@@ -55682,60 +55682,6 @@ router.get("/set-model/:modelName", _middlewares_leader_middleware__WEBPACK_IMPO
 });
 /**
  * @swagger
- * /createnewfolder/{foldername}:
- *   get:
- *     summary: Create new folder
- *     description: Creates a new folder in Cloudinary
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: foldername
- *         required: true
- *         schema:
- *           type: string
- *         description: Folder name to create
- *     responses:
- *       200:
- *         description: Folder created successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "Created"
- */
-router.get("/createnewfolder/:foldername", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const folderName = req.params.foldername;
-    const cl = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__["default"].getInstance();
-    await cl.createNewFolder(folderName);
-    res.send("Created");
-});
-/**
- * @swagger
- * /overwritefiles:
- *   get:
- *     summary: Overwrite files
- *     description: Overwrites files in Cloudinary
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Files overwritten successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "Created"
- */
-router.get("/overwritefiles", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const cl = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__["default"].getInstance();
-    await cl.overwriteFile();
-    res.send("Created");
-});
-/**
- * @swagger
  * /setactiveqr:
  *   get:
  *     summary: Set active QR code
@@ -58798,21 +58744,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "default": () => (/* binding */ CloudinaryService),
 /* harmony export */   setQR: () => (/* binding */ setQR)
 /* harmony export */ });
-/* harmony import */ var cloudinary__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! cloudinary */ "cloudinary");
-/* harmony import */ var cloudinary__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(cloudinary__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! qrcode */ "qrcode");
-/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(qrcode__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _payment_UpiClass__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./payment/UpiClass */ "./src/services/payment/UpiClass.ts");
-/* harmony import */ var _messages_paymentLinks__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../messages/paymentLinks */ "./src/messages/paymentLinks.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var adm_zip__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! adm-zip */ "adm-zip");
-/* harmony import */ var adm_zip__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(adm_zip__WEBPACK_IMPORTED_MODULE_8__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! qrcode */ "qrcode");
+/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(qrcode__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _messages_paymentLinks__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../messages/paymentLinks */ "./src/messages/paymentLinks.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var adm_zip__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! adm-zip */ "adm-zip");
+/* harmony import */ var adm_zip__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(adm_zip__WEBPACK_IMPORTED_MODULE_7__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -58822,8 +58766,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger('tg-aut:cloudinary-service');
+// NOTE: despite the file/class name, this service no longer talks to Cloudinary.
+// Persona pic bundles are fetched from the CMS /folders endpoint and payment QR
+// codes are generated locally. The former direct-Cloudinary upload methods were
+// removed (dead / admin-only code).
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger('tg-aut:cloudinary-service');
 function getClientId() {
     return process.env.dbcoll?.toLowerCase() || 'default';
 }
@@ -58864,21 +58811,21 @@ async function setQR(upi, fileName) {
             throw new Error('Username is invalid after cleaning');
         }
         // Create UPI URL
-        const url = `upi://pay?pa=${upi.trim()}&tn=${cleanDescription}&pn=${cleanDescription}&${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_5__.endpoint}`;
+        const url = `upi://pay?pa=${upi.trim()}&tn=${cleanDescription}&pn=${cleanDescription}&${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_4__.endpoint}`;
         logger.log(`[QR] Generated UPI URL: ${url}`);
         // Create client-specific directory if needed
         const clientId = getClientId();
-        const baseDir = path__WEBPACK_IMPORTED_MODULE_1__.resolve(getServiceDir(), '../', clientId);
-        if (!fs__WEBPACK_IMPORTED_MODULE_2__.existsSync(baseDir)) {
-            fs__WEBPACK_IMPORTED_MODULE_2__.mkdirSync(baseDir, { recursive: true });
+        const baseDir = path__WEBPACK_IMPORTED_MODULE_0__.resolve(getServiceDir(), '../', clientId);
+        if (!fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(baseDir)) {
+            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(baseDir, { recursive: true });
             logger.log(`[QR] Created directory: ${baseDir}`);
         }
         // Set up file path
-        const filePath = path__WEBPACK_IMPORTED_MODULE_1__.resolve(baseDir, fileName);
+        const filePath = path__WEBPACK_IMPORTED_MODULE_0__.resolve(baseDir, fileName);
         logger.log(`[QR] Saving QR code to: ${filePath}`);
         // Generate QR code with promise
         return await new Promise((resolve, reject) => {
-            qrcode__WEBPACK_IMPORTED_MODULE_3___default().toFile(filePath, url, {
+            qrcode__WEBPACK_IMPORTED_MODULE_2___default().toFile(filePath, url, {
                 margin: 1,
                 width: 512, // Set a reasonable size
                 errorCorrectionLevel: 'H' // Highest error correction
@@ -58895,7 +58842,7 @@ async function setQR(upi, fileName) {
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error in setQR");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error in setQR");
         return false;
     }
 }
@@ -58905,11 +58852,6 @@ class CloudinaryService {
         this.MAX_RESOURCES = 10000; // Maximum number of resources to keep
         this.cleanupInterval = null;
         this.CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-        cloudinary__WEBPACK_IMPORTED_MODULE_0__.v2.config({
-            cloud_name: process.env.CL_NAME,
-            api_key: process.env.CL_APIKEY,
-            api_secret: process.env.CL_APISECRET
-        });
         this.startPeriodicCleanup();
     }
     startPeriodicCleanup() {
@@ -58954,19 +58896,19 @@ class CloudinaryService {
     async downloadAndExtractZip(url) {
         const clientId = getClientId();
         const serviceDir = getServiceDir();
-        const zipPath = path__WEBPACK_IMPORTED_MODULE_1__.resolve(serviceDir, `temp_${clientId}.zip`);
-        const extractPath = path__WEBPACK_IMPORTED_MODULE_1__.resolve(serviceDir, '../', clientId);
+        const zipPath = path__WEBPACK_IMPORTED_MODULE_0__.resolve(serviceDir, `temp_${clientId}.zip`);
+        const extractPath = path__WEBPACK_IMPORTED_MODULE_0__.resolve(serviceDir, '../', clientId);
         logger.log(`[Download] Starting download from ${url}`);
         logger.log(`[Download] Using temporary zip path: ${zipPath}`);
         logger.log(`[Download] Target extraction path: ${extractPath}`);
         try {
             // Ensure extract directory exists
-            if (!fs__WEBPACK_IMPORTED_MODULE_2__.existsSync(extractPath)) {
-                fs__WEBPACK_IMPORTED_MODULE_2__.mkdirSync(extractPath, { recursive: true });
+            if (!fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(extractPath)) {
+                fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(extractPath, { recursive: true });
                 logger.log(`[Download] Created extraction directory: ${extractPath}`);
             }
             // Download the zip file
-            const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_7__.fetchWithTimeout)(url, {
+            const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_6__.fetchWithTimeout)(url, {
                 responseType: 'arraybuffer',
                 timeout: 30000 // 30 second timeout
             });
@@ -58975,19 +58917,19 @@ class CloudinaryService {
             }
             if (response.status === 200 && response.data) {
                 // Clean up existing zip if it exists
-                if (fs__WEBPACK_IMPORTED_MODULE_2__.existsSync(zipPath)) {
-                    fs__WEBPACK_IMPORTED_MODULE_2__.unlinkSync(zipPath);
+                if (fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(zipPath)) {
+                    fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(zipPath);
                     logger.log(`[Download] Removed existing temporary zip file`);
                 }
                 // Write the zip file
-                fs__WEBPACK_IMPORTED_MODULE_2__.writeFileSync(zipPath, response.data);
+                fs__WEBPACK_IMPORTED_MODULE_1__.writeFileSync(zipPath, response.data);
                 logger.log(`[Download] Zip file downloaded successfully (${response.data.length} bytes)`);
                 // Extract the zip file using adm-zip
-                const zip = new (adm_zip__WEBPACK_IMPORTED_MODULE_8___default())(zipPath);
+                const zip = new (adm_zip__WEBPACK_IMPORTED_MODULE_7___default())(zipPath);
                 zip.extractAllTo(extractPath, true);
                 logger.log(`[Download] Zip file extracted successfully to ${extractPath}`);
                 // Clean up the temporary zip file
-                fs__WEBPACK_IMPORTED_MODULE_2__.unlinkSync(zipPath);
+                fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(zipPath);
                 logger.log(`[Download] Cleaned up temporary zip file`);
                 return true;
             }
@@ -58996,20 +58938,20 @@ class CloudinaryService {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error during download and extract operation");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error during download and extract operation");
             if (error.code)
                 logger.error(`[Download] Error code: ${error.code}`);
             if (error.response?.status)
                 logger.error(`[Download] HTTP Status: ${error.response.status}`);
             // Clean up on error
             try {
-                if (fs__WEBPACK_IMPORTED_MODULE_2__.existsSync(zipPath)) {
-                    fs__WEBPACK_IMPORTED_MODULE_2__.unlinkSync(zipPath);
+                if (fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(zipPath)) {
+                    fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(zipPath);
                     logger.log(`[Download] Cleaned up temporary zip file after error`);
                 }
             }
             catch (cleanupError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(cleanupError, "Error during cleanup");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(cleanupError, "Error during cleanup");
             }
             return false;
         }
@@ -59021,82 +58963,8 @@ class CloudinaryService {
         // await this.findAndSaveResources(folderName, 'image');
         // await this.findAndSaveResources(folderName, 'video');
         await setQR(process.env.qrId?.trim(), "QR.jpg");
-        await setQR(_payment_UpiClass__WEBPACK_IMPORTED_MODULE_4__.UpiIds['gpay']?.trim(), "QR2.jpg");
-        await setQR(process.env.gpayId?.trim() || _payment_UpiClass__WEBPACK_IMPORTED_MODULE_4__.UpiIds['gpayid']?.trim() || _payment_UpiClass__WEBPACK_IMPORTED_MODULE_4__.UpiIds['gpayId']?.trim(), "QR1.jpg");
-    }
-    async createNewFolder(folderName) {
-        await this.createFolder(folderName);
-        await this.uploadFilesToFolder(folderName);
-    }
-    async overwriteFile() {
-        const files = ['pic', 'dmp1', 'dmp2', 'dmp3', 'dmp4', 'dp1', 'dp2', 'dp3'];
-        for (let i = 0; i < files.length; i++) {
-            try {
-                const filePath = path__WEBPACK_IMPORTED_MODULE_1__.resolve(getServiceDir(), '../', getClientId(), `${files[i]}.jpg`);
-                const result = await cloudinary__WEBPACK_IMPORTED_MODULE_0__.v2.uploader.upload(filePath, {
-                    resource_type: 'auto',
-                    folder: getClientId(),
-                    overwrite: true,
-                    invalidate: true,
-                    public_id: `${files[i]}`
-                });
-                logger.log(result);
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error in overwriteFile");
-            }
-        }
-    }
-    async findAndSaveResources(folderName, type) {
-        try {
-            const { resources } = await cloudinary__WEBPACK_IMPORTED_MODULE_0__.v2.api.resources({ resource_type: type, type: 'upload', prefix: folderName, max_results: 500 });
-            await Promise.all(resources.map(async (resource) => {
-                try {
-                    this.resources.set(resource.public_id.split('/')[1].split('_')[0], resource.url);
-                    await saveFile(resource.url, `${resource.public_id.split('/')[1].split('_')[0]}`);
-                }
-                catch (error) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error in findAndSaveResources");
-                }
-            }));
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error in findAndSaveResources");
-        }
-    }
-    async createFolder(folderName) {
-        try {
-            const result = await cloudinary__WEBPACK_IMPORTED_MODULE_0__.v2.api.create_folder(folderName);
-            return result;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error creating folder");
-            throw error;
-        }
-    }
-    // Function to upload files from URLs to a specific folder in Cloudinary
-    async uploadFilesToFolder(folderName) {
-        const uploadPromises = Array.from(this.resources.entries()).map(async ([key, url]) => {
-            try {
-                const result = await cloudinary__WEBPACK_IMPORTED_MODULE_0__.v2.uploader.upload_large(url, {
-                    folder: folderName,
-                    resource_type: 'auto',
-                    public_id: key, // Set the key as the public_id
-                });
-                return result;
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error uploading file");
-                throw error;
-            }
-        });
-        try {
-            return await Promise.all(uploadPromises);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error uploading files");
-            throw error;
-        }
+        await setQR(_payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__.UpiIds['gpay']?.trim(), "QR2.jpg");
+        await setQR(process.env.gpayId?.trim() || _payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__.UpiIds['gpayid']?.trim() || _payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__.UpiIds['gpayId']?.trim(), "QR1.jpg");
     }
     get(publicId) {
         try {
@@ -59104,7 +58972,7 @@ class CloudinaryService {
             return result || '';
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error getting resource");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error getting resource");
         }
     }
     getBuffer(publicId) {
@@ -59113,7 +58981,7 @@ class CloudinaryService {
             return result || '';
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error getting resource");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error getting resource");
         }
     }
     cleanup() {
@@ -59123,30 +58991,6 @@ class CloudinaryService {
             CloudinaryService.instance = undefined;
         }
         logger.log("[CloudinaryService] Cleanup complete");
-    }
-}
-async function saveFile(url, name) {
-    const extension = url.substring(url.lastIndexOf('.') + 1, url.length);
-    const clientId = getClientId();
-    const mypath = path__WEBPACK_IMPORTED_MODULE_1__.resolve(getServiceDir(), '../', clientId, `${name}.${extension}`);
-    try {
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_7__.fetchWithTimeout)(url, { responseType: 'arraybuffer' });
-        if (response?.status !== 200) {
-            throw new Error(`Unable to download file from ${url}`);
-        }
-        fs__WEBPACK_IMPORTED_MODULE_2__.mkdirSync(path__WEBPACK_IMPORTED_MODULE_1__.dirname(mypath), { recursive: true });
-        if (!fs__WEBPACK_IMPORTED_MODULE_2__.existsSync(mypath)) {
-            fs__WEBPACK_IMPORTED_MODULE_2__.writeFileSync(mypath, response.data);
-            logger.log(`${name}.${extension} Saved!!`);
-        }
-        else {
-            fs__WEBPACK_IMPORTED_MODULE_2__.unlinkSync(mypath);
-            fs__WEBPACK_IMPORTED_MODULE_2__.writeFileSync(mypath, response.data);
-            logger.log(`${name}.${extension} Replaced!!`);
-        }
-    }
-    catch (err) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(err, "Error downloading file");
     }
 }
 
@@ -63223,17 +63067,6 @@ module.exports = require("big-integer");
 
 "use strict";
 module.exports = require("chalk");
-
-/***/ },
-
-/***/ "cloudinary"
-/*!*****************************!*\
-  !*** external "cloudinary" ***!
-  \*****************************/
-(module) {
-
-"use strict";
-module.exports = require("cloudinary");
 
 /***/ },
 
