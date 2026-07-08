@@ -62146,18 +62146,18 @@ const bullets = [
 // aligns inside ``` code fences). Sensitive words are typo'd here + masked at the send chokepoint
 // (utils/maskSensitiveWords.patchOutgoingMask). Rich pool (12) to avoid robotic repetition.
 const greetingsTemplates = [
-    `\n\nI'm **alone in my hostel room** baby 🙈\nSo bored now\n\nLet's do a **Demoo**!!\n[MENU]\nSend Mony and I'll start na 💋`,
-    "\n\nJust came out of the **Bathroom** baby 💦\nStill all fresh\n\nTry a small **Dmoo**!!\n[MENU]\nSend Amnt and msg me 🙈",
-    "\n\nMy **Parents** are outside now😏\nI'm alone in Mood\n\nTake the **Demoo**!!\n[MENU]\nSend Mony and let's start 💦",
-    "\n\nAlone in my **Hostel Room** baby 🙈\nDoor is locked\n\nLet's do a **Dmo**!!\n[MENU]\nSend Amnt and enjoy me 💋",
-    "\n\nMy **Boyfriend** is so boring baby 😘\nOnly you excite me\n\nTry a **Demoo** na!!\n[MENU]\nSend Mony and msg me 💦",
-    "\n\nI'm so in the **Mood** now baby 🥵\nCan't wait for you\n\nTake the **Dmoo**!!\n[MENU]\nSend Amnt and let's play 🙈",
-    "\n\nLying on my Bed waiting baby 🙈\nJust for you\n\nLet's do a **Demoo**!!\n[MENU]\nSend Mony and I'm all yours 💋",
-    "\n\nMy **Family** is sleeping now 🙈\nI sneaked away for you\n\nTry a quiet **Dmo**!!\n[MENU]\nSend Amnt and let's be naughty 💦",
-    "\n\nJust **showered** baby 💦\nFeeling so fresh now\n\nTake the **Demoo** na!!\n[MENU]\nSend Mony and msg me 🙈",
-    "\n\nMissing you so much baby 🙈\nThinking of you Only\n\nLet's do a **Dmoo**!!\n[MENU]\nSend Amnt and I'll show everything 💦",
-    "\n\nAll cozy now baby 🙈\nAlone and waiting\n\nTry a **Demoo**!!\n[MENU]\nSend Mony and let's start 💋",
-    "\n\nMy room Door is locked baby\nNo one is in home\n\nLet's do a **Dmo** na!!\n[MENU]\nSend Amnt and I'm all yours 💦"
+    `\n\nI'm **alone in my hostel room** baby 🙈\nSo bored now\n\nLet's do a **Demoo**!![MENU]\nSend Mony and I'll start na 💋`,
+    "\n\nJust came out of the **Bathroom** baby 💦\nStill all fresh\n\nTry a small **Dmoo**!![MENU]\nSend Amnt and msg me 🙈",
+    "\n\nMy **Parents** are outside now😏\nI'm alone in Mood\n\nTake the **Demoo**!![MENU]\nSend Mony and let's start 💦",
+    "\n\nAlone in my **Hostel Room** baby 🙈\nDoor is locked\n\nLet's do a **Dmo**!![MENU]\nSend Amnt and enjoy me 💋",
+    "\n\nMy **Boyfriend** is so boring baby 😘\nOnly you excite me\n\nTry a **Demoo** na!![MENU]\nSend Mony and msg me 💦",
+    "\n\nI'm so in the **Mood** now baby 🥵\nCan't wait for you\n\nTake the **Dmoo**!![MENU]\nSend Amnt and let's play 🙈",
+    "\n\nLying on my Bed waiting baby 🙈\nJust for you\n\nLet's do a **Demoo**!![MENU]\nSend Mony and I'm all yours 💋",
+    "\n\nMy **Family** is sleeping now 🙈\nI sneaked away for you\n\nTry a quiet **Dmo**!![MENU]\nSend Amnt and let's be naughty 💦",
+    "\n\nJust **showered** baby 💦\nFeeling so fresh now\n\nTake the **Demoo** na!![MENU]\nSend Mony and msg me 🙈",
+    "\n\nMissing you so much baby 🙈\nThinking of you Only\n\nLet's do a **Dmoo**!![MENU]\nSend Amnt and I'll show everything 💦",
+    "\n\nAll cozy now baby 🙈\nAlone and waiting\n\nTry a **Demoo**!![MENU]\nSend Mony and let's start 💋",
+    "\n\nMy room Door is locked baby\nNo one is in home\n\nLet's do a **Dmo** na!![MENU]\nSend Amnt and I'm all yours 💦"
 ];
 // The demo price menu is the SINGLE shared source in messages/demoMenu.ts (used by greetings,
 // standardMessages, upsells). Re-exported here for backward compat with existing importers.
