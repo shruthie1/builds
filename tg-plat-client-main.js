@@ -16831,56 +16831,76 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildPaidEventLadder: () => (/* binding */ buildPaidEventLadder)
 /* harmony export */ });
 const MIN = 60 * 1000;
+// Uniform tightening factor: scales every ladder step's delay so the whole sequence is
+// more compressed (steps fire closer together). 1 = original spacing; 0.7 = 30% tighter.
+const SCALE = 0.7;
 function buildPaidEventLadder(chatId, clientId, type, now) {
-    const call = (mins) => ({ type: 'call', chatId, clientId, time: now + mins * MIN, payload: {}, attempts: 0 });
-    const msg = (mins, message) => ({ type: 'message', chatId, clientId, time: now + mins * MIN, payload: { message }, attempts: 0 });
-    const callMe = `Call me👇👇!!\nhttps://ZomCall.netlify.app/${clientId}/${chatId}\n`;
+    const at = (mins) => now + Math.round(mins * SCALE * MIN);
+    const call = (mins) => ({ type: 'call', chatId, clientId, time: at(mins), payload: {}, attempts: 0 });
+    const msg = (mins, message) => ({ type: 'message', chatId, clientId, time: at(mins), payload: { message }, attempts: 0 });
+    const link = `https://ZomCall.netlify.app/${clientId}/${chatId}`;
+    // A few natural "come to the link" variants so the repeated tail steps don't read as
+    // identical spam. Each keeps the literal link so the URL-bypass gate recognises it.
+    const zoom = `<a href="${link}">Zoom Link</a>`;
+    const callMeVariants = [
+        `<b>Call me here</b>\n\n${zoom}`,
+        `Call me on zoom\n\n${zoom}`,
+        `Click link to Call me 💕\n\n${zoom}`,
+        `Waiting for u 🥹\n\n${zoom}`,
+        `Call me on this link baby 😚\n\n${zoom}`,
+        `<b>open this link!</b>\n\n${zoom}`,
+        `I'm Calling here 💋\n\n${zoom}`,
+        `Just Call me na 🙈 \n\n${zoom}`,
+    ];
+    // Deterministic per-step pick (no Math.random — must stay reproducible), varied by index.
+    let callMeIdx = 0;
+    const callMe = () => callMeVariants[callMeIdx++ % callMeVariants.length];
     if (type === '1') {
         return [
             call(1.5),
-            msg(2.2, 'Wait, I will Try Again!!'),
+            msg(2.2, "wait wait i'm calling you again 🥺"),
             call(2.5),
-            msg(3.2, 'Do you have any Network issue??\n\nCall is Failed to Connect!!'),
+            msg(3.2, "ughh is your network okay? the call keeps dropping 😩 it's not connecting"),
             call(3.5),
-            msg(4.2, 'Some Network issue...!!\n\nDont worry, I will not cheat U!!\nI will try again!!\nPlease Wait...!!\nI will only message you okay!!'),
-            msg(4.7, "Dont Speak Okay!!\nI'm in **Bathroom\nMute yourself**!! I will Show you in Call Okay..!!"),
-            msg(5, `Heyy You Call me Here👇!!\nhttps://ZomCall.netlify.app/${clientId}/${chatId}\n\nU Call me Now!!`),
-            msg(6, `You Call me Here Man!!\nU Call Now!!, It will work!!\n\nOpen👇👇\nhttps://ZomCall.netlify.app/${clientId}/${chatId}`),
-            msg(7, `https://ZomCall.netlify.app/${clientId}/${chatId}\n\nU Call me on the Zoom!!`),
-            msg(8, `https://ZomCall.netlify.app/${clientId}/${chatId}\n\nU only Call me on the Zoom!!`),
-            msg(11, `Call me Here Man!!\nU Call Now!!\n\nOpen👇👇\nhttps://ZomCall.netlify.app/${clientId}/${chatId}`),
-            msg(13, 'Same Problem, Call Not connecting now...!!\n\nPlease Understand and Beleive me Baby!!\n\nI will give u service today pakka ok!!\n\nPlease Wait Sometime...!!\nI will only message you okay!!'),
-            call(15), msg(15.5, callMe),
-            call(20), msg(20.5, callMe),
-            call(30), msg(30.5, callMe),
-            call(45), msg(45.5, callMe),
+            msg(4.2, "must be some network issue baby 😔 don't worry okay, i'm not cheating you, i'll keep trying.. just give me a sec 🙏"),
+            msg(4.7, "and don't talk when we connect okk, i'm in the bathroom 🙈 keep yourself on mute, i'll show you everything on the call 😉"),
+            msg(5, `okay try calling ME here instead babe 👉 ${zoom}\ncall me now na 🥰`),
+            msg(6, `come on, call me on this one, it actually works 😘 ${zoom}`),
+            msg(7, `call me here baby, i'm waiting 💋 ${zoom}`),
+            msg(8, `only call me on this link okay? 🙈 ${zoom}`),
+            msg(11, `babe you there?? just open this and call me 👉 ${zoom}`),
+            msg(13, "same problem, normal call still won't connect 😭 please believe me na, i'm not going anywhere.. i'll give you the full show today pakka 💕 just come to the link, okay?"),
+            call(15), msg(15.5, callMe()),
+            call(20), msg(20.5, callMe()),
+            call(30), msg(30.5, callMe()),
+            call(45), msg(45.5, callMe()),
         ];
     }
     if (type === '2') {
         return [
-            msg(1, 'Wait, I will Try Again!!'),
+            msg(1, "wait let me try you again 🥺"),
             call(1.5),
-            msg(2, `Seems its not working at all,\n\nYou Call me Here Only👇!!\nhttps://ZomCall.netlify.app/${clientId}/${chatId}\n\nU Call me Now!!\n`),
-            call(4), msg(4.5, callMe),
-            call(6.5), msg(7, callMe),
-            call(9), msg(9.5, callMe),
-            call(12), msg(12.5, callMe),
-            call(15), msg(15.5, callMe),
-            call(20), msg(20.5, callMe),
-            call(30), msg(30.5, callMe),
-            call(45), msg(45.5, callMe),
+            msg(2, `okay this normal call really isn't working 😩 just call me here instead babe 👉 ${zoom}\ncall me now na 😚`),
+            call(4), msg(4.5, callMe()),
+            call(6.5), msg(7, callMe()),
+            call(9), msg(9.5, callMe()),
+            call(12), msg(12.5, callMe()),
+            call(15), msg(15.5, callMe()),
+            call(20), msg(20.5, callMe()),
+            call(30), msg(30.5, callMe()),
+            call(45), msg(45.5, callMe()),
         ];
     }
     return [
-        msg(1, callMe),
-        call(4), msg(4.5, callMe),
-        call(6.5), msg(7, callMe),
-        call(9), msg(9.5, callMe),
-        call(12), msg(12.5, callMe),
-        call(15), msg(15.5, callMe),
-        call(20), msg(20.5, callMe),
-        call(30), msg(30.5, callMe),
-        call(45), msg(45.5, callMe),
+        msg(1, callMe()),
+        call(4), msg(4.5, callMe()),
+        call(6.5), msg(7, callMe()),
+        call(9), msg(9.5, callMe()),
+        call(12), msg(12.5, callMe()),
+        call(15), msg(15.5, callMe()),
+        call(20), msg(20.5, callMe()),
+        call(30), msg(30.5, callMe()),
+        call(45), msg(45.5, callMe()),
     ];
 }
 
@@ -16923,6 +16943,9 @@ class EventScheduler {
     start() {
         if (this.intervalId)
             clearInterval(this.intervalId);
+        // Reset the guard: a stop()/start() while a previous tick was mid-flight must not leave
+        // isProcessing stuck true (which would make every new tick skip).
+        this.isProcessing = false;
         this.logger.log(`loop started | clientId=${this.clientId} | tick=${this.tickMs}ms`);
         this.intervalId = setInterval(() => {
             if (this.isProcessing) {
@@ -17024,17 +17047,22 @@ class EventStore {
             return;
         await this.collection.insertMany(events);
     }
-    async findDue(clientId, now) {
+    // `limit` bounds how many due events one tick pulls, so a post-outage backlog is drained
+    // in batches instead of one huge blocking tick (which would stall the loop + trip FLOOD_WAIT).
+    async findDue(clientId, now, limit = 50) {
         return this.collection
             .find({ clientId, time: { $lte: now } })
             .sort({ time: 1 })
+            .limit(limit)
             .toArray();
     }
     async deleteById(id) {
         await this.collection.deleteOne({ _id: id });
     }
-    async deleteByChat(chatId) {
-        const res = await this.collection.deleteMany({ chatId });
+    // Scoped by clientId: cancelling a chat's ladder must NOT delete other clients' events
+    // for the same chatId (they share one collection).
+    async deleteByChat(chatId, clientId) {
+        const res = await this.collection.deleteMany({ chatId, clientId });
         return res.deletedCount ?? 0;
     }
     async reschedule(id, time, attempts) {
@@ -17079,9 +17107,26 @@ const MAX_EVENT_ATTEMPTS = 3;
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   classifyError: () => (/* binding */ classifyError),
+/* harmony export */   decideEventAction: () => (/* binding */ decideEventAction),
 /* harmony export */   isBadTargetError: () => (/* binding */ isBadTargetError),
-/* harmony export */   isRpcError: () => (/* binding */ isRpcError)
+/* harmony export */   isRpcError: () => (/* binding */ isRpcError),
+/* harmony export */   isUrlMessage: () => (/* binding */ isUrlMessage)
 /* harmony export */ });
+// A URL/link message (ZomCall "call me here") — sends regardless of the amount gate.
+function isUrlMessage(text) {
+    return /https?:\/\/|zomcall\.netlify\.app/i.test(text || '');
+}
+function decideEventAction(event, user, isAmountEligible) {
+    // Universal gate: no user or banned → no ops of any kind.
+    if (!user || user.canReply === 0)
+        return 'BLOCK';
+    if (event.type === 'call')
+        return 'CALL';
+    const text = event.payload?.message ?? '';
+    if (isUrlMessage(text))
+        return 'SEND'; // URL bypasses the amount gate
+    return isAmountEligible(user) ? 'SEND' : 'GATE_FAIL';
+}
 /**
  * A "bad target": the connection is fine but this specific chat/user can't be
  * resolved or messaged (peer not found, blocked, invalid id, peer-flood).
@@ -17107,13 +17152,15 @@ function isRpcError(error) {
     if (!error || typeof error !== 'object')
         return false;
     const e = error;
+    // GramJS RPCErrors carry a string `errorMessage` (e.g. "USER_IS_BLOCKED") and/or an
+    // RPCError/FloodWaitError name/className. Deliberately NOT matching a bare numeric `.code`
+    // — Axios/HTTP/Node errors also have numeric codes and must stay TRANSIENT (retryable),
+    // not be misclassified as permanent RPC failures.
     if (typeof e.errorMessage === 'string' && e.errorMessage.length > 0)
         return true;
     if (typeof e.name === 'string' && /RPCError|FloodWaitError/i.test(e.name))
         return true;
     if (typeof e.className === 'string' && /RPCError/i.test(e.className))
-        return true;
-    if (typeof e.code === 'number')
         return true;
     return false;
 }
@@ -17146,9 +17193,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MAX_EVENT_ATTEMPTS: () => (/* reexport safe */ _event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS),
 /* harmony export */   buildPaidEventLadder: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildPaidEventLadder),
 /* harmony export */   classifyError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.classifyError),
+/* harmony export */   decideEventAction: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.decideEventAction),
 /* harmony export */   eventCollectionFrom: () => (/* reexport safe */ _event_store__WEBPACK_IMPORTED_MODULE_2__.eventCollectionFrom),
 /* harmony export */   isBadTargetError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isBadTargetError),
-/* harmony export */   isRpcError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isRpcError)
+/* harmony export */   isRpcError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isRpcError),
+/* harmony export */   isUrlMessage: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isUrlMessage)
 /* harmony export */ });
 /* harmony import */ var _event_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./event.schema */ "../../packages/tg-events/src/event.schema.ts");
 /* harmony import */ var _executor_types__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./executor.types */ "../../packages/tg-events/src/executor.types.ts");
@@ -38289,7 +38338,6 @@ async function requestCall(chatId, force = false, source = "Default") {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   classifyError: () => (/* reexport safe */ _tg_events__WEBPACK_IMPORTED_MODULE_0__.classifyError),
 /* harmony export */   deleteEventsForChat: () => (/* binding */ deleteEventsForChat),
 /* harmony export */   executeEvent: () => (/* binding */ executeEvent),
 /* harmony export */   scheduleLadder: () => (/* binding */ scheduleLadder)
@@ -38308,83 +38356,61 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-aut:event-executor');
-function store() {
-    return new _tg_events__WEBPACK_IMPORTED_MODULE_0__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().getEventsCollection());
-}
-// URL/link messages (e.g. ZomCall "call me here" links) are calls-to-action and must
-// ALWAYS go out — like call events — regardless of the paid-service gate.
-function isUrlMessage(text) {
-    return /https?:\/\/|zomcall\.netlify\.app/i.test(text || '');
-}
-async function resolveEntity(client, chatId) {
+const store = () => new _tg_events__WEBPACK_IMPORTED_MODULE_0__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().getEventsCollection());
+async function sendMessage(chatId, text) {
+    const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
     const dialogManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance().dialogManager;
-    if (dialogManager) {
-        try {
-            const cached = await dialogManager.getEntity(chatId);
-            if (cached)
-                return cached;
-        }
-        catch (err) {
-            logger.debug(`dialog getEntity miss for ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
-        }
+    let entity = null;
+    try {
+        entity = (await dialogManager?.getEntity(chatId)) || null;
     }
-    return (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__.safeGetEntity)(client, chatId);
-}
-async function sendMessage(client, chatId, text) {
-    const entity = await resolveEntity(client, chatId);
-    await client.sendMessage(entity || chatId, { message: text, linkPreview: false });
+    catch (err) {
+        logger.debug(`getEntity miss for ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!entity)
+        entity = await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__.safeGetEntity)(client, chatId);
+    // Show a "typing…" indicator before sending so the message feels human (setTyping also
+    // waits ~2s, giving a natural pause). Best-effort — it swallows its own errors.
+    await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.setTyping)(entity || chatId);
+    // Messages with <b> bold or a link render via HTML; show the link preview card for URLs.
+    const html = /<b>|<\/b>|<a /i.test(text);
+    const hasLink = (0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.isUrlMessage)(text);
+    await client.sendMessage(entity || chatId, {
+        message: text,
+        parseMode: html ? 'html' : undefined,
+        linkPreview: hasLink,
+    });
 }
 async function executeEvent(event) {
     try {
-        if (event.type === 'call') {
+        if (!_core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist()) {
+            logger.warn(`instance not ready chat=${event.chatId} — TRANSIENT`);
+            return 'TRANSIENT';
+        }
+        const userDetail = await _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(event.chatId);
+        // Pure gate decision (all product rules live in decideEventAction — see @tg/events).
+        const action = (0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.decideEventAction)(event, userDetail, (u) => (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canStartService)(u, u.payAmount ?? 0));
+        if (action === 'BLOCK') {
+            logger.warn(`no-ops chat=${event.chatId} (missing user or canReply=0) — PERMANENT`);
+            return 'PERMANENT';
+        }
+        if (action === 'GATE_FAIL') {
+            logger.warn(`not eligible chat=${event.chatId} (payAmount=${userDetail?.payAmount}) — PERMANENT`);
+            return 'PERMANENT';
+        }
+        if (action === 'CALL') {
             const ok = await (0,_calls__WEBPACK_IMPORTED_MODULE_1__.requestCall)(event.chatId, true, 'scheduler');
             if (!ok)
-                logger.warn(`requestCall returned false for chat=${event.chatId} — TRANSIENT`);
+                logger.warn(`requestCall false chat=${event.chatId} — TRANSIENT`);
             return ok ? 'SUCCESS' : 'TRANSIENT';
         }
-        // message
-        if (!_core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist()) {
-            logger.warn(`Telegram instance not ready for chat=${event.chatId} — TRANSIENT`);
-            return 'TRANSIENT';
-        }
-        const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
-        const text = event.payload.message ?? '';
-        // URL/link messages always send — no eligibility gate (like calls).
-        if (isUrlMessage(text)) {
-            await sendMessage(client, event.chatId, text);
-            return 'SUCCESS';
-        }
-        // Normal text messages honor: banned + canProceedWithService (amounts + cooldown).
-        // A failed gate is PERMANENT (drop, never retry) — the condition won't change on a +30s
-        // reschedule. Only truly transient conditions (instance/DB/send error) are TRANSIENT.
-        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
-        let userDetail;
-        try {
-            userDetail = await db.read(event.chatId);
-        }
-        catch (err) {
-            logger.warn(`user read failed for chat=${event.chatId}: ${err instanceof Error ? err.message : String(err)} — TRANSIENT`);
-            return 'TRANSIENT';
-        }
-        if (!userDetail) {
-            logger.warn(`no userDetail for chat=${event.chatId} — PERMANENT`);
-            return 'PERMANENT';
-        }
-        if (userDetail.canReply === 0) {
-            logger.warn(`user banned (canReply=0) chat=${event.chatId} — PERMANENT`);
-            return 'PERMANENT';
-        }
-        if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetail)) {
-            logger.warn(`canProceedWithService=false chat=${event.chatId} (payAmount=${userDetail.payAmount}) — PERMANENT`);
-            return 'PERMANENT';
-        }
-        await sendMessage(client, event.chatId, text);
+        // action === 'SEND'
+        await sendMessage(event.chatId, event.payload.message ?? '');
         return 'SUCCESS';
     }
     catch (error) {
-        logger.error(`executeEvent failed for ${event.type} ${event.chatId}`, error);
+        logger.error(`executeEvent failed ${event.type} chat=${event.chatId}`, error);
         return (0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.classifyError)(error);
     }
 }
@@ -38400,7 +38426,7 @@ async function scheduleLadder(chatId, type = '1') {
     logger.log(`Scheduled ${events.length} events for ${clientId} | ${chatId}`);
 }
 async function deleteEventsForChat(chatId) {
-    return store().deleteByChat(chatId);
+    return store().deleteByChat(chatId, process.env.clientId);
 }
 
 
@@ -56417,23 +56443,31 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
 /* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
 /* harmony import */ var _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../modules/events/event-executor */ "./src/modules/events/event-executor.ts");
-/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
-/* harmony import */ var _telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../telegram-utils/telegramUtils */ "./src/telegram-utils/telegramUtils.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_19___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_19__);
-/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
+/* harmony import */ var _telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../telegram-utils/telegramUtils */ "./src/telegram-utils/telegramUtils.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_20___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_20__);
+/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
+
+
+
+
+
+// Shared bad-target predicate (single source of truth in @tg/events) — a per-request 4xx
+// condition (peer not found / blocked / invalid id / peer-flood), NOT a connection outage.
 
 
 
@@ -56452,15 +56486,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:telegram-routes");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("tg-aut:telegram-routes");
 const router = (0,express__WEBPACK_IMPORTED_MODULE_0__.Router)();
 function scheduleTelegramRouteTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__.scheduleUnrefTimeout)(() => {
-        void callback().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, context));
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__.scheduleUnrefTimeout)(() => {
+        void callback().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, context));
     }, delayMs);
 }
 function parseOptionalNonNegativeInteger(value, fallback) {
@@ -56479,8 +56509,8 @@ function peerIdText(peer) {
     if (!peer) {
         return null;
     }
-    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.PeerChannel) {
-        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_15__.getPeerDialogId)(peer) ?? null;
+    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerChannel) {
+        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_16__.getPeerDialogId)(peer) ?? null;
     }
     if (typeof peer === "object" && "id" in peer) {
         const id = peer.id;
@@ -56502,7 +56532,7 @@ function getCachedSenderInfo(messageFromId) {
     if (!senderId) {
         return null;
     }
-    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance().get(senderId);
+    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(senderId);
     if (senderEntity?.className === "User") {
         return {
             id: senderEntity.id?.toString() ?? senderId,
@@ -56521,33 +56551,14 @@ function getCachedSenderInfo(messageFromId) {
     };
 }
 async function sendTelegramUnavailable(req, res, operation, readOnly = true, errorText = "TelegramManager instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
         evidence,
         requestId: req.requestId,
     });
-}
-/**
- * A "bad target" error: the Telegram CONNECTION is fine, but this specific chat/user can't be
- * resolved or messaged (peer not in cache, invalid/inaccessible id, user blocked us, etc.). These
- * are per-request 4xx conditions — they must NOT be reported as a telegram.connection health
- * failure, because that returns 503 and (on the deployed builds) makes the service look down and
- * spams HTTP_FAILURES for what is really just an unreachable recipient.
- */
-function isBadTargetError(error) {
-    const msg = (error instanceof Error ? error.message : String(error ?? "")).toUpperCase();
-    return (msg.includes("COULD NOT FIND THE INPUT ENTITY") ||
-        msg.includes("PEER_ID_INVALID") ||
-        msg.includes("USER_ID_INVALID") ||
-        msg.includes("CHANNEL_INVALID") ||
-        msg.includes("USER_IS_BLOCKED") ||
-        msg.includes("YOU_BLOCKED_USER") ||
-        msg.includes("CHAT_ID_INVALID") ||
-        msg.includes("PEER_FLOOD") // rate-limited on THIS peer, not a connection outage
-    );
 }
 /**
  * A Telegram OPERATION failed AFTER the connection was already confirmed up (the pre-flight
@@ -56561,20 +56572,20 @@ function isBadTargetError(error) {
  * The only 503s left are the genuine "dependency down" pre-flight checks (instance/DB unavailable).
  */
 function sendTelegramOperationFailure(req, res, operation, error, errorText, _summary, _readOnly = true) {
-    const status = isBadTargetError(error) ? 404 : 500;
+    const status = (0,_tg_events__WEBPACK_IMPORTED_MODULE_5__.isBadTargetError)(error) ? 404 : 500;
     res.status(status).json({
         operation,
         readOnly: false,
         success: false,
         sent: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
         requestId: req.requestId,
     });
 }
 async function sendDatabaseUnavailable(req, res, operation, readOnly = true, errorText = "MongoDB instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
@@ -56583,7 +56594,7 @@ async function sendDatabaseUnavailable(req, res, operation, readOnly = true, err
     });
 }
 function sendDatabaseOperationFailure(req, res, operation, error, errorText, summary, readOnly = true) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -56591,11 +56602,11 @@ function sendDatabaseOperationFailure(req, res, operation, error, errorText, sum
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
@@ -56667,7 +56678,7 @@ function buildTelegramRouteData(req) {
  *             schema:
  *               type: boolean
  */
-router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "request-call";
     const chatId = req.params.chatId?.trim();
     const force = req.query.force === "true";
@@ -56698,7 +56709,7 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to request call", "Telegram call request failed", false);
     }
 });
@@ -56746,13 +56757,13 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               items:
  *                 type: object
  */
-router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "chat-history";
     try {
         const chatId = req.params.chatId;
         const requestId = req.requestId || "unknown";
         if (!chatId || chatId.trim() === "") {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_20__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
             return;
         }
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
@@ -56762,7 +56773,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
         // Validate parameters
         if (offset === null || minId === null || limit === null || maxId === null || limit < 1) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_20__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
             return;
         }
         // Validate limit to prevent abuse
@@ -56777,7 +56788,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         let messages = [];
         let hasMore = false;
         try {
-            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_7__.withTimeout)(() => (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
+            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
                 timeout: 30000,
                 errorMessage: `GetMessages timeout for chatId: ${chatId}`,
                 throwErr: true,
@@ -56816,7 +56827,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /chat/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /chat/:chatId endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
     }
 });
@@ -56844,7 +56855,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *             schema:
  *               type: boolean
  */
-router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-call-request";
     const chatId = req.params.chatId?.trim();
     if (!chatId) {
@@ -56877,7 +56888,7 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to delete call request", "Telegram call request cleanup failed", false);
     }
 });
@@ -56931,7 +56942,7 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
  *               type: object
  *               example: { operation: "execute-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "execute-handshake";
     try {
         const chatId = req.params.chatId;
@@ -56943,7 +56954,7 @@ router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
         sendTelegramOperationSuccess(req, res, operation, "Handshake execution completed", { chatId, data });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /executehs endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /executehs endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to execute handshake", "Telegram handshake execution failed", false);
     }
 });
@@ -56997,7 +57008,7 @@ router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *               type: object
  *               example: { operation: "execute-long-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "execute-long-handshake";
     try {
         const chatId = req.params.chatId;
@@ -57009,7 +57020,7 @@ router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
         sendTelegramOperationSuccess(req, res, operation, "Long handshake execution completed", { chatId, data });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /executehsl endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /executehsl endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to execute long handshake", "Telegram long handshake execution failed", false);
     }
 });
@@ -57038,14 +57049,14 @@ router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "send-demo-media-package", success: true, chatId: "12345" }
  */
-router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-demo-media-package";
     try {
         const chatId = req.params.chatId;
         const tg = await getTelegramClientForOperation(req, res, operation);
         if (!tg)
             return;
-        const files = await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_5__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
+        const files = await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_6__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
         await tg.sendMessage(chatId, {
             file: files,
             message: "Take Demo Video Call, I Will show you Directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
@@ -57053,7 +57064,7 @@ router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_
         sendTelegramOperationSuccess(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error sending demo video call");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error sending demo video call");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
     }
 });
@@ -57082,20 +57093,20 @@ router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_
  *               type: object
  *               example: { operation: "delete-chat", success: true, chatId: "12345" }
  */
-router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-chat";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const deleted = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_6__.deleteChat)(chatId);
+        const deleted = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_7__.deleteChat)(chatId);
         if (deleted === false) {
             throw new Error("deleteChat returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "Chat deleted", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /deletechat endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /deletechat endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
     }
 });
@@ -57124,20 +57135,20 @@ router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "block-user", success: true, chatId: "12345" }
  */
-router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "block-user";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const blocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_6__.blockUser)(chatId);
+        const blocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_7__.blockUser)(chatId);
         if (blocked === false) {
             throw new Error("blockUser returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "User blocked", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /blockuser endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /blockuser endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
     }
 });
@@ -57166,20 +57177,20 @@ router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *               type: object
  *               example: { operation: "unblock-user", success: true, chatId: "12345" }
  */
-router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "unblock-user";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const unblocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_6__.unblockUser)(chatId);
+        const unblocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_7__.unblockUser)(chatId);
         if (unblocked === false) {
             throw new Error("unblockUser returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "User unblock completed", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /unblockuser endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /unblockuser endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
     }
 });
@@ -57218,7 +57229,7 @@ router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *             schema:
  *               type: object
  */
-router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-external-message";
     const chatId = req.params.chatId?.trim();
     const rawMessage = typeof req.query.msg === "string" ? req.query.msg : "";
@@ -57254,15 +57265,15 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         let db;
         let userDetail;
         try {
-            if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.isInstanceExist()) {
+            if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_9__.UserDataDtoCrud.isInstanceExist()) {
                 await sendDatabaseUnavailable(req, res, operation, false);
                 return;
             }
-            db = _core_dbservice__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
+            db = _core_dbservice__WEBPACK_IMPORTED_MODULE_9__.UserDataDtoCrud.getInstance();
             userDetail = await db.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
             sendDatabaseOperationFailure(req, res, operation, error, "Failed to load user before sending message", "External message user lookup failed", false);
             return;
         }
@@ -57292,7 +57303,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
             });
             return;
         }
-        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_7__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
+        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
             timeout: 5000,
             errorMessage: "GetMessages Timeout",
             throwErr: false,
@@ -57315,14 +57326,14 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         }
         if (req.query.force !== "true" && !(0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetail)) {
             logger.log("Skipping Paid User Service Reply");
-            await (0,_index__WEBPACK_IMPORTED_MODULE_9__.sendMessageWithButton)(`Failed to send External Message: ${msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+            await (0,_index__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithButton)(`Failed to send External Message: ${msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
             await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_4__.deleteEventsForChat)(chatId).catch((e) => logger.error("event delete failed", e instanceof Error ? e.message : String(e)));
             try {
                 const updatedUserDetail = await db.update(chatId, { paidReply: true, limitTime: Date.now() });
                 Object.assign(userDetail, updatedUserDetail);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
                 sendDatabaseOperationFailure(req, res, operation, error, "Failed to update user before sending message", "External message user state update failed", false);
                 return;
             }
@@ -57351,7 +57362,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send external message", "External message send failed", false);
     }
 });
@@ -57380,7 +57391,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               type: object
  *               example: { operation: "send-video-call-link", success: true, chatId: "12345" }
  */
-router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-video-call-link";
     try {
         const chatId = req.params.chatId;
@@ -57399,7 +57410,7 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error sending video call link");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error sending video call link");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send video call link", "Telegram video call link send failed", false);
     }
 });
@@ -57426,12 +57437,12 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *                 username:
  *                   type: string
  */
-router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_17__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_13__.findHealthCheck)(snapshot, "telegram.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_18__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.findHealthCheck)(snapshot, "telegram.connection");
         if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "telegram.connection",
                 owner: "telegram",
@@ -57452,26 +57463,26 @@ router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
             });
             return;
         }
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_13__.healthCheckHttpStatus)(check)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.healthCheckHttpStatus)(check)).json({
             status: toLegacyTelegramHealthStatus(check),
             username: process.env.username,
             readOnly: true,
             health: snapshot,
             healthStatus: check.status,
             check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_13__.createHealthRecoveryPlan)(snapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.createHealthRecoveryPlan)(snapshot),
             requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /checkHealth endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /checkHealth endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
             summary: "Error checking Telegram connection",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_18__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -57516,7 +57527,7 @@ function toLegacyTelegramHealthStatus(check) {
  *             schema:
  *               type: object
  */
-router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "telegram-get-me");
@@ -57527,7 +57538,7 @@ router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14_
         res.json(me);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /getMe endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /getMe endpoint");
         sendTelegramOperationFailure(req, res, "telegram-get-me", error, "Failed to get Telegram user", "Telegram getMe failed");
     }
 });
@@ -57644,7 +57655,7 @@ router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14_
  *                   description:
  *                     type: string
  */
-router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "list-dialogs";
     try {
         const requestId = req.requestId || "unknown";
@@ -57675,7 +57686,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
         const requestedLimit = parseOptionalNonNegativeInteger(req.query.limit, 100);
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
         if (requestedLimit === null || offset === null) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_20__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
             return;
         }
         // MEMORY FIX: Enforce maximum limit to prevent excessive memory usage
@@ -57729,30 +57740,30 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             try {
                                 // Keep this list endpoint cache-only. Live entity lookups can outlive
                                 // request timeouts and keep logging after the response has been sent.
-                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance().get(dialog.id);
+                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(dialog.id);
                                 if (entity) {
                                     // Extract comprehensive entity information
-                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.User) {
+                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.User) {
                                         const user = entity;
                                         const userStatus = user.status;
                                         let wasOnline = null;
                                         // Extract wasOnline from different status types
-                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.UserStatusOffline) {
+                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusOffline) {
                                             wasOnline = userStatus.wasOnline || null;
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.UserStatusRecently) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusRecently) {
                                             wasOnline = null; // Recently doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.UserStatusLastWeek) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusLastWeek) {
                                             wasOnline = null; // LastWeek doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.UserStatusLastMonth) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusLastMonth) {
                                             wasOnline = null; // LastMonth doesn't have wasOnline
                                         }
                                         enhancedInfo = {
                                             username: user.username || null,
                                             phone: user.phone || null,
-                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.UserStatusOnline,
+                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusOnline,
                                             lastSeen: wasOnline,
                                             isBot: user.bot || false,
                                             isVerified: user.verified || false,
@@ -57766,7 +57777,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             isFake: user.fake || false
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.Chat) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Chat) {
                                         const chat = entity;
                                         enhancedInfo = {
                                             participantsCount: chat.participantsCount || null,
@@ -57775,7 +57786,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             migratedTo: chat.migratedTo ? String(chat.migratedTo) : null
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.Channel) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Channel) {
                                         const channel = entity;
                                         enhancedInfo = {
                                             username: channel.username || null,
@@ -57824,7 +57835,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             // MEMORY FIX: Limit entity fetches to prevent memory leaks
                             let senderInfo = null;
                             // Check if message is Api.Message (has fromId property)
-                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.Message;
+                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Message;
                             const messageFromId = isApiMessage ? message.fromId : null;
                             if (messageFromId && totalProcessed < MAX_ENTITY_FETCHES) {
                                 senderInfo = getCachedSenderInfo(messageFromId);
@@ -57880,7 +57891,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                         logger.warn(`Error enhancing dialog:`, error instanceof Error ? error.message : String(error));
                         // Return basic dialog info on error
                         const errorMessage = dialog.message;
-                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_19__.Api.Message;
+                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Message;
                         const errorMessageText = isApiMessage ? errorMessage.message || "" : "";
                         const errorMessageOut = isApiMessage ? errorMessage.out || false : false;
                         return {
@@ -57940,7 +57951,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /dialogs endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /dialogs endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
         }
@@ -57970,7 +57981,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
  *             schema:
  *               type: object
  */
-router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "dialog-info";
     try {
         const chatId = req.params.chatId;
@@ -57989,14 +58000,14 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
             return;
         try {
             // Get entity info — check cache first, then network
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance().get(chatId);
-            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_7__.withTimeout)(() => client.getEntity(chatId), {
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(chatId);
+            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => client.getEntity(chatId), {
                 timeout: 10000,
                 errorMessage: `GetEntity timeout for chatId: ${chatId}`,
                 throwErr: true,
             });
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance().put(chatId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().put(chatId, entity);
             }
             // Type guards and safe property access
             const isUser = entity.className === "User";
@@ -58039,7 +58050,7 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialog info", "Telegram dialog info failed", true);
         }
@@ -58072,7 +58083,7 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
  *                 success:
  *                   type: boolean
  */
-router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_14__.leaderOnlyMiddleware, async (req, res) => {
+router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "mark-dialog-read";
     try {
         const chatId = req.params.chatId;
@@ -58090,7 +58101,7 @@ router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         if (!client)
             return;
         try {
-            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_7__.withTimeout)(() => client.markAsRead(chatId), {
+            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => client.markAsRead(chatId), {
                 timeout: 10000,
                 errorMessage: `MarkAsRead timeout for chatId: ${chatId}`,
                 throwErr: true,
@@ -58107,7 +58118,7 @@ router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to mark dialog as read", "Telegram mark dialog read failed", false);
         }
