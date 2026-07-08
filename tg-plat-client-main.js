@@ -16866,10 +16866,10 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
             msg(4.7, "And <b>don't talk</b> when we connect okk...!!\nI'm in the bathroom, keep yourself on <b>Mute</b>\nI'll show you everything on the call 😉"),
             msg(5, `Okay try calling ME here instead babe 🥰\n\n${zoom}\n\n<b>Call me now na</b>`),
             msg(6, `Come on, call me on this one 😘\nit <b>actually works</b>\n\n${zoom}`),
-            msg(7, `Call me here baby 💋\nI'm <b>waiting</b>\n\n${zoom}`),
+            msg(7, `Call me here baby 💋\ni'm <b>waiting</b>\n\n${zoom}`),
             msg(8, `Only call me on <b>this link</b> okay? 🙈\n\n${zoom}`),
-            msg(11, `Babe you there?? 🥹\nJust open this and <b>call me</b>\n\n${zoom}`),
-            msg(13, "Same problem 😭\nNormal call still <b>won't connect</b>\nPlease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
+            msg(11, `Babe you there?? 🥹\njust open this and <b>call me</b>\n\n${zoom}`),
+            msg(13, "Same problem 😭\nnormal call still <b>won't connect</b>\nplease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
             call(15), msg(15.5, callMe()),
             call(20), msg(20.5, callMe()),
             call(30), msg(30.5, callMe()),
@@ -37200,7 +37200,9 @@ const screenshot = `**Send ur Payment Screenshot!!**`;
 const qr = '**"PhonePe / PayTm" ONLY!!** 👆';
 const qr1 = '**Pay to this NEW QR Code!!**';
 const pynw = getPynw();
-const demo = `\n**DEMO Services:**\n${(0,_demoMenu__WEBPACK_IMPORTED_MODULE_2__.buildDemoMenu)()}\n**Pay on My Website 👉🏻 ${process.env.link}**`;
+// buildDemoMenu() already supplies the leading/trailing newlines around the code fence,
+// so we must NOT add our own \n before/after it — that produced extra blank lines.
+const demo = `\n**DEMO Services:**${(0,_demoMenu__WEBPACK_IMPORTED_MODULE_2__.buildDemoMenu)()}**Pay on My Website 👉🏻 ${process.env.link}**`;
 const noFreeDemo = `**No FREE** Demos!!`;
 const installments = 'You Can Take **Video Call** in Installments!!\n\n**Like... Daily 15Mins!!**\nSo 4 days u can enjoy in **Full video Call.** 🤗';
 const daily100 = `So Many **People** Msg me for **Free Demo 😔**\nI cant waste my time on **TimePassers!!**\n\nDemo **Video Call** is just **𝟱𝟬₹!!**\nTake **Full Service** Only If U like **Demo VC!!**\n\n**PAY nd Enjoy** me Like a **REAL MAN!! 🔥**\nDont be a **TimePasser!! 😏**`;
