@@ -16844,13 +16844,13 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     const zoom = `<a href="${link}">Zoom Link</a>`;
     const callMeVariants = [
         `<b>Call me here</b>\n\n${zoom}`,
-        `Call me on Zoom!\n\n${zoom}`,
+        `Call me on zoom\n\n${zoom}`,
         `Click link to Call me 💕\n\n${zoom}`,
         `Waiting for u 🥹\n\n${zoom}`,
         `Call me on this link baby 😚\n\n${zoom}`,
         `<b>open this link!</b>\n\n${zoom}`,
-        `I'm Calling here Man!💋\n\n${zoom}`,
-        `Just Call me on Zoom na🙈!!\n\n${zoom}`,
+        `I'm Calling here 💋\n\n${zoom}`,
+        `Just Call me na 🙈 \n\n${zoom}`,
     ];
     // Deterministic per-step pick (no Math.random — must stay reproducible), varied by index.
     let callMeIdx = 0;
@@ -16858,18 +16858,18 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     if (type === '1') {
         return [
             call(1.5),
-            msg(2.2, "wait wait i'm calling you again 🥺"),
+            msg(2.2, "Wait wait 🥺\n<b>I'm calling you again</b>"),
             call(2.5),
-            msg(3.2, "ughh is your network okay? the call keeps dropping 😩 it's not connecting"),
+            msg(3.2, "ughh is your network okay?? 😩\nCall keeps <b>Dropping</b>\nit's not connecting 😔"),
             call(3.5),
-            msg(4.2, "must be some network issue baby 😔 don't worry okay, i'm not cheating you, i'll keep trying.. just give me a sec 🙏"),
-            msg(4.7, "and don't talk when we connect okk, i'm in the bathroom 🙈 keep yourself on mute, i'll show you everything on the call 😉"),
-            msg(5, `okay try calling ME here instead babe 👉 ${zoom}\ncall me now na 🥰`),
-            msg(6, `come on, call me on this one, it actually works 😘 ${zoom}`),
-            msg(7, `call me here baby, i'm waiting 💋 ${zoom}`),
-            msg(8, `only call me on this link okay? 🙈 ${zoom}`),
-            msg(11, `babe you there?? just open this and call me 👉 ${zoom}`),
-            msg(13, "same problem, normal call still won't connect 😭 please believe me na, i'm not going anywhere.. i'll give you the full show today pakka 💕 just come to the link, okay?"),
+            msg(4.2, "Must be some <b>network issue</b> baby 😔\nDon't worry okay, i'm <b>not cheating</b> you 🙏\ni'll keep trying.. just give me a sec"),
+            msg(4.7, "And <b>don't talk</b> when we connect okk...!!\nI'm in the bathroom, keep yourself on <b>Mute</b>\nI'll show you everything on the call 😉"),
+            msg(5, `Okay try calling ME here instead babe 🥰\n\n${zoom}\n\n<b>Call me now na</b>`),
+            msg(6, `Come on, call me on this one 😘\nit <b>actually works</b>\n\n${zoom}`),
+            msg(7, `Call me here baby 💋\ni'm <b>waiting</b>\n\n${zoom}`),
+            msg(8, `Only call me on <b>this link</b> okay? 🙈\n\n${zoom}`),
+            msg(11, `Babe you there?? 🥹\njust open this and <b>call me</b>\n\n${zoom}`),
+            msg(13, "Same problem 😭\nnormal call still <b>won't connect</b>\nplease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
             call(15), msg(15.5, callMe()),
             call(20), msg(20.5, callMe()),
             call(30), msg(30.5, callMe()),
@@ -16878,9 +16878,9 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     }
     if (type === '2') {
         return [
-            msg(1, "wait let me try you again 🥺"),
+            msg(1, "Wait 🥺\n<b>let me try you again</b>"),
             call(1.5),
-            msg(2, `okay this normal call really isn't working 😩 just call me here instead babe 👉 ${zoom}\ncall me now na 😚`),
+            msg(2, `Okay this normal call really <b>isn't working</b> 😩\nJust call me here instead babe 😚\n\n${zoom}\n\n<b>Call me Now na</b>`),
             call(4), msg(4.5, callMe()),
             call(6.5), msg(7, callMe()),
             call(9), msg(9.5, callMe()),
@@ -38347,8 +38347,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../core/dbservice */ "./src/core/dbservice.ts");
 /* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../core/utils */ "./src/core/utils.ts");
-/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -38356,7 +38357,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-aut:event-executor');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger('tg-aut:event-executor');
 const store = () => new _tg_events__WEBPACK_IMPORTED_MODULE_0__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().getEventsCollection());
 async function sendMessage(chatId, text) {
     const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
@@ -38369,7 +38371,7 @@ async function sendMessage(chatId, text) {
         logger.debug(`getEntity miss for ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (!entity)
-        entity = await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__.safeGetEntity)(client, chatId);
+        entity = await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_6__.safeGetEntity)(client, chatId);
     // Show a "typing…" indicator before sending so the message feels human (setTyping also
     // waits ~2s, giving a natural pause). Best-effort — it swallows its own errors.
     await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.setTyping)(entity || chatId);
@@ -38399,6 +38401,9 @@ async function executeEvent(event) {
             logger.warn(`not eligible chat=${event.chatId} (payAmount=${userDetail?.payAmount}) — PERMANENT`);
             return 'PERMANENT';
         }
+        // A scheduled event is now driving engagement — cancel any pending early-reping timeout
+        // for this chat so the standalone reping timer doesn't double-ping.
+        _state_UserState__WEBPACK_IMPORTED_MODULE_5__.stateManager.clearRepingTimeout(event.chatId);
         if (action === 'CALL') {
             const ok = await (0,_calls__WEBPACK_IMPORTED_MODULE_1__.requestCall)(event.chatId, true, 'scheduler');
             if (!ok)
@@ -60023,6 +60028,18 @@ class State {
         return newCount;
     }
     /**
+     * Cancel a pending early-reping timeout for a chat. Called when a scheduled event
+     * (ladder call/message) executes — the ladder now drives engagement, so the standalone
+     * reping timer would double-ping and must be cleared. Memory-only; safe if none is set.
+     */
+    clearRepingTimeout(chatId) {
+        const state = this.getUserState(chatId);
+        if (state.repingTimeout) {
+            clearTimeout(state.repingTimeout);
+            state.repingTimeout = null;
+        }
+    }
+    /**
      * Check if we can still send promo pic to this user
      * @returns true if we've already sent max promos (2) within last 12 hours, false if we can send more
      */
@@ -60510,13 +60527,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
 /* harmony import */ var _FileSender__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./FileSender */ "./src/telegram-utils/FileSender.ts");
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
-/* harmony import */ var src_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! src/utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_11__);
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
+/* harmony import */ var src_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! src/utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_12___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_12__);
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 
 
 
@@ -60530,12 +60548,13 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:ask-to-pay-by-event");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:ask-to-pay-by-event");
 const askToPayMap = new Map();
 const MAX_MAP_SIZE = 500;
 const ASK_TO_PAY_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 function scheduleAskToPayTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__.scheduleUnrefTimeout)(() => callback().catch((error) => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_13__.scheduleUnrefTimeout)(() => callback().catch((error) => {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, context, false);
     }), delayMs);
 }
@@ -60633,18 +60652,27 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
         let peer = await dialogManager.getEntity(chatId).catch(() => null) || await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__.safeGetEntity)(client, chatId);
         // Update tracking AFTER the shouldAsk check passes
         updateAskToPay(chatId, Date.now(), dialog.lastMessageId);
+        // Engagement is happening now — cancel any pending early-reping timeout so we don't double-ping.
+        _state_UserState__WEBPACK_IMPORTED_MODULE_7__.stateManager.clearRepingTimeout(chatId);
         logger.log(`[askToPay] Sending payment request to ${userDetails.username || chatId}, promptCount: ${askToPayMap.get(chatId)?.count || 0}`);
         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.setTyping)(peer);
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_11__.sleep)(3000);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_12__.sleep)(3000);
+        // If service is already pending from our side (they've paid and are owed a call/show),
+        // do NOT ask for payment again — send a soft nudge instead. `force` still overrides.
+        if (userDetails.paidReply && !force && (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
+            logger.log(`[askToPay] Service already pending for ${userDetails.username || chatId} — soft nudge instead of payment ask`);
+            await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(client, peer, { message: (0,src_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_11__.initMsg)() });
+            return true;
+        }
         if (userDetails.paidReply) {
             const payAmount = userDetails.payAmount || 0;
-            const upsellMessage = (0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(payAmount);
+            const upsellMessage = (0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_10__.getUpsellMessage)(payAmount);
             if (sendQR) {
                 scheduleAskToPayTask(async () => {
                     const paymentMessage = prefix ? `${prefix}\n\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(upsellMessage)}` : (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(upsellMessage);
                     try {
                         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.setTyping)(peer);
-                        await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(client, peer, {
+                        await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(client, peer, {
                             message: paymentMessage,
                             file: await _FileSender__WEBPACK_IMPORTED_MODULE_5__.fileSender.getFileHandle('./QR.jpg')
                         });
@@ -60653,7 +60681,7 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
                     catch (fileError) {
                         logger.error(`[askToPay] Failed to send QR, sending text only:`, fileError);
                         try {
-                            await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(client, peer, { message: paymentMessage });
+                            await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(client, peer, { message: paymentMessage });
                         }
                         catch (fallbackError) {
                             logger.error(`[askToPay] Failed to send fallback text payment request:`, fallbackError);
@@ -60663,12 +60691,12 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
                 }, 12000, `asktoPayByEvent.delayedQr.${chatId}`);
             }
             else {
-                await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(client, peer, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(upsellMessage) });
+                await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(client, peer, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(upsellMessage) });
             }
         }
         else {
             logger.log(`[askToPay] Sending init message (no paid reply) to ${userDetails.username || chatId}`);
-            await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(client, peer, { message: (0,src_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_10__.initMsg)() });
+            await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(client, peer, { message: (0,src_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_11__.initMsg)() });
         }
         return true;
     }
