@@ -16844,13 +16844,13 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     const zoom = `<a href="${link}">Zoom Link</a>`;
     const callMeVariants = [
         `<b>Call me here</b>\n\n${zoom}`,
-        `Call me on zoom\n\n${zoom}`,
+        `Call me on Zoom!\n\n${zoom}`,
         `Click link to Call me 💕\n\n${zoom}`,
         `Waiting for u 🥹\n\n${zoom}`,
         `Call me on this link baby 😚\n\n${zoom}`,
         `<b>open this link!</b>\n\n${zoom}`,
-        `I'm Calling here 💋\n\n${zoom}`,
-        `Just Call me na 🙈 \n\n${zoom}`,
+        `I'm Calling here Man!💋\n\n${zoom}`,
+        `Just Call me on Zoom na🙈!!\n\n${zoom}`,
     ];
     // Deterministic per-step pick (no Math.random — must stay reproducible), varied by index.
     let callMeIdx = 0;
