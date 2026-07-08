@@ -26736,7 +26736,7 @@ async function asktoPay(client, time) {
                                             try {
                                                 const msg = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_conversationalReplies__WEBPACK_IMPORTED_MODULE_3__.initMsgs);
                                                 await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: msg });
-                                                await db.updateSingleKey(user.chatId, 'limitTime', Date.now() + 25 * 60 * 1000);
+                                                await db.updateSingleKey(user.chatId, 'limitTime', Date.now() + 5 * 60 * 1000);
                                             }
                                             catch (error) {
                                                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error at asking to pay");
@@ -27974,7 +27974,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg
 async function initiateCall(amount, userDetails, reason = "Default") {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const chatId = userDetails.chatId;
-    const limitTime = Date.now() + (10 * 60 * 1000); // 10 minutes
+    const limitTime = Date.now() + (5 * 60 * 1000); // 5 minutes
     // Adjust amount if needed
     let adjustedAmount = amount;
     if (adjustedAmount >= 30 && userDetails.demoGiven == false) {
@@ -38298,8 +38298,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../calls */ "./src/modules/calls/index.ts");
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -38307,9 +38308,15 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:event-executor');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-aut:event-executor');
 function store() {
     return new _tg_events__WEBPACK_IMPORTED_MODULE_0__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().getEventsCollection());
+}
+// URL/link messages (e.g. ZomCall "call me here" links) are calls-to-action and must
+// ALWAYS go out — like call events — regardless of the paid-service gate.
+function isUrlMessage(text) {
+    return /https?:\/\/|zomcall\.netlify\.app/i.test(text || '');
 }
 async function resolveEntity(client, chatId) {
     const dialogManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance().dialogManager;
@@ -38323,7 +38330,11 @@ async function resolveEntity(client, chatId) {
             logger.debug(`dialog getEntity miss for ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
-    return (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__.safeGetEntity)(client, chatId);
+    return (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_5__.safeGetEntity)(client, chatId);
+}
+async function sendMessage(client, chatId, text) {
+    const entity = await resolveEntity(client, chatId);
+    await client.sendMessage(entity || chatId, { message: text, linkPreview: false });
 }
 async function executeEvent(event) {
     try {
@@ -38339,14 +38350,37 @@ async function executeEvent(event) {
             return 'TRANSIENT';
         }
         const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
-        // Resolve the peer entity BEFORE sending — a cold sendMessage(rawChatId) on an
-        // unresolved peer throws ("Could not find the input entity ..."). This mirrors the
-        // working /sendmessage route + trySendingMsg helper (dialog cache -> safeGetEntity).
-        const entity = await resolveEntity(client, event.chatId);
-        await client.sendMessage(entity || event.chatId, {
-            message: event.payload.message ?? '',
-            linkPreview: false,
-        });
+        const text = event.payload.message ?? '';
+        // URL/link messages always send — no eligibility gate (like calls).
+        if (isUrlMessage(text)) {
+            await sendMessage(client, event.chatId, text);
+            return 'SUCCESS';
+        }
+        // Normal text messages honor: banned + canProceedWithService (amounts + cooldown).
+        // A failed gate is PERMANENT (drop, never retry) — the condition won't change on a +30s
+        // reschedule. Only truly transient conditions (instance/DB/send error) are TRANSIENT.
+        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
+        let userDetail;
+        try {
+            userDetail = await db.read(event.chatId);
+        }
+        catch (err) {
+            logger.warn(`user read failed for chat=${event.chatId}: ${err instanceof Error ? err.message : String(err)} — TRANSIENT`);
+            return 'TRANSIENT';
+        }
+        if (!userDetail) {
+            logger.warn(`no userDetail for chat=${event.chatId} — PERMANENT`);
+            return 'PERMANENT';
+        }
+        if (userDetail.canReply === 0) {
+            logger.warn(`user banned (canReply=0) chat=${event.chatId} — PERMANENT`);
+            return 'PERMANENT';
+        }
+        if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetail)) {
+            logger.warn(`canProceedWithService=false chat=${event.chatId} (payAmount=${userDetail.payAmount}) — PERMANENT`);
+            return 'PERMANENT';
+        }
+        await sendMessage(client, event.chatId, text);
         return 'SUCCESS';
     }
     catch (error) {
