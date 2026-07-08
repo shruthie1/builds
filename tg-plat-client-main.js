@@ -21750,10 +21750,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getRuntimeConfigBase: () => (/* binding */ getRuntimeConfigBase),
 /* harmony export */   getRuntimeConfigBaseOrNull: () => (/* binding */ getRuntimeConfigBaseOrNull)
 /* harmony export */ });
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node-fetch */ "node-fetch");
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fetch__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 // const { execSync } = require('child_process');
 // try {
 //     execSync(`npm install`, { stdio: 'inherit' });
@@ -21763,8 +21761,7 @@ __webpack_require__.r(__webpack_exports__);
 // }
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:core-config');
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:core-config');
 function getRuntimeConfigBaseOrNull() {
     const base = (process.env.RUNTIME_CONFIG_BASE || process.env.tgmanager || process.env.tgcms || '').trim().replace(/\/$/, '');
     return base || null;
@@ -21798,7 +21795,7 @@ async function getDataAndSetEnvVariables(url) {
     for (let attempt = 1; attempt <= CONFIG_FETCH_MAX_ATTEMPTS; attempt++) {
         try {
             logger.info(`⚙️ CONFIG fetch | ${process.env.clientId || 'unknown-client'} | attempt ${attempt}/${CONFIG_FETCH_MAX_ATTEMPTS} | ${url}`);
-            const response = await node_fetch__WEBPACK_IMPORTED_MODULE_0___default()(url, { headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor' } });
+            const response = await fetch(url, { headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor' } });
             if (!response.ok) {
                 throw new Error(`Runtime configuration request failed with status ${response.status}`);
             }
@@ -21828,7 +21825,7 @@ async function getDataAndSetEnvVariables(url) {
         }
     }
     // All attempts failed — do NOT proceed with empty env. Throw so the boot aborts.
-    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(lastError, "Error retrieving runtime configuration after retries");
+    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(lastError, "Error retrieving runtime configuration after retries");
     logger.error('Failed to fetch runtime configuration after all retries', lastError instanceof Error ? lastError.message : String(lastError), lastError instanceof Error ? lastError.stack : undefined);
     throw new Error(`Runtime config fetch failed after ${CONFIG_FETCH_MAX_ATTEMPTS} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
@@ -22833,20 +22830,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
 /* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! mongodb */ "mongodb");
 /* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! node-fetch */ "node-fetch");
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(node_fetch__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:dbservice");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
     totalCount: "totalCount",
@@ -22970,7 +22964,7 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
@@ -22983,7 +22977,7 @@ class UserDataDtoCrud {
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error connecting to MongoDB");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error connecting to MongoDB");
                 await this.closeConnection();
                 return false;
             }
@@ -23003,7 +22997,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} bandit=${promotionFlags.messageBandit} locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -23051,11 +23045,11 @@ class UserDataDtoCrud {
                     if (redisRequired) {
                         throw error;
                     }
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Promotion Redis unavailable; continuing with Redis-backed promotion features disabled', false);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Promotion Redis unavailable; continuing with Redis-backed promotion features disabled', false);
                     redis = null;
                 }
             }
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.createPromotionRuntime)({
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.createPromotionRuntime)({
                 channelIntelligenceCollection: this.channelIntelligenceDb,
                 activeChannelCollection: this.activeChannelDb,
                 redis,
@@ -23066,7 +23060,7 @@ class UserDataDtoCrud {
             logger.log('Promotion runtime initialized; collections=channelIntelligence,activeChannels');
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Promotion runtime initialization failed');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Promotion runtime initialization failed');
             await this.closePromotionRedis();
             throw error;
         }
@@ -23080,7 +23074,7 @@ class UserDataDtoCrud {
             redis.disconnect?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error closing promotion Redis connection', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error closing promotion Redis connection', false);
         }
     }
     async refreshPromotionRuntime() {
@@ -23089,7 +23083,7 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
         await this.ensurePromoteStatsInitialized();
         return true;
@@ -23144,7 +23138,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching texted client count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
     }
@@ -23165,7 +23159,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error checking payment status");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error checking payment status");
         }
         return resp;
     }
@@ -23215,7 +23209,7 @@ class UserDataDtoCrud {
                     // Store timeout reference and unref to allow process exit if needed
                     const limitTimeout = setTimeout(() => {
                         void this.updateSingleKey(chatId, user.limitTime, Date.now() + (2 * 60 * 60 * 1000))
-                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
+                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
                     }, 20000);
                     limitTimeout.unref();
                 }
@@ -23231,7 +23225,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Creating/updating stats", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Creating/updating stats", false);
         }
     }
     async updateStatSingleKey(chatId, mykey, value) {
@@ -23453,7 +23447,7 @@ class UserDataDtoCrud {
             return updatedDocument;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating promotion stats");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating promotion stats");
         }
     }
     async activatePromotions() {
@@ -23552,7 +23546,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching paid users");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching paid users");
             return ({ total: 0, new: 0 });
         }
     }
@@ -23583,7 +23577,7 @@ class UserDataDtoCrud {
             const result = await this.statsDb.deleteMany({ chatId, profile: process.env.dbcoll, client: process.env.clientId });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error removing single stat");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error removing single stat");
         }
     }
     async readRecentPaidPpl() {
@@ -23714,7 +23708,7 @@ class UserDataDtoCrud {
             logger.log(`Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, Upserts: ${result.upsertedCount}`);
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, "Failed to Bulk update Channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(e, "Failed to Bulk update Channels");
         }
     }
     async enforceActiveChannelSafetyState() {
@@ -23804,7 +23798,7 @@ class UserDataDtoCrud {
             return result || await this.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating UserDataDto", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating UserDataDto", true);
             return await this.read(chatId);
         }
     }
@@ -23825,7 +23819,7 @@ class UserDataDtoCrud {
             return result || await this.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating single key", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating single key", true);
             logger.error(`Error updating single key for chatId: ${chatId}`, error);
             return await this.read(chatId);
         }
@@ -23873,13 +23867,13 @@ class UserDataDtoCrud {
             return { newUser: wasCreated, userDetails };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error creating or updating UserDataDto");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error creating or updating UserDataDto");
             let fallback;
             try {
                 fallback = await this.read(chatId);
             }
             catch (readError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
             }
             const safeDetails = fallback || existing || (newUser ? { ...newUser, totalCount: 0 } : { ...USER_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() });
             return { newUser: !!newUser, userDetails: safeDetails };
@@ -23920,7 +23914,7 @@ class UserDataDtoCrud {
             return result.acknowledged;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error updating promotion attribution');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error updating promotion attribution');
             return false;
         }
     }
@@ -23953,7 +23947,7 @@ class UserDataDtoCrud {
             return await channelDb.findOne({});
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, "Error fetching promote messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(e, "Error fetching promote messages");
         }
     }
     async updateClient(filter, data) {
@@ -23962,7 +23956,7 @@ class UserDataDtoCrud {
             return await clientsDb.updateOne(filter, { $set: data });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating Client");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating Client");
         }
     }
     async updateBufferClientAssignment(mobile, update) {
@@ -23972,7 +23966,7 @@ class UserDataDtoCrud {
             await bufferClientsDb.updateOne({ mobile }, { $set: update });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating buffer client persona assignment");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating buffer client persona assignment");
             logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`, error instanceof Error ? error.message : String(error));
         }
     }
@@ -23982,7 +23976,7 @@ class UserDataDtoCrud {
             const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
             const doc = await bufferClientsDb.findOne({ mobile });
             if (doc) {
-                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
+                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
             }
             else {
                 logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
@@ -23990,7 +23984,7 @@ class UserDataDtoCrud {
             return doc;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching buffer client doc");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching buffer client doc");
             logger.error(`[Persona] Failed to load buffer client doc for ${mobile}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -24018,7 +24012,7 @@ class UserDataDtoCrud {
             return pool;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching buffer persona pool");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching buffer persona pool");
             logger.error(`[Persona] Failed to load buffer persona pool for ${clientId}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -24061,14 +24055,14 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching local persona assignment snapshot", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching local persona assignment snapshot", false);
             logger.warn(`[Persona] Failed to load local assignment snapshot for ${clientId}`, error instanceof Error ? error.message : String(error));
         }
         try {
             const tgcms = process.env.tgmanager || process.env.tgcms;
             if (tgcms) {
                 logger.debug(`🧍 PERSONA assignment fetch | ${clientId} | ${tgcms}`);
-                const response = await node_fetch__WEBPACK_IMPORTED_MODULE_2___default()(`${tgcms}/clients/${clientId}/existing-assignments?scope=all`, {
+                const response = await fetch(`${tgcms}/clients/${clientId}/existing-assignments?scope=all`, {
                     headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor' },
                 });
                 if (!response.ok) {
@@ -24106,7 +24100,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error removing from available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error removing from available messages");
             throw error;
         }
     }
@@ -24125,7 +24119,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error adding to available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error adding to available messages");
             throw error;
         }
     }
@@ -24148,7 +24142,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating timestamps");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating timestamps");
         }
     }
     // async getAvgCalculatedChannels() {
@@ -24198,7 +24192,7 @@ class UserDataDtoCrud {
             return docs.map((doc) => doc.channelId.toString());
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error getting restricted channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting restricted channels");
         }
     }
     async updateActiveChannel(filter, data) {
@@ -24432,7 +24426,7 @@ class UserDataDtoCrud {
             }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "RemoveChannelMsgErr");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "RemoveChannelMsgErr");
             throw error;
         }
     }
@@ -24453,7 +24447,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating success message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating success message count");
             throw error;
         }
     }
@@ -24474,7 +24468,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating failure message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating failure message count");
             throw error;
         }
     }
@@ -24495,7 +24489,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating follow-up success count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating follow-up success count");
             throw error;
         }
     }
@@ -24516,7 +24510,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating follow-up failure count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating follow-up failure count");
             throw error;
         }
     }
@@ -24748,12 +24742,12 @@ class UserDataDtoCrud {
                 logger.log('MongoDB connection closed.');
             }
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
             await this.client?.close();
             this.client = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error closing MongoDB connection");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error closing MongoDB connection");
         }
     }
 }
@@ -63194,6 +63188,17 @@ module.exports = require("big-integer");
 
 /***/ },
 
+/***/ "bson"
+/*!***********************!*\
+  !*** external "bson" ***!
+  \***********************/
+(module) {
+
+"use strict";
+module.exports = require("bson");
+
+/***/ },
+
 /***/ "chalk"
 /*!************************!*\
   !*** external "chalk" ***!
@@ -63213,6 +63218,17 @@ module.exports = require("chalk");
 
 "use strict";
 module.exports = require("cors");
+
+/***/ },
+
+/***/ "dotenv"
+/*!*************************!*\
+  !*** external "dotenv" ***!
+  \*************************/
+(module) {
+
+"use strict";
+module.exports = require("dotenv");
 
 /***/ },
 
@@ -63268,17 +63284,6 @@ module.exports = require("ioredis");
 
 "use strict";
 module.exports = require("mongodb");
-
-/***/ },
-
-/***/ "node-fetch"
-/*!*****************************!*\
-  !*** external "node-fetch" ***!
-  \*****************************/
-(module) {
-
-"use strict";
-module.exports = require("node-fetch");
 
 /***/ },
 
@@ -63755,30 +63760,36 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var node_url__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! node:url */ "node:url");
 /* harmony import */ var node_url__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(node_url__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _core_Config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./core/Config */ "./src/core/Config.ts");
-/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var bson__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! bson */ "bson");
+/* harmony import */ var bson__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(bson__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! dotenv */ "dotenv");
+/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(dotenv__WEBPACK_IMPORTED_MODULE_5__);
+/* harmony import */ var _core_Config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./core/Config */ "./src/core/Config.ts");
+/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+
+
+// Static imports so webpack emits real externals; createRequire(import.meta.url) gets replaced
+// with a throwing context stub under target:'node', which broke bson/dotenv resolution at runtime.
 
 
 
 
 
 
-
-
-
-const requireModule = /* createRequire() */ undefined;
 // __dirname when present (webpack replaces it with the bundle's real runtime dir); import.meta.url
 // gets inlined as the build-time CI path and breaks package.json FS reads/writes on the VM.
 const moduleDir =  true
     ? __webpack_dirname__
     : 0;
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:entry");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:entry");
 const DEFAULT_BSON_BUFFER_SIZE = 1024 * 1024 * 2;
-function configureDotenv(requireFn = __webpack_require__("./src sync recursive")) {
+function configureDotenv(requireFn) {
     try {
-        const dotenv = requireFn('dotenv');
+        const dotenv = (requireFn ? requireFn('dotenv') : dotenv__WEBPACK_IMPORTED_MODULE_5__);
         if (typeof dotenv?.config === 'function') {
             dotenv.config();
         }
@@ -63791,9 +63802,9 @@ function configureDotenv(requireFn = __webpack_require__("./src sync recursive")
 }
 // CRITICAL MEMORY FIX: Reduce BSON internal buffer size from default 17MB to 2MB.
 // This prevents the MongoDB driver's BSON serializer from pre-allocating a huge buffer.
-function configureBsonMemory(requireFn = __webpack_require__("./src sync recursive"), bufferSize = DEFAULT_BSON_BUFFER_SIZE) {
+function configureBsonMemory(requireFn, bufferSize = DEFAULT_BSON_BUFFER_SIZE) {
     try {
-        const bson = requireFn('bson');
+        const bson = (requireFn ? requireFn('bson') : bson__WEBPACK_IMPORTED_MODULE_4__);
         if (typeof bson?.setInternalBufferSize !== 'function') {
             console.warn('[MEMORY] Could not set BSON buffer size: setInternalBufferSize unavailable');
             return false;
@@ -63816,7 +63827,7 @@ function readPackageJson(baseDir = moduleDir) {
         return JSON.parse(packageJsonContent);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error reading package.json");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error reading package.json");
         throw error;
     }
 }
@@ -63826,7 +63837,7 @@ function writePackageJson(data, baseDir = moduleDir) {
         node_fs__WEBPACK_IMPORTED_MODULE_1___default().writeFileSync(getPackageJsonPath(baseDir), packageJsonContent, 'utf-8');
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error writing package.json");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error writing package.json");
         throw error;
     }
 }
@@ -63836,7 +63847,7 @@ function modifyPackageJson(action, packageName, version, dev = false, baseDir = 
         packageJson = readPackageJson(baseDir);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Failed to load package.json");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Failed to load package.json");
         return false;
     }
     const section = dev ? 'devDependencies' : 'dependencies';
@@ -63873,7 +63884,7 @@ function modifyPackageJson(action, packageName, version, dev = false, baseDir = 
             }
             break;
         default:
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error(`Unknown action: ${action}`), `Unknown action: ${action}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(new Error(`Unknown action: ${action}`), `Unknown action: ${action}`);
             return false;
     }
     try {
@@ -63882,7 +63893,7 @@ function modifyPackageJson(action, packageName, version, dev = false, baseDir = 
         return true;
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Failed to update package.json.");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Failed to update package.json.");
         return false;
     }
 }
@@ -63891,16 +63902,16 @@ async function installPackage(runCommand = node_child_process__WEBPACK_IMPORTED_
     runCommand("npm i");
 }
 async function bootstrapEntry(deps = {}) {
-    const clientConfigUrl = (deps.buildClientConfigUrl ?? _core_Config__WEBPACK_IMPORTED_MODULE_4__.buildClientConfigUrl)();
-    await (deps.getDataAndSetEnvVariables ?? _core_Config__WEBPACK_IMPORTED_MODULE_4__.getDataAndSetEnvVariables)(clientConfigUrl);
-    const sharedConfigUrl = (deps.buildSharedConfigUrl ?? _core_Config__WEBPACK_IMPORTED_MODULE_4__.buildSharedConfigUrl)();
-    await (deps.getDataAndSetEnvVariables ?? _core_Config__WEBPACK_IMPORTED_MODULE_4__.getDataAndSetEnvVariables)(sharedConfigUrl);
-    await (deps.setUpiIds ?? _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_5__.setUpiIds)();
+    const clientConfigUrl = (deps.buildClientConfigUrl ?? _core_Config__WEBPACK_IMPORTED_MODULE_6__.buildClientConfigUrl)();
+    await (deps.getDataAndSetEnvVariables ?? _core_Config__WEBPACK_IMPORTED_MODULE_6__.getDataAndSetEnvVariables)(clientConfigUrl);
+    const sharedConfigUrl = (deps.buildSharedConfigUrl ?? _core_Config__WEBPACK_IMPORTED_MODULE_6__.buildSharedConfigUrl)();
+    await (deps.getDataAndSetEnvVariables ?? _core_Config__WEBPACK_IMPORTED_MODULE_6__.getDataAndSetEnvVariables)(sharedConfigUrl);
+    await (deps.setUpiIds ?? _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_7__.setUpiIds)();
     await (deps.importApp ?? (() => Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./app */ "./src/app.ts"))))();
 }
 function runEntryBootstrap(deps = {}) {
     return bootstrapEntry(deps).catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error during tg-aut entry bootstrap");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error during tg-aut entry bootstrap");
         throw error;
     });
 }
