@@ -16904,6 +16904,11 @@ const DEFAULT_TICK_MS = 20000;
 const DEFAULT_RESCHEDULE_MS = 30000;
 const DEFAULT_INTER_EVENT_MS = 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const consoleLogger = {
+    log: (m) => console.log(`[tg-events:scheduler] ${m}`),
+    warn: (m) => console.warn(`[tg-events:scheduler] ${m}`),
+    error: (m, e) => console.error(`[tg-events:scheduler] ${m}`, e ?? ''),
+};
 class EventScheduler {
     constructor(store, clientId, executor, opts = {}) {
         this.isProcessing = false;
@@ -16913,16 +16918,20 @@ class EventScheduler {
         this.tickMs = opts.tickMs ?? DEFAULT_TICK_MS;
         this.rescheduleMs = opts.rescheduleMs ?? DEFAULT_RESCHEDULE_MS;
         this.interEventMs = opts.interEventMs ?? DEFAULT_INTER_EVENT_MS;
+        this.logger = opts.logger ?? consoleLogger;
     }
     start() {
         if (this.intervalId)
             clearInterval(this.intervalId);
+        this.logger.log(`loop started | clientId=${this.clientId} | tick=${this.tickMs}ms`);
         this.intervalId = setInterval(() => {
-            if (this.isProcessing)
+            if (this.isProcessing) {
+                this.logger.warn('tick skipped: previous tick still processing');
                 return;
+            }
             this.isProcessing = true;
             this.processDueOnce(Date.now())
-                .catch(() => { })
+                .catch((err) => this.logger.error('processDueOnce crashed', err))
                 .finally(() => { this.isProcessing = false; });
         }, this.tickMs);
     }
@@ -16933,13 +16942,25 @@ class EventScheduler {
         }
     }
     async processDueOnce(now) {
-        const events = await this.store.findDue(this.clientId, now);
+        let events;
+        try {
+            events = await this.store.findDue(this.clientId, now);
+        }
+        catch (err) {
+            this.logger.error(`findDue failed for clientId=${this.clientId}`, err);
+            return;
+        }
+        if (events.length === 0)
+            return;
+        this.logger.log(`tick: ${events.length} due event(s) for clientId=${this.clientId}`);
         for (const event of events) {
             let outcome;
             try {
                 outcome = await this.executor(event);
             }
-            catch {
+            catch (err) {
+                // BAD PATH: executor threw. Log loudly — this is the "events not executing" signal.
+                this.logger.error(`executor THREW for ${event.type} chat=${event.chatId} id=${String(event._id)} — treating as TRANSIENT`, err);
                 outcome = 'TRANSIENT';
             }
             await this.applyOutcome(event, outcome, now);
@@ -16950,16 +16971,25 @@ class EventScheduler {
     async applyOutcome(event, outcome, now) {
         if (!event._id)
             return;
-        if (outcome === 'SUCCESS' || outcome === 'PERMANENT') {
+        const tag = `${event.type} chat=${event.chatId} id=${String(event._id)}`;
+        if (outcome === 'SUCCESS') {
+            this.logger.log(`SUCCESS ${tag} — deleting`);
+            await this.store.deleteById(event._id);
+            return;
+        }
+        if (outcome === 'PERMANENT') {
+            this.logger.warn(`PERMANENT ${tag} — dropping (will NOT retry)`);
             await this.store.deleteById(event._id);
             return;
         }
         // TRANSIENT
         const attempts = (event.attempts ?? 0) + 1;
         if (attempts >= _event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS) {
+            this.logger.warn(`TRANSIENT ${tag} — attempts ${attempts}/${_event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS} EXHAUSTED, dropping (NEVER SENT)`);
             await this.store.deleteById(event._id);
         }
         else {
+            this.logger.warn(`TRANSIENT ${tag} — attempt ${attempts}/${_event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS}, rescheduling +${this.rescheduleMs}ms`);
             await this.store.reschedule(event._id, now + this.rescheduleMs, attempts);
         }
     }
@@ -20863,7 +20893,13 @@ class ExpressServer {
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(10000);
         await (0,_core_jobs__WEBPACK_IMPORTED_MODULE_16__.runJobs)();
         const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_26__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_5__.UserDataDtoCrud.getInstance().getEventsCollection());
-        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_26__.EventScheduler(eventStore, process.env.clientId, _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_27__.executeEvent);
+        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_26__.EventScheduler(eventStore, process.env.clientId, _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_27__.executeEvent, {
+            logger: {
+                log: (m) => logger.log(`[event-scheduler] ${m}`),
+                warn: (m) => logger.warn(`[event-scheduler] ${m}`),
+                error: (m, e) => logger.error(`[event-scheduler] ${m}`, e),
+            },
+        });
         eventScheduler.start();
         logger.log(`EventScheduler started for clientId=${process.env.clientId}`);
     }
@@ -38262,28 +38298,52 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../calls */ "./src/modules/calls/index.ts");
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-aut:event-executor');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:event-executor');
 function store() {
     return new _tg_events__WEBPACK_IMPORTED_MODULE_0__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().getEventsCollection());
+}
+async function resolveEntity(client, chatId) {
+    const dialogManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance().dialogManager;
+    if (dialogManager) {
+        try {
+            const cached = await dialogManager.getEntity(chatId);
+            if (cached)
+                return cached;
+        }
+        catch (err) {
+            logger.debug(`dialog getEntity miss for ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    return (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_4__.safeGetEntity)(client, chatId);
 }
 async function executeEvent(event) {
     try {
         if (event.type === 'call') {
             const ok = await (0,_calls__WEBPACK_IMPORTED_MODULE_1__.requestCall)(event.chatId, true, 'scheduler');
+            if (!ok)
+                logger.warn(`requestCall returned false for chat=${event.chatId} — TRANSIENT`);
             return ok ? 'SUCCESS' : 'TRANSIENT';
         }
         // message
-        if (!_core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist())
+        if (!_core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist()) {
+            logger.warn(`Telegram instance not ready for chat=${event.chatId} — TRANSIENT`);
             return 'TRANSIENT';
+        }
         const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
-        await client.sendMessage(event.chatId, {
+        // Resolve the peer entity BEFORE sending — a cold sendMessage(rawChatId) on an
+        // unresolved peer throws ("Could not find the input entity ..."). This mirrors the
+        // working /sendmessage route + trySendingMsg helper (dialog cache -> safeGetEntity).
+        const entity = await resolveEntity(client, event.chatId);
+        await client.sendMessage(entity || event.chatId, {
             message: event.payload.message ?? '',
             linkPreview: false,
         });
