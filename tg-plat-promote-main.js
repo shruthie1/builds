@@ -363,16 +363,6 @@ module.exports = require("mongodb");
 
 /***/ },
 
-/***/ "node-fetch"
-/*!*****************************!*\
-  !*** external "node-fetch" ***!
-  \*****************************/
-(module) {
-
-module.exports = require("node-fetch");
-
-/***/ },
-
 /***/ "node-schedule-tz"
 /*!***********************************!*\
   !*** external "node-schedule-tz" ***!
@@ -739,34 +729,31 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! dotenv */ "dotenv");
 /* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(dotenv__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! node-fetch */ "node-fetch");
-/* harmony import */ var node_fetch__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(node_fetch__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_4__);
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! url */ "url");
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_5__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! url */ "url");
+/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("index");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("index");
 dotenv__WEBPACK_IMPORTED_MODULE_1___default().config();
-const __filename = (0,url__WEBPACK_IMPORTED_MODULE_5__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/index.ts");
-const __dirname = path__WEBPACK_IMPORTED_MODULE_4___default().dirname(__filename);
+const __filename = (0,url__WEBPACK_IMPORTED_MODULE_4__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/index.ts");
+const __dirname = path__WEBPACK_IMPORTED_MODULE_3___default().dirname(__filename);
 // Enable garbage collection for heapdump functionality
 if (typeof global.gc !== 'function') {
     logger.warn('⚠️  Garbage collection not exposed. Run with --expose-gc flag for full heapdump functionality');
 }
 const readPackageJson = () => {
     try {
-        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_4___default().resolve(__dirname, '../package.json');
-        const packageJsonContent = fs__WEBPACK_IMPORTED_MODULE_3___default().readFileSync(packageJsonPath, 'utf-8');
+        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_3___default().resolve(__dirname, '../package.json');
+        const packageJsonContent = fs__WEBPACK_IMPORTED_MODULE_2___default().readFileSync(packageJsonPath, 'utf-8');
         return JSON.parse(packageJsonContent);
     }
     catch (error) {
@@ -777,9 +764,9 @@ const readPackageJson = () => {
 // Function to write package.json
 const writePackageJson = (data) => {
     try {
-        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_4___default().resolve(__dirname, '../package.json');
+        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_3___default().resolve(__dirname, '../package.json');
         const packageJsonContent = JSON.stringify(data, null, 2);
-        fs__WEBPACK_IMPORTED_MODULE_3___default().writeFileSync(packageJsonPath, packageJsonContent, 'utf-8');
+        fs__WEBPACK_IMPORTED_MODULE_2___default().writeFileSync(packageJsonPath, packageJsonContent, 'utf-8');
     }
     catch (error) {
         logger.error('Error writing package.json:', error.message);
@@ -887,7 +874,7 @@ function buildSharedConfigUrl() {
 }
 async function getDataAndSetEnvVariables(url) {
     try {
-        const response = await node_fetch__WEBPACK_IMPORTED_MODULE_2___default()(url, { headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || "santoor" } });
+        const response = await fetch(url, { headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || "santoor" } });
         if (!response.ok) {
             throw new Error(`Runtime configuration request failed with status ${response.status}`);
         }
