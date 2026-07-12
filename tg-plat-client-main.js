@@ -1777,7 +1777,16 @@ class PercentileEngine {
     }
     async getPercentiles() {
         if (this.cache && Date.now() - this.lastComputed < REFRESH_MS) {
-            return this.cache;
+            const persistedPrior = await (0,_conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior)(this.redis);
+            if ((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.hasMeaningfulConversionPrior)(persistedPrior)) {
+                if (!sameConversionPrior(this.cache.conversionPrior, persistedPrior)) {
+                    this.cache.conversionPrior = persistedPrior;
+                }
+                return this.cache;
+            }
+            if ((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.hasMeaningfulConversionPrior)(this.cache.conversionPrior)) {
+                return this.cache;
+            }
         }
         // Try Redis first (cross-process sharing)
         try {
@@ -2191,6 +2200,14 @@ function parseStoredConversionPrior(value) {
     if (!shape || !rate)
         return null;
     return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.normalizeConversionPrior)(value);
+}
+function sameConversionPrior(left, right) {
+    if (!left || !right)
+        return false;
+    return left.shape === right.shape
+        && left.rate === right.rate
+        && left.fittedAt === right.fittedAt
+        && left.channelCount === right.channelCount;
 }
 function emptyBuckets() {
     return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
@@ -3953,8 +3970,11 @@ class PromotionFlowRunner {
         }
     }
     async loadSelectionConversionPrior() {
-        if (!this.options.scoringEnabled || !this.adapter.getConversionPrior)
+        if (!this.options.scoringEnabled)
             return null;
+        if (!this.adapter.getConversionPrior) {
+            throw new Error('Promotion selection requires adapter.getConversionPrior when scoring is enabled');
+        }
         const prior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_7__.normalizeConversionPrior)(await this.adapter.getConversionPrior());
         if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_7__.hasMeaningfulConversionPrior)(prior)) {
             throw new Error('Promotion selection requires a warmed persisted conversion prior');
@@ -6378,6 +6398,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
+
 
 
 
@@ -7155,10 +7177,10 @@ class BasePromotionEngine {
         const engine = this.percentileEngineOrNull();
         if (!engine)
             return null;
-        const cached = engine.getCachedPercentiles();
-        if (cached?.conversionPrior)
-            return cached.conversionPrior;
-        return (await engine.getPercentiles()).conversionPrior;
+        const percentiles = await engine.getPercentiles();
+        return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_12__.hasMeaningfulConversionPrior)(percentiles.conversionPrior)
+            ? percentiles.conversionPrior
+            : null;
     }
 }
 function normalizePoolMessageText(value) {
@@ -9389,7 +9411,7 @@ function selectPromotionChannels(options) {
         else {
             const expectedValue = clamp01(doc.expectedValue, 0.5);
             const freshness = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.computeConversionFreshness)(doc.conversionUpdatedAt, now);
-            const explorationSample = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.sampleGammaPosteriorRate)(doc.conversions, doc.survivedSends, conversionPrior, random);
+            const explorationSample = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.sampleGammaPosteriorRate)(doc.conversions, (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.resolveConversionExposure)(doc), conversionPrior, random);
             rankScores.set(channelId, explorationSample * freshness);
             tieBreakScores.set(channelId, expectedValue);
             proven.push(channel);
