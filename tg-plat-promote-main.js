@@ -11366,6 +11366,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getMessages: () => (/* binding */ getMessages)
 /* harmony export */ });
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _isPermanentError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+
 
 const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("getMessages");
 const config = {
@@ -11450,6 +11452,11 @@ async function getMessages(client, entity, { limit = 10, useCache = true, strate
     }
     catch (err) {
         logger.error("getMessagesWith error:", err?.message ?? String(err));
+        // Transient errors return [] so callers stay simple. But a PERMANENT error (frozen/revoked
+        // account) must propagate — this is a hot path, so swallowing it to [] would let a dead account
+        // run forever. Callers already catch and route permanent errors to the setup/swap flow.
+        if ((0,_isPermanentError__WEBPACK_IMPORTED_MODULE_1__["default"])({ message: err?.message ?? String(err), status: err?.code }))
+            throw err;
         return strategy === "fallback" && useCache ? getFromCache(key) || [] : [];
     }
 }
@@ -18308,7 +18315,13 @@ class DialogManager {
         }
         catch (error) {
             this.log('error', 'Error marking dialog as read', { error: error instanceof Error ? error.message : String(error) });
-            // Don't throw - mark as read is not critical
+            // markAsRead is not critical, so transient failures are logged and dropped. But a PERMANENT
+            // error here (e.g. 420 FROZEN_METHOD_INVALID on messages.ReadHistory when the account is
+            // frozen) must still trigger the setup/swap flow — otherwise a frozen account runs silently
+            // because this was the only Telegram call it happened to make. handlePermanentDialogFailure
+            // no-ops for transient errors and escalates permanent ones; its re-throw (used to unwind
+            // in-flight fetch loops) is irrelevant here since callers treat markAsRead as fire-and-forget.
+            await this.handlePermanentDialogFailure(error, 'markAsRead').catch(() => { });
         }
     }
     /**
@@ -21745,6 +21758,11 @@ class ReactionService {
             }
             else {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `[Reactions] Error in channel ${channel.title}`, false);
+                // A permanent failure here (e.g. FROZEN/AUTH_KEY propagated from getMessages) means the
+                // account is dead — hand off to the app so it can swap. onAccountError already filters.
+                if (parsed.type === 'AUTH_ERROR' || parsed.type === 'UNKNOWN') {
+                    await this.onAccountError(error);
+                }
             }
             return 'error';
         }
@@ -34879,21 +34897,6 @@ async function installPackage() {
     // installProcess.stderr.on('data', (data) => logger.error(data.toString()));
     // await new Promise((resolve) => installProcess.on('close', resolve));
 }
-// Whitelist of expected env keys from remote API
-const ALLOWED_ENV_KEYS = new Set([
-    'mobile', 'link', 'repl', 'username', 'name', 'clientId',
-    'tgcms', 'tgmanager', 'updatesChannel', 'notifChannel', 'logsChannel2',
-    'accountsChannel', 'warningsChannel', 'httpFailuresChannel', 'FailedPaymentsChannel',
-    'logsChatId', 'BOT_TOKENS', 'REDIS_HOST', 'REDIS_URL', 'RUNTIME_CONFIG_BASE',
-    'mongodburi', 'mongouri', 'MONGO_URI', 'MONGODB_URI', 'DB_URI', 'dbcoll', 'session',
-    'API_ID', 'API_HASH', 'apiId', 'apiHash',
-    'X_API_KEY', 'API_KEY', 'TG_2FA_PASSWORD', 'GMAIL_ADD', 'GMAIL_PASS',
-    'promoteLink', 'botToken', 'chatId',
-    'promoteMsg', 'promoteChannel', 'promoteGroup',
-]);
-function isAllowedRuntimeEnvKey(key) {
-    return ALLOWED_ENV_KEYS.has(key) || key.startsWith('TELEGRAM_CHANNEL_CONFIG_') || process.env[key] !== undefined;
-}
 function getRuntimeConfigBase() {
     const base = (process.env.RUNTIME_CONFIG_BASE || process.env.tgmanager || process.env.tgcms || '').trim().replace(/\/$/, '');
     if (!base) {
@@ -34918,13 +34921,8 @@ async function getDataAndSetEnvVariables(url) {
         }
         const jsonData = await response.json();
         for (const key in jsonData) {
-            if (isAllowedRuntimeEnvKey(key)) {
-                process.env[key] = jsonData[key];
-                logger.info('setting key: ', key);
-            }
-            else {
-                logger.warn(`Skipping unexpected env key from remote API: ${key}`);
-            }
+            process.env[key] = jsonData[key];
+            logger.info('setting key: ', key);
         }
         logger.info('Environment variables set successfully!');
     }
