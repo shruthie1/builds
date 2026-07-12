@@ -1012,10 +1012,10 @@ class ChannelIntelligenceService {
         const prior = options.fitPriorFromDocs === true
             ? (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.fitGammaPriorFromRates)(docs
                 .map((doc) => {
-                const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
-                if (survivedSends <= 0)
+                const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
+                if (exposure <= 0)
                     return null;
-                return safeNonNegative(doc.conversions) / survivedSends;
+                return safeNonNegative(doc.conversions) / exposure;
             })
                 .filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0))
             : (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(options.prior);
@@ -1206,8 +1206,9 @@ class ChannelIntelligenceService {
         const followupTotal = safeNonNegative(doc.followupTotal);
         const followupSuccessCount = safeNonNegative(doc.followupSuccessCount);
         const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
+        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
         const conversionPrior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(percentiles?.conversionPrior);
-        const conversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, survivedSends, conversionPrior);
+        const conversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, exposure, conversionPrior);
         const followupSuccessRate = followupTotal > 0
             ? Math.round(Math.min(1, followupSuccessCount / followupTotal) * 1000) / 1000
             : safeRate(doc.followupSuccessRate, 0.5);
@@ -1275,7 +1276,8 @@ class ChannelIntelligenceService {
     }
     buildConversionBackfillFields(doc, prior) {
         const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
-        const conversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, survivedSends, prior));
+        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
+        const conversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, exposure, prior));
         const currentSurvivedSends = safeNonNegative(doc.survivedSends);
         const currentConversionRateShrunk = roundConversionRate(safeNonNegative(doc.conversionRateShrunk));
         if (currentSurvivedSends === survivedSends && currentConversionRateShrunk === conversionRateShrunk) {
@@ -2424,6 +2426,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.resolveAccountDailyCap),
+/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.resolveConversionExposure),
 /* harmony export */   resolveLegacySeedIntervalMs: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.resolveLegacySeedIntervalMs),
 /* harmony export */   resolvePromotionPacingGate: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.resolvePromotionPacingGate),
 /* harmony export */   sampleGammaPosteriorRate: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.sampleGammaPosteriorRate),
@@ -8832,6 +8835,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasMeaningfulConversionPrior: () => (/* binding */ hasMeaningfulConversionPrior),
 /* harmony export */   hasRecordedConversions: () => (/* binding */ hasRecordedConversions),
 /* harmony export */   normalizeConversionPrior: () => (/* binding */ normalizeConversionPrior),
+/* harmony export */   resolveConversionExposure: () => (/* binding */ resolveConversionExposure),
 /* harmony export */   sampleGammaPosteriorRate: () => (/* binding */ sampleGammaPosteriorRate)
 /* harmony export */ });
 const CONVERSION_PRIOR_ALPHA = 1;
@@ -8864,6 +8868,23 @@ function countSurvivedSends(messagePool) {
             return sum;
         return sum + safeNonNegative(entry['survived']);
     }, 0);
+}
+/**
+ * Exposure denominator for the conversion rate. Prefer per-message pool survival
+ * (survivedSends) — it folds in delete-safety. But pool-survival counters only
+ * accumulate under the new pool system, so legacy channels have survivedSends=0
+ * while carrying real historical `conversions`. Using 0 there would make
+ * conversions/0 explode and rank unproven channels highest — the opposite of intent.
+ * Fall back to the always-populated `totalSendsToChannel` (the exact DM-per-send the
+ * fleet-waste analysis is built on). As pool-survival data accrues per channel,
+ * survivedSends > 0 and transparently takes over.
+ */
+function resolveConversionExposure(doc) {
+    const record = isRecord(doc) ? doc : {};
+    const survivedSends = countSurvivedSends(record['messagePool']);
+    if (survivedSends > 0)
+        return survivedSends;
+    return safeNonNegative(record['totalSendsToChannel']);
 }
 function computeSmoothedConversionRate(conversions, messagePool) {
     const attempts = countPoolAttempts(messagePool);
@@ -9184,6 +9205,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasMeaningfulConversionPrior: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasMeaningfulConversionPrior),
 /* harmony export */   hasRecordedConversions: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasRecordedConversions),
 /* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.normalizeConversionPrior),
+/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.resolveConversionExposure),
 /* harmony export */   sampleGammaPosteriorRate: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.sampleGammaPosteriorRate)
 /* harmony export */ });
 /* harmony import */ var _expected_value__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./expected-value */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts");
@@ -10233,6 +10255,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPersistedConversionPrior),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
+/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveConversionExposure),
 /* harmony export */   resolveLegacySeedIntervalMs: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveLegacySeedIntervalMs),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.resolvePromotionFailureAction),
 /* harmony export */   resolvePromotionPacingGate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolvePromotionPacingGate),
