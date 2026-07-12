@@ -2078,30 +2078,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   readPromotionFeatureFlags: () => (/* binding */ readPromotionFeatureFlags)
 /* harmony export */ });
-function enabled(value) {
-    return value === 'true';
-}
-function readPromotionFeatureFlags(env) {
-    const source = isRecord(env) ? env : {};
-    const flags = {
-        channelScoring: enabled(asString(source['ENABLE_CHANNEL_SCORING'])),
-        conversionAttribution: enabled(asString(source['ENABLE_CONVERSION_ATTRIBUTION'])),
-        redisChannelLock: enabled(asString(source['ENABLE_REDIS_CHANNEL_LOCK'])),
-        messageBandit: enabled(asString(source['ENABLE_MESSAGE_BANDIT'])),
-    };
+function readPromotionFeatureFlags(_env) {
+    // Feature flags removed: the promotion intelligence features (channel scoring,
+    // conversion attribution, Redis channel locks, message bandit) are ALWAYS ON.
+    // The env argument is ignored — kept only for call-site compatibility.
+    // NOTE: Redis-backed features (locks, attribution) still no-op gracefully at the
+    // runtime layer when Redis is unavailable; enabling them here never crashes a
+    // Redis-less instance (see dbservice: Redis absence warns-and-continues).
     return {
-        ...flags,
-        runtimeRequired: flags.channelScoring
-            || flags.conversionAttribution
-            || flags.redisChannelLock
-            || flags.messageBandit,
+        channelScoring: true,
+        conversionAttribution: true,
+        redisChannelLock: true,
+        messageBandit: true,
+        runtimeRequired: true,
     };
-}
-function asString(value) {
-    return typeof value === 'string' ? value : undefined;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -8461,6 +8451,12 @@ class PromotionRuntime {
         }
         if (safeOptions['enableAttribution'] === true && !useAttribution) {
             throw new Error('PromotionRuntime conversion attribution requires a Redis client with get/set/lrange/pipeline');
+        }
+        // Percentile scoring is mandatory when requested (no circuit breaker): fail hard if
+        // its dependencies (Redis + active-channel collection) are missing, rather than
+        // silently falling back to a non-scored engine.
+        if (safeOptions['enablePercentiles'] === true && !usePercentiles) {
+            throw new Error('PromotionRuntime channel scoring requires a Redis client with sorted-set support and an active-channel collection');
         }
         const percentiles = usePercentiles && activeChannelCollection
             ? _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.init(activeChannelCollection, percentileRedis, channelIntelligenceCollection, { replace })
@@ -25865,48 +25861,43 @@ class UserDataDtoCrud {
             const redisPassword = process.env.REDIS_PASSWORD?.trim() || undefined;
             const redisDb = Number(process.env.REDIS_DB || process.env.redisDb) || 0;
             const redisPort = Number(process.env.REDIS_PORT || process.env.redisPort) || 6379;
-            const redisRequired = promotionFlags.redisChannelLock || promotionFlags.conversionAttribution;
-            let redis = null;
+            let redis;
             const redisOptions = {
                 connectTimeout: 5000,
                 enableReadyCheck: true,
                 lazyConnect: true,
                 maxRetriesPerRequest: 1,
             };
+            // Redis is MANDATORY for the promotion runtime (channel locks, conversion
+            // attribution, percentile scoring). No circuit breaker / graceful fallback:
+            // if Redis is not configured or unreachable, fail hard so the misconfiguration
+            // surfaces (the outer catch reports via parseError) instead of silently
+            // running a degraded promotion engine.
             if (!redisUrl && !redisHost) {
-                if (redisRequired) {
-                    throw new Error('Promotion Redis is required when Redis channel locks or conversion attribution are enabled');
-                }
-                logger.warn('Redis not configured, promotion runtime will use fallback thresholds and disable Redis-backed locks/attribution');
+                throw new Error('Promotion Redis is mandatory but not configured (set REDIS_URI or REDIS_HOST)');
             }
-            else {
-                redis = redisUrl
-                    ? new Redis(redisUrl, redisOptions)
-                    : new Redis({
-                        ...redisOptions,
-                        host: redisHost,
-                        port: redisPort,
-                        db: redisDb,
-                        ...(redisPassword ? { password: redisPassword } : {}),
-                    });
-                this.promotionRedis = redis;
-                redis.on?.('error', (error) => {
-                    const message = error instanceof Error ? error.message : String(error);
-                    logger.warn(`Promotion Redis connection error: ${message}`);
+            redis = redisUrl
+                ? new Redis(redisUrl, redisOptions)
+                : new Redis({
+                    ...redisOptions,
+                    host: redisHost,
+                    port: redisPort,
+                    db: redisDb,
+                    ...(redisPassword ? { password: redisPassword } : {}),
                 });
-                try {
-                    await redis.connect?.();
-                    await redis.ping?.();
-                    logger.log(`Redis connected for promotion runtime locks/attribution (${redisUrl ? 'url' : `${redisHost}:${redisPort}/${redisDb}`})`);
-                }
-                catch (error) {
-                    await this.closePromotionRedis();
-                    if (redisRequired) {
-                        throw error;
-                    }
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Promotion Redis unavailable; continuing with Redis-backed promotion features disabled', false);
-                    redis = null;
-                }
+            this.promotionRedis = redis;
+            redis.on?.('error', (error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn(`Promotion Redis connection error: ${message}`);
+            });
+            try {
+                await redis.connect?.();
+                await redis.ping?.();
+                logger.log(`Redis connected for promotion runtime locks/attribution (${redisUrl ? 'url' : `${redisHost}:${redisPort}/${redisDb}`})`);
+            }
+            catch (error) {
+                await this.closePromotionRedis();
+                throw error;
             }
             await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.createPromotionRuntime)({
                 channelIntelligenceCollection: this.channelIntelligenceDb,
