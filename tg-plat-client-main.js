@@ -1010,14 +1010,18 @@ class ChannelIntelligenceService {
         const docs = (await readCursorArray(this.collection.find({})))
             .filter(isChannelIntelligenceDocument);
         const prior = options.fitPriorFromDocs === true
-            ? (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.fitGammaPriorFromRates)(docs
-                .map((doc) => {
-                const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
-                if (exposure <= 0)
-                    return null;
-                return safeNonNegative(doc.conversions) / exposure;
-            })
-                .filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0))
+            ? (() => {
+                const rates = [];
+                const exposures = [];
+                for (const doc of docs) {
+                    const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
+                    if (exposure <= 0)
+                        continue;
+                    rates.push(safeNonNegative(doc.conversions) / exposure);
+                    exposures.push(exposure);
+                }
+                return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.fitGammaPriorFromRates)(rates, exposures);
+            })()
             : (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(options.prior);
         if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.hasMeaningfulConversionPrior)(prior)) {
             throw new Error('Conversion scoring backfill requires an explicit persisted conversion prior');
@@ -1051,6 +1055,14 @@ class ChannelIntelligenceService {
         }
         return (0,_scoring_expected_value__WEBPACK_IMPORTED_MODULE_4__.computeExpectedValue)(doc, percentiles, getRank);
     }
+    async loadPercentilesForDerivedScoring() {
+        try {
+            return await _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance().getPercentiles();
+        }
+        catch {
+            return null;
+        }
+    }
     // --- Internals ---
     /**
      * Compute and write score + lifecycle using percentile-based thresholds.
@@ -1060,7 +1072,7 @@ class ChannelIntelligenceService {
         if (!currentDoc)
             return;
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const scoreFields = this.buildDerivedScoreFields(currentDoc);
+            const scoreFields = this.buildDerivedScoreFields(currentDoc, await this.loadPercentilesForDerivedScoring());
             const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields });
             if (isMatchedUpdateResult(result)) {
                 return;
@@ -1195,14 +1207,7 @@ class ChannelIntelligenceService {
             }
         }
     }
-    buildDerivedScoreFields(doc) {
-        let percentiles = null;
-        try {
-            percentiles = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance().getCachedPercentiles();
-        }
-        catch {
-            // PercentileEngine not initialized — use fallback thresholds
-        }
+    buildDerivedScoreFields(doc, percentiles = null) {
         const followupTotal = safeNonNegative(doc.followupTotal);
         const followupSuccessCount = safeNonNegative(doc.followupSuccessCount);
         const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
@@ -8870,21 +8875,26 @@ function countSurvivedSends(messagePool) {
     }, 0);
 }
 /**
- * Exposure denominator for the conversion rate. Prefer per-message pool survival
- * (survivedSends) — it folds in delete-safety. But pool-survival counters only
- * accumulate under the new pool system, so legacy channels have survivedSends=0
- * while carrying real historical `conversions`. Using 0 there would make
- * conversions/0 explode and rank unproven channels highest — the opposite of intent.
- * Fall back to the always-populated `totalSendsToChannel` (the exact DM-per-send the
- * fleet-waste analysis is built on). As pool-survival data accrues per channel,
- * survivedSends > 0 and transparently takes over.
+ * Exposure denominator for the conversion rate = the total number of times we've posted
+ * to the channel (the DM-per-send denominator).
+ *
+ * `survivedSends` (per-message pool survival) and `totalSendsToChannel` measure OVERLAPPING
+ * populations: survivedSends ⊆ totalSendsToChannel. Pool-survival counters only accumulate
+ * under the new pool system, so a channel can have thousands of legacy `totalSendsToChannel`
+ * but only a handful of `survivedSends`. Using survivedSends alone as the denominator there
+ * collapses it to a tiny number → conversions/1 explodes (e.g. crs=8.57, an impossible rate)
+ * and ranks that channel above genuine converters.
+ *
+ * So exposure = max(survivedSends, totalSendsToChannel): total-send history always FLOORS the
+ * denominator (honest exposure), and survived-sends can only RAISE it, never collapse it. As
+ * pool data accrues, survivedSends approaches totalSendsToChannel and the delete-safety intent
+ * (deleted messages reduce survived, hence the rate) is preserved without the inflation.
  */
 function resolveConversionExposure(doc) {
     const record = isRecord(doc) ? doc : {};
     const survivedSends = countSurvivedSends(record['messagePool']);
-    if (survivedSends > 0)
-        return survivedSends;
-    return safeNonNegative(record['totalSendsToChannel']);
+    const totalSends = safeNonNegative(record['totalSendsToChannel']);
+    return Math.max(survivedSends, totalSends);
 }
 function computeSmoothedConversionRate(conversions, messagePool) {
     const attempts = countPoolAttempts(messagePool);
@@ -8912,12 +8922,30 @@ function hasMeaningfulConversionPrior(value) {
     const prior = normalizeConversionPrior(value);
     return prior.fittedAt > 0 && prior.channelCount > 0;
 }
-function fitGammaPriorFromRates(rates) {
+/**
+ * Fit the Gamma-Poisson prior from the fleet's per-channel conversion rates via
+ * moment-matching (mean + variance). The Gamma `rate` parameter is the prior's
+ * PSEUDO-EXPOSURE — the number of "prior sends" the prior counts for, i.e. how much
+ * real exposure a channel needs before its own data outweighs the prior.
+ *
+ * On a high-variance fleet, moment-matching alone yields a very weak `rate` (e.g. 0.7),
+ * so a channel with 1 real send but 9 attributed DMs gets crs=(shape+9)/(rate+1)≈5 — an
+ * impossible rate that tops the ranking on almost no evidence. To fix this we FLOOR the
+ * pseudo-exposure at a fleet-derived minimum: `exposures` (per-channel total exposure) are
+ * passed in, and the prior must be worth at least a low-percentile channel's exposure. This
+ * is fully data-derived (no hardcoded sample count) — a 1-send channel is dominated by the
+ * prior until it accumulates a fleet-typical amount of exposure.
+ */
+function fitGammaPriorFromRates(rates, exposures) {
     if (!Array.isArray(rates))
         return { ...DEFAULT_CONVERSION_PRIOR };
     const samples = rates.filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0);
     if (samples.length === 0)
         return { ...DEFAULT_CONVERSION_PRIOR };
+    // Fleet-derived pseudo-exposure floor: the ~25th percentile of real per-channel exposure,
+    // so the prior counts for at least a low-but-typical channel's worth of sends. Data-driven.
+    const pseudoExposureFloor = exposureFloorFromSamples(exposures);
+    const applyFloor = (rate) => Math.max(rate, pseudoExposureFloor);
     const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
     if (!(mean > 0)) {
         return {
@@ -8926,7 +8954,7 @@ function fitGammaPriorFromRates(rates) {
         };
     }
     if (samples.length < 2) {
-        const rate = 1;
+        const rate = applyFloor(1);
         return {
             shape: clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape),
             rate,
@@ -8936,7 +8964,7 @@ function fitGammaPriorFromRates(rates) {
     }
     const variance = computeSampleVariance(samples, mean);
     if (!(variance > 0)) {
-        const rate = 1000;
+        const rate = applyFloor(1000);
         return {
             shape: clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape),
             rate,
@@ -8945,14 +8973,36 @@ function fitGammaPriorFromRates(rates) {
         };
     }
     const unclampedRate = mean / variance;
-    const rate = clamp(unclampedRate, 0.001, 10000, 1);
+    const rate = applyFloor(clamp(unclampedRate, 0.001, 10000, 1));
+    // shape = mean * rate keeps the prior mean at `mean` (Gamma mean = shape/rate).
     const shape = clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape);
     return {
         shape,
-        rate: shape / mean,
+        rate,
         fittedAt: Date.now(),
         channelCount: samples.length,
     };
+}
+/**
+ * Fleet-derived pseudo-exposure floor for the prior = the MEAN per-channel exposure.
+ *
+ * The mean (not a low percentile) is deliberate: the channelIntelligence fleet is dominated
+ * by thousands of near-zero-send channels, so p25/median exposure is tiny (~3-17 sends) —
+ * far too weak a floor to shrink a 1-send/9-DM outlier below genuine high-exposure converters.
+ * The mean (~400 on the real fleet, right-skewed so it sits well above the median) is the
+ * "typical exposure a promoted channel accumulates", and empirically it's the point where a
+ * tiny-sample outlier is shrunk BELOW a real strong converter (verified against live data).
+ * Fully data-derived — no authored percentile or sample count. Returns 0 when no exposures
+ * are supplied so callers that omit them keep the pre-floor behaviour (back-compatible).
+ */
+function exposureFloorFromSamples(exposures) {
+    if (!Array.isArray(exposures))
+        return 0;
+    const values = exposures.filter((value) => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    if (values.length === 0)
+        return 0;
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    return Math.max(1, mean);
 }
 function computeConversionRateShrunk(conversions, survivedSends, prior) {
     const safeConversions = safeNonNegative(conversions);
@@ -8986,19 +9036,47 @@ function sampleGammaPosteriorRate(conversions, survivedSends, prior, random = Ma
     return Number.isFinite(sample) && sample >= 0 ? sample : 0;
 }
 function safeNonNegative(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0
-        ? value
+    const numeric = coerceFiniteNumber(value);
+    return Number.isFinite(numeric) && numeric > 0
+        ? numeric
         : 0;
 }
 function safePositive(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0
-        ? value
+    const numeric = coerceFiniteNumber(value);
+    return Number.isFinite(numeric) && numeric > 0
+        ? numeric
         : null;
 }
 function safeTimestamp(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0
-        ? value
+    const numeric = coerceFiniteNumber(value);
+    return Number.isFinite(numeric) && numeric > 0
+        ? numeric
         : 0;
+}
+function coerceFiniteNumber(value) {
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? value : Number.NaN;
+    if (typeof value === 'bigint')
+        return Number(value);
+    if (value && typeof value === 'object') {
+        try {
+            const viaValueOf = value.valueOf?.();
+            if (typeof viaValueOf === 'number')
+                return Number.isFinite(viaValueOf) ? viaValueOf : Number.NaN;
+            if (typeof viaValueOf === 'bigint')
+                return Number(viaValueOf);
+            if (viaValueOf !== undefined && viaValueOf !== value) {
+                const coerced = Number(viaValueOf);
+                if (Number.isFinite(coerced))
+                    return coerced;
+            }
+        }
+        catch {
+            // Ignore exotic coercion failures and fall through to Number().
+        }
+    }
+    const coerced = Number(value);
+    return Number.isFinite(coerced) ? coerced : Number.NaN;
 }
 function computeSampleVariance(values, mean) {
     if (values.length < 2)
