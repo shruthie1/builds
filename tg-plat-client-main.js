@@ -21858,6 +21858,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ALL_REACTIONS: () => (/* binding */ ALL_REACTIONS),
 /* harmony export */   DEFAULT_REACTIONS: () => (/* binding */ DEFAULT_REACTIONS),
+/* harmony export */   FETCH_FAILURE_TTL: () => (/* binding */ FETCH_FAILURE_TTL),
+/* harmony export */   REACTION_CACHE_TTL: () => (/* binding */ REACTION_CACHE_TTL),
 /* harmony export */   cacheValidReaction: () => (/* binding */ cacheValidReaction),
 /* harmony export */   clearReactionCache: () => (/* binding */ clearReactionCache),
 /* harmony export */   getRandomReaction: () => (/* binding */ getRandomReaction),
@@ -21877,6 +21879,10 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger( true ? __webpack_filename__ : 0);
 const FETCH_FAILURE_TTL = 10 * 60; // 10 minutes — only for transient errors
+// Successful reaction lists were previously cached forever (ttl=-1), so a channel that later
+// changes its allowed reactions never gets re-verified. A 10-day TTL forces periodic re-fetch
+// while staying long enough that we don't hammer Telegram with GetFullChannel calls.
+const REACTION_CACHE_TTL = 10 * 24 * 60 * 60; // 10 days (seconds)
 const DISABLED_REACTIONS_MARKER = '__reactions_disabled__';
 const DEFAULT_REACTIONS = ['👍', '❤', '🔥', '👏', '🥰', '😁'];
 const ALL_REACTIONS = [
@@ -21887,6 +21893,22 @@ const ALL_REACTIONS = [
 ];
 function buildKey(chatId) {
     return `reactions::${chatId}`;
+}
+/**
+ * Sets the reaction-cache TTL on a key only when it has none (ttl === -1).
+ * Used to migrate legacy persist-forever entries to the 10-day window on access,
+ * without bulk deletion. A ttl of -2 means the key vanished between read and here — skip.
+ */
+async function adoptTtlIfMissing(redis, key) {
+    try {
+        const ttl = await redis.ttl(key);
+        if (ttl === -1) {
+            await redis.expire(key, REACTION_CACHE_TTL);
+        }
+    }
+    catch (error) {
+        logger.error('Error adopting reaction cache TTL:', error);
+    }
 }
 /**
  * Validates if an emoticon is supported.
@@ -21953,6 +21975,8 @@ async function fetchAndStoreReactions(client, chatId) {
                 pipeline.rpush(key, DISABLED_REACTIONS_MARKER);
                 logger.debug(`Fetched reactions for ${chatId}: type=${reactionInfo.reactionType} disabled=true`);
             }
+            // Expire so the list re-verifies periodically instead of persisting forever.
+            pipeline.expire(key, REACTION_CACHE_TTL);
             await pipeline.exec();
             return reactionInfo;
         }
@@ -21994,12 +22018,20 @@ async function getRandomReaction(client, chatId) {
             emoticons = await redis.lrange(key, 0, -1);
         }
         if (emoticons.includes(DISABLED_REACTIONS_MARKER)) {
-            // If channel reached here, it passed the 30-day DB gate — re-verify from Telegram
+            // If channel reached here, it passed the 30-day DB gate — re-verify from Telegram.
+            // This path already re-fetches (and re-writes the TTL) every time, so no migration needed.
             const refreshed = await fetchAndStoreReactions(client, chatId);
             if (refreshed.reactionsDisabled) {
                 return undefined;
             }
             emoticons = refreshed.emoticons;
+        }
+        else if (exists) {
+            // Lazy migration for served-from-cache emoji lists: legacy keys were written with no
+            // expiry (ttl=-1). Adopt the TTL on access so existing entries expire gradually instead
+            // of being bulk-deleted (which would trigger a fleet-wide re-fetch storm). Only set it
+            // when missing so we never keep pushing the window forward on every read.
+            await adoptTtlIfMissing(redis, key);
         }
         emoticons = emoticons.filter(isValidEmoticon);
         if (emoticons.length > 0) {
@@ -22053,6 +22085,9 @@ async function cacheValidReaction(chatId, emoticon) {
             await redis.del(key);
         }
         await redis.rpush(key, emoticon);
+        // Keep the cache-wide TTL contract: entries re-verify within the window rather than
+        // reverting to persist-forever when rebuilt here.
+        await redis.expire(key, REACTION_CACHE_TTL);
         return true;
     }
     catch (error) {
@@ -23451,16 +23486,20 @@ class ReactionService {
             }
             return;
         }
-        // Only persist if Redis confirms permanently disabled (no TTL = confirmed via GetFullChannel)
-        // Keys with TTL are from transient fetch failures — don't persist those
+        // Persist only for a Redis-confirmed disabled channel — never a transient fetch failure.
+        // Confirmed markers carry either no expiry (-1, legacy) or the long REACTION_CACHE_TTL;
+        // transient failures carry the short FETCH_FAILURE_TTL. So the ONLY skip case is a
+        // positive TTL within the failure window. (Before the cache-TTL change, "any TTL" meant
+        // failure — that heuristic no longer holds now that confirmed markers also expire.)
         try {
             const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_7__.RedisClient.getClient();
             const ttl = await redis.ttl(`reactions::${normalizedId}`);
-            if (ttl === -1) {
+            const isTransientFailure = ttl > 0 && ttl <= _ReactionCache__WEBPACK_IMPORTED_MODULE_3__.FETCH_FAILURE_TTL;
+            if (!isTransientFailure) {
                 // Channel-WIDE reactions-off only (account bans never reach this path — persistToDb is
                 // only true for genuine reactions_disabled). reactRestrictedAt drives the 7-day self-heal.
                 await this.db.updateActiveChannel({ channelId: normalizedId }, { reactRestricted: true, reactRestrictedAt: new Date() });
-                logger.warn(`[${this.instanceId}] ${oneLine} | persisted`);
+                logger.warn(`[${this.instanceId}] ${oneLine} | persisted (ttl=${ttl})`);
             }
             else {
                 logger.warn(`[${this.instanceId}] ${oneLine} | skipped persist (ttl=${ttl}, likely fetch failure)`);
@@ -23576,16 +23615,16 @@ const DELAY_DISTRIBUTION = [
     { weight: 0.05, minMs: 25000, maxMs: 60000 }, // Long: distracted / AFK
 ];
 const DEFAULT_REACTION_CONFIG = {
-    MIN_DELAY_MS: 11000,
+    MIN_DELAY_MS: 15000, // Reduced reaction frequency (~30% slower) — defensive vs CHANNEL_RESTRICTED
     MAX_DELAY_MS: 25000, // Increased to accommodate long bucket
-    TARGET_DELAY_MS: 11000,
-    SKIP_REACTION_PROBABILITY: 0.10,
+    TARGET_DELAY_MS: 15000, // Reduced reaction frequency (~30% slower)
+    SKIP_REACTION_PROBABILITY: 0.15,
     MULTI_REACTION_PROBABILITY: 0.30,
     READ_SIM_MIN_MS: 1000,
     READ_SIM_MAX_MS: 3000,
     PER_CHANNEL_COOLDOWN_MS: 20 * 1000, // 20 seconds
     DAILY_REACTION_LIMIT: 8000,
-    HOURLY_REACTION_LIMIT: 200,
+    HOURLY_REACTION_LIMIT: 150, // Reduced reaction frequency (~30% slower)
     PER_CHANNEL_DAILY_LIMIT: 500,
     MAX_FLOODS_PER_HOUR: 5,
     FLOOD_BUFFER_MIN: 1.2,
