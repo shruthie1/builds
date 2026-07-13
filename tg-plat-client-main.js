@@ -12768,6 +12768,67 @@ class RedisClient {
         return RedisClient.instance;
     }
     /**
+     * Ensures the lazy Redis client is command-ready before use.
+     * This preserves `enableOfflineQueue: false` while avoiding startup races.
+     */
+    static async getReadyClient() {
+        const client = RedisClient.getClient();
+        if (client.status === "ready") {
+            return client;
+        }
+        if (!RedisClient.connectPromise) {
+            RedisClient.connectPromise = (async () => {
+                try {
+                    if (client.status === "wait") {
+                        logger.debug("Connecting lazy Redis client before first command");
+                        await client.connect();
+                    }
+                    else if (client.status !== "ready") {
+                        logger.debug(`Waiting for Redis client to become ready (status: ${client.status})`);
+                        await RedisClient.waitForReady(client);
+                    }
+                    return client;
+                }
+                finally {
+                    RedisClient.connectPromise = null;
+                }
+            })();
+        }
+        return RedisClient.connectPromise;
+    }
+    static async waitForReady(client, timeoutMs = 15000) {
+        if (client.status === "ready") {
+            return;
+        }
+        await new Promise((resolve, reject) => {
+            const onReady = () => {
+                cleanup();
+                resolve();
+            };
+            const onError = (error) => {
+                cleanup();
+                reject(error);
+            };
+            const onEnd = () => {
+                cleanup();
+                reject(new Error("Redis connection ended before becoming ready"));
+            };
+            const timeout = setTimeout(() => {
+                cleanup();
+                reject(new Error(`Timed out waiting for Redis readiness (status: ${client.status})`));
+            }, timeoutMs);
+            const cleanup = () => {
+                clearTimeout(timeout);
+                client.removeListener("ready", onReady);
+                client.removeListener("error", onError);
+                client.removeListener("end", onEnd);
+            };
+            client.on("ready", onReady);
+            client.on("error", onError);
+            client.on("end", onEnd);
+        });
+    }
+    /**
      * Gracefully disconnects the Redis client.
      */
     static async disconnect() {
@@ -12795,6 +12856,7 @@ class RedisClient {
                 logger.error("❌ Error during disconnection:", error);
             }
             finally {
+                RedisClient.connectPromise = null;
                 RedisClient.instance = null;
                 logger.debug("Instance cleared");
             }
@@ -12816,7 +12878,7 @@ class RedisClient {
             await new Promise(resolve => setTimeout(resolve, 1000));
             // Create new connection
             logger.debug("Creating new connection...");
-            const client = RedisClient.getClient();
+            const client = await RedisClient.getReadyClient();
             // Test connection
             logger.debug("Testing connection with ping...");
             const start = Date.now();
@@ -12884,7 +12946,7 @@ class RedisClient {
      * Sets a key-value pair with an optional expiration time.
      */
     static async set(key, value, ttl) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             const finalValue = typeof value === "string" || typeof value === "number"
                 ? String(value)
@@ -12909,7 +12971,7 @@ class RedisClient {
      * (Merged from promote-clients during @tg/core consolidation — used by proxy-manager locks.)
      */
     static async setnx(key, value) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         const finalValue = typeof value === "string" || typeof value === "number"
             ? String(value)
             : JSON.stringify(value);
@@ -12920,7 +12982,7 @@ class RedisClient {
      * Gets a value by key (raw string).
      */
     static async get(key) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             return await client.get(key);
         }
@@ -12956,7 +13018,7 @@ class RedisClient {
      * Increments a numeric value by step (default 1).
      */
     static async incr(key, step = 1) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             return step === 1
                 ? await client.incr(key)
@@ -12971,7 +13033,7 @@ class RedisClient {
      * Decrements a numeric value by step (default 1).
      */
     static async decr(key, step = 1) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             return step === 1
                 ? await client.decr(key)
@@ -12984,7 +13046,7 @@ class RedisClient {
     }
     // -------------------- LISTS --------------------
     static async rpush(key, values) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             return Array.isArray(values)
                 ? await client.rpush(key, ...values)
@@ -12996,19 +13058,20 @@ class RedisClient {
         }
     }
     static async lrange(key, start, end) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         return client.lrange(key, start, end);
     }
     // -------------------- HASHES --------------------
     static async hset(key, field, value) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         const val = typeof value === "string" || typeof value === "number"
             ? String(value)
             : JSON.stringify(value);
         return client.hset(key, field, val);
     }
     static async hget(key, field) {
-        return RedisClient.getClient().hget(key, field);
+        const client = await RedisClient.getReadyClient();
+        return client.hget(key, field);
     }
     static async hgetObject(key, field) {
         const val = await RedisClient.hget(key, field);
@@ -13022,31 +13085,38 @@ class RedisClient {
         }
     }
     static async hgetall(key) {
-        return RedisClient.getClient().hgetall(key);
+        const client = await RedisClient.getReadyClient();
+        return client.hgetall(key);
     }
     // -------------------- SETS --------------------
     static async sadd(key, members) {
+        const client = await RedisClient.getReadyClient();
         return Array.isArray(members)
-            ? RedisClient.getClient().sadd(key, ...members)
-            : RedisClient.getClient().sadd(key, members);
+            ? client.sadd(key, ...members)
+            : client.sadd(key, members);
     }
     static async smembers(key) {
-        return RedisClient.getClient().smembers(key);
+        const client = await RedisClient.getReadyClient();
+        return client.smembers(key);
     }
     // -------------------- KEYS / TTL --------------------
     static async del(keys) {
+        const client = await RedisClient.getReadyClient();
         return Array.isArray(keys)
-            ? RedisClient.getClient().del(...keys)
-            : RedisClient.getClient().del(keys);
+            ? client.del(...keys)
+            : client.del(keys);
     }
     static async exists(key) {
-        return (await RedisClient.getClient().exists(key)) === 1;
+        const client = await RedisClient.getReadyClient();
+        return (await client.exists(key)) === 1;
     }
     static async expire(key, seconds) {
-        return RedisClient.getClient().expire(key, seconds);
+        const client = await RedisClient.getReadyClient();
+        return client.expire(key, seconds);
     }
     static async ttl(key) {
-        return RedisClient.getClient().ttl(key);
+        const client = await RedisClient.getReadyClient();
+        return client.ttl(key);
     }
     // -------------------- MEMORY & MONITORING --------------------
     /**
@@ -13054,7 +13124,7 @@ class RedisClient {
      * Useful for debugging memory consumption differences across instances.
      */
     static async getMemoryInfo() {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             const info = await client.info("memory");
             const lines = info.split("\r\n");
@@ -13089,7 +13159,7 @@ class RedisClient {
      * Useful for identifying large objects that might cause memory issues.
      */
     static async getKeySize(key) {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             const value = await client.get(key);
             if (value === null || value === undefined)
@@ -13106,7 +13176,7 @@ class RedisClient {
      * Gets database statistics including key count.
      */
     static async getDbStats() {
-        const client = RedisClient.getClient();
+        const client = await RedisClient.getReadyClient();
         try {
             const info = await client.info("keyspace");
             const db = Number(process.env.REDIS_DB) || 0;
@@ -13124,6 +13194,7 @@ class RedisClient {
     }
 }
 RedisClient.instance = null;
+RedisClient.connectPromise = null;
 
 
 /***/ },
