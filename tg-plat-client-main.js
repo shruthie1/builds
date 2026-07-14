@@ -26653,12 +26653,7 @@ class UserDataDtoCrud {
         if (!this.client) {
             logger.log('trying to connect to DB......');
             try {
-                // Pool was 10 — far too small: loadChannelsForRunner hydrates channels 25-wide, each
-                // doing several DB ops, so a pool of 10 throttled effective concurrency to ~10 and
-                // made a cycle's hydrate take ~165s. Raise it (env-tunable) so the concurrency the
-                // promotion loader relies on isn't starved at the connection layer.
-                const maxPoolSize = Number(process.env.MONGO_MAX_POOL_SIZE) || 50;
-                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize });
+                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 10 });
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Mongo connection completed after close was requested; closing stale connected client');
                     await connectedClient.close();
