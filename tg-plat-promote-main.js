@@ -9934,15 +9934,12 @@ function evaluateChannelPromotionHealth(input, options = {}) {
             signals,
         };
     }
-    if (contentHealth === 'exhausted') {
-        return {
-            promotable: false,
-            reason: 'content_exhausted',
-            score: 0,
-            probeEligible: false,
-            signals,
-        };
-    }
+    // NOTE: 'exhausted' (no active pool survivors yet) is NOT a hard drop. Under the pool-fill
+    // lifecycle a channel with an empty active pool is usually still LEARNING — it must stay promotable
+    // so the seed ladder (legacy → custom → AI) can run and grow the pool. Truly-unsendable channels
+    // (banned / write-forbidden / no sendability) are already rejected by the earlier gates above; here
+    // 'exhausted' only applies a score penalty via contentPenalty() below. Previously this hard-returned
+    // promotable:false, which dropped every learning channel in hydration → fleet-wide zero sends.
     const score = Math.max(0, Math.min(100, 100
         - contentPenalty(contentHealth)
         - deletionPenalty(deletionRate)
@@ -31214,16 +31211,27 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     //  CHANNEL FETCH / HYDRATION (promote-flavored)
     // =================================================================
     async loadChannelsForRunner() {
+        const hydrateStart = Date.now();
         const fetchedChannels = await this.fetchDialogs();
         const channels = [];
+        let nullInfo = 0;
+        let notPromotable = 0;
         for (const channel of fetchedChannels.slice(0, this.MAX_CHANNELS_CACHE)) {
             const channelInfo = await this.getChannelInfo(channel.channelId, channel);
-            if (channelInfo && this.isChannelPromotable(channelInfo)) {
-                channels.push(channelInfo);
+            if (!channelInfo) {
+                nullInfo += 1;
+                continue;
             }
+            if (this.isChannelPromotable(channelInfo))
+                channels.push(channelInfo);
+            else
+                notPromotable += 1;
         }
         this.channels = fetchedChannels;
-        logger.info(`[${this.mobile}] 🎯 PROMO channels | fetched ${fetchedChannels.length} | usable ${channels.length}`);
+        // Hydration outcome + timing: 'usable' should be well above 0 (the content_exhausted fix keeps
+        // learning channels usable); a large fetched→usable gap or a long hydrateMs points at slow
+        // per-channel hydration / mass drops as the bottleneck.
+        logger.info(`[${this.mobile}] 🎯 PROMO channels | fetched ${fetchedChannels.length} | usable ${channels.length} | dropped ${notPromotable} | noInfo ${nullInfo} | hydrateMs ${Date.now() - hydrateStart}`);
         return channels;
     }
     async getChannelForRunner(channelId) {
