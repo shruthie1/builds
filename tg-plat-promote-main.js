@@ -25511,12 +25511,7 @@ class UserDataDtoCrud {
         if (!this.client && !this.isConnected) {
             logger.info('trying to connect to DB......', process.env.mongodburi);
             try {
-                // Pool was 10 — far too small: this process runs N promotion engines (one per mobile),
-                // all sharing this single pool, and each hydrates channels 25-wide with several DB ops
-                // apiece. A pool of 10 starved that concurrency (cycle hydrate ~165s). Raise it
-                // (env-tunable) so hydration isn't bottlenecked at the connection layer.
-                const maxPoolSize = Number(process.env.MONGO_MAX_POOL_SIZE) || 50;
-                this.client = await mongodb__WEBPACK_IMPORTED_MODULE_0__.MongoClient.connect(process.env.mongodburi, { maxPoolSize });
+                this.client = await mongodb__WEBPACK_IMPORTED_MODULE_0__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 10 });
                 logger.info('Connected to MongoDB');
                 this.isConnected = true;
                 this.activeChannelDb = this.client.db("tgclients").collection('activeChannels');
