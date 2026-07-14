@@ -9994,15 +9994,12 @@ function evaluateChannelPromotionHealth(input, options = {}) {
             signals,
         };
     }
-    if (contentHealth === 'exhausted') {
-        return {
-            promotable: false,
-            reason: 'content_exhausted',
-            score: 0,
-            probeEligible: false,
-            signals,
-        };
-    }
+    // NOTE: 'exhausted' (no active pool survivors yet) is NOT a hard drop. Under the pool-fill
+    // lifecycle a channel with an empty active pool is usually still LEARNING — it must stay promotable
+    // so the seed ladder (legacy → custom → AI) can run and grow the pool. Truly-unsendable channels
+    // (banned / write-forbidden / no sendability) are already rejected by the earlier gates above; here
+    // 'exhausted' only applies a score penalty via contentPenalty() below. Previously this hard-returned
+    // promotable:false, which dropped every learning channel in hydration → fleet-wide zero sends.
     const score = Math.max(0, Math.min(100, 100
         - contentPenalty(contentHealth)
         - deletionPenalty(deletionRate)
@@ -51072,6 +51069,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     //  CHANNEL FETCH / HYDRATION (rich)
     // =================================================================
     async loadChannelsForRunner() {
+        const hydrateStart = Date.now();
         const fetchedChannels = await this.fetchDialogs();
         const channels = [];
         const rejectionCounts = new Map();
@@ -51114,6 +51112,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             `dropped ${Math.max(0, fetchedChannels.length - channels.length)}`,
             `drop ${this.formatCountMap(rejectionCounts) || 'none'}`,
             `sample ${rejectionSamples.join(',') || 'none'}`,
+            `hydrateMs ${Date.now() - hydrateStart}`,
         ].join(' | '));
         return channels;
     }
