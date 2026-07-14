@@ -6556,21 +6556,33 @@ class BasePromotionEngine {
             .map((messageId) => this.validPromotionMessage(this.promoteMsgs[messageId]))
             .filter((text) => typeof text === 'string' && text.trim().length > 0)
             .map((text) => (0,_pool__WEBPACK_IMPORTED_MODULE_10__.createLegacyPoolEntry)(text));
+        const getStart = Date.now();
         const existingDoc = await account.intelligence.get(channelInfo.channelId);
+        const getMs = Date.now() - getStart;
         if (this.isLegacyPoolMigrationSatisfied(existingDoc, {
             requiredEntryKeys: entries.map((entry) => entry.key),
             requiresExploredFlag: legacySeed.state !== 'cold_start',
         })) {
-            migrateLog.debug("skip", { chan: channelInfo.channelId, state: legacySeed.state, reason: "already-migrated" });
+            // Only surface the already-migrated skip when the DB read itself was slow (>500ms) — that
+            // is the signal that intelligence.get() latency is the hydration bottleneck. Fast skips
+            // stay quiet so 300 no-op skips don't flood the logs every cycle.
+            if (getMs > 500) {
+                migrateLog.info("skip-slow", { chan: channelInfo.channelId, state: legacySeed.state, getMs });
+            }
+            else {
+                migrateLog.debug("skip", { chan: channelInfo.channelId, state: legacySeed.state, reason: "already-migrated", getMs });
+            }
             return existingDoc;
         }
         const hasPoolEvidence = hasPoolExplorationEvidence(existingDoc?.messagePool);
+        const seedStart = Date.now();
         await account.intelligence.seedLegacyPoolMigration(channelInfo.channelId, {
             entries,
             hasEverExplored: hasPoolEvidence
                 || legacySeed.state !== 'cold_start',
         });
-        migrateLog.debug("seed", { chan: channelInfo.channelId, state: legacySeed.state, seeded: entries.length });
+        const seedMs = Date.now() - seedStart;
+        migrateLog.debug("seed", { chan: channelInfo.channelId, state: legacySeed.state, seeded: entries.length, getMs, seedMs });
         return account.intelligence.get(channelInfo.channelId);
     }
     mergePromotionHealthSignals(channelInfo, doc) {
@@ -25499,7 +25511,12 @@ class UserDataDtoCrud {
         if (!this.client && !this.isConnected) {
             logger.info('trying to connect to DB......', process.env.mongodburi);
             try {
-                this.client = await mongodb__WEBPACK_IMPORTED_MODULE_0__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 10 });
+                // Pool was 10 — far too small: this process runs N promotion engines (one per mobile),
+                // all sharing this single pool, and each hydrates channels 25-wide with several DB ops
+                // apiece. A pool of 10 starved that concurrency (cycle hydrate ~165s). Raise it
+                // (env-tunable) so hydration isn't bottlenecked at the connection layer.
+                const maxPoolSize = Number(process.env.MONGO_MAX_POOL_SIZE) || 50;
+                this.client = await mongodb__WEBPACK_IMPORTED_MODULE_0__.MongoClient.connect(process.env.mongodburi, { maxPoolSize });
                 logger.info('Connected to MongoDB');
                 this.isConnected = true;
                 this.activeChannelDb = this.client.db("tgclients").collection('activeChannels');
@@ -31256,12 +31273,29 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     async loadChannelsForRunner() {
         const hydrateStart = Date.now();
         const fetchedChannels = await this.fetchDialogs();
+        const fetchDialogsMs = Date.now() - hydrateStart;
         const candidates = fetchedChannels.slice(0, this.MAX_CHANNELS_CACHE);
         // Hydrate channels concurrently instead of one-at-a-time: each getChannelInfo() is an
         // independent chain of DB round-trips, so a serial for-await paid the full latency of all
         // ~300 chains back to back (minutes). Bounded concurrency collapses that into a few waves.
         const concurrency = this.resolveHydrateConcurrency();
-        const hydrated = await this.mapWithConcurrency(candidates, concurrency, (channel) => this.getChannelInfo(channel.channelId, channel));
+        // Loud start marker + progress heartbeat so a stuck/slow hydrate is obvious in the logs
+        // (running N-wide, how many done, wall-clock) instead of inferring it from migrate lines.
+        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate START | candidates ${candidates.length} | conc ${concurrency} | fetchDialogsMs ${fetchDialogsMs}`);
+        const hydrateMapStart = Date.now();
+        let hydratedDone = 0;
+        const heartbeat = setInterval(() => {
+            logger.info(`[${this.mobile}] ⏱️ PROMO hydrate progress | ${hydratedDone}/${candidates.length} | elapsedMs ${Date.now() - hydrateMapStart} | conc ${concurrency}`);
+        }, 5000);
+        heartbeat.unref?.();
+        const hydrated = await this.mapWithConcurrency(candidates, concurrency, async (channel) => {
+            const r = await this.getChannelInfo(channel.channelId, channel);
+            hydratedDone += 1;
+            return r;
+        });
+        clearInterval(heartbeat);
+        const hydrateMapMs = Date.now() - hydrateMapStart;
+        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate DONE | ${candidates.length} channels | hydrateMapMs ${hydrateMapMs} | avgPerChannelMs ${candidates.length ? Math.round(hydrateMapMs / candidates.length) : 0} | conc ${concurrency}`);
         const channels = [];
         let nullInfo = 0;
         let notPromotable = 0;
