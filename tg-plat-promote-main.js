@@ -6443,6 +6443,13 @@ class BasePromotionEngine {
         this.cleanupInterval = null;
         this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_7__.DelayCalculator();
         this.channelHydrationAttempts = new Map();
+        // Per-cycle intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of
+        // loadChannelsForRunner. MEASURED root cause of slow hydration: 300 serial intelligence.get()
+        // findOne calls cost ~107s because each is a separate WAN round-trip to Atlas (~350ms each),
+        // NOT because the query is slow (it's indexed, <1ms server-side). One batch $in collapses the
+        // 300 round-trips into 1. Keyed by normalized channelId; value undefined = "warmed, no doc"
+        // (distinct from key-absent = "not warmed, do a live get()"). Rebuilt each cycle.
+        this.intelligenceDocCache = null;
         this.globalBandit = null;
         this.promotionContext = null;
         /**
@@ -6541,6 +6548,57 @@ class BasePromotionEngine {
         }
         return this.globalBandit;
     }
+    /**
+     * Warm intelligenceDocCache with a SINGLE batchGet({$in}) for the whole candidate set. Call once
+     * at the top of loadChannelsForRunner, before hydrating channels. Turns 300 serial WAN round-trips
+     * (~107s) into one. Best-effort: on any error the cache is left empty and each channel falls back
+     * to a live get() (old behavior), so this can only speed things up, never break correctness.
+     */
+    async warmIntelligenceCache(channelIds) {
+        const cache = new Map();
+        this.intelligenceDocCache = cache;
+        const t0 = Date.now();
+        let account;
+        try {
+            account = this.promotionContext ?? this.refreshPromotionContext();
+        }
+        catch {
+            this.intelligenceDocCache = null;
+            return { requested: 0, found: 0, ms: 0 };
+        }
+        const ids = Array.from(new Set(channelIds.map((id) => this.normalizeChannelId(id)).filter((id) => !!id)));
+        if (ids.length === 0)
+            return { requested: 0, found: 0, ms: 0 };
+        try {
+            const docs = await account.intelligence.batchGet(ids);
+            for (const id of ids)
+                cache.set(id, undefined); // mark all as warmed-empty first
+            for (const doc of docs) {
+                const id = this.normalizeChannelId(doc.channelId);
+                if (id)
+                    cache.set(id, doc);
+            }
+            const ms = Date.now() - t0;
+            migrateLog.info("warm-cache", { requested: ids.length, found: docs.length, ms });
+            return { requested: ids.length, found: docs.length, ms };
+        }
+        catch {
+            this.intelligenceDocCache = null; // fall back to per-channel live reads
+            return { requested: ids.length, found: 0, ms: Date.now() - t0 };
+        }
+    }
+    /** Read an intelligence doc through the per-cycle cache if warmed, else a live get(). */
+    async getIntelligenceDocCached(account, channelId) {
+        const id = this.normalizeChannelId(channelId);
+        const cache = this.intelligenceDocCache;
+        if (cache && id && cache.has(id)) {
+            return { doc: cache.get(id) ?? null, cached: true };
+        }
+        const doc = await account.intelligence.get(channelId);
+        if (cache && id)
+            cache.set(id, doc ?? undefined);
+        return { doc, cached: false };
+    }
     async ensureLegacyPoolMigration(channelInfo, legacyAvailableMsgs) {
         if (!channelInfo)
             return null;
@@ -6556,34 +6614,29 @@ class BasePromotionEngine {
             .map((messageId) => this.validPromotionMessage(this.promoteMsgs[messageId]))
             .filter((text) => typeof text === 'string' && text.trim().length > 0)
             .map((text) => (0,_pool__WEBPACK_IMPORTED_MODULE_10__.createLegacyPoolEntry)(text));
-        const getStart = Date.now();
-        const existingDoc = await account.intelligence.get(channelInfo.channelId);
-        const getMs = Date.now() - getStart;
+        const { doc: existingDoc, cached } = await this.getIntelligenceDocCached(account, channelInfo.channelId);
         if (this.isLegacyPoolMigrationSatisfied(existingDoc, {
             requiredEntryKeys: entries.map((entry) => entry.key),
             requiresExploredFlag: legacySeed.state !== 'cold_start',
         })) {
-            // Only surface the already-migrated skip when the DB read itself was slow (>500ms) — that
-            // is the signal that intelligence.get() latency is the hydration bottleneck. Fast skips
-            // stay quiet so 300 no-op skips don't flood the logs every cycle.
-            if (getMs > 500) {
-                migrateLog.info("skip-slow", { chan: channelInfo.channelId, state: legacySeed.state, getMs });
-            }
-            else {
-                migrateLog.debug("skip", { chan: channelInfo.channelId, state: legacySeed.state, reason: "already-migrated", getMs });
-            }
+            // Fast skip — the common case (already migrated). Stays at debug: the batch-warmed cache
+            // makes this a 0-round-trip in-memory check, so the 300 skip lines are cheap and only
+            // visible when debug logging is on.
+            migrateLog.debug("skip", { chan: channelInfo.channelId, state: legacySeed.state, reason: "already-migrated", cached });
             return existingDoc;
         }
         const hasPoolEvidence = hasPoolExplorationEvidence(existingDoc?.messagePool);
-        const seedStart = Date.now();
         await account.intelligence.seedLegacyPoolMigration(channelInfo.channelId, {
             entries,
             hasEverExplored: hasPoolEvidence
                 || legacySeed.state !== 'cold_start',
         });
-        const seedMs = Date.now() - seedStart;
-        migrateLog.debug("seed", { chan: channelInfo.channelId, state: legacySeed.state, seeded: entries.length, getMs, seedMs });
-        return account.intelligence.get(channelInfo.channelId);
+        migrateLog.debug("seed", { chan: channelInfo.channelId, state: legacySeed.state, seeded: entries.length });
+        const seededDoc = await account.intelligence.get(channelInfo.channelId);
+        const cacheId = this.normalizeChannelId(channelInfo.channelId);
+        if (this.intelligenceDocCache && cacheId)
+            this.intelligenceDocCache.set(cacheId, seededDoc ?? undefined);
+        return seededDoc;
     }
     mergePromotionHealthSignals(channelInfo, doc) {
         if (!doc)
@@ -31276,7 +31329,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         const concurrency = this.resolveHydrateConcurrency();
         // Loud start marker + progress heartbeat so a stuck/slow hydrate is obvious in the logs
         // (running N-wide, how many done, wall-clock) instead of inferring it from migrate lines.
-        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate START | candidates ${candidates.length} | conc ${concurrency} | fetchDialogsMs ${fetchDialogsMs}`);
+        // ONE batchGet for all candidates' intelligence docs before the per-channel hydrate map.
+        // Measured: 300 serial intelligence.get() = ~107s (300 WAN round-trips); one $in batch = one
+        // round-trip. This is THE hydration-speed fix; concurrency alone couldn't beat the per-trip latency.
+        const warm = await this.warmIntelligenceCache(candidates.map((c) => c.channelId));
+        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate START | candidates ${candidates.length} | conc ${concurrency} | fetchDialogsMs ${fetchDialogsMs} | warmCache ${warm.found}/${warm.requested} in ${warm.ms}ms`);
         const hydrateMapStart = Date.now();
         let hydratedDone = 0;
         const heartbeat = setInterval(() => {
