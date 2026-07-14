@@ -7121,6 +7121,49 @@ class BasePromotionEngine {
         }
         return 10 * 60 * 1000;
     }
+    /**
+     * How many channels to hydrate concurrently in loadChannelsForRunner. The per-channel work is
+     * a chain of independent DB round-trips (getActiveChannel + updateActiveChannel + legacy-pool
+     * migration read/seed/read); running ~300 of them serially is what made channel loading take
+     * minutes. These calls are independent, so a bounded-concurrency map collapses the round-trips
+     * into a handful of parallel waves. Overridable via env for tuning / rollback (set to 1 to
+     * restore the old fully-serial behavior).
+     */
+    resolveHydrateConcurrency() {
+        const raw = process.env.PROMO_HYDRATE_CONCURRENCY;
+        const parsed = raw ? Number(raw) : Number.NaN;
+        if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 100) {
+            return Math.floor(parsed);
+        }
+        return 25;
+    }
+    /**
+     * Map an array through an async worker with bounded concurrency, preserving input order in the
+     * result. Unlike Promise.all(items.map(...)) this never fans out more than `limit` in-flight at
+     * once (protects Mongo/Telegram from a 300-wide burst); unlike a serial for-await it does not
+     * pay the full latency of every round-trip in sequence. Single-process/single-threaded, so the
+     * shared in-memory guards the workers touch (e.g. channelHydrationAttempts) stay race-free.
+     */
+    async mapWithConcurrency(items, limit, worker) {
+        const results = new Array(items.length);
+        const boundedLimit = Math.max(1, Math.min(limit, items.length || 1));
+        let cursor = 0;
+        const runLane = async () => {
+            while (true) {
+                const index = cursor;
+                cursor += 1;
+                if (index >= items.length)
+                    return;
+                results[index] = await worker(items[index], index);
+            }
+        };
+        const lanes = [];
+        for (let i = 0; i < boundedLimit; i++) {
+            lanes.push(runLane());
+        }
+        await Promise.all(lanes);
+        return results;
+    }
     jitteredDelay(targetMs, jitterMs) {
         const jitter = Math.floor((Math.random() * 2 - 1) * jitterMs);
         return Math.max(60000, targetMs + jitter);
@@ -51071,11 +51114,18 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     async loadChannelsForRunner() {
         const hydrateStart = Date.now();
         const fetchedChannels = await this.fetchDialogs();
+        const candidates = fetchedChannels.slice(0, this.MAX_CHANNELS_CACHE);
         const channels = [];
         const rejectionCounts = new Map();
         const rejectionSamples = [];
-        for (const channel of fetchedChannels.slice(0, this.MAX_CHANNELS_CACHE)) {
-            const channelInfo = await this.getChannelInfo(channel.channelId, channel);
+        // Hydrate channels concurrently instead of one-at-a-time: each getChannelInfo() is an
+        // independent chain of DB round-trips, so a serial for-await paid the full latency of all
+        // ~300 chains back to back (minutes). Bounded concurrency collapses that into a few waves.
+        // The accounting below runs over the ordered results so drop-sample ordering stays stable.
+        const concurrency = this.resolveHydrateConcurrency();
+        const hydrated = await this.mapWithConcurrency(candidates, concurrency, (channel) => this.getChannelInfo(channel.channelId, channel));
+        for (let i = 0; i < candidates.length; i++) {
+            const channelInfo = hydrated[i];
             if (channelInfo && this.isChannelPromotable(channelInfo)) {
                 channels.push(channelInfo);
                 continue;
@@ -51083,7 +51133,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             const reason = channelInfo ? this.getPromotionChannelRejectReason(channelInfo) : 'hydrate-null';
             rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1);
             if (rejectionSamples.length < 8) {
-                rejectionSamples.push(`${this.normalizeChannelId(channel.channelId)}:${reason}`);
+                rejectionSamples.push(`${this.normalizeChannelId(candidates[i].channelId)}:${reason}`);
             }
         }
         this.channels = channels;
@@ -51112,6 +51162,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             `dropped ${Math.max(0, fetchedChannels.length - channels.length)}`,
             `drop ${this.formatCountMap(rejectionCounts) || 'none'}`,
             `sample ${rejectionSamples.join(',') || 'none'}`,
+            `conc ${concurrency}`,
             `hydrateMs ${Date.now() - hydrateStart}`,
         ].join(' | '));
         return channels;
