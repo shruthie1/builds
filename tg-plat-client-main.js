@@ -6470,6 +6470,30 @@ class BasePromotionEngine {
         this.mobile = mobile;
         this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
     }
+    /**
+     * Shared delay normalization for the helper channel loop sleep (identical for both apps).
+     * daysLeft-driven:
+     *   - LIMITED (daysLeft > 0): high-volume ~3 min between messages, ignoring the incoming delay.
+     *   - HEALTHY (daysLeft === 0): normalize a "healthy-floor" sleep to the jittered healthy target,
+     *     cap oversized delays, otherwise pass through.
+     */
+    normalizeHelperChannelDelay(delayMs) {
+        if (this.getDaysLeft() > 0) {
+            // Race the countdown: flat ~2.5-3.5 min cadence regardless of what the runner requested.
+            return this.jitteredDelay(3 * 60 * 1000, 30 * 1000);
+        }
+        const safe = Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
+        if (!safe)
+            return safe;
+        const healthyFloor = 11 * 60 * 1000;
+        if (safe >= healthyFloor) {
+            return this.jitteredDelay(this.HELPER_HEALTHY_DELAY_TARGET_MS, this.HELPER_HEALTHY_DELAY_JITTER_MS);
+        }
+        if (this.HELPER_MAX_CHANNEL_DELAY_MS && safe > this.HELPER_MAX_CHANNEL_DELAY_MS) {
+            return this.HELPER_MAX_CHANNEL_DELAY_MS;
+        }
+        return safe;
+    }
     // Protected hooks with default no-op base impl that subclasses MAY override.
     onConstructorComplete() { }
     async performAppCleanup() { }
@@ -6770,7 +6794,9 @@ class BasePromotionEngine {
             attributionEnabled,
             batchTarget: this.MAX_CHANNELS_CACHE,
             messageCheckDelayMs: this.MESSAGE_CHECK_DELAY,
-            followUpDelayMs: 10 * 60 * 1000,
+            // daysLeft-driven, shared across both apps: healthy = 7-14 min main->follow-up,
+            // limited (daysLeft > 0) = ~3 min high-volume. See delayCalculator.getFollowUpDelay.
+            followUpDelayMs: this.resolveFollowUpDelayMs(),
             followUpJitterMs: 60 * 1000,
             maxFollowUpCount: this.MAX_QUEUE_SIZE,
             channelLoopDelayMs: this.HELPER_CHANNEL_LOOP_DELAY_MS,
@@ -7026,6 +7052,14 @@ class BasePromotionEngine {
             return Math.floor(parsed);
         }
         return 2 * 60 * 1000;
+    }
+    /**
+     * Main-message -> follow-up delay, daysLeft-driven and identical for both apps (single source of
+     * truth in DelayCalculator): healthy (daysLeft === 0) = 7-14 min; limited (daysLeft > 0) = ~3 min
+     * high-volume. Recomputed each promotion cycle so a change in daysLeft takes effect immediately.
+     */
+    resolveFollowUpDelayMs() {
+        return this.delayCalculator.getFollowUpDelay(this.getDaysLeft());
     }
     resolveChannelRehydrationDebounceMs() {
         const raw = process.env.CHANNEL_REHYDRATION_DEBOUNCE_MS;
@@ -7645,18 +7679,26 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('DelayCalculator');
+// Pacing is daysLeft-driven and identical across both apps (tg-aut clients + promote clients):
+//  - HEALTHY  (daysLeft === 0): normal human-like cadence. Main->follow-up gap is 7-14 min.
+//  - LIMITED  (daysLeft  >  0): the account is under a spam-limit countdown, so we push high volume
+//                               while it can still send — ~3 min between messages.
+// A single source of truth here means both namespaces behave the same once rebuilt.
 const DEFAULT_DELAY_CONFIG = {
     baseDelayMinMs: 3 * 60 * 1000, // 3 min
     baseDelayMaxMs: 7 * 60 * 1000, // 7 min
     browseDelayMinMs: 3000,
     browseDelayMaxMs: 8000,
-    followUpDelayMinMs: 5 * 60 * 1000, // 5 min
-    followUpDelayMaxMs: 10 * 60 * 1000, // 10 min
+    followUpDelayMinMs: 7 * 60 * 1000, // 7 min  (healthy main -> follow-up floor)
+    followUpDelayMaxMs: 14 * 60 * 1000, // 14 min (healthy main -> follow-up ceiling)
     followUpSkipProbability: 0.30, // 30% chance to skip follow-up
     perChannelCooldownMs: 8 * 60 * 60 * 1000, // 8 hours
     successMultiplier: 0.85,
     failureMultiplier: 1.5,
 };
+// High-volume cadence used while daysLeft > 0 (limited account racing its countdown).
+const HIGH_VOLUME_DELAY_MIN_MS = 2.5 * 60 * 1000; // ~2.5 min
+const HIGH_VOLUME_DELAY_MAX_MS = 3.5 * 60 * 1000; // ~3.5 min (centres on ~3 min/message)
 class DelayCalculator {
     constructor(config) {
         this.adaptiveMultiplier = 1.0;
@@ -7668,7 +7710,15 @@ class DelayCalculator {
     /**
      * Get the next inter-promotion delay, adaptive to success/failure.
      */
-    getNextDelay(lastResult) {
+    getNextDelay(lastResult, daysLeft = 0) {
+        // LIMITED account (daysLeft > 0): race the countdown at a flat ~3 min/message. No adaptive,
+        // night, or success/failure scaling — we want maximum consistent volume while it can send.
+        if (daysLeft > 0) {
+            const delay = HIGH_VOLUME_DELAY_MIN_MS +
+                Math.random() * (HIGH_VOLUME_DELAY_MAX_MS - HIGH_VOLUME_DELAY_MIN_MS);
+            logger.debug(`Next delay: ${(delay / 1000 / 60).toFixed(1)}min (HIGH-VOLUME, daysLeft=${daysLeft})`);
+            return Math.floor(delay);
+        }
         if (lastResult === 'success') {
             this.adaptiveMultiplier = Math.max(0.5, this.adaptiveMultiplier * this.config.successMultiplier);
         }
@@ -7693,14 +7743,20 @@ class DelayCalculator {
             Math.random() * (this.config.browseDelayMaxMs - this.config.browseDelayMinMs);
     }
     /**
-     * Get follow-up delay. Returns 0 if the follow-up should be skipped (30% chance).
+     * Get the main-message -> follow-up delay. Returns 0 if the follow-up should be skipped.
+     * HEALTHY (daysLeft === 0): 7-14 min. LIMITED (daysLeft > 0): ~3 min, and never skipped, so the
+     * account fires its follow-up quickly while it still can.
      */
-    getFollowUpDelay() {
+    getFollowUpDelay(daysLeft = 0) {
+        if (daysLeft > 0) {
+            return Math.floor(HIGH_VOLUME_DELAY_MIN_MS +
+                Math.random() * (HIGH_VOLUME_DELAY_MAX_MS - HIGH_VOLUME_DELAY_MIN_MS));
+        }
         if (Math.random() < this.config.followUpSkipProbability) {
             return 0; // Skip this follow-up
         }
-        return this.config.followUpDelayMinMs +
-            Math.random() * (this.config.followUpDelayMaxMs - this.config.followUpDelayMinMs);
+        return Math.floor(this.config.followUpDelayMinMs +
+            Math.random() * (this.config.followUpDelayMaxMs - this.config.followUpDelayMinMs));
     }
     /**
      * Check if enough time has passed since the last promotion in this channel.
@@ -26478,6 +26534,7 @@ class UserDataDtoCrud {
                 this.activeChannelDb = connectedClient.db("tgclients").collection('activeChannels');
                 this.channelIntelligenceDb = connectedClient.db("tgclients").collection('channelIntelligence');
                 this.promoteStatsDb = connectedClient.db("tgclients").collection('promoteStats');
+                await this.ensureDailyAnalyticsIndexes(connectedClient);
                 await this.initializePromotionRuntime();
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Promotion runtime initialized after close was requested; closing stale Mongo/Redis resources');
@@ -26707,7 +26764,61 @@ class UserDataDtoCrud {
         }
         return Array.from(names);
     }
+    async ensureDailyAnalyticsIndexes(client) {
+        try {
+            for (const name of UserDataDtoCrud.DAILY_COLLECTIONS) {
+                const coll = client.db("tgclients").collection(name);
+                await coll.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }).catch(() => undefined);
+                await coll.createIndex({ date: 1, clientId: 1 }, { unique: true }).catch(() => undefined);
+            }
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error ensuring daily analytics indexes", false);
+        }
+    }
+    todayKey() {
+        const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+        return ist.toISOString().slice(0, 10);
+    }
+    async recordDaily(collection, inc) {
+        try {
+            const clientId = process.env.clientId;
+            if (!clientId || !this.client)
+                return;
+            const date = this.todayKey();
+            const expireAt = new Date(Date.now() + UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60 * 1000);
+            await this.client.db("tgclients").collection(collection).updateOne({ date, clientId }, {
+                $inc: inc,
+                $setOnInsert: { date, clientId, profile: process.env.dbcoll, expireAt, createdAt: new Date() },
+            }, { upsert: true });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error recording daily analytics (${collection})`, false);
+        }
+    }
+    /** Daily user funnel: new DM'd users, active (any message), paid users, revenue. */
+    async recordDailyUser(fields) {
+        const inc = {};
+        if (fields.newUsers)
+            inc.newUsers = fields.newUsers;
+        if (fields.active)
+            inc.active = fields.active;
+        if (fields.paid)
+            inc.paid = fields.paid;
+        if (fields.revenue)
+            inc.revenue = fields.revenue;
+        if (Object.keys(inc).length)
+            await this.recordDaily('userStatsDaily', inc);
+    }
     async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) {
+        // Daily funnel analytics (best-effort, bounded via TTL). active on every stat write;
+        // newUsers on first contact; paid + revenue when a payment is confirmed this call.
+        void this.recordDailyUser({
+            active: 1,
+            newUsers: newUser ? 1 : 0,
+            paid: didPay ? 1 : 0,
+            revenue: didPay && Number.isFinite(payAmount) && payAmount > 0 ? Math.floor(payAmount) : 0,
+        });
         try {
             const filter = { chatId, client: process.env.clientId, profile: process.env.dbcoll };
             const chat = await this.statsDb.findOne(filter);
@@ -28281,6 +28392,13 @@ class UserDataDtoCrud {
         }
     }
 }
+// ===================================================================
+//  DAILY ANALYTICS (TTL-based, bounded) — mirrors promote-clients so both
+//  namespaces write consistently. One doc per {date, clientId}, live $inc,
+//  auto-expiring after 14 days via a TTL index on `expireAt`.
+// ===================================================================
+UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS = 14;
+UserDataDtoCrud.DAILY_COLLECTIONS = ['promoteStatsDaily', 'reactionStatsDaily', 'userStatsDaily'];
 function getRecentProfiles(data, time, expectedCount) {
     const currentTime = Date.now();
     const oldTime = currentTime - time;
@@ -49709,22 +49827,8 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     adapterShouldContinue() {
         return this.shouldContinueHelperPromotion();
     }
-    normalizeHelperChannelDelay(delayMs) {
-        const safeDelayMs = Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
-        if (!safeDelayMs)
-            return safeDelayMs;
-        const healthyDelayFloor = 11 * 60 * 1000;
-        if (safeDelayMs >= healthyDelayFloor) {
-            const normalizedDelayMs = this.jitteredDelay(this.HELPER_HEALTHY_DELAY_TARGET_MS, this.HELPER_HEALTHY_DELAY_JITTER_MS);
-            logger.debug(`Promotion helper loop: healthy delay normalized ${this.formatDuration(safeDelayMs)} -> ${this.formatDuration(normalizedDelayMs)}`);
-            return normalizedDelayMs;
-        }
-        if (this.HELPER_MAX_CHANNEL_DELAY_MS && safeDelayMs > this.HELPER_MAX_CHANNEL_DELAY_MS) {
-            logger.debug(`Promotion delay capped ${this.formatDuration(safeDelayMs)} -> ${this.formatDuration(this.HELPER_MAX_CHANNEL_DELAY_MS)}`);
-            return this.HELPER_MAX_CHANNEL_DELAY_MS;
-        }
-        return safeDelayMs;
-    }
+    // normalizeHelperChannelDelay is now the shared daysLeft-driven implementation in
+    // BasePromotionEngine (healthy: normalized healthy target; limited daysLeft>0: ~3 min high-volume).
     buildRunnerAdapterExtras(account) {
         void account;
         return {
