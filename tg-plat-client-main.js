@@ -62,11 +62,10 @@ class ConversionAttributionService {
      *
      * @param commonChatIds - Channel IDs from GetCommonChats
      */
-    async attributeConversion(commonChatIds, isPaid = false) {
+    async attributeDmConversion(commonChatIds) {
         const uniqueChatIds = normalizeCommonChatIds(commonChatIds);
         if (uniqueChatIds.length === 0)
             return { attributedChannels: [] };
-        const shouldRecordPaid = isPaid === true;
         try {
             // For each common chat, check if a promote mobile sent there recently
             const candidates = [];
@@ -98,11 +97,8 @@ class ConversionAttributionService {
                     weight: equalWeight,
                 });
                 try {
-                    // Increment fractional conversion on the channel.
-                    await this.intelligenceService.recordConversion(candidate.channelId, equalWeight);
-                    if (shouldRecordPaid) {
-                        await this.intelligenceService.recordPaidConversion(candidate.channelId, equalWeight);
-                    }
+                    // Increment fractional channel->DM-open attribution on the channel.
+                    await this.intelligenceService.recordDmConversion(candidate.channelId, equalWeight);
                 }
                 catch {
                     // Attribution discovery should still return even when analytics persistence is transiently down.
@@ -193,8 +189,7 @@ function isRecord(value) {
 }
 function isIntelligenceServiceLike(value) {
     return isRecord(value)
-        && typeof value['recordConversion'] === 'function'
-        && typeof value['recordPaidConversion'] === 'function';
+        && typeof value['recordDmConversion'] === 'function';
 }
 function isTrackerLike(value) {
     return isRecord(value) && typeof value['getLastPromoter'] === 'function';
@@ -289,7 +284,7 @@ class ChannelClassifier {
                 return sum + safeNonNegative(armRecord['n']);
             }, 0);
             if (totalPulls >= 10) {
-                const conversions = safeNonNegative(intelDoc.conversions);
+                const conversions = safeNonNegative(intelDoc.dmConversions);
                 // Channels that ACTUALLY convert are high_intent regardless of keywords
                 if (conversions > 0.5) {
                     performanceCategory = 'high_intent';
@@ -357,7 +352,7 @@ const CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS = [
         options: { unique: true },
     },
     {
-        spec: { channelCategory: 1, conversionRateShrunk: -1 },
+        spec: { channelCategory: 1, dmConversionRateShrunk: -1 },
         options: { name: 'idx_category_score' },
     },
     {
@@ -457,7 +452,8 @@ class ChannelIntelligenceService {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
-        return this.collection.findOne({ channelId: safeChannelId });
+        const doc = await this.collection.findOne({ channelId: safeChannelId });
+        return doc ? normalizeConversionFields(doc) : doc;
     }
     async batchGet(channelIds, projection) {
         const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelIds)(channelIds);
@@ -465,7 +461,7 @@ class ChannelIntelligenceService {
             return [];
         const opts = projection ? { projection } : undefined;
         const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }, opts));
-        return rows.filter(isChannelIntelligenceDocument);
+        return rows.filter(isChannelIntelligenceDocument).map(normalizeConversionFields);
     }
     async getTopChannels(limit = 50) {
         const safeLimit = normalizeLimit(limit, 50);
@@ -477,9 +473,10 @@ class ChannelIntelligenceService {
         // under-fill the result. Post-filter (validation) then trims to safeLimit. Cap the over-fetch so a
         // pathological collection can't be fully scanned.
         const fetchLimit = Math.min(safeLimit * FETCH_OVERSCAN_FACTOR, MAX_TOP_CHANNEL_FETCH);
-        const rows = await readCursorArray(isSortableCursorLike(cursor) ? cursor.sort({ conversionRateShrunk: -1 }).limit(fetchLimit) : cursor);
+        const rows = await readCursorArray(isSortableCursorLike(cursor) ? cursor.sort({ dmConversionRateShrunk: -1 }).limit(fetchLimit) : cursor);
         const eligibleRows = rows
             .filter(isChannelIntelligenceDocument)
+            .map(normalizeConversionFields)
             .sort((a, b) => compareTopChannelDocs(a, b, now));
         if (isSortableCursorLike(cursor)) {
             return eligibleRows.slice(0, safeLimit);
@@ -798,7 +795,8 @@ class ChannelIntelligenceService {
         await this.writeScoreAndLifecycle(safeChannelId, doc);
     }
     // --- Conversion recording (ROI) ---
-    async recordConversion(channelId, fractionalWeight) {
+    /** Record a STAGE-1 channel->DM open (fractional attribution). Writes the new dmConversions key. */
+    async recordDmConversion(channelId, fractionalWeight) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
@@ -806,37 +804,17 @@ class ChannelIntelligenceService {
         if (weight === null)
             return;
         await this.ensureDoc(safeChannelId);
-        await this.repairNumericFields(safeChannelId, ['conversions']);
+        await this.repairNumericFields(safeChannelId, ['dmConversions']);
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, {
-            $inc: { conversions: weight },
+            $inc: { dmConversions: weight },
             $set: {
-                conversionUpdatedAt: Date.now(),
+                dmConversionUpdatedAt: Date.now(),
                 updatedAt: new Date(),
                 writeVersion: nextWriteVersion(safeChannelId),
             },
         }, { returnDocument: 'after' });
         if (doc) {
-            await this.writeScoreAndLifecycle(safeChannelId, doc);
-        }
-    }
-    async recordPaidConversion(channelId, fractionalWeight) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        const weight = this.normalizeFractionalWeight(fractionalWeight);
-        if (weight === null)
-            return;
-        await this.ensureDoc(safeChannelId);
-        await this.repairNumericFields(safeChannelId, ['paidConversions']);
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, {
-            $inc: { paidConversions: weight },
-            $set: {
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        }, { returnDocument: 'after' });
-        if (doc) {
-            await this.writeScoreAndLifecycle(safeChannelId, doc);
+            await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
         }
     }
     // --- Channel classification ---
@@ -974,7 +952,8 @@ class ChannelIntelligenceService {
     // --- Scoring ---
     async backfillConversionScoringFields(options = {}) {
         const docs = (await readCursorArray(this.collection.find({})))
-            .filter(isChannelIntelligenceDocument);
+            .filter(isChannelIntelligenceDocument)
+            .map(normalizeConversionFields);
         const prior = options.fitPriorFromDocs === true
             ? (() => {
                 const rates = [];
@@ -983,7 +962,7 @@ class ChannelIntelligenceService {
                     const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
                     if (exposure <= 0)
                         continue;
-                    rates.push(safeNonNegative(doc.conversions) / exposure);
+                    rates.push(safeNonNegative(doc.dmConversions) / exposure);
                     exposures.push(exposure);
                 }
                 return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.fitGammaPriorFromRates)(rates, exposures);
@@ -1179,7 +1158,7 @@ class ChannelIntelligenceService {
         const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
         const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
         const conversionPrior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(percentiles?.conversionPrior);
-        const conversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, exposure, conversionPrior);
+        const dmConversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.dmConversions, exposure, conversionPrior);
         const followupSuccessRate = followupTotal > 0
             ? Math.round(Math.min(1, followupSuccessCount / followupTotal) * 1000) / 1000
             : safeRate(doc.followupSuccessRate, 0.5);
@@ -1188,7 +1167,7 @@ class ChannelIntelligenceService {
         const scoreFields = {
             expectedValue: Math.round(ev * 1000) / 1000,
             survivedSends,
-            conversionRateShrunk: Math.round(conversionRateShrunk * 1000000) / 1000000,
+            dmConversionRateShrunk: Math.round(dmConversionRateShrunk * 1000000) / 1000000,
             scoreUpdatedAt: Date.now(),
             followupSuccessRate,
         };
@@ -1260,15 +1239,15 @@ class ChannelIntelligenceService {
     buildConversionBackfillFields(doc, prior) {
         const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
         const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
-        const conversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.conversions, exposure, prior));
+        const dmConversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.dmConversions, exposure, prior));
         const currentSurvivedSends = safeNonNegative(doc.survivedSends);
-        const currentConversionRateShrunk = roundConversionRate(safeNonNegative(doc.conversionRateShrunk));
-        if (currentSurvivedSends === survivedSends && currentConversionRateShrunk === conversionRateShrunk) {
+        const currentConversionRateShrunk = roundConversionRate(safeNonNegative(doc.dmConversionRateShrunk));
+        if (currentSurvivedSends === survivedSends && currentConversionRateShrunk === dmConversionRateShrunk) {
             return null;
         }
         return {
             survivedSends,
-            conversionRateShrunk,
+            dmConversionRateShrunk,
             updatedAt: new Date(),
             writeVersion: nextWriteVersion(doc.channelId),
         };
@@ -1321,12 +1300,12 @@ function roundConversionRate(value) {
     return Math.round(value * 1000000) / 1000000;
 }
 function compareTopChannelDocs(left, right, now) {
-    const leftEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(left.conversionRateShrunk, left.conversionUpdatedAt, now);
-    const rightEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(right.conversionRateShrunk, right.conversionUpdatedAt, now);
+    const leftEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(left.dmConversionRateShrunk, left.dmConversionUpdatedAt, now);
+    const rightEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(right.dmConversionRateShrunk, right.dmConversionUpdatedAt, now);
     if (rightEfficiency !== leftEfficiency)
         return rightEfficiency - leftEfficiency;
-    const leftRate = safeNonNegative(left.conversionRateShrunk);
-    const rightRate = safeNonNegative(right.conversionRateShrunk);
+    const leftRate = safeNonNegative(left.dmConversionRateShrunk);
+    const rightRate = safeNonNegative(right.dmConversionRateShrunk);
     if (rightRate !== leftRate)
         return rightRate - leftRate;
     return safeNonNegative(right.expectedValue) - safeNonNegative(left.expectedValue);
@@ -1484,6 +1463,26 @@ function isSortableCursorLike(value) {
 function isChannelIntelligenceDocument(value) {
     return isRecord(value) && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']) !== null;
 }
+/**
+ * DUAL-READ shim for the conversion-naming rename. Writes now target the new stage-1 keys
+ * (dmConversions / dmConversionRateShrunk / dmConversionUpdatedAt), but docs written before the
+ * one-time DB migration still carry the old keys (conversions / conversionRateShrunk /
+ * conversionUpdatedAt). Coalesce new ?? old at the read boundary so ALL downstream code
+ * (scoring, selection, classifier) only ever sees the new field names. Removed once the
+ * migration has run and old keys no longer exist. Mutates in place (rows are fresh from the driver).
+ */
+function normalizeConversionFields(doc) {
+    if (!isRecord(doc))
+        return doc;
+    const d = doc;
+    if (d['dmConversions'] === undefined && d['conversions'] !== undefined)
+        d['dmConversions'] = d['conversions'];
+    if (d['dmConversionRateShrunk'] === undefined && d['conversionRateShrunk'] !== undefined)
+        d['dmConversionRateShrunk'] = d['conversionRateShrunk'];
+    if (d['dmConversionUpdatedAt'] === undefined && d['conversionUpdatedAt'] !== undefined)
+        d['dmConversionUpdatedAt'] = d['conversionUpdatedAt'];
+    return doc;
+}
 function shouldReplace(options) {
     return isRecord(options) && options['replace'] === true;
 }
@@ -1561,11 +1560,10 @@ function createDefaultIntelligence(channelId, topic = 'general_chat') {
         scoreUpdatedAt: now,
         totalSendsToChannel: 0,
         saturationRate: 0,
-        conversions: 0,
+        dmConversions: 0,
         survivedSends: 0,
-        conversionRateShrunk: 0,
-        paidConversions: 0,
-        conversionUpdatedAt: 0,
+        dmConversionRateShrunk: 0,
+        dmConversionUpdatedAt: 0,
         channelCategory: 'unclassified',
         categoryConfidence: 0,
         categoryUpdatedAt: 0,
@@ -1959,10 +1957,12 @@ class PercentileEngine {
                         $addFields: {
                             _safeFollowupTotal: safeMongoNumber('$followupTotal'),
                             _safeFollowupSuccess: safeMongoNumber('$followupSuccessCount'),
-                            _safeConversions: safeMongoNumber('$conversions'),
+                            // Dual-read: docs written pre-migration carry the old key names. { $ifNull: [new, old] }
+                            // reads the new field, falling back to the old until the one-time DB migration runs.
+                            _safeConversions: safeMongoNumber({ $ifNull: ['$dmConversions', '$conversions'] }),
                             _safePoolAttempts: safeMongoPoolAttemptSum('$messagePool'),
                             _safeSurvivedSends: safeMongoNumber('$survivedSends'),
-                            _safeConversionRateShrunk: safeMongoNumber('$conversionRateShrunk'),
+                            _safeConversionRateShrunk: safeMongoNumber({ $ifNull: ['$dmConversionRateShrunk', '$conversionRateShrunk'] }),
                         },
                     },
                     {
@@ -9474,8 +9474,8 @@ function computeExpectedValue(doc, percentiles, getPercentileRank) {
     let conversionBonus = 0;
     let saturationPenalty = 0;
     if (percentiles && getPercentileRank) {
-        const conversionRate = (0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeSmoothedConversionRate)(safeDoc['conversions'], safeDoc['messagePool']);
-        if ((0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasRecordedConversions)(safeDoc['conversions']) && conversionRate !== null) {
+        const conversionRate = (0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeSmoothedConversionRate)(safeDoc['dmConversions'], safeDoc['messagePool']);
+        if ((0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasRecordedConversions)(safeDoc['dmConversions']) && conversionRate !== null) {
             const conversionRank = safeRank(getPercentileRank, conversionRate, 'conversionRate');
             conversionBonus = conversionRank >= 0.75 ? 0.15 : conversionRank >= 0.50 ? 0.08 : 0;
         }
@@ -9648,8 +9648,8 @@ function selectPromotionChannels(options) {
         }
         else {
             const expectedValue = clamp01(doc.expectedValue, 0.5);
-            const freshness = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.computeConversionFreshness)(doc.conversionUpdatedAt, now);
-            const explorationSample = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.sampleGammaPosteriorRate)(doc.conversions, (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.resolveConversionExposure)(doc), conversionPrior, random);
+            const freshness = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.computeConversionFreshness)(doc.dmConversionUpdatedAt, now);
+            const explorationSample = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.sampleGammaPosteriorRate)(doc.dmConversions, (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.resolveConversionExposure)(doc), conversionPrior, random);
             rankScores.set(channelId, explorationSample * freshness);
             tieBreakScores.set(channelId, expectedValue);
             proven.push(channel);
@@ -9731,7 +9731,7 @@ function normalizeChannel(value) {
     };
 }
 function isExploreCandidate(doc) {
-    return safeNonNegative(doc.survivedSends) <= 0 && safeNonNegative(doc.conversions) <= 0;
+    return safeNonNegative(doc.survivedSends) <= 0 && safeNonNegative(doc.dmConversions) <= 0;
 }
 function isChannelIntelligenceDocument(value) {
     return typeof value === 'object'
@@ -26706,7 +26706,7 @@ class UserDataDtoCrud {
         if (!this.client) {
             logger.log('trying to connect to DB......');
             try {
-                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 10 });
+                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Mongo connection completed after close was requested; closing stale connected client');
                     await connectedClient.close();
@@ -34544,7 +34544,7 @@ async function handleNewUserMessage(event, chatId, firstName) {
                     limit: 100,
                 });
                 logger.debug(`Attribution common chat lookup for ${chatId}: commonChats=${commonChatIds.length}`);
-                const attribution = await attributionService.attributeConversion(commonChatIds, false);
+                const attribution = await attributionService.attributeDmConversion(commonChatIds);
                 const attributedChannels = (Array.isArray(attribution.attributedChannels)
                     ? attribution.attributedChannels
                     : []).map((item) => ({
