@@ -1280,7 +1280,25 @@ class ChannelIntelligenceService {
     // --- Index creation ---
     async ensureIndexes() {
         for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
-            await this.collection.createIndex(definition.spec, definition.options);
+            try {
+                await this.collection.createIndex(definition.spec, definition.options);
+            }
+            catch (error) {
+                // Self-heal a same-NAME index whose spec changed (Mongo rejects it as IndexOptionsConflict /
+                // IndexKeySpecsConflict). This happens across the conversionRateShrunk -> dmConversionRateShrunk
+                // rename: the old idx_category_score still exists on the old key. Drop it by name and recreate
+                // on the new key so boot does NOT depend on running the migration script first.
+                const msg = String(error?.message ?? error);
+                const indexName = definition.options?.name;
+                const isConflict = /same name|IndexOptionsConflict|IndexKeySpecsConflict|already exists with different options/i.test(msg);
+                if (isConflict && indexName && typeof this.collection.dropIndex === 'function') {
+                    await this.collection.dropIndex(indexName);
+                    await this.collection.createIndex(definition.spec, definition.options);
+                }
+                else {
+                    throw error;
+                }
+            }
         }
     }
 }
@@ -24319,6 +24337,11 @@ class TelegramManager {
             return;
         }
         if (!existingState) {
+            // First inbound contact from this user to this promote account = a channel->DM open reaching
+            // the promote side. Count it as a promote-namespace new user (was previously UNWIRED — promote
+            // recordDailyUser had no caller, so all newUsers showed under tg-aut only). active:1 is already
+            // recorded per-inbound in handleEvents, so only newUsers here. Best-effort.
+            void db.recordDailyUser(this.clientDetails.mobile, { newUsers: 1 });
             await this.sendPromoteRouteStageMessage(chatId, 1);
             this.routeStateMap.set(chatId, {
                 stage: 1,
@@ -24371,6 +24394,10 @@ class TelegramManager {
                         logger.info(`${this.clientDetails.mobile.toUpperCase()}:${broadcastName}-${chatId} :: `, event.message.text);
                         try {
                             this.liveMap.set(chatId, Date.now());
+                            // Count an active promote-namespace user on every inbound message (mirrors
+                            // tg-aut's active:1 on every stat write) so userStatsDaily has a real active
+                            // denominator, not just newUsers. Fire-and-forget, per-mobile.
+                            void _dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance().recordDailyUser(this.clientDetails.mobile, { active: 1 });
                             // Promotion-attribution conversion (credits the driving channel), same as
                             // tg-aut. Fire-and-forget so it never delays or blocks the routing flow.
                             void this.attributePromotionConversion(event, chatId);
@@ -25035,9 +25062,9 @@ class AppService {
         const db = _dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
         await db.increaseSuccessCount(clientId, mobile);
     }
-    async updateFailedCount(clientId, mobile) {
+    async updateFailedCount(clientId, mobile, banned = false) {
         const db = _dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
-        await db.increaseFailedCount(clientId, mobile);
+        await db.increaseFailedCount(clientId, mobile, banned);
     }
     async updateMsgCount(clientId) {
         const db = _dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
@@ -26283,10 +26310,12 @@ class UserDataDtoCrud {
         }
     }
     /** See increaseSuccessCount doc — mobile is threaded, never read from process.env. */
-    async increaseFailedCount(clientId, mobile) {
+    async increaseFailedCount(clientId, mobile, banned = false) {
         try {
             const promoteClientStatDb = this.client.db("tgclients").collection('promoteClientStats');
-            void this.recordDailyPromo(mobile, { sent: 1, failed: 1 });
+            // Track USER_BANNED_IN_CHANNEL separately (banned:1) so daily analytics can distinguish an
+            // account-level spam limit from ordinary send failures — mirrors tg-aut's recordDailyPromo.
+            void this.recordDailyPromo(mobile, banned ? { sent: 1, failed: 1, banned: 1 } : { sent: 1, failed: 1 });
             return await promoteClientStatDb.updateOne({ clientId }, { $inc: { failedCount: 1 } });
         }
         catch (error) {
@@ -31148,7 +31177,10 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     async handleFailedMessage(channelInfo, isFollowUp, errorMsg) {
         this.stats.totalFailed++;
         this.stats.failStreak++;
-        _core_app_service__WEBPACK_IMPORTED_MODULE_6__.AppService.getInstance().updateFailedCount(this.clientId, this.mobile);
+        // Flag USER_BANNED_IN_CHANNEL so daily analytics tracks account-level spam limits separately
+        // from ordinary send failures (mirrors tg-aut). errorMsg is in scope here.
+        const isBanned = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_5__.contains)(errorMsg, ['USER_BANNED_IN_CHANNEL']);
+        _core_app_service__WEBPACK_IMPORTED_MODULE_6__.AppService.getInstance().updateFailedCount(this.clientId, this.mobile, isBanned);
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
         const channelId = channelInfo.channelId;
         const cleanErrorMessage = errorMsg || 'Unknown error';
