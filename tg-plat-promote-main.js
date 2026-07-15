@@ -718,7 +718,7 @@ class ChannelIntelligenceService {
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordDeletion(channelId, strategy, survivalMs, isFollowup) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
@@ -749,7 +749,7 @@ class ChannelIntelligenceService {
         }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordFailure(channelId, strategy, errorType) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
@@ -788,10 +788,19 @@ class ChannelIntelligenceService {
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     // --- Conversion recording (ROI) ---
-    /** Record a STAGE-1 channel->DM open (fractional attribution). Writes the new dmConversions key. */
+    /**
+     * Record a STAGE-1 channel->DM open (fractional attribution) into the new dmConversions key.
+     *
+     * ATOMIC ON-WRITE MIGRATION: a plain $inc:{dmConversions} would start from 0 on a pre-rename doc
+     * that still holds the old `conversions` value — orphaning history and persisting a corrupted
+     * near-zero rate that poisons channel selection. Instead this uses an aggregation-pipeline update
+     * that FOLDS the old value in the same write: dmConversions = ($dmConversions ?? $conversions ?? 0)
+     * + weight, and $unset the old key. Each write self-heals one doc, so there is no separate
+     * migration race and no lost window increments.
+     */
     async recordDmConversion(channelId, fractionalWeight) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
         if (!safeChannelId)
@@ -800,15 +809,33 @@ class ChannelIntelligenceService {
         if (weight === null)
             return;
         await this.ensureDoc(safeChannelId);
-        await this.repairNumericFields(safeChannelId, ['dmConversions']);
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, {
-            $inc: { dmConversions: weight },
-            $set: {
-                dmConversionUpdatedAt: Date.now(),
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
+        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, [
+            {
+                $set: {
+                    // Fold any legacy `conversions` value into dmConversions before adding the new weight.
+                    // Base = dmConversions ?? conversions; sanitize to 0 unless it is a real finite number
+                    // (isNumber rejects null/absent; the self-equality check {$eq:[b,b]} rejects NaN — Mongo
+                    // has no $isFinite). The old repairNumericFields did this NaN->0 cleanup before $inc.
+                    // So history is preserved whether the doc was migrated, legacy, or holds a corrupt value.
+                    dmConversions: {
+                        $let: {
+                            vars: { base: { $ifNull: ['$dmConversions', '$conversions'] } },
+                            in: {
+                                $add: [
+                                    { $cond: [{ $and: [{ $isNumber: '$$base' }, { $eq: ['$$base', '$$base'] }] }, '$$base', 0] },
+                                    weight,
+                                ],
+                            },
+                        },
+                    },
+                    dmConversionUpdatedAt: Date.now(),
+                    updatedAt: new Date(),
+                    writeVersion: nextWriteVersion(safeChannelId),
+                },
             },
-        }, { returnDocument: 'after' });
+            // Drop the legacy key now that its value lives in dmConversions (no-op if already absent).
+            { $unset: ['conversions'] },
+        ], { returnDocument: 'after' });
         if (doc) {
             await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
         }
@@ -1014,7 +1041,10 @@ class ChannelIntelligenceService {
             return;
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
             const scoreFields = this.buildDerivedScoreFields(currentDoc, await this.loadPercentilesForDerivedScoring());
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields });
+            // Self-heal the rename on-write: scoreFields writes the new dmConversionRateShrunk; drop the
+            // legacy conversionRateShrunk/conversionUpdatedAt so a doc touched by any outcome-recorder is
+            // fully migrated and never leaves a stale rate for the dual-read to fall back to.
+            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields, $unset: { conversionRateShrunk: '', conversionUpdatedAt: '' } });
             if (isMatchedUpdateResult(result)) {
                 return;
             }
@@ -6461,12 +6491,15 @@ class BasePromotionEngine {
         this.cleanupInterval = null;
         this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_7__.DelayCalculator();
         this.channelHydrationAttempts = new Map();
-        // Per-cycle intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of
-        // loadChannelsForRunner. MEASURED root cause of slow hydration: 300 serial intelligence.get()
-        // findOne calls cost ~107s because each is a separate WAN round-trip to Atlas (~350ms each),
-        // NOT because the query is slow (it's indexed, <1ms server-side). One batch $in collapses the
-        // 300 round-trips into 1. Keyed by normalized channelId; value undefined = "warmed, no doc"
-        // (distinct from key-absent = "not warmed, do a live get()"). Rebuilt each cycle.
+        // Intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of loadChannelsForRunner.
+        // MEASURED root cause of slow hydration: 300 serial intelligence.get() findOne calls cost ~107s
+        // because each is a separate WAN round-trip to Atlas (~350ms each), NOT because the query is slow
+        // (it's indexed, <1ms server-side). One batch $in collapses the 300 round-trips into 1. Keyed by
+        // normalized channelId; value undefined = "warmed, no doc" (distinct from key-absent = "not warmed,
+        // do a live get()"). REPLACED (not cleared) at the start of each loadChannelsForRunner warm; entries
+        // are seeded/updated on writes within a cycle. NOTE: it is NOT nulled at cycle end, so a follow-up
+        // timer firing between cycles may read the previous cycle's snapshot for a channel — acceptable, as
+        // docs are ~cycle-fresh and a miss falls back to a live get(). Do not treat it as strictly per-cycle.
         this.intelligenceDocCache = null;
         this.globalBandit = null;
         this.promotionContext = null;
@@ -6588,12 +6621,17 @@ class BasePromotionEngine {
         if (ids.length === 0)
             return { requested: 0, found: 0, ms: 0 };
         try {
-            const docs = await account.intelligence.batchGet(ids);
+            // Seed warmed-empty placeholders BEFORE the await, then only FILL found docs after — never
+            // re-blank. A follow-up timer that seeds a real doc into the cache during the batchGet await
+            // must not be reverted to undefined by a post-await reset loop (that was a clobber race).
             for (const id of ids)
-                cache.set(id, undefined); // mark all as warmed-empty first
+                if (!cache.has(id))
+                    cache.set(id, undefined);
+            const docs = await account.intelligence.batchGet(ids);
             for (const doc of docs) {
                 const id = this.normalizeChannelId(doc.channelId);
-                if (id)
+                // Only overwrite a still-empty slot; respect a real doc a concurrent seed wrote meanwhile.
+                if (id && !cache.get(id))
                     cache.set(id, doc);
             }
             const ms = Date.now() - t0;
@@ -10066,10 +10104,18 @@ function evaluateChannelPromotionHealth(input, options = {}) {
     // (banned / write-forbidden / no sendability) are already rejected by the earlier gates above; here
     // 'exhausted' only applies a score penalty via contentPenalty() below. Previously this hard-returned
     // promotable:false, which dropped every learning channel in hydration → fleet-wide zero sends.
+    // A channel that is BOTH content-exhausted AND dead (no active pool to promote, and either a
+    // tiny <50-participant channel or a fresh zero-unique-user probe) is genuinely not worth promoting
+    // — it is not a LEARNING candidate (nothing to grow, no audience) and keeps costing sends + ban
+    // exposure. content(40)+dead(20)=60 alone leaves score 40 (>threshold), which re-admitted these
+    // after content_exhausted stopped hard-dropping. This combined penalty pushes exhausted+dead below
+    // threshold WITHOUT affecting learning channels (exhausted + low/active activity stays promotable).
+    const exhaustedDeadPenalty = (contentHealth === 'exhausted' && channelActivity === 'dead') ? 25 : 0;
     const score = Math.max(0, Math.min(100, 100
         - contentPenalty(contentHealth)
         - deletionPenalty(deletionRate)
         - activityPenalty(channelActivity)
+        - exhaustedDeadPenalty
         - recentUniqueUserPenalty({
             recentUniqueUsers,
             participantsCount,
@@ -26120,14 +26166,7 @@ class UserDataDtoCrud {
         }
     }
     async incrementRoutedUserCount() {
-        try {
-            const promoteClientStatDb = this.client.db("tgclients").collection('promoteClientStats');
-            return await promoteClientStatDb.updateOne({ clientId: process.env.clientId }, { $inc: { routedUserCount: 1 } });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error updating client stat");
-            return null;
-        }
+        return this.incrementRoutedUserCountBy(1);
     }
     /**
      * Returns which of the given chatIds have reached the main account (userData with totalCount > 0)
@@ -26156,7 +26195,14 @@ class UserDataDtoCrud {
             if (!Number.isFinite(count) || count <= 0)
                 return null;
             const promoteClientStatDb = this.client.db("tgclients").collection('promoteClientStats');
-            return await promoteClientStatDb.updateOne({ clientId: process.env.clientId }, { $inc: { routedUserCount: count } });
+            // ATOMIC ON-WRITE MIGRATION (convertedCount -> routedUserCount): a plain $inc would start
+            // from 0 on a pre-rename doc still holding convertedCount, and a later blind $rename would
+            // drop the window increments. Fold old->new in the same write via an aggregation pipeline:
+            // routedUserCount = ($routedUserCount ?? $convertedCount ?? 0) + count, then drop the old key.
+            return await promoteClientStatDb.updateOne({ clientId: process.env.clientId }, [
+                { $set: { routedUserCount: { $add: [{ $ifNull: ['$routedUserCount', { $ifNull: ['$convertedCount', 0] }] }, count] } } },
+                { $unset: ['convertedCount'] },
+            ]);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error incrementing routed user count");
