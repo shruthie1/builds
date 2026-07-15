@@ -11605,6 +11605,7 @@ function toIso(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   BotConfig: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig),
 /* harmony export */   ChannelCategory: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory),
 /* harmony export */   EntityCacheManager: () => (/* reexport safe */ _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager),
@@ -11614,46 +11615,46 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   Logger: () => (/* reexport safe */ _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger),
 /* harmony export */   NotificationSeverity: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
 /* harmony export */   RedisClient: () => (/* reexport safe */ _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_16__.RedisClient),
-/* harmony export */   SPAMBOT_PROBE_MIN_INTERVAL_MS: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_29__.SPAMBOT_PROBE_MIN_INTERVAL_MS),
-/* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.SeededRandom),
+/* harmony export */   SPAMBOT_PROBE_MIN_INTERVAL_MS: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_30__.SPAMBOT_PROBE_MIN_INTERVAL_MS),
+/* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.SeededRandom),
 /* harmony export */   __resetTGConfigForTests: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.__resetTGConfigForTests),
-/* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.acceptPhoneCall),
-/* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.aggregateHealthStatus),
-/* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.analyzeText),
-/* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.attemptReverse),
-/* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.attemptReverseFuzzy),
+/* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.acceptPhoneCall),
+/* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.aggregateHealthStatus),
+/* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.analyzeText),
+/* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.attemptReverse),
+/* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.attemptReverseFuzzy),
 /* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.batchGetEntities),
-/* harmony export */   batchObfuscate: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.batchObfuscate),
-/* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_29__.checktghealth),
+/* harmony export */   batchObfuscate: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.batchObfuscate),
+/* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_30__.checktghealth),
 /* harmony export */   cleanupMessageCache: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__.cleanupMessageCache),
-/* harmony export */   confirmPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.confirmPhoneCall),
-/* harmony export */   contains: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_26__.contains),
-/* harmony export */   containsAll: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_26__.containsAll),
+/* harmony export */   confirmPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.confirmPhoneCall),
+/* harmony export */   contains: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_27__.contains),
+/* harmony export */   containsAll: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_27__.containsAll),
 /* harmony export */   createError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.createError),
-/* harmony export */   createHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.createHealthCheck),
-/* harmony export */   createHealthErrorSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.createHealthErrorSnapshot),
-/* harmony export */   createHealthRecoveryPlan: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.createHealthRecoveryPlan),
-/* harmony export */   createHealthSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.createHealthSnapshot),
-/* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.createPhoneCallState),
-/* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.decodePhoneCallData),
-/* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.destroyPhoneCallState),
-/* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.encodePhoneCallData),
+/* harmony export */   createHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.createHealthCheck),
+/* harmony export */   createHealthErrorSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.createHealthErrorSnapshot),
+/* harmony export */   createHealthRecoveryPlan: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.createHealthRecoveryPlan),
+/* harmony export */   createHealthSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.createHealthSnapshot),
+/* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.createPhoneCallState),
+/* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.decodePhoneCallData),
+/* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.destroyPhoneCallState),
+/* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.encodePhoneCallData),
 /* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
 /* harmony export */   extractMessage: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.extractMessage),
 /* harmony export */   fetchWithTimeout: () => (/* reexport safe */ _utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_4__.fetchWithTimeout),
-/* harmony export */   findHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.findHealthCheck),
+/* harmony export */   findHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.findHealthCheck),
 /* harmony export */   formatRichNotification: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification),
-/* harmony export */   generateEmojiFingerprint: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.generateEmojiFingerprint),
+/* harmony export */   generateEmojiFingerprint: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.generateEmojiFingerprint),
 /* harmony export */   generateEmojis: () => (/* reexport safe */ _utils_emoji__WEBPACK_IMPORTED_MODULE_10__.generateEmojis),
 /* harmony export */   generateRealisticConfig: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.generateRealisticConfig),
 /* harmony export */   generateTGConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.generateTGConfig),
 /* harmony export */   generateTGConfigWithProxy: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.generateTGConfigWithProxy),
-/* harmony export */   generateVariants: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.generateVariants),
+/* harmony export */   generateVariants: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.generateVariants),
 /* harmony export */   getAllMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.getAllMobileProxyStatus),
 /* harmony export */   getAllReactionsFromTg: () => (/* reexport safe */ _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_22__.getAllReactionsFromTg),
 /* harmony export */   getAvailablePlatforms: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getAvailablePlatforms),
 /* harmony export */   getBackoffDelay: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.getBackoffDelay),
-/* harmony export */   getConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.getConfig),
+/* harmony export */   getConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.getConfig),
 /* harmony export */   getCredentialsForMobile: () => (/* reexport safe */ _utils_tg_apps__WEBPACK_IMPORTED_MODULE_14__.getCredentialsForMobile),
 /* harmony export */   getExpectedAuthFingerprint: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getExpectedAuthFingerprint),
 /* harmony export */   getMessages: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__.getMessages),
@@ -11669,55 +11670,56 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getTelegramCredentialPool: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getTelegramCredentialPool),
 /* harmony export */   getTelegramCredentialsForMobile: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getTelegramCredentialsForMobile),
 /* harmony export */   handleMobileProxyFailure: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.handleMobileProxyFailure),
-/* harmony export */   healthCheckHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.healthCheckHttpStatus),
-/* harmony export */   healthErrorMessage: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.healthErrorMessage),
-/* harmony export */   healthHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.healthHttpStatus),
-/* harmony export */   healthOwnerForComponent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.healthOwnerForComponent),
-/* harmony export */   homoglyphMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.homoglyphMap),
+/* harmony export */   healthCheckHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.healthCheckHttpStatus),
+/* harmony export */   healthErrorMessage: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.healthErrorMessage),
+/* harmony export */   healthHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.healthHttpStatus),
+/* harmony export */   healthOwnerForComponent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.healthOwnerForComponent),
+/* harmony export */   homoglyphMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.homoglyphMap),
 /* harmony export */   invalidateConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.invalidateConfig),
-/* harmony export */   invisibleChars: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.invisibleChars),
+/* harmony export */   invisibleChars: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.invisibleChars),
 /* harmony export */   isAuthAllowlisted: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.isAuthAllowlisted),
 /* harmony export */   isAuthError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isAuthError),
 /* harmony export */   isAuthFingerprintMatch: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.isAuthFingerprintMatch),
 /* harmony export */   isAxiosError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.isAxiosError),
 /* harmony export */   isChannelRestricted: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isChannelRestricted),
 /* harmony export */   isFloodWait: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isFloodWait),
-/* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.isHealthCheckActionable),
+/* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.isHealthCheckActionable),
 /* harmony export */   isPeerFlood: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isPeerFlood),
-/* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_27__["default"]),
+/* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_28__["default"]),
 /* harmony export */   isPermanentTelegramError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isPermanentTelegramError),
 /* harmony export */   isReactionInvalid: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isReactionInvalid),
 /* harmony export */   isRetryable: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isRetryable),
 /* harmony export */   isSocksError: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.isSocksError),
 /* harmony export */   isTransient: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__.isTransient),
 /* harmony export */   loadGeminiKeys: () => (/* reexport safe */ _utils_gemini_keys__WEBPACK_IMPORTED_MODULE_5__.loadGeminiKeys),
-/* harmony export */   millisecondsSince: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.millisecondsSince),
-/* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.numberMap),
-/* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.obfuscateText),
+/* harmony export */   millisecondsSince: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.millisecondsSince),
+/* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.numberMap),
+/* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.obfuscateText),
 /* harmony export */   parseError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError),
 /* harmony export */   parseTelegramError: () => (/* reexport safe */ _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError),
-/* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_30__.percent),
+/* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_31__.percent),
+/* harmony export */   pickActiveChannelWrite: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.pickActiveChannelWrite),
 /* harmony export */   quickGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.quickGetEntity),
 /* harmony export */   removeProxyMapping: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.removeProxyMapping),
-/* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__.requestPhoneCall),
+/* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.requestPhoneCall),
 /* harmony export */   resetMobileIdentity: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.resetMobileIdentity),
 /* harmony export */   rotateProxy: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.rotateProxy),
 /* harmony export */   safeGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.safeGetEntity),
 /* harmony export */   safeStringify: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.safeStringify),
 /* harmony export */   scheduleUnrefTimeout: () => (/* reexport safe */ _utils_timers__WEBPACK_IMPORTED_MODULE_9__.scheduleUnrefTimeout),
 /* harmony export */   selectRandomElements: () => (/* reexport safe */ _utils_random__WEBPACK_IMPORTED_MODULE_11__.selectRandomElements),
-/* harmony export */   sendMessageWithTimeout: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_28__.sendMessageWithTimeout),
-/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_28__.sendMessageWithTimeoutOrThrow),
+/* harmony export */   sendMessageWithTimeout: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_29__.sendMessageWithTimeout),
+/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_29__.sendMessageWithTimeoutOrThrow),
 /* harmony export */   setAllFailedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setAllFailedCallback),
 /* harmony export */   setBeforeProxyRestartCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setBeforeProxyRestartCallback),
 /* harmony export */   setProxyRotatedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setProxyRotatedCallback),
-/* harmony export */   specialCharMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.specialCharMap),
+/* harmony export */   specialCharMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.specialCharMap),
 /* harmony export */   stableHash: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.stableHash),
 /* harmony export */   stopHealthMonitor: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.stopHealthMonitor),
-/* harmony export */   testReverseCoverage: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.testReverseCoverage),
+/* harmony export */   testReverseCoverage: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.testReverseCoverage),
 /* harmony export */   tryGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.tryGetEntity),
 /* harmony export */   unrefTimer: () => (/* reexport safe */ _utils_timers__WEBPACK_IMPORTED_MODULE_9__.unrefTimer),
-/* harmony export */   validateConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__.validateConfig),
+/* harmony export */   validateConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.validateConfig),
 /* harmony export */   withBackoff: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.withBackoff),
 /* harmony export */   withTimeout: () => (/* reexport safe */ _utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)
 /* harmony export */ });
@@ -11745,16 +11747,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
 /* harmony import */ var _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./telegram-utils/getAllReactions */ "../../packages/tg-core/src/telegram-utils/getAllReactions.ts");
 /* harmony import */ var _types_telegram_errors__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./types/telegram-errors */ "../../packages/tg-core/src/types/telegram-errors.ts");
-/* harmony import */ var _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
-/* harmony import */ var _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
-/* harmony import */ var _utils_contains__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _health__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./types/activeChannel */ "../../packages/tg-core/src/types/activeChannel.ts");
+/* harmony import */ var _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
+/* harmony import */ var _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
+/* harmony import */ var _utils_contains__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
+/* harmony import */ var _health__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./health */ "../../packages/tg-core/src/health.ts");
 // @tg/core — shared leaf infrastructure barrel.
 // NOTE: tg-apps.ts and tg-config.ts BOTH export `ITelegramCredentials`. tg-config is the canonical
 // source; we re-export tg-apps without its (duplicate) ITelegramCredentials to avoid a name clash.
+
 
 
 
@@ -12812,6 +12816,54 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
         baseDelay: 1000,
         maxDelay: 5000,
     });
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/types/activeChannel.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/types/activeChannel.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* binding */ ACTIVE_CHANNEL_WRITABLE_KEYS),
+/* harmony export */   pickActiveChannelWrite: () => (/* binding */ pickActiveChannelWrite)
+/* harmony export */ });
+/**
+ * The exhaustive allow-list of keys that may be PERSISTED to activeChannels. Any key not here is
+ * dropped at the write boundary — this is what stops raw GramJS entity fields from leaking in.
+ * `channelId` is intentionally excluded (it is the filter key / $setOnInsert, never a mutable $set).
+ */
+const ACTIVE_CHANNEL_WRITABLE_KEYS = [
+    'title', 'username', 'participantsCount', 'broadcast', 'restricted', 'canSendMsgs', 'sendMessages',
+    'banned', 'forbidden', 'reactRestricted', 'private', 'availableMsgs', 'megagroup', 'sendPlain',
+    'accessHash', 'bannedAt', 'tempBan', 'reactRestrictedAt', 'freeformDeletedCount', 'followUpDeletedCount',
+    'successMsgCount', 'failureMsgCount', 'followupMsgSuccessCount', 'followupMsgFailureCount', 'deletedCount',
+    'lastMessageTime', 'messageIndex', 'messageId', 'recentUniqueUsers', 'lastUniqueUserCheckAt', 'message',
+    'lastErrorType', 'createdAt', 'updatedAt', 'manualUpdatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
+    'lastHydrationStatus', 'lastHydrationReason', 'lastBlockerRepairAt', 'lastBlockerRepairReason',
+];
+const WRITABLE_KEY_SET = new Set(ACTIVE_CHANNEL_WRITABLE_KEYS);
+/**
+ * Whitelist a would-be activeChannels write payload down to ONLY persisted keys, dropping any unknown
+ * key (e.g. raw GramJS entity fields: flags, defaultBannedRights, gigagroup, className, photo, scam…).
+ * Route EVERY activeChannels $set through this. Keys with `undefined` values are dropped (so a partial
+ * update never writes undefined); `null` is preserved (a meaningful clear, e.g. bannedAt: null).
+ */
+function pickActiveChannelWrite(data) {
+    const out = {};
+    if (data && typeof data === 'object') {
+        for (const [key, value] of Object.entries(data)) {
+            if (WRITABLE_KEY_SET.has(key) && value !== undefined) {
+                out[key] = value;
+            }
+        }
+    }
+    return out;
 }
 
 
@@ -26685,19 +26737,21 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   user: () => (/* binding */ user)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
-/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! mongodb */ "mongodb");
-/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core */ "../../packages/tg-core/src/index.ts");
+/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! mongodb */ "mongodb");
+/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:dbservice");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
     totalCount: "totalCount",
@@ -26785,7 +26839,7 @@ class UserDataDtoCrud {
         if (!this.client) {
             logger.log('trying to connect to DB......');
             try {
-                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
+                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_2__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Mongo connection completed after close was requested; closing stale connected client');
                     await connectedClient.close();
@@ -26822,7 +26876,7 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
@@ -26835,7 +26889,7 @@ class UserDataDtoCrud {
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error connecting to MongoDB");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error connecting to MongoDB");
                 await this.closeConnection();
                 return false;
             }
@@ -26855,7 +26909,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} bandit=${promotionFlags.messageBandit} locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -26902,7 +26956,7 @@ class UserDataDtoCrud {
                 await this.closePromotionRedis();
                 throw error;
             }
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.createPromotionRuntime)({
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.createPromotionRuntime)({
                 channelIntelligenceCollection: this.channelIntelligenceDb,
                 activeChannelCollection: this.activeChannelDb,
                 redis,
@@ -26913,7 +26967,7 @@ class UserDataDtoCrud {
             logger.log('Promotion runtime initialized; collections=channelIntelligence,activeChannels');
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Promotion runtime initialization failed');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Promotion runtime initialization failed');
             await this.closePromotionRedis();
             throw error;
         }
@@ -26927,7 +26981,7 @@ class UserDataDtoCrud {
             redis.disconnect?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error closing promotion Redis connection', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error closing promotion Redis connection', false);
         }
     }
     async refreshPromotionRuntime() {
@@ -26936,7 +26990,7 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
         await this.ensurePromoteStatsInitialized();
         return true;
@@ -26991,7 +27045,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching texted client count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
     }
@@ -27012,7 +27066,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error checking payment status");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error checking payment status");
         }
         return resp;
     }
@@ -27043,7 +27097,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error ensuring daily analytics indexes", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error ensuring daily analytics indexes", false);
         }
     }
     todayKey() {
@@ -27069,7 +27123,7 @@ class UserDataDtoCrud {
             }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error recording daily analytics (${collection})`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Error recording daily analytics (${collection})`, false);
         }
     }
     /**
@@ -27161,7 +27215,7 @@ class UserDataDtoCrud {
                     // Store timeout reference and unref to allow process exit if needed
                     const limitTimeout = setTimeout(() => {
                         void this.updateSingleKey(chatId, user.limitTime, Date.now() + (2 * 60 * 60 * 1000))
-                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
+                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
                     }, 20000);
                     limitTimeout.unref();
                 }
@@ -27177,7 +27231,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Creating/updating stats", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Creating/updating stats", false);
         }
     }
     // =========================================================================
@@ -27431,7 +27485,7 @@ class UserDataDtoCrud {
             return updatedDocument;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating promotion stats");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating promotion stats");
         }
     }
     async activatePromotions() {
@@ -27530,7 +27584,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching paid users");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching paid users");
             return ({ total: 0, new: 0 });
         }
     }
@@ -27561,7 +27615,7 @@ class UserDataDtoCrud {
             const result = await this.statsDb.deleteMany({ chatId, profile: process.env.dbcoll, client: process.env.clientId });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error removing single stat");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error removing single stat");
         }
     }
     async readRecentPaidPpl() {
@@ -27692,7 +27746,7 @@ class UserDataDtoCrud {
             logger.log(`Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, Upserts: ${result.upsertedCount}`);
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(e, "Failed to Bulk update Channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, "Failed to Bulk update Channels");
         }
     }
     async enforceActiveChannelSafetyState() {
@@ -27782,7 +27836,7 @@ class UserDataDtoCrud {
             return result || await this.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating UserDataDto", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating UserDataDto", true);
             return await this.read(chatId);
         }
     }
@@ -27803,7 +27857,7 @@ class UserDataDtoCrud {
             return result || await this.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating single key", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating single key", true);
             logger.error(`Error updating single key for chatId: ${chatId}`, error);
             return await this.read(chatId);
         }
@@ -27851,13 +27905,13 @@ class UserDataDtoCrud {
             return { newUser: wasCreated, userDetails };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error creating or updating UserDataDto");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error creating or updating UserDataDto");
             let fallback;
             try {
                 fallback = await this.read(chatId);
             }
             catch (readError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
             }
             const safeDetails = fallback || existing || (newUser ? { ...newUser, totalCount: 0 } : { ...USER_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() });
             return { newUser: !!newUser, userDetails: safeDetails };
@@ -27898,7 +27952,7 @@ class UserDataDtoCrud {
             return result.acknowledged;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error updating promotion attribution');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error updating promotion attribution');
             return false;
         }
     }
@@ -27931,7 +27985,7 @@ class UserDataDtoCrud {
             return await channelDb.findOne({});
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(e, "Error fetching promote messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, "Error fetching promote messages");
         }
     }
     async updateClient(filter, data) {
@@ -27940,7 +27994,7 @@ class UserDataDtoCrud {
             return await clientsDb.updateOne(filter, { $set: data });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating Client");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating Client");
         }
     }
     async updateBufferClientAssignment(mobile, update) {
@@ -27950,7 +28004,7 @@ class UserDataDtoCrud {
             await bufferClientsDb.updateOne({ mobile }, { $set: update });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating buffer client persona assignment");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating buffer client persona assignment");
             logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`, error instanceof Error ? error.message : String(error));
         }
     }
@@ -27960,7 +28014,7 @@ class UserDataDtoCrud {
             const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
             const doc = await bufferClientsDb.findOne({ mobile });
             if (doc) {
-                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
+                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_5__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
             }
             else {
                 logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
@@ -27968,7 +28022,7 @@ class UserDataDtoCrud {
             return doc;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching buffer client doc");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching buffer client doc");
             logger.error(`[Persona] Failed to load buffer client doc for ${mobile}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -27996,7 +28050,7 @@ class UserDataDtoCrud {
             return pool;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching buffer persona pool");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching buffer persona pool");
             logger.error(`[Persona] Failed to load buffer persona pool for ${clientId}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -28039,7 +28093,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error fetching local persona assignment snapshot", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error fetching local persona assignment snapshot", false);
             logger.warn(`[Persona] Failed to load local assignment snapshot for ${clientId}`, error instanceof Error ? error.message : String(error));
         }
         try {
@@ -28084,7 +28138,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error removing from available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error removing from available messages");
             throw error;
         }
     }
@@ -28103,7 +28157,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error adding to available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error adding to available messages");
             throw error;
         }
     }
@@ -28126,7 +28180,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating timestamps");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating timestamps");
         }
     }
     // async getAvgCalculatedChannels() {
@@ -28176,7 +28230,7 @@ class UserDataDtoCrud {
             return docs.map((doc) => doc.channelId.toString());
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting restricted channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error getting restricted channels");
         }
     }
     async updateActiveChannel(filter, data) {
@@ -28289,8 +28343,10 @@ class UserDataDtoCrud {
             delete setOnInsert[key];
         }
         const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, {
+            // STRICT WRITE BOUNDARY: whitelist to canonical persisted keys so unknown/raw-entity
+            // keys can never persist (see @tg/core ACTIVE_CHANNEL_WRITABLE_KEYS).
             $set: {
-                ...normalizedData,
+                ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.pickActiveChannelWrite)(normalizedData),
                 updatedAt: new Date(),
                 manualUpdatedAt: new Date()
             },
@@ -28412,7 +28468,7 @@ class UserDataDtoCrud {
             }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "RemoveChannelMsgErr");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "RemoveChannelMsgErr");
             throw error;
         }
     }
@@ -28433,7 +28489,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating success message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating success message count");
             throw error;
         }
     }
@@ -28454,7 +28510,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating failure message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating failure message count");
             throw error;
         }
     }
@@ -28475,7 +28531,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating follow-up success count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating follow-up success count");
             throw error;
         }
     }
@@ -28496,7 +28552,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error updating follow-up failure count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating follow-up failure count");
             throw error;
         }
     }
@@ -28728,12 +28784,12 @@ class UserDataDtoCrud {
                 logger.log('MongoDB connection closed.');
             }
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_5__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.reset();
             await this.client?.close();
             this.client = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error closing MongoDB connection");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error closing MongoDB connection");
         }
     }
 }
@@ -30727,6 +30783,8 @@ const POST_SETUPCLIENT_SHUTDOWN_DELAY_MS = 60000;
 function getPeriodicMsgStats() {
     return msgStats;
 }
+// IChannel (the activeChannels doc shape) is now the single canonical type in @tg/core — see
+// packages/tg-core/src/types/activeChannel.ts. Import it from '@tg/core'; do not redefine it here.
 // selectRandomElements moved to @tg/core/utils/random (shared); imported above for internal use.
 // Permanent-failure handling lives in ./permanent-failure (fully independent module). Imported here
 // only for the internal caller below; all other modules import it directly from ./permanent-failure.
