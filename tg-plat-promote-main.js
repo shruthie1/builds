@@ -815,14 +815,18 @@ class ChannelIntelligenceService {
                     // Fold any legacy `conversions` value into dmConversions before adding the new weight.
                     // Base = dmConversions ?? conversions; sanitize to 0 unless it is a real finite number
                     // (isNumber rejects null/absent; the self-equality check {$eq:[b,b]} rejects NaN — Mongo
-                    // has no $isFinite). The old repairNumericFields did this NaN->0 cleanup before $inc.
-                    // So history is preserved whether the doc was migrated, legacy, or holds a corrupt value.
+                    // The old repairNumericFields did this non-finite/negative -> 0 cleanup before $inc.
+                    // Base = dmConversions ?? conversions; then floor at >0. IMPORTANT: MongoDB aggregation
+                    // comparisons use BSON total-order, where NaN sorts BELOW every number — so {$gt:[NaN,0]}
+                    // is false and NaN maps to 0 (a self-equality {$eq:[NaN,NaN]} guard does NOT work: BSON
+                    // $eq treats NaN==NaN as true). This also floors negatives to 0. History preserved whether
+                    // the doc was migrated, legacy, or holds a corrupt NaN value.
                     dmConversions: {
                         $let: {
                             vars: { base: { $ifNull: ['$dmConversions', '$conversions'] } },
                             in: {
                                 $add: [
-                                    { $cond: [{ $and: [{ $isNumber: '$$base' }, { $eq: ['$$base', '$$base'] }] }, '$$base', 0] },
+                                    { $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] },
                                     weight,
                                 ],
                             },
@@ -26198,9 +26202,20 @@ class UserDataDtoCrud {
             // ATOMIC ON-WRITE MIGRATION (convertedCount -> routedUserCount): a plain $inc would start
             // from 0 on a pre-rename doc still holding convertedCount, and a later blind $rename would
             // drop the window increments. Fold old->new in the same write via an aggregation pipeline:
-            // routedUserCount = ($routedUserCount ?? $convertedCount ?? 0) + count, then drop the old key.
+            // routedUserCount = floor0($routedUserCount ?? $convertedCount) + count, then drop old key.
+            // {$gt:[base,0]} floors NaN/negative -> 0 (BSON NaN sorts below 0, so $gt is false) so a
+            // corrupt legacy value can't poison the counter — matching the channelIntelligence fold.
             return await promoteClientStatDb.updateOne({ clientId: process.env.clientId }, [
-                { $set: { routedUserCount: { $add: [{ $ifNull: ['$routedUserCount', { $ifNull: ['$convertedCount', 0] }] }, count] } } },
+                {
+                    $set: {
+                        routedUserCount: {
+                            $let: {
+                                vars: { base: { $ifNull: ['$routedUserCount', '$convertedCount'] } },
+                                in: { $add: [{ $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] }, count] },
+                            },
+                        },
+                    },
+                },
                 { $unset: ['convertedCount'] },
             ]);
         }
