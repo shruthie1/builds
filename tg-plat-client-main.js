@@ -819,14 +819,18 @@ class ChannelIntelligenceService {
                     // Fold any legacy `conversions` value into dmConversions before adding the new weight.
                     // Base = dmConversions ?? conversions; sanitize to 0 unless it is a real finite number
                     // (isNumber rejects null/absent; the self-equality check {$eq:[b,b]} rejects NaN — Mongo
-                    // has no $isFinite). The old repairNumericFields did this NaN->0 cleanup before $inc.
-                    // So history is preserved whether the doc was migrated, legacy, or holds a corrupt value.
+                    // The old repairNumericFields did this non-finite/negative -> 0 cleanup before $inc.
+                    // Base = dmConversions ?? conversions; then floor at >0. IMPORTANT: MongoDB aggregation
+                    // comparisons use BSON total-order, where NaN sorts BELOW every number — so {$gt:[NaN,0]}
+                    // is false and NaN maps to 0 (a self-equality {$eq:[NaN,NaN]} guard does NOT work: BSON
+                    // $eq treats NaN==NaN as true). This also floors negatives to 0. History preserved whether
+                    // the doc was migrated, legacy, or holds a corrupt NaN value.
                     dmConversions: {
                         $let: {
                             vars: { base: { $ifNull: ['$dmConversions', '$conversions'] } },
                             in: {
                                 $add: [
-                                    { $cond: [{ $and: [{ $isNumber: '$$base' }, { $eq: ['$$base', '$$base'] }] }, '$$base', 0] },
+                                    { $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] },
                                     weight,
                                 ],
                             },
