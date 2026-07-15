@@ -1284,7 +1284,25 @@ class ChannelIntelligenceService {
     // --- Index creation ---
     async ensureIndexes() {
         for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
-            await this.collection.createIndex(definition.spec, definition.options);
+            try {
+                await this.collection.createIndex(definition.spec, definition.options);
+            }
+            catch (error) {
+                // Self-heal a same-NAME index whose spec changed (Mongo rejects it as IndexOptionsConflict /
+                // IndexKeySpecsConflict). This happens across the conversionRateShrunk -> dmConversionRateShrunk
+                // rename: the old idx_category_score still exists on the old key. Drop it by name and recreate
+                // on the new key so boot does NOT depend on running the migration script first.
+                const msg = String(error?.message ?? error);
+                const indexName = definition.options?.name;
+                const isConflict = /same name|IndexOptionsConflict|IndexKeySpecsConflict|already exists with different options/i.test(msg);
+                if (isConflict && indexName && typeof this.collection.dropIndex === 'function') {
+                    await this.collection.dropIndex(indexName);
+                    await this.collection.createIndex(definition.spec, definition.options);
+                }
+                else {
+                    throw error;
+                }
+            }
         }
     }
 }
@@ -25966,6 +25984,17 @@ class TelegramManager {
                 instanceName: this.clientId,
                 store: _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance(),
                 onAccountError: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_21__.startNewUserProcess)(error, `Reactions:${this.clientId}`),
+                // Per-mobile daily reaction analytics (best-effort). tg-aut previously left
+                // reactionStatsDaily empty — the collection was created but never written. Mirrors
+                // promote-clients: record success/failed/restricted/floods into reactionStatsDaily.
+                onReactionOutcome: (outcome) => {
+                    void _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().recordDailyReaction({
+                        success: outcome === 'success' ? 1 : 0,
+                        failed: outcome === 'failed' ? 1 : 0,
+                        restricted: outcome === 'restricted' ? 1 : 0,
+                        floods: outcome === 'flood' ? 1 : 0,
+                    }, this.mobile);
+                },
             });
             logger.warn(`[${this.mobile}] ReactionService recreated by health recovery`);
             return true;
@@ -27023,6 +27052,24 @@ class UserDataDtoCrud {
             inc.revenue = fields.revenue;
         if (Object.keys(inc).length)
             await this.recordDaily('userStatsDaily', inc, mobile);
+    }
+    /**
+     * Daily reaction analytics. tg-aut reacts (the shared ReactionService loop + direct sendReaction),
+     * but this collection was created empty and NEVER written — a namespace hole. Wired via the
+     * ReactionService onReactionOutcome hook (see TelegramManager.ensureReactionService). Per-mobile.
+     */
+    async recordDailyReaction(fields, mobile = process.env.mobile) {
+        const inc = {};
+        if (fields.success)
+            inc.success = fields.success;
+        if (fields.failed)
+            inc.failed = fields.failed;
+        if (fields.restricted)
+            inc.restricted = fields.restricted;
+        if (fields.floods)
+            inc.floods = fields.floods;
+        if (Object.keys(inc).length)
+            await this.recordDaily('reactionStatsDaily', inc, mobile);
     }
     async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) {
         // Daily funnel analytics (best-effort, bounded via TTL). active on every stat write;
@@ -32015,7 +32062,10 @@ async function initiateCall(amount, userDetails, reason = "Default") {
     const updatedDetails = await db.update(chatId, updatedUserDetails);
     // Update the passed userDetails object to keep it in sync
     Object.assign(userDetails, updatedDetails);
-    await db.createOrUpdateStats(chatId, null, adjustedAmount, true, userDetails.demoGiven, updatedUserDetails.paidReply, userDetails.secondShow, true);
+    await db.createOrUpdateStats(chatId, null, adjustedAmount, 
+    // newUser=false: call initiation runs for an EXISTING (paying) user, not a first contact.
+    // Passing true here double-counted userStatsDaily.newUsers. active/paid/revenue still record.
+    false, userDetails.demoGiven, updatedUserDetails.paidReply, userDetails.secondShow, true);
     logger.log(`Call Initiated ${userDetails.payAmount},${userDetails.videos?.length ?? 0}`);
     if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
         logger.log(`[CALL] Proceeding with call - chatId: ${chatId}, amount: ${adjustedAmount}, reason: ${reason}`);
