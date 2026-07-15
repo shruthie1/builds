@@ -722,7 +722,7 @@ class ChannelIntelligenceService {
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordDeletion(channelId, strategy, survivalMs, isFollowup) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
@@ -753,7 +753,7 @@ class ChannelIntelligenceService {
         }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordFailure(channelId, strategy, errorType) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
@@ -792,10 +792,19 @@ class ChannelIntelligenceService {
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
         if (!doc)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, doc);
+        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     // --- Conversion recording (ROI) ---
-    /** Record a STAGE-1 channel->DM open (fractional attribution). Writes the new dmConversions key. */
+    /**
+     * Record a STAGE-1 channel->DM open (fractional attribution) into the new dmConversions key.
+     *
+     * ATOMIC ON-WRITE MIGRATION: a plain $inc:{dmConversions} would start from 0 on a pre-rename doc
+     * that still holds the old `conversions` value — orphaning history and persisting a corrupted
+     * near-zero rate that poisons channel selection. Instead this uses an aggregation-pipeline update
+     * that FOLDS the old value in the same write: dmConversions = ($dmConversions ?? $conversions ?? 0)
+     * + weight, and $unset the old key. Each write self-heals one doc, so there is no separate
+     * migration race and no lost window increments.
+     */
     async recordDmConversion(channelId, fractionalWeight) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
         if (!safeChannelId)
@@ -804,15 +813,33 @@ class ChannelIntelligenceService {
         if (weight === null)
             return;
         await this.ensureDoc(safeChannelId);
-        await this.repairNumericFields(safeChannelId, ['dmConversions']);
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, {
-            $inc: { dmConversions: weight },
-            $set: {
-                dmConversionUpdatedAt: Date.now(),
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
+        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, [
+            {
+                $set: {
+                    // Fold any legacy `conversions` value into dmConversions before adding the new weight.
+                    // Base = dmConversions ?? conversions; sanitize to 0 unless it is a real finite number
+                    // (isNumber rejects null/absent; the self-equality check {$eq:[b,b]} rejects NaN — Mongo
+                    // has no $isFinite). The old repairNumericFields did this NaN->0 cleanup before $inc.
+                    // So history is preserved whether the doc was migrated, legacy, or holds a corrupt value.
+                    dmConversions: {
+                        $let: {
+                            vars: { base: { $ifNull: ['$dmConversions', '$conversions'] } },
+                            in: {
+                                $add: [
+                                    { $cond: [{ $and: [{ $isNumber: '$$base' }, { $eq: ['$$base', '$$base'] }] }, '$$base', 0] },
+                                    weight,
+                                ],
+                            },
+                        },
+                    },
+                    dmConversionUpdatedAt: Date.now(),
+                    updatedAt: new Date(),
+                    writeVersion: nextWriteVersion(safeChannelId),
+                },
             },
-        }, { returnDocument: 'after' });
+            // Drop the legacy key now that its value lives in dmConversions (no-op if already absent).
+            { $unset: ['conversions'] },
+        ], { returnDocument: 'after' });
         if (doc) {
             await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
         }
@@ -1018,7 +1045,10 @@ class ChannelIntelligenceService {
             return;
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
             const scoreFields = this.buildDerivedScoreFields(currentDoc, await this.loadPercentilesForDerivedScoring());
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields });
+            // Self-heal the rename on-write: scoreFields writes the new dmConversionRateShrunk; drop the
+            // legacy conversionRateShrunk/conversionUpdatedAt so a doc touched by any outcome-recorder is
+            // fully migrated and never leaves a stale rate for the dual-read to fall back to.
+            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields, $unset: { conversionRateShrunk: '', conversionUpdatedAt: '' } });
             if (isMatchedUpdateResult(result)) {
                 return;
             }
@@ -6500,12 +6530,15 @@ class BasePromotionEngine {
         this.cleanupInterval = null;
         this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_7__.DelayCalculator();
         this.channelHydrationAttempts = new Map();
-        // Per-cycle intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of
-        // loadChannelsForRunner. MEASURED root cause of slow hydration: 300 serial intelligence.get()
-        // findOne calls cost ~107s because each is a separate WAN round-trip to Atlas (~350ms each),
-        // NOT because the query is slow (it's indexed, <1ms server-side). One batch $in collapses the
-        // 300 round-trips into 1. Keyed by normalized channelId; value undefined = "warmed, no doc"
-        // (distinct from key-absent = "not warmed, do a live get()"). Rebuilt each cycle.
+        // Intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of loadChannelsForRunner.
+        // MEASURED root cause of slow hydration: 300 serial intelligence.get() findOne calls cost ~107s
+        // because each is a separate WAN round-trip to Atlas (~350ms each), NOT because the query is slow
+        // (it's indexed, <1ms server-side). One batch $in collapses the 300 round-trips into 1. Keyed by
+        // normalized channelId; value undefined = "warmed, no doc" (distinct from key-absent = "not warmed,
+        // do a live get()"). REPLACED (not cleared) at the start of each loadChannelsForRunner warm; entries
+        // are seeded/updated on writes within a cycle. NOTE: it is NOT nulled at cycle end, so a follow-up
+        // timer firing between cycles may read the previous cycle's snapshot for a channel — acceptable, as
+        // docs are ~cycle-fresh and a miss falls back to a live get(). Do not treat it as strictly per-cycle.
         this.intelligenceDocCache = null;
         this.globalBandit = null;
         this.promotionContext = null;
@@ -6627,12 +6660,17 @@ class BasePromotionEngine {
         if (ids.length === 0)
             return { requested: 0, found: 0, ms: 0 };
         try {
-            const docs = await account.intelligence.batchGet(ids);
+            // Seed warmed-empty placeholders BEFORE the await, then only FILL found docs after — never
+            // re-blank. A follow-up timer that seeds a real doc into the cache during the batchGet await
+            // must not be reverted to undefined by a post-await reset loop (that was a clobber race).
             for (const id of ids)
-                cache.set(id, undefined); // mark all as warmed-empty first
+                if (!cache.has(id))
+                    cache.set(id, undefined);
+            const docs = await account.intelligence.batchGet(ids);
             for (const doc of docs) {
                 const id = this.normalizeChannelId(doc.channelId);
-                if (id)
+                // Only overwrite a still-empty slot; respect a real doc a concurrent seed wrote meanwhile.
+                if (id && !cache.get(id))
                     cache.set(id, doc);
             }
             const ms = Date.now() - t0;
@@ -10126,10 +10164,18 @@ function evaluateChannelPromotionHealth(input, options = {}) {
     // (banned / write-forbidden / no sendability) are already rejected by the earlier gates above; here
     // 'exhausted' only applies a score penalty via contentPenalty() below. Previously this hard-returned
     // promotable:false, which dropped every learning channel in hydration → fleet-wide zero sends.
+    // A channel that is BOTH content-exhausted AND dead (no active pool to promote, and either a
+    // tiny <50-participant channel or a fresh zero-unique-user probe) is genuinely not worth promoting
+    // — it is not a LEARNING candidate (nothing to grow, no audience) and keeps costing sends + ban
+    // exposure. content(40)+dead(20)=60 alone leaves score 40 (>threshold), which re-admitted these
+    // after content_exhausted stopped hard-dropping. This combined penalty pushes exhausted+dead below
+    // threshold WITHOUT affecting learning channels (exhausted + low/active activity stays promotable).
+    const exhaustedDeadPenalty = (contentHealth === 'exhausted' && channelActivity === 'dead') ? 25 : 0;
     const score = Math.max(0, Math.min(100, 100
         - contentPenalty(contentHealth)
         - deletionPenalty(deletionRate)
         - activityPenalty(channelActivity)
+        - exhaustedDeadPenalty
         - recentUniqueUserPenalty({
             recentUniqueUsers,
             participantsCount,
@@ -27130,6 +27176,38 @@ class UserDataDtoCrud {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Creating/updating stats", false);
         }
     }
+    // =========================================================================
+    //  Named funnel-transition helpers.
+    //  createOrUpdateStats has a positional-boolean signature
+    //  (name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) that is easy to
+    //  mis-call — a wrong boolean slot once double-counted newUsers (CallInitiationService).
+    //  These wrappers encode each real funnel transition ONCE so call sites read by intent and
+    //  the arg order lives in a single place. Behavior is identical — they just call
+    //  createOrUpdateStats with the correct args.
+    // =========================================================================
+    /** First inbound contact from a brand-new user (the ONLY newUser=true transition). */
+    async recordNewUserContact(chatId, name) {
+        await this.createOrUpdateStats(chatId, name, 0, true, false, true, false);
+    }
+    /** A returning/existing user messaged — refresh their current funnel state (no new-user count). */
+    async recordExistingUserActivity(chatId, name, state) {
+        await this.createOrUpdateStats(chatId, name, state.payAmount ?? 0, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
+    }
+    /** Demo given (₹10 tier): demoGiven+paidReply, secondShow=false, didPay left unset. */
+    async recordDemoGiven(chatId, name = 'any', payAmount = 10) {
+        await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, false);
+    }
+    /**
+     * Full / second show (₹150 tier): demoGiven+paidReply+secondShow set. Preserves the original
+     * call exactly — didPay is left UNSET (undefined), so this does NOT itself mark a paid conversion.
+     */
+    async recordFullShow(chatId, name = 'any', payAmount = 150) {
+        await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, true);
+    }
+    /** Call initiated for an existing paying user (didPay=true, never a new user). */
+    async recordCallInitiated(chatId, payAmount, state) {
+        await this.createOrUpdateStats(chatId, null, payAmount, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow, true);
+    }
     async updateStatSingleKey(chatId, mykey, value) {
         const filter = { chatId, profile: process.env.dbcoll, client: process.env.clientId };
         await this.statsDb.updateOne(filter, { $set: { [mykey]: value } }, { upsert: true });
@@ -31469,7 +31547,7 @@ async function executehs(client, chatId, data) {
     };
     userDetails = await db.update(chatId, updatedData); // Reset states after demo given
     (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_18__.resetStatesOnDemoGiven)(chatId, userDetails);
-    await db.createOrUpdateStats(chatId, 'any', 10, false, true, true, false);
+    await db.recordDemoGiven(chatId);
     await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
     await db.updateVideos(chatId, data.video);
     const msg = `DEMO-Given : @${userDetails.username}\nChatId : ${chatId}\nClient :${process.env.clientId}\n${parseObjectToString(data)}`;
@@ -31533,7 +31611,7 @@ async function executehsl(client, chatId, data) {
     else {
         (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_18__.resetStatesOnDemoGiven)(chatId, userDetails);
     }
-    await db.createOrUpdateStats(chatId, 'any', 150, false, true, true, true);
+    await db.recordFullShow(chatId);
     await db.updateVideos(chatId, data.video);
     const msg = `FULLSHOw-Given : @${userDetails.username}\nChatId : ${chatId}\nClient : ${process.env.clientId}\n${parseObjectToString(data)}`;
     await (0,_index__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithButton)(msg, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
@@ -32062,10 +32140,13 @@ async function initiateCall(amount, userDetails, reason = "Default") {
     const updatedDetails = await db.update(chatId, updatedUserDetails);
     // Update the passed userDetails object to keep it in sync
     Object.assign(userDetails, updatedDetails);
-    await db.createOrUpdateStats(chatId, null, adjustedAmount, 
-    // newUser=false: call initiation runs for an EXISTING (paying) user, not a first contact.
-    // Passing true here double-counted userStatsDaily.newUsers. active/paid/revenue still record.
-    false, userDetails.demoGiven, updatedUserDetails.paidReply, userDetails.secondShow, true);
+    // Call initiation is for an EXISTING (paying) user, not a first contact — recordCallInitiated
+    // encodes newUser=false + didPay=true, so newUsers is never double-counted here.
+    await db.recordCallInitiated(chatId, adjustedAmount, {
+        demoGiven: userDetails.demoGiven,
+        paidReply: updatedUserDetails.paidReply,
+        secondShow: userDetails.secondShow,
+    });
     logger.log(`Call Initiated ${userDetails.payAmount},${userDetails.videos?.length ?? 0}`);
     if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
         logger.log(`[CALL] Proceeding with call - chatId: ${chatId}, amount: ${adjustedAmount}, reason: ${reason}`);
@@ -34484,7 +34565,12 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
  * Update user stats
  */
 async function updateUserStats(db, chatId, firstName, userDetails) {
-    await db.createOrUpdateStats(chatId, firstName, userDetails?.payAmount ? userDetails.payAmount : 0, false, userDetails.demoGiven, userDetails.paidReply, userDetails.secondShow);
+    await db.recordExistingUserActivity(chatId, firstName, {
+        payAmount: userDetails?.payAmount,
+        demoGiven: userDetails.demoGiven,
+        paidReply: userDetails.paidReply,
+        secondShow: userDetails.secondShow,
+    });
 }
 
 
@@ -34561,7 +34647,7 @@ function normalizeSenderId(senderId) {
 async function handleNewUserMessage(event, chatId, firstName) {
     logger.log(`[SPECIAL CASE] New user detected - chatId: ${chatId}, firstName: ${firstName}`);
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
-    await db.createOrUpdateStats(chatId, firstName, 0, true, false, true, false);
+    await db.recordNewUserContact(chatId, firstName);
     // ROI Attribution - fire and forget
     const senderId = normalizeSenderId(event.message.senderId);
     if (senderId) {
@@ -34907,7 +34993,7 @@ async function OutEventPrint(event) {
                     }, 8000);
                 }, 15000);
                 await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, demoGiven: true, payAmount: 50 });
-                await db.createOrUpdateStats(chatId, 'any', 10, false, true, true, false);
+                await db.recordDemoGiven(chatId);
                 await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
             }
             else if (text === 'hsl') {
@@ -34915,7 +35001,7 @@ async function OutEventPrint(event) {
                 await event.client.sendMessage(chatId, { message: `How is it?🙈` });
                 let userDetails = await db.read(chatId);
                 userDetails = await db.update(chatId, { paidReply: true, limitTime: Date.now() + (2 * 60 * 1000), demoGiven: true, payAmount: 150, totalCount: 10, secondShow: true });
-                await db.createOrUpdateStats(chatId, 'any', 150, false, true, true, true);
+                await db.recordFullShow(chatId);
             }
             else if (text === 'psy') {
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
