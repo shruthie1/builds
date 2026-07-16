@@ -662,7 +662,9 @@ class ChannelIntelligenceService {
             await this.collection.updateOne({ channelId: safeChannelId }, {
                 $set: {
                     ...setFields,
-                    ...(isV2OnlyDocument(doc) ? { 'timestamps.updatedAtMs': Date.now() } : { updatedAt: new Date() }),
+                    ...(isV2OnlyDocument(doc)
+                        ? { 'timestamps.updatedAtMs': Date.now() }
+                        : { updatedAt: new Date(), writeVersion: nextWriteVersion(safeChannelId) }),
                 },
                 ...(isV2OnlyDocument(doc) ? { $inc: { revision: 1 } } : {}),
             });
@@ -981,8 +983,10 @@ class ChannelIntelligenceService {
                 promotionFitScore: clamp01(asNumber(safeClassification['promotionFitScore'])),
                 categoryUpdatedAt: Date.now(),
                 updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
             },
         });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Saturation update ---
     async updateSaturationRate(channelId, participantsCount) {
@@ -996,7 +1000,14 @@ class ChannelIntelligenceService {
         if (!doc || safeParticipantsCount === null)
             return;
         const rate = safeNonNegative(doc.totalSendsToChannel) / safeParticipantsCount;
-        await this.collection.updateOne({ channelId: safeChannelId }, { $set: { saturationRate: Math.round(rate * 1000) / 1000, updatedAt: new Date() } });
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $set: {
+                saturationRate: Math.round(rate * 1000) / 1000,
+                updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
+            },
+        });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Post-success periodic updates ---
     /**
@@ -1021,8 +1032,7 @@ class ChannelIntelligenceService {
         // Update saturation rate on every call (lightweight)
         const safeParticipantsCount = safePositive(participantsCount);
         if (safeParticipantsCount !== null) {
-            const rate = safeNonNegative(doc.totalSendsToChannel) / safeParticipantsCount;
-            await this.collection.updateOne({ channelId: safeChannelId }, { $set: { saturationRate: Math.round(rate * 1000) / 1000, updatedAt: new Date() } });
+            await this.updateSaturationRate(safeChannelId, safeParticipantsCount);
         }
     }
     // --- GramJS signal updates ---
@@ -1048,8 +1058,10 @@ class ChannelIntelligenceService {
                 'onlineTrend.lastSampled': Date.now(),
                 'onlineTrend.sampleCount': sampleCount + 1,
                 updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
             },
         });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     async updateViewEngagement(channelId, views, participantsCount) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
@@ -1077,8 +1089,10 @@ class ChannelIntelligenceService {
                 'viewEngagement.lastChecked': Date.now(),
                 'viewEngagement.checksCount': checksCount + 1,
                 updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
             },
         });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Profile update ---
     async updateProfile(channelId, topic, topicConfidence, language, languageConfidence) {
@@ -1098,8 +1112,10 @@ class ChannelIntelligenceService {
                 languageConfidence: clamp01(languageConfidence),
                 profileUpdatedAt: Date.now(),
                 updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
             },
         });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Promotion tracking ---
     async recordPromotion(channelId) {
