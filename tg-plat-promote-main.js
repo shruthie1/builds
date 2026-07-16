@@ -373,16 +373,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isAccountSpecificError: () => (/* binding */ isAccountSpecificError)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
-/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
-/* harmony import */ var _channel_classifier__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-classifier */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts");
-/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
-/* harmony import */ var _scoring_expected_value__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../scoring/expected-value */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _pool_pool_store__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool/pool-store */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-store.ts");
-/* harmony import */ var _policy_message_policy__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../policy/message-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-policy.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
+/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
+/* harmony import */ var _channel_classifier__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-classifier */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts");
+/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
+/* harmony import */ var _scoring_expected_value__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../scoring/expected-value */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts");
+/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _pool_pool_store__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../pool/pool-store */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-store.ts");
+/* harmony import */ var _policy_message_policy__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../policy/message-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-policy.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /**
  * Channel Intelligence Service — MongoDB-backed per-channel learning.
  *
@@ -407,7 +408,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
+
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__.PromoLogger('pool');
 // --- EWMA config ---
 const EWMA_ALPHA = 0.15;
 // --- Deletion timing thresholds (ms) ---
@@ -445,14 +447,41 @@ class ChannelIntelligenceService {
     }
     // --- Read ---
     async get(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
         const doc = await this.collection.findOne({ channelId: safeChannelId });
         return doc ? normalizeConversionFields(doc) : doc;
     }
+    /**
+     * Read the V2 projection. A sidecar is trusted only when it matches the current legacy write;
+     * otherwise derive in memory so rolling deployment cannot return stale learning evidence.
+     */
+    async getV2(channelId) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        if (!safeChannelId)
+            return null;
+        const doc = await this.collection.findOne({ channelId: safeChannelId });
+        if (!doc)
+            return null;
+        return isCurrentChannelIntelligenceV2(doc, doc.v2)
+            ? doc.v2
+            : (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(doc);
+    }
+    async batchGetV2(channelIds) {
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelIds)(channelIds);
+        if (safeChannelIds.length === 0)
+            return [];
+        const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }));
+        return rows.flatMap((doc) => {
+            const v2 = isCurrentChannelIntelligenceV2(doc, doc.v2)
+                ? doc.v2
+                : (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(doc);
+            return v2 ? [v2] : [];
+        });
+    }
     async batchGet(channelIds, projection) {
-        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelIds)(channelIds);
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelIds)(channelIds);
         if (safeChannelIds.length === 0)
             return [];
         const opts = projection ? { projection } : undefined;
@@ -487,12 +516,23 @@ class ChannelIntelligenceService {
      * Should be called periodically (e.g., once per health check cycle).
      */
     async recoverStaleHostileChannels() {
-        const threeDaysAgo = Date.now() - 3 * 24 * 3600000;
+        const now = Date.now();
+        const threeDaysAgo = now - 3 * 24 * 3600000;
         const filter = {
             stage: 'hostile',
             stageUpdatedAt: { $lt: threeDaysAgo },
         };
-        const update = { $set: { stage: 'learning', stageUpdatedAt: Date.now(), 'errors.consecutiveErrors': 0 } };
+        // Mark sidecars stale in one bulk update. V2 readers safely derive from this canonical document
+        // until the next compact sidecar refresh; this avoids copying any pool data in a recovery sweep.
+        const update = {
+            $set: {
+                stage: 'learning',
+                stageUpdatedAt: now,
+                'errors.consecutiveErrors': 0,
+                updatedAt: new Date(now),
+                writeVersion: `recovery:${now}`,
+            },
+        };
         if (this.collection.updateMany) {
             const result = await this.collection.updateMany(filter, update);
             return result.modifiedCount;
@@ -509,26 +549,32 @@ class ChannelIntelligenceService {
     }
     // --- Upsert ---
     async ensureDoc(channelId, topic = 'general_chat') {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeTopic = normalizeLabel(topic, 'general_chat');
         const defaults = (0,_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__.createDefaultIntelligence)(safeChannelId, safeTopic);
-        await this.collection.updateOne({ channelId: safeChannelId }, { $setOnInsert: defaults }, { upsert: true });
+        const v2 = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(defaults);
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $setOnInsert: {
+                ...defaults,
+                ...(v2 ? { schemaVersion: _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION, v2 } : {}),
+            },
+        }, { upsert: true });
     }
     async insertPoolEntryIfAbsent(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
-        const { filter, update } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_7__.buildInsertIfAbsentUpdate)(entry);
+        const { filter, update } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_8__.buildInsertIfAbsentUpdate)(entry);
         await this.collection.updateOne({ channelId: safeChannelId, ...filter }, update);
     }
     async recordPoolEntrySent(channelId, entryKey, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return;
-        const { update, arrayFilters } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_7__.buildSentUpdate)(safeEntryKey, nowMs);
+        const { update, arrayFilters } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_8__.buildSentUpdate)(safeEntryKey, nowMs);
         await this.collection.updateOne({ channelId: safeChannelId }, {
             ...update,
             $set: {
@@ -547,7 +593,7 @@ class ChannelIntelligenceService {
      * per-account): the $inc filters on { channelId } and touches only that channel's seedProbeCounts.
      */
     async incrementSeedProbe(channelId, source) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -560,7 +606,7 @@ class ChannelIntelligenceService {
         });
     }
     async seedLegacyPoolMigration(channelId, input) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -591,13 +637,14 @@ class ChannelIntelligenceService {
         for (const entry of entries) {
             await this.insertPoolEntryIfAbsent(safeChannelId, entry);
         }
+        await this.syncV2FromLegacy(safeChannelId);
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return;
-        const { update, arrayFilters } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_7__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs);
+        const { update, arrayFilters } = (0,_pool_pool_store__WEBPACK_IMPORTED_MODULE_8__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs);
         await this.collection.updateOne({ channelId: safeChannelId }, {
             ...update,
             $set: {
@@ -611,7 +658,7 @@ class ChannelIntelligenceService {
         await this.writeScoreAndLifecycle(safeChannelId);
     }
     async recordExploreOutcome(channelId, outcome) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         const safeOutcome = normalizeExploreOutcome(outcome);
         if (!safeChannelId || !safeOutcome)
             return;
@@ -630,13 +677,13 @@ class ChannelIntelligenceService {
         });
     }
     async syncPoolEntryStates(channelId, nowMs = Date.now()) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         const safeNowMs = safeNonNegative(nowMs);
         if (!safeChannelId || safeNowMs <= 0)
             return;
         let engine;
         try {
-            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
+            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
         }
         catch {
             return;
@@ -691,7 +738,7 @@ class ChannelIntelligenceService {
     }
     // --- Outcome recording ---
     async recordSuccess(channelId, strategy, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeStrategy = normalizeMessageStrategy(strategy);
@@ -715,13 +762,16 @@ class ChannelIntelligenceService {
             updatedAt: new Date(),
             writeVersion: nextWriteVersion(safeChannelId),
         };
+        if (!isFollowup) {
+            setFields['lastPromotedAt'] = Date.now();
+        }
         const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
         if (!doc)
             return;
         await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordDeletion(channelId, strategy, survivalMs, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeStrategy = normalizeMessageStrategy(strategy);
@@ -752,7 +802,7 @@ class ChannelIntelligenceService {
         await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     async recordFailure(channelId, strategy, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeStrategy = normalizeMessageStrategy(strategy);
@@ -760,7 +810,7 @@ class ChannelIntelligenceService {
         await this.ensureWritableSubdocuments(safeChannelId, safeStrategy);
         const now = Date.now();
         const safeErrorType = normalizeErrorType(errorType);
-        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(safeErrorType);
+        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(safeErrorType);
         const errorCategory = this.categorizeError(safeErrorType, errorClass);
         const accountOnly = errorClass === 'account';
         poolLog.debug('skip-channel', {
@@ -792,17 +842,13 @@ class ChannelIntelligenceService {
     }
     // --- Conversion recording (ROI) ---
     /**
-     * Record a STAGE-1 channel->DM open (fractional attribution) into the new dmConversions key.
-     *
-     * ATOMIC ON-WRITE MIGRATION: a plain $inc:{dmConversions} would start from 0 on a pre-rename doc
-     * that still holds the old `conversions` value — orphaning history and persisting a corrupted
-     * near-zero rate that poisons channel selection. Instead this uses an aggregation-pipeline update
-     * that FOLDS the old value in the same write: dmConversions = ($dmConversions ?? $conversions ?? 0)
-     * + weight, and $unset the old key. Each write self-heals one doc, so there is no separate
-     * migration race and no lost window increments.
+     * Record a STAGE-1 channel->DM open (fractional attribution) in both conversion aliases during
+     * the additive V2 rollout. A plain $inc would lose legacy-only history, so both keys are folded
+     * from `conversions ?? dmConversions` and then written to the same resulting value. Prefer the
+     * legacy alias while both names exist because older fleet services still write that key.
      */
     async recordDmConversion(channelId, fractionalWeight) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const weight = this.normalizeFractionalWeight(fractionalWeight);
@@ -813,17 +859,28 @@ class ChannelIntelligenceService {
             {
                 $set: {
                     // Fold any legacy `conversions` value into dmConversions before adding the new weight.
-                    // Base = dmConversions ?? conversions; sanitize to 0 unless it is a real finite number
+                    // Base = conversions ?? dmConversions; sanitize to 0 unless it is a real finite number
                     // (isNumber rejects null/absent; the self-equality check {$eq:[b,b]} rejects NaN — Mongo
                     // The old repairNumericFields did this non-finite/negative -> 0 cleanup before $inc.
-                    // Base = dmConversions ?? conversions; then floor at >0. IMPORTANT: MongoDB aggregation
+                    // Base = conversions ?? dmConversions; then floor at >0. IMPORTANT: MongoDB aggregation
                     // comparisons use BSON total-order, where NaN sorts BELOW every number — so {$gt:[NaN,0]}
                     // is false and NaN maps to 0 (a self-equality {$eq:[NaN,NaN]} guard does NOT work: BSON
                     // $eq treats NaN==NaN as true). This also floors negatives to 0. History preserved whether
                     // the doc was migrated, legacy, or holds a corrupt NaN value.
                     dmConversions: {
                         $let: {
-                            vars: { base: { $ifNull: ['$dmConversions', '$conversions'] } },
+                            vars: { base: { $ifNull: ['$conversions', '$dmConversions'] } },
+                            in: {
+                                $add: [
+                                    { $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] },
+                                    weight,
+                                ],
+                            },
+                        },
+                    },
+                    conversions: {
+                        $let: {
+                            vars: { base: { $ifNull: ['$conversions', '$dmConversions'] } },
                             in: {
                                 $add: [
                                     { $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] },
@@ -833,12 +890,11 @@ class ChannelIntelligenceService {
                         },
                     },
                     dmConversionUpdatedAt: Date.now(),
+                    conversionUpdatedAt: Date.now(),
                     updatedAt: new Date(),
                     writeVersion: nextWriteVersion(safeChannelId),
                 },
             },
-            // Drop the legacy key now that its value lives in dmConversions (no-op if already absent).
-            { $unset: ['conversions'] },
         ], { returnDocument: 'after' });
         if (doc) {
             await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
@@ -846,7 +902,7 @@ class ChannelIntelligenceService {
     }
     // --- Channel classification ---
     async updateClassification(channelId, classification) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeClassification = isRecord(classification) ? classification : {};
@@ -863,7 +919,7 @@ class ChannelIntelligenceService {
     }
     // --- Saturation update ---
     async updateSaturationRate(channelId, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const doc = await this.get(safeChannelId);
@@ -879,7 +935,7 @@ class ChannelIntelligenceService {
      * Call after recordSuccess/recordDeletion — skips work unless ~50 pulls elapsed.
      */
     async refreshChannelMeta(channelId, title, username, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const doc = await this.get(safeChannelId);
@@ -888,7 +944,7 @@ class ChannelIntelligenceService {
         const totalPulls = sumStrategyPulls(doc.strategies);
         // Reclassify every ~50 pulls (and on first classification)
         if (totalPulls % 50 < 2 || doc.channelCategory === 'unclassified') {
-            const classification = _channel_classifier__WEBPACK_IMPORTED_MODULE_2__.ChannelClassifier.classify(title, username, doc);
+            const classification = _channel_classifier__WEBPACK_IMPORTED_MODULE_3__.ChannelClassifier.classify(title, username, doc);
             await this.updateClassification(safeChannelId, classification);
         }
         // Update saturation rate on every call (lightweight)
@@ -900,7 +956,7 @@ class ChannelIntelligenceService {
     }
     // --- GramJS signal updates ---
     async updateOnlineTrend(channelId, onlineCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const doc = await this.get(safeChannelId);
@@ -923,7 +979,7 @@ class ChannelIntelligenceService {
         });
     }
     async updateViewEngagement(channelId, views, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeViews = safeNonNegativeInput(views);
@@ -951,7 +1007,7 @@ class ChannelIntelligenceService {
     }
     // --- Profile update ---
     async updateProfile(channelId, topic, topicConfidence, language, languageConfidence) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const safeTopic = normalizeLabel(topic, 'general_chat');
@@ -970,11 +1026,18 @@ class ChannelIntelligenceService {
     }
     // --- Promotion tracking ---
     async recordPromotion(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        await this.collection.updateOne({ channelId: safeChannelId }, { $set: { lastPromotedAt: Date.now(), updatedAt: new Date() } });
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $set: {
+                lastPromotedAt: Date.now(),
+                updatedAt: new Date(),
+                writeVersion: nextWriteVersion(safeChannelId),
+            },
+        });
+        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Scoring ---
     async backfillConversionScoringFields(options = {}) {
@@ -986,16 +1049,16 @@ class ChannelIntelligenceService {
                 const rates = [];
                 const exposures = [];
                 for (const doc of docs) {
-                    const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
+                    const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
                     if (exposure <= 0)
                         continue;
                     rates.push(safeNonNegative(doc.dmConversions) / exposure);
                     exposures.push(exposure);
                 }
-                return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.fitGammaPriorFromRates)(rates, exposures);
+                return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.fitGammaPriorFromRates)(rates, exposures);
             })()
-            : (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(options.prior);
-        if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.hasMeaningfulConversionPrior)(prior)) {
+            : (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.normalizeConversionPrior)(options.prior);
+        if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.hasMeaningfulConversionPrior)(prior)) {
             throw new Error('Conversion scoring backfill requires an explicit persisted conversion prior');
         }
         let updated = 0;
@@ -1018,18 +1081,39 @@ class ChannelIntelligenceService {
         let getRank;
         if (percentiles) {
             try {
-                const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
+                const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
                 getRank = (v, m) => pe.getPercentileRankSync(v, m);
             }
             catch {
                 // PercentileEngine not initialized
             }
         }
-        return (0,_scoring_expected_value__WEBPACK_IMPORTED_MODULE_4__.computeExpectedValue)(doc, percentiles, getRank);
+        return (0,_scoring_expected_value__WEBPACK_IMPORTED_MODULE_5__.computeExpectedValue)(doc, percentiles, getRank);
+    }
+    /**
+     * Keep the additive V2 sidecar derived from the exact legacy snapshot that won the preceding
+     * atomic write. V2 is not read by production selection until the whole fleet is deployed, so a
+     * failed sync is recoverable by the backfill; the compare-and-set loop prevents stale snapshots
+     * from overwriting a concurrent legacy update.
+     */
+    async syncV2FromLegacy(channelId) {
+        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
+            const doc = await this.collection.findOne({ channelId });
+            if (!doc)
+                return;
+            if (isCurrentChannelIntelligenceV2(doc, doc.v2))
+                return;
+            const v2 = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(doc);
+            if (!v2)
+                return;
+            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, doc), { $set: { schemaVersion: _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION, v2 } });
+            if (isMatchedUpdateResult(result))
+                return;
+        }
     }
     async loadPercentilesForDerivedScoring() {
         try {
-            return await _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance().getPercentiles();
+            return await _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance().getPercentiles();
         }
         catch {
             return null;
@@ -1045,11 +1129,11 @@ class ChannelIntelligenceService {
             return;
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
             const scoreFields = this.buildDerivedScoreFields(currentDoc, await this.loadPercentilesForDerivedScoring());
-            // Self-heal the rename on-write: scoreFields writes the new dmConversionRateShrunk; drop the
-            // legacy conversionRateShrunk/conversionUpdatedAt so a doc touched by any outcome-recorder is
-            // fully migrated and never leaves a stale rate for the dual-read to fall back to.
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields, $unset: { conversionRateShrunk: '', conversionUpdatedAt: '' } });
+            // The fleet is in an additive migration. Keep the legacy aliases until every consumer has
+            // deployed V2; cleanup is an explicit later operation, never an incidental outcome write.
+            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields });
             if (isMatchedUpdateResult(result)) {
+                await this.syncV2FromLegacy(channelId);
                 return;
             }
             currentDoc = await this.get(channelId);
@@ -1185,10 +1269,10 @@ class ChannelIntelligenceService {
     buildDerivedScoreFields(doc, percentiles = null) {
         const followupTotal = safeNonNegative(doc.followupTotal);
         const followupSuccessCount = safeNonNegative(doc.followupSuccessCount);
-        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
-        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
-        const conversionPrior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.normalizeConversionPrior)(percentiles?.conversionPrior);
-        const dmConversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.dmConversions, exposure, conversionPrior);
+        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.countSurvivedSends)(doc.messagePool);
+        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
+        const conversionPrior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.normalizeConversionPrior)(percentiles?.conversionPrior);
+        const dmConversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionRateShrunk)(doc.dmConversions, exposure, conversionPrior);
         const followupSuccessRate = followupTotal > 0
             ? Math.round(Math.min(1, followupSuccessCount / followupTotal) * 1000) / 1000
             : safeRate(doc.followupSuccessRate, 0.5);
@@ -1201,16 +1285,18 @@ class ChannelIntelligenceService {
             scoreUpdatedAt: Date.now(),
             followupSuccessRate,
         };
+        scoreFields['conversionRateShrunk'] = scoreFields['dmConversionRateShrunk'];
+        scoreFields['conversionUpdatedAt'] = safeTimestamp(doc.dmConversionUpdatedAt ?? doc.conversionUpdatedAt);
         // Pool-fill lifecycle: this channel's seedProbeCounts resets to zeros the moment IT crosses from
         // LEARNING (< POOL_TARGET_SURVIVORS survivors) to PROVEN (>= target) — scoped to this doc/channelId
         // only, so a later erosion back under the target re-probes with a clean slate. writeScoreAndLifecycle
         // runs after every pool-outcome/send/deletion write, so this check fires on the same doc each time.
-        const survivorCount = (0,_policy_message_policy__WEBPACK_IMPORTED_MODULE_8__.countPoolSurvivors)(doc.messagePool);
+        const survivorCount = (0,_policy_message_policy__WEBPACK_IMPORTED_MODULE_9__.countPoolSurvivors)(doc.messagePool);
         const hadSeedProbes = Boolean(doc.seedProbeCounts)
             && (safeNonNegative(doc.seedProbeCounts?.legacy) > 0
                 || safeNonNegative(doc.seedProbeCounts?.custom) > 0
                 || safeNonNegative(doc.seedProbeCounts?.ai) > 0);
-        if (survivorCount >= _pool__WEBPACK_IMPORTED_MODULE_6__.MESSAGE_SAFETY.POOL_TARGET_SURVIVORS && hadSeedProbes) {
+        if (survivorCount >= _pool__WEBPACK_IMPORTED_MODULE_7__.MESSAGE_SAFETY.POOL_TARGET_SURVIVORS && hadSeedProbes) {
             scoreFields['seedProbeCounts'] = { legacy: 0, custom: 0, ai: 0 };
         }
         const totalPulls = sumStrategyPulls(doc.strategies);
@@ -1221,7 +1307,7 @@ class ChannelIntelligenceService {
         const currentStage = doc.stage;
         let newStage = currentStage;
         if (percentiles) {
-            const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
+            const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
             const deleteRate = totalPulls > 0 ? totalDeletions / totalPulls : 0;
             const deleteRank = pe.getPercentileRankSync(deleteRate, 'deleteRate');
             if (deleteRate > 0.3 && deleteRank >= 0.90) {
@@ -1267,9 +1353,9 @@ class ChannelIntelligenceService {
         return scoreFields;
     }
     buildConversionBackfillFields(doc, prior) {
-        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.countSurvivedSends)(doc.messagePool);
-        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.resolveConversionExposure)(doc);
-        const dmConversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionRateShrunk)(doc.dmConversions, exposure, prior));
+        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.countSurvivedSends)(doc.messagePool);
+        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
+        const dmConversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionRateShrunk)(doc.dmConversions, exposure, prior));
         const currentSurvivedSends = safeNonNegative(doc.survivedSends);
         const currentConversionRateShrunk = roundConversionRate(safeNonNegative(doc.dmConversionRateShrunk));
         if (currentSurvivedSends === survivedSends && currentConversionRateShrunk === dmConversionRateShrunk) {
@@ -1293,7 +1379,7 @@ class ChannelIntelligenceService {
             return 'human';
         return 'late';
     }
-    categorizeError(errorType, errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(errorType)) {
+    categorizeError(errorType, errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(errorType)) {
         const known = ['SLOWMODE_WAIT', 'PEER_FLOOD', 'FLOOD_WAIT', 'CHANNEL_RESTRICTED'];
         const upper = errorType.toUpperCase();
         if (errorClass === 'channel')
@@ -1313,7 +1399,7 @@ class ChannelIntelligenceService {
     }
     // --- Index creation ---
     async ensureIndexes() {
-        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
+        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
             try {
                 await this.collection.createIndex(definition.spec, definition.options);
             }
@@ -1348,8 +1434,8 @@ function roundConversionRate(value) {
     return Math.round(value * 1000000) / 1000000;
 }
 function compareTopChannelDocs(left, right, now) {
-    const leftEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(left.dmConversionRateShrunk, left.dmConversionUpdatedAt, now);
-    const rightEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_5__.computeConversionEfficiency)(right.dmConversionRateShrunk, right.dmConversionUpdatedAt, now);
+    const leftEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionEfficiency)(left.dmConversionRateShrunk, left.dmConversionUpdatedAt, now);
+    const rightEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionEfficiency)(right.dmConversionRateShrunk, right.dmConversionUpdatedAt, now);
     if (rightEfficiency !== leftEfficiency)
         return rightEfficiency - leftEfficiency;
     const leftRate = safeNonNegative(left.dmConversionRateShrunk);
@@ -1416,7 +1502,7 @@ function isTerminalChannelError(value) {
         || value.includes('TOPIC_DELETED');
 }
 function isAccountSpecificError(value) {
-    return (0,_pool__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(value) === 'account';
+    return (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(value) === 'account';
 }
 function normalizeLabel(value, fallback) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
@@ -1451,9 +1537,9 @@ function hasPoolStateEvidence(entry) {
         || safeNonNegative(entry.lastValidatedAtMs) > 0;
 }
 function resolvePoolEntryState(entry, engine, nowMs) {
-    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_6__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
+    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
     const rank = engine.getPercentileRankSync(score, 'messageRawScore');
-    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_6__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
+    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_7__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
 }
 function buildVersionedChannelFilter(channelId, doc) {
     const writeVersion = normalizeWriteVersion(doc?.writeVersion);
@@ -1509,7 +1595,41 @@ function isSortableCursorLike(value) {
         && typeof value['limit'] === 'function';
 }
 function isChannelIntelligenceDocument(value) {
-    return isRecord(value) && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']) !== null;
+    return isRecord(value) && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(value['channelId']) !== null;
+}
+function isChannelIntelligenceV2(value) {
+    if (!isRecord(value))
+        return false;
+    const timestamps = value['timestamps'];
+    const lifecycle = value['lifecycle'];
+    const primary = value['primary'];
+    const followup = value['followup'];
+    const historical = value['historical'];
+    const conversion = value['conversion'];
+    const source = value['source'];
+    return value['schemaVersion'] === _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION
+        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(value['channelId']) !== null
+        && isRecord(timestamps)
+        && isRecord(lifecycle)
+        && isRecord(primary)
+        && isRecord(followup)
+        && isRecord(historical)
+        && isRecord(conversion)
+        && isRecord(source);
+}
+function isCurrentChannelIntelligenceV2(doc, value) {
+    if (!isChannelIntelligenceV2(value))
+        return false;
+    const source = asRecord(value.source);
+    const sourceWriteVersion = normalizeWriteVersion(source['legacyWriteVersion']);
+    const writeVersion = normalizeWriteVersion(doc.writeVersion);
+    const sourceUpdatedAtMs = safeTimestamp(source['legacyUpdatedAtMs']);
+    const updatedAt = normalizeDate(doc.updatedAt);
+    if (updatedAt && sourceUpdatedAtMs !== updatedAt.getTime())
+        return false;
+    if (writeVersion)
+        return sourceWriteVersion === writeVersion;
+    return Boolean(updatedAt);
 }
 /**
  * DUAL-READ shim for the conversion-naming rename. Writes now target the new stage-1 keys
@@ -1544,6 +1664,177 @@ function normalizeExploreOutcome(value) {
     return value === 'channelSideFailed' || value === 'survived'
         ? value
         : null;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts"
+/*!**********************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts ***!
+  \**********************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* binding */ CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
+/* harmony export */   buildV2SidecarBackfillOperation: () => (/* binding */ buildV2SidecarBackfillOperation),
+/* harmony export */   countResolvedPrimaryAttempts: () => (/* binding */ countResolvedPrimaryAttempts),
+/* harmony export */   migrateLegacyChannelIntelligence: () => (/* binding */ migrateLegacyChannelIntelligence)
+/* harmony export */ });
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+
+/** The additive schema version written during the in-place migration. */
+const CHANNEL_INTELLIGENCE_SCHEMA_VERSION = 2;
+/**
+ * Creates a compact V2 sidecar without moving or duplicating `messagePool`. No legacy value is
+ * discarded: ambiguous counters remain under `historical` with their original semantics.
+ */
+function migrateLegacyChannelIntelligence(value, nowMs = Date.now()) {
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value?.channelId);
+    if (!channelId)
+        return null;
+    const messages = normalizePoolEntries(value?.messagePool);
+    const resolved = messages.reduce((totals, entry) => ({
+        survived: totals.survived + nonNegative(entry.survived),
+        deleted: totals.deleted + nonNegative(entry.deleted),
+        channelRejected: totals.channelRejected + nonNegative(entry.channelSideFailed),
+    }), { survived: 0, deleted: 0, channelRejected: 0 });
+    const followupAccepted = nonNegative(value?.followupSuccessCount);
+    const followupTotal = nonNegative(value?.followupTotal);
+    const updatedAtMs = timestampMs(value?.updatedAt, nowMs);
+    const conversion = resolveConversion(value);
+    return {
+        schemaVersion: CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
+        channelId,
+        source: {
+            legacyUpdatedAtMs: updatedAtMs,
+            ...(normalizeWriteVersion(value?.writeVersion)
+                ? { legacyWriteVersion: normalizeWriteVersion(value?.writeVersion) }
+                : {}),
+        },
+        timestamps: {
+            firstSeenAtMs: timestampMs(value?.firstSeenAt, updatedAtMs),
+            lastPromotionAtMs: timestampMs(value?.lastPromotedAt, 0),
+            updatedAtMs,
+        },
+        lifecycle: {
+            state: mapLifecycle(value?.stage),
+            updatedAtMs: timestampMs(value?.stageUpdatedAt, updatedAtMs),
+        },
+        primary: { resolved },
+        followup: {
+            accepted: followupAccepted,
+            // Legacy followupTotal increments for both accepted sends and deletions.
+            deleted: Math.max(0, followupTotal - followupAccepted),
+        },
+        historical: {
+            totalSendsToChannel: nonNegative(value?.totalSendsToChannel),
+            strategies: normalizeStrategies(value?.strategies),
+        },
+        conversion: {
+            dmOpenCredits: conversion.credits,
+            updatedAtMs: conversion.updatedAtMs,
+        },
+    };
+}
+function countResolvedPrimaryAttempts(outcomes) {
+    return nonNegative(outcomes.survived)
+        + nonNegative(outcomes.deleted)
+        + nonNegative(outcomes.channelRejected);
+}
+/**
+ * Builds an additive optimistic-concurrency update. Existing top-level fields, including
+ * `messagePool`, are untouched. Callers can safely rerun skipped documents after live traffic.
+ */
+function buildV2SidecarBackfillOperation(value, nowMs = Date.now()) {
+    const v2 = migrateLegacyChannelIntelligence(value, nowMs);
+    if (!v2)
+        return null;
+    const filter = { channelId: v2.channelId };
+    const writeVersion = normalizeWriteVersion(value.writeVersion);
+    if (writeVersion) {
+        filter.writeVersion = writeVersion;
+    }
+    else if (value.updatedAt instanceof Date && Number.isFinite(value.updatedAt.getTime())) {
+        filter.updatedAt = value.updatedAt;
+    }
+    return {
+        filter,
+        update: { $set: { schemaVersion: CHANNEL_INTELLIGENCE_SCHEMA_VERSION, v2 } },
+    };
+}
+function normalizePoolEntries(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value.filter(isPoolEntry);
+}
+function normalizeStrategies(value) {
+    if (!isRecord(value))
+        return {};
+    const normalized = {};
+    for (const [strategy, arm] of Object.entries(value)) {
+        if (!isRecord(arm))
+            continue;
+        normalized[strategy] = {
+            s: nonNegative(arm.s),
+            f: nonNegative(arm.f),
+            n: nonNegative(arm.n),
+        };
+    }
+    return normalized;
+}
+function isPoolEntry(value) {
+    if (!isRecord(value))
+        return false;
+    return typeof value.key === 'string'
+        && typeof value.text === 'string'
+        && (value.source === 'ai' || value.source === 'custom' || value.source === 'legacy')
+        && (value.state === 'active' || value.state === 'benched')
+        && isFiniteNumber(value.attempted)
+        && isFiniteNumber(value.survived)
+        && isFiniteNumber(value.deleted)
+        && isFiniteNumber(value.channelSideFailed)
+        && isFiniteNumber(value.lastSentAtMs)
+        && isFiniteNumber(value.lastValidatedAtMs);
+}
+function mapLifecycle(value) {
+    switch (value) {
+        case 'optimized': return 'proven';
+        case 'hostile': return 'blocked';
+        case 'learning': return 'learning';
+        default: return 'new';
+    }
+}
+function timestampMs(value, fallback) {
+    if (value instanceof Date && Number.isFinite(value.getTime()))
+        return value.getTime();
+    return isFiniteNumber(value) && value > 0 ? value : fallback;
+}
+function resolveConversion(value) {
+    const dmUpdatedAtMs = timestampMs(value.dmConversionUpdatedAt, 0);
+    const legacyUpdatedAtMs = timestampMs(value.conversionUpdatedAt, 0);
+    // During the rolling rename, choose the alias written most recently. Equal/unknown timestamps
+    // retain the current dm-preferring behavior so duplicated aliases do not get added together.
+    if (legacyUpdatedAtMs > dmUpdatedAtMs) {
+        return { credits: nonNegative(value.conversions), updatedAtMs: legacyUpdatedAtMs };
+    }
+    return {
+        credits: nonNegative(value.dmConversions ?? value.conversions),
+        updatedAtMs: Math.max(dmUpdatedAtMs, legacyUpdatedAtMs),
+    };
+}
+function nonNegative(value) {
+    return isFiniteNumber(value) && value > 0 ? value : 0;
+}
+function isFiniteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value);
+}
+function normalizeWriteVersion(value) {
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -1676,12 +1967,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ALL_STRATEGIES: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__.ALL_STRATEGIES),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
 /* harmony export */   CONVERSION_PRIOR_REDIS_KEY: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.CONVERSION_PRIOR_REDIS_KEY),
 /* harmony export */   ChannelClassifier: () => (/* reexport safe */ _channel_classifier__WEBPACK_IMPORTED_MODULE_2__.ChannelClassifier),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine),
+/* harmony export */   buildV2SidecarBackfillOperation: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.buildV2SidecarBackfillOperation),
+/* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.countResolvedPrimaryAttempts),
 /* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__.createDefaultIntelligence),
 /* harmony export */   createDefaultStrategies: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__.createDefaultStrategies),
+/* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.migrateLegacyChannelIntelligence),
 /* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.readPersistedConversionPrior),
 /* harmony export */   writePersistedConversionPrior: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.writePersistedConversionPrior)
 /* harmony export */ });
@@ -1691,6 +1986,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
 /* harmony import */ var _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./conversion-prior-store */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts");
 /* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
+/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
+
 
 
 
@@ -2362,6 +2659,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_SEND_WINDOW_MS: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.ACCOUNT_SEND_WINDOW_MS),
 /* harmony export */   ALL_STRATEGIES: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.ALL_STRATEGIES),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
 /* harmony export */   COLD_START_THRESHOLD: () => (/* reexport safe */ _message_strategy__WEBPACK_IMPORTED_MODULE_4__.COLD_START_THRESHOLD),
 /* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.CONVERSION_FRESHNESS_HALF_LIFE_MS),
 /* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.CONVERSION_PRIOR_ALPHA),
@@ -2397,6 +2695,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.buildOutcomeUpdate),
 /* harmony export */   buildPercentileBuckets: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.buildPercentileBuckets),
 /* harmony export */   buildSentUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.buildSentUpdate),
+/* harmony export */   buildV2SidecarBackfillOperation: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.buildV2SidecarBackfillOperation),
 /* harmony export */   calculateFollowUpDelay: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.calculateFollowUpDelay),
 /* harmony export */   calculateHealthBasedPromotionDelay: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.calculateHealthBasedPromotionDelay),
 /* harmony export */   calculatePromotionBatchLimit: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.calculatePromotionBatchLimit),
@@ -2413,6 +2712,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeSmoothedConversionRate: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.computeSmoothedConversionRate),
 /* harmony export */   countPoolAttempts: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.countPoolAttempts),
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.countPoolSurvivors),
+/* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.countResolvedPrimaryAttempts),
 /* harmony export */   countSurvivedSends: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.countSurvivedSends),
 /* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.createDefaultIntelligence),
 /* harmony export */   createDefaultStrategies: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.createDefaultStrategies),
@@ -2434,6 +2734,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.isMessageSource),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.isPoolMessageIndex),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_6__.messageIndexToStrategy),
+/* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence),
 /* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_10__.normalizeConversionPrior),
 /* harmony export */   normalizeLegacyAvailableMessageIds: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.normalizeLegacyAvailableMessageIds),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_7__.parsePoolMessageIndex),
@@ -9839,9 +10140,6 @@ function normalizeRawChannelId(value) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS: () => (/* binding */ DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES: () => (/* binding */ DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT),
@@ -9871,9 +10169,6 @@ const DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT = 50;
 const DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES = 5;
 const DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT = 40;
 const DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT = 70;
-const DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT = 0.2;
-const DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT = 0.5;
-const DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS = 30;
 const DEFAULT_CRITICAL_FIELDS = [
     'canSendMsgs',
     'sendMessages',
@@ -10037,9 +10332,6 @@ function evaluateChannelPromotionHealth(input, options = {}) {
     const deleteRateMinSamples = safePositiveNumber(options.deleteRateMinSamples, DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES);
     const deleteRateModerate = safePercentRatio(options.deleteRateModeratePercent, DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT);
     const deleteRateSevere = safePercentRatio(options.deleteRateSeverePercent, DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT);
-    const activityDeadUniqueRate = safePercentRatio(options.activityDeadUniquePercent, DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT);
-    const activityLowUniqueRate = Math.max(activityDeadUniqueRate, safePercentRatio(options.activityLowUniquePercent, DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT));
-    const activitySignalTtlDays = safePositiveNumber(options.activitySignalTtlDays, DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS);
     const now = safePositiveNumber(channel.now, Date.now());
     const sendability = evaluateChannelSendability({ ...channel, banned: false });
     const probeSendability = evaluateChannelSendability({ ...channel, banned: false, canSendMsgs: true });
@@ -10052,7 +10344,6 @@ function evaluateChannelPromotionHealth(input, options = {}) {
     const freeformDeletedCount = safeNonNegativeNumber(channel.freeformDeletedCount ?? channel.wordRestriction);
     const followUpDeletedCount = safeNonNegativeNumber(channel.followUpDeletedCount ?? channel.dMRestriction);
     const participantsCount = safeNonNegativeNumber(channel.participantsCount);
-    const recentUniqueUsers = safeNonNegativeNumber(channel.recentUniqueUsers);
     const contentHealth = classifyContentHealth(channel.messagePool, channel.hasEverExplored);
     const survivingMessages = successMsgCount + followupMsgSuccessCount;
     const moderatedAttempts = deletedCount + survivingMessages;
@@ -10062,15 +10353,7 @@ function evaluateChannelPromotionHealth(input, options = {}) {
         moderateRate: deleteRateModerate,
         severeRate: deleteRateSevere,
     });
-    const channelActivity = classifyChannelActivity({
-        participantsCount,
-        recentUniqueUsers,
-        lastUniqueUserCheckAt: channel.lastUniqueUserCheckAt,
-        now,
-        ttlDays: activitySignalTtlDays,
-        deadUniqueRate: activityDeadUniqueRate,
-        lowUniqueRate: activityLowUniqueRate,
-    });
+    const channelActivity = classifyChannelActivity({ participantsCount });
     const signals = {
         sendability: (banned ? probeSendability.canSend : sendabilityPass) ? 'pass' : 'fail',
         banned,
@@ -10120,14 +10403,6 @@ function evaluateChannelPromotionHealth(input, options = {}) {
         - deletionPenalty(deletionRate)
         - activityPenalty(channelActivity)
         - exhaustedDeadPenalty
-        - recentUniqueUserPenalty({
-            recentUniqueUsers,
-            participantsCount,
-            lastUniqueUserCheckAt: channel.lastUniqueUserCheckAt,
-            now,
-            ttlDays: activitySignalTtlDays,
-            deadUniqueRate: activityDeadUniqueRate,
-        })
         - moderationPenalty(freeformDeletedCount + followUpDeletedCount)));
     const promotable = score > threshold;
     return {
@@ -10309,23 +10584,13 @@ function classifyDeletionRate(deletedCount, survivingMessages, thresholds) {
         return 'moderate';
     return 'low';
 }
+// Channel activity is classified purely on participants count. A unique-user activity probe
+// (recentUniqueUsers / lastUniqueUserCheckAt) was scaffolded here but never had a real writer, so it
+// was permanently inert and has been removed. Re-add a fresh-signal branch only alongside a real writer.
 function classifyChannelActivity(input) {
-    if (isFreshActivitySignal(input.lastUniqueUserCheckAt, input.now, input.ttlDays)) {
-        if (input.participantsCount > 0) {
-            const activeRate = input.recentUniqueUsers / input.participantsCount;
-            if (activeRate < input.deadUniqueRate)
-                return 'dead';
-            if (activeRate < input.lowUniqueRate)
-                return 'low';
-            return 'active';
-        }
-        if (input.recentUniqueUsers <= 0)
-            return 'dead';
-    }
-    const participantsCount = input.participantsCount;
-    if (participantsCount < 50)
+    if (input.participantsCount < 50)
         return 'dead';
-    if (participantsCount < 200)
+    if (input.participantsCount < 200)
         return 'low';
     return 'active';
 }
@@ -10350,15 +10615,6 @@ function activityPenalty(channelActivity) {
         return 5;
     return 0;
 }
-function recentUniqueUserPenalty(input) {
-    if (!isFreshActivitySignal(input.lastUniqueUserCheckAt, input.now, input.ttlDays))
-        return 0;
-    if (input.participantsCount > 0) {
-        const activeRate = input.recentUniqueUsers / input.participantsCount;
-        return activeRate < input.deadUniqueRate ? 60 : 0;
-    }
-    return input.recentUniqueUsers <= 0 ? 60 : 0;
-}
 function moderationPenalty(totalRestrictionCount) {
     if (totalRestrictionCount >= 8)
         return 15;
@@ -10371,12 +10627,6 @@ function isProbeCooldownElapsed(bannedAt, now, cooldownDays) {
     if (timestamp === null)
         return false;
     return now - timestamp > cooldownDays * 24 * 60 * 60 * 1000;
-}
-function isFreshActivitySignal(lastUniqueUserCheckAt, now, ttlDays) {
-    const timestamp = toTimestamp(lastUniqueUserCheckAt);
-    if (timestamp === null)
-        return false;
-    return now - timestamp <= ttlDays * 24 * 60 * 60 * 1000;
 }
 function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -10424,9 +10674,6 @@ function classification(code, scope, reason, waitSeconds, transient, shouldPersi
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT),
@@ -10474,6 +10721,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ALL_STRATEGIES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ALL_STRATEGIES),
 /* harmony export */   BasePromotionEngine: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BasePromotionEngine),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
 /* harmony export */   COLD_START_THRESHOLD: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.COLD_START_THRESHOLD),
 /* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_FRESHNESS_HALF_LIFE_MS),
 /* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_PRIOR_ALPHA),
@@ -10482,9 +10730,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ChannelClassifier: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ChannelClassifier),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
 /* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_ACTIVITY_DEAD_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_ACTIVITY_LOW_UNIQUE_PERCENT),
-/* harmony export */   DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_ACTIVITY_SIGNAL_TTL_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_DELETE_RATE_SEVERE_PERCENT),
@@ -10523,6 +10768,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildOutcomeUpdate),
 /* harmony export */   buildPercentileBuckets: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildPercentileBuckets),
 /* harmony export */   buildSentUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildSentUpdate),
+/* harmony export */   buildV2SidecarBackfillOperation: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildV2SidecarBackfillOperation),
 /* harmony export */   calculateFollowUpDelay: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.calculateFollowUpDelay),
 /* harmony export */   calculateHealthBasedPromotionDelay: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.calculateHealthBasedPromotionDelay),
 /* harmony export */   calculatePromotionBatchLimit: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.calculatePromotionBatchLimit),
@@ -10541,6 +10787,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeSmoothedConversionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeSmoothedConversionRate),
 /* harmony export */   countPoolAttempts: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countPoolAttempts),
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countPoolSurvivors),
+/* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countResolvedPrimaryAttempts),
 /* harmony export */   countSurvivedSends: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countSurvivedSends),
 /* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createDefaultIntelligence),
 /* harmony export */   createDefaultStrategies: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createDefaultStrategies),
@@ -10577,6 +10824,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolMessageIndex),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeHydratedChannelFacts),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy),
+/* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.migrateLegacyChannelIntelligence),
 /* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizeConversionPrior),
 /* harmony export */   normalizeLegacyAvailableMessageIds: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizeLegacyAvailableMessageIds),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.parsePoolMessageIndex),
@@ -12760,11 +13008,11 @@ __webpack_require__.r(__webpack_exports__);
 const ACTIVE_CHANNEL_WRITABLE_KEYS = [
     'title', 'username', 'participantsCount', 'broadcast', 'restricted', 'canSendMsgs', 'sendMessages',
     'banned', 'forbidden', 'reactRestricted', 'private', 'availableMsgs', 'megagroup', 'sendPlain',
-    'accessHash', 'bannedAt', 'tempBan', 'reactRestrictedAt', 'freeformDeletedCount', 'followUpDeletedCount',
+    'accessHash', 'bannedAt', 'reactRestrictedAt', 'freeformDeletedCount', 'followUpDeletedCount',
     'successMsgCount', 'failureMsgCount', 'followupMsgSuccessCount', 'followupMsgFailureCount', 'deletedCount',
-    'lastMessageTime', 'messageIndex', 'messageId', 'recentUniqueUsers', 'lastUniqueUserCheckAt', 'message',
-    'lastErrorType', 'createdAt', 'updatedAt', 'manualUpdatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
-    'lastHydrationStatus', 'lastHydrationReason', 'lastBlockerRepairAt', 'lastBlockerRepairReason',
+    'lastMessageTime', 'messageIndex', 'messageId', 'message',
+    'createdAt', 'updatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
+    'lastHydrationStatus', 'lastHydrationReason',
 ];
 const WRITABLE_KEY_SET = new Set(ACTIVE_CHANNEL_WRITABLE_KEYS);
 /**
@@ -26682,8 +26930,6 @@ class UserDataDtoCrud {
             data.broadcast = false;
             data.sendMessages = false;
             data.sendPlain = false;
-            data.lastBlockerRepairReason = 'live_sendable';
-            data.lastBlockerRepairAt = new Date();
             return;
         }
         const hasLiveBlocker = data.private === true ||
@@ -26726,7 +26972,7 @@ class UserDataDtoCrud {
             // `{...normalizedData}` spread — the exact vector that leaked ~40 raw GramJS entity fields
             // (flags/defaultBannedRights/gigagroup/className/…) into ~1% of live docs. pickActiveChannelWrite
             // drops any key not in ACTIVE_CHANNEL_WRITABLE_KEYS, so an entity can never persist again.
-            const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, { $set: { ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.pickActiveChannelWrite)(normalizedData), updatedAt: new Date(), manualUpdatedAt: new Date() } }, { upsert: true, returnDocument: 'after' });
+            const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, { $set: { ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.pickActiveChannelWrite)(normalizedData), updatedAt: new Date() } }, { upsert: true, returnDocument: 'after' });
             return (result ?? null);
         }
         catch (error) {
@@ -32272,13 +32518,14 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         }
     }
     computeLiveCanSend(liveChannelInfo) {
-        const hasLiveBlocker = liveChannelInfo.broadcast === true ||
-            liveChannelInfo.restricted === true ||
-            liveChannelInfo.sendMessages === true;
-        if (liveChannelInfo.canSendMsgs != null) {
-            return liveChannelInfo.canSendMsgs === true && !hasLiveBlocker;
-        }
-        return !hasLiveBlocker;
+        // Use the ONE shared sendability formula (@tg/channel-state) — all 7 blockers
+        // (broadcast/restricted/left/private/forbidden/sendMessages/sendPlain). This app's old local
+        // check only looked at broadcast/restricted/sendMessages and MISSED left/private/forbidden/
+        // sendPlain, so it could mark a genuinely-unsendable channel as canSendMsgs=true → wasted
+        // sends + ban risk. If Telegram already reported canSendMsgs=false, respect it.
+        if (liveChannelInfo.canSendMsgs === false)
+            return false;
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.computeLiveCanSendMsgs)(liveChannelInfo);
     }
     mergeLiveChannelInfo(existing, liveChannelInfo) {
         const channelId = this.normalizeChannelId(liveChannelInfo.channelId);
