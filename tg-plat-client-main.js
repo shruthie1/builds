@@ -1793,7 +1793,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
-/** The final, root-level schema version. */
+/** Root-level durable-facts schema version. Full legacy-field cleanup requires a separate reader/writer cutover. */
 const CHANNEL_INTELLIGENCE_SCHEMA_VERSION = 2;
 /**
  * Derives a clean V2 projection without discarding legacy values. The cleanup migration archives
@@ -21157,6 +21157,13 @@ class EventStore {
     constructor(collection) {
         this.collection = collection;
     }
+    /** Idempotent indexes for the scheduler's due-event and cancellation queries. */
+    async ensureIndexes() {
+        await Promise.all([
+            this.collection.createIndex({ clientId: 1, time: 1 }, { name: 'idx_events_due_by_client' }),
+            this.collection.createIndex({ chatId: 1, clientId: 1 }, { name: 'idx_events_by_chat_client' }),
+        ]);
+    }
     async createMultiple(events) {
         if (events.length === 0)
             return;
@@ -25120,6 +25127,7 @@ class ExpressServer {
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(10000);
         await (0,_core_jobs__WEBPACK_IMPORTED_MODULE_16__.runJobs)();
         const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_26__.EventStore(_core_dbservice__WEBPACK_IMPORTED_MODULE_5__.UserDataDtoCrud.getInstance().getEventsCollection());
+        await eventStore.ensureIndexes();
         const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_26__.EventScheduler(eventStore, process.env.clientId, _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_27__.executeEvent, {
             logger: {
                 log: (m) => logger.log(`[event-scheduler] ${m}`),
@@ -27014,6 +27022,7 @@ function sweepEntityCacheByAge(cacheMap, lastSeen, now, maxIdleMs) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   UserDataDtoCrud: () => (/* binding */ UserDataDtoCrud),
+/* harmony export */   normalizeUserDataDto: () => (/* binding */ normalizeUserDataDto),
 /* harmony export */   user: () => (/* binding */ user)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
@@ -27073,6 +27082,66 @@ const USER_DEFAULTS = {
     username: '',
     totalCount: 0,
 };
+const USER_NUMERIC_FIELDS = [
+    'picCount', 'totalCount', 'lastMsgTimeStamp', 'prfCount', 'paidCount', 'limitTime',
+    'canReply', 'payAmount', 'picsSent', 'highestPayAmount', 'cheatCount', 'callTime', 'fullShow',
+];
+const USER_BOOLEAN_FIELDS = ['paidReply', 'demoGiven', 'secondShow'];
+function asFiniteNumber(value, fallback) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return value;
+    if (typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed))
+            return parsed;
+    }
+    return fallback;
+}
+function asBoolean(value, fallback) {
+    if (typeof value === 'boolean')
+        return value;
+    if (typeof value === 'number')
+        return value !== 0;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['true', '1', 'yes'].includes(normalized))
+            return true;
+        if (['false', '0', 'no', ''].includes(normalized))
+            return false;
+    }
+    return fallback;
+}
+function isLegacyTotalCountIncrementError(error) {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return /\$inc/i.test(message)
+        && /totalCount|non-numeric type/i.test(message);
+}
+/**
+ * Converts legacy BSON/string values to the runtime contract without mutating Mongo.
+ * The companion migration persists only values that can be converted exactly.
+ */
+function normalizeUserDataDto(value) {
+    const source = value && typeof value === 'object'
+        ? value
+        : {};
+    const normalized = { ...USER_DEFAULTS, ...source };
+    for (const field of USER_NUMERIC_FIELDS) {
+        normalized[field] = asFiniteNumber(source[field], USER_DEFAULTS[field] ?? 0);
+    }
+    for (const field of USER_BOOLEAN_FIELDS) {
+        normalized[field] = asBoolean(source[field], USER_DEFAULTS[field]);
+    }
+    normalized.chatId = typeof source.chatId === 'string' ? source.chatId : String(source.chatId ?? '');
+    normalized.profile = typeof source.profile === 'string' && source.profile.trim()
+        ? source.profile
+        : 'default_profile';
+    normalized.username = typeof source.username === 'string' ? source.username : '';
+    normalized.accessHash = typeof source.accessHash === 'string' ? source.accessHash : '';
+    normalized.videos = Array.isArray(source.videos)
+        ? source.videos.filter((item) => typeof item === 'string')
+        : [];
+    return normalized;
+}
 class UserDataDtoCrud {
     constructor() {
         this.clients = {};
@@ -27287,10 +27356,10 @@ class UserDataDtoCrud {
         const THIRTY_MIN_MS = 30 * 60 * 1000;
         const TWO_DAYS_AGO = Date.now() - ONE_DAY_MS;
         try {
-            const documents = await this.db.find({
+            const documents = (await this.db.find({
                 chatId,
                 client: { $ne: process.env.clientId }
-            }).toArray();
+            }).toArray()).map(normalizeUserDataDto);
             // Preprocess list extraction once
             const profiles = [];
             const lastDayProfiles = [];
@@ -27332,17 +27401,19 @@ class UserDataDtoCrud {
     async checkIfPaidToOthers(chatId) {
         const resp = { paid: '', demoGiven: '' };
         try {
-            const document = await this.db.find({ chatId, profile: { $exists: true, "$ne": `${process.env.dbcoll}` }, payAmount: { $gte: 10 } }).toArray();
-            const document2 = await this.db.find({ chatId, profile: { $exists: true, "$ne": `${process.env.dbcoll}` }, demoGiven: true }).toArray();
-            if (document.length > 0) {
-                document.map((doc) => {
+            // Legacy documents can store these fields as strings, which Mongo's typed
+            // predicates do not match. Normalize after the scoped lookup until migration ends.
+            const documents = (await this.db.find({
+                chatId,
+                profile: { $exists: true, "$ne": `${process.env.dbcoll}` },
+            }).toArray()).map(normalizeUserDataDto);
+            for (const doc of documents) {
+                if (doc.payAmount >= 10) {
                     resp.paid = resp.paid + `@${this.clients[doc.profile]?.username}` + ", ";
-                });
-            }
-            if (document2.length > 0) {
-                document2.map((doc) => {
+                }
+                if (doc.demoGiven) {
                     resp.demoGiven = resp.demoGiven + `@${this.clients[doc.profile]?.username}` + ", ";
-                });
+                }
             }
         }
         catch (error) {
@@ -27557,7 +27628,7 @@ class UserDataDtoCrud {
     async read(chatId) {
         const result = await this.db.findOne({ chatId, profile: process.env.dbcoll });
         if (result) {
-            return result;
+            return normalizeUserDataDto(result);
         }
         else {
             return undefined;
@@ -28112,7 +28183,7 @@ class UserDataDtoCrud {
                 $set: setFields,
                 $setOnInsert: setOnInsert,
             }, { upsert: true, returnDocument: 'after' });
-            return result || await this.read(chatId);
+            return result ? normalizeUserDataDto(result) : await this.read(chatId);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating UserDataDto", true);
@@ -28133,7 +28204,7 @@ class UserDataDtoCrud {
                 $set: { [key]: value, lastMsgTimeStamp: now },
                 $setOnInsert: setOnInsert
             }, { upsert: true, returnDocument: 'after' });
-            return result || await this.read(chatId);
+            return result ? normalizeUserDataDto(result) : await this.read(chatId);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating single key", true);
@@ -28169,13 +28240,36 @@ class UserDataDtoCrud {
                     continue; // provided by $set — can't be in both
                 setOnInsert[key] = value;
             }
-            const result = await this.db.findOneAndUpdate({ chatId, profile }, {
+            const write = () => this.db.findOneAndUpdate({ chatId, profile }, {
                 $set: { ...safeUpdates, lastMsgTimeStamp: now },
                 $inc: { totalCount: 1 },
                 $setOnInsert: setOnInsert,
             }, { upsert: true, returnDocument: 'after' });
+            let result;
+            try {
+                result = await write();
+            }
+            catch (error) {
+                if (!isLegacyTotalCountIncrementError(error))
+                    throw error;
+                // $inc cannot operate on a legacy string/null counter. Convert just this
+                // document atomically, then retry the original upsert without losing updates.
+                await this.db.updateOne({ chatId, profile }, [{
+                        $set: {
+                            totalCount: {
+                                $convert: {
+                                    input: '$totalCount',
+                                    to: 'double',
+                                    onError: 0,
+                                    onNull: 0,
+                                },
+                            },
+                        },
+                    }]);
+                result = await write();
+            }
             // Native driver: `result` is the post-update document (returnDocument: 'after').
-            const userDetails = result ?? await this.read(chatId);
+            const userDetails = result ? normalizeUserDataDto(result) : await this.read(chatId);
             // totalCount === 1 after the $inc means this call created the doc.
             const wasCreated = userDetails?.totalCount === 1;
             if (wasCreated) {
