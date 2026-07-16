@@ -1788,7 +1788,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
-/** The final, root-level schema version. */
+/** Root-level durable-facts schema version. Full legacy-field cleanup requires a separate reader/writer cutover. */
 const CHANNEL_INTELLIGENCE_SCHEMA_VERSION = 2;
 /**
  * Derives a clean V2 projection without discarding legacy values. The cleanup migration archives
@@ -26711,6 +26711,7 @@ class UserDataDtoCrud {
                 this.promoteStatsDb = this.client.db("tgclients").collection('promoteStats');
                 this.channelIntelligenceDb = this.client.db("tgclients").collection('channelIntelligence');
                 await this.ensureDailyAnalyticsIndexes();
+                await this.ensurePromoteClientStatsIndex();
                 await this.initializePromotionRuntime();
                 await this.getClients();
                 return true;
@@ -26868,6 +26869,10 @@ class UserDataDtoCrud {
             this.isConnected = false;
             this.client = null;
         }
+    }
+    /** One metrics row per logical promotion client. Existing rows are verified before startup. */
+    async ensurePromoteClientStatsIndex() {
+        await this.client.db("tgclients").collection('promoteClientStats').createIndex({ clientId: 1 }, { unique: true, name: 'uniq_promote_client_stats_client' });
     }
     async getUserData(chatId) {
         try {
@@ -27702,8 +27707,16 @@ class UserDataDtoCrud {
     }
     async updatePromoteClient(filter, data) {
         try {
+            const mobile = typeof filter.mobile === 'string' ? filter.mobile.trim() : '';
+            if (!mobile) {
+                logger.warn('Skipping promote client update: a non-empty mobile identity is required');
+                return null;
+            }
             const clientsDb = this.client.db("tgclients").collection('promoteClients');
-            const result = await clientsDb.findOneAndUpdate(filter, { $set: { ...data } }, { upsert: true, returnDocument: 'after' });
+            const result = await clientsDb.findOneAndUpdate(
+            // `mobile` is the required identity, but callers may add lifecycle guards to
+            // prevent a stale manager from mutating a reassigned client document.
+            { ...filter, mobile }, { $set: { ...data, updatedAt: new Date() } }, { returnDocument: 'after' });
             return result ?? null;
         }
         catch (error) {
@@ -27723,10 +27736,15 @@ class UserDataDtoCrud {
     }
     async createPromoteClient(clientData) {
         try {
+            const mobile = typeof clientData.mobile === 'string' ? clientData.mobile.trim() : '';
+            if (!mobile) {
+                logger.warn('Skipping promote client creation: a non-empty mobile identity is required');
+                return null;
+            }
             const clientsDb = this.client.db("tgclients").collection('promoteClients');
             const newClient = {
                 tgId: clientData.tgId,
-                mobile: clientData.mobile || '',
+                mobile,
                 lastActive: clientData.lastActive,
                 availableDate: clientData.availableDate,
                 channels: clientData.channels,
