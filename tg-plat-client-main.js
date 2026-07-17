@@ -62,7 +62,7 @@ class ConversionAttributionService {
      *
      * @param commonChatIds - Channel IDs from GetCommonChats
      */
-    async attributeDmConversion(commonChatIds) {
+    async attributeDMConversion(commonChatIds) {
         const uniqueChatIds = normalizeCommonChatIds(commonChatIds);
         if (uniqueChatIds.length === 0)
             return { attributedChannels: [] };
@@ -97,11 +97,10 @@ class ConversionAttributionService {
                     weight: equalWeight,
                 });
                 try {
-                    // Increment fractional channel->DM-open attribution on the channel.
-                    await this.intelligenceService.recordDmConversion(candidate.channelId, equalWeight);
+                    await this.intelligenceService.recordDMConversion(candidate.channelId, equalWeight);
                 }
                 catch {
-                    // Attribution discovery should still return even when analytics persistence is transiently down.
+                    // Attribution discovery still returns so userData records the source channels.
                 }
             }
             return { attributedChannels: attributions };
@@ -188,8 +187,7 @@ function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function isIntelligenceServiceLike(value) {
-    return isRecord(value)
-        && typeof value['recordDmConversion'] === 'function';
+    return isRecord(value) && typeof value['recordDMConversion'] === 'function';
 }
 function isTrackerLike(value) {
     return isRecord(value) && typeof value['getLastPromoter'] === 'function';
@@ -218,125 +216,6 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts"
-/*!*****************************************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts ***!
-  \*****************************************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ChannelClassifier: () => (/* binding */ ChannelClassifier)
-/* harmony export */ });
-/**
- * Data-driven channel classification.
- *
- * Replaces hardcoded keyword filtering in getActiveChannels().
- * Uses keyword matching as a SIGNAL (not a gate) combined with actual promotion results.
- * Performance data overrides keywords when confident.
- */
-// Keyword lists — used as soft signals, NOT hard gates
-const HIGH_INTENT_KEYWORDS = [
-    'wife', 'adult', 'dating', 'coupl', 'swap', 'sex', 'escort',
-    'intimate', 'hook', 'paid', 'call girl', 'massage', 'companion',
-];
-const SOCIAL_CHAT_KEYWORDS = [
-    'chat', 'friend', 'girl', 'boy', 'love', 'romance', 'flirt',
-    'single', 'meet', 'connect', 'relationship', 'desi', 'bhabhi',
-    'aunty', 'hot', 'sexy', 'beautiful',
-];
-const OFF_TOPIC_KEYWORDS = [
-    'crypto', 'bitcoin', 'game', 'movie', 'film', 'news', 'tech',
-    'education', 'course', 'job', 'finance', 'invest', 'trade',
-    'sport', 'cric', 'bet', 'coding', 'program', 'forex', 'nft',
-    'stock', 'mutual fund', 'exam', 'upsc', 'ssc',
-];
-function safeNonNegative(value, fallback = 0) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-function clamp01(value, fallback) {
-    if (value === undefined || !Number.isFinite(value))
-        return fallback;
-    return Math.max(0, Math.min(1, value));
-}
-function safeExpectedValue(value) {
-    if (value === undefined || !Number.isFinite(value) || value < 0 || value > 1)
-        return 0.5;
-    return value;
-}
-class ChannelClassifier {
-    /**
-     * Classify a channel based on its title, username, AND historical performance.
-     * Performance data overrides keywords when confident enough.
-     */
-    static classify(title, username, intelDoc) {
-        const text = `${safeText(title).toLowerCase()} ${safeText(username).toLowerCase()}`;
-        const highIntentHits = HIGH_INTENT_KEYWORDS.filter(k => text.includes(k)).length;
-        const socialChatHits = SOCIAL_CHAT_KEYWORDS.filter(k => text.includes(k)).length;
-        const offTopicHits = OFF_TOPIC_KEYWORDS.filter(k => text.includes(k)).length;
-        // Signal 2: Historical promotion performance (strongest signal)
-        let performanceCategory = 'unclassified';
-        let performanceConfidence = 0;
-        if (intelDoc && intelDoc.stage !== 'new') {
-            const totalAttempts = poolAttemptCount(intelDoc.messagePool);
-            if (totalAttempts >= 10) {
-                const conversions = safeNonNegative(intelDoc.dmConversions);
-                // Channels that ACTUALLY convert are high_intent regardless of keywords
-                if (conversions > 0.5) {
-                    performanceCategory = 'high_intent';
-                    performanceConfidence = clamp01(conversions / 3, 0);
-                }
-            }
-        }
-        // Combine: performance data overrides keywords when confident
-        let category;
-        let confidence;
-        if (performanceConfidence > 0.5) {
-            category = performanceCategory;
-            confidence = performanceConfidence;
-        }
-        else if (highIntentHits >= 2 || (highIntentHits >= 1 && offTopicHits === 0)) {
-            category = 'high_intent';
-            confidence = Math.min(0.7, highIntentHits * 0.25);
-        }
-        else if (offTopicHits >= 2) {
-            category = 'off_topic';
-            confidence = Math.min(0.7, offTopicHits * 0.2);
-        }
-        else if (socialChatHits >= 1) {
-            category = 'social_chat';
-            confidence = Math.min(0.5, socialChatHits * 0.2);
-        }
-        else {
-            category = 'unclassified';
-            confidence = 0;
-        }
-        // promotionFitScore: 0-1
-        const keywordFit = (highIntentHits * 0.3 + socialChatHits * 0.15)
-            / Math.max(1, highIntentHits + socialChatHits + offTopicHits);
-        const performanceFit = intelDoc ? safeExpectedValue(intelDoc.expectedValue) : 0.5;
-        const promotionFitScore = performanceConfidence > 0.3
-            ? performanceFit * 0.8 + keywordFit * 0.2
-            : keywordFit * 0.5 + 0.25;
-        return { category, confidence: clamp01(confidence, 0), promotionFitScore: clamp01(promotionFitScore, 0.25) };
-    }
-}
-function safeText(value) {
-    return typeof value === 'string' ? value : '';
-}
-function asRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
-}
-function poolAttemptCount(value) {
-    if (!Array.isArray(value))
-        return 0;
-    return value.reduce((total, entry) => total + safeNonNegative(asRecord(entry)['attempted']), 0);
-}
-
-
-/***/ },
-
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts"
 /*!***************************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts ***!
@@ -352,14 +231,6 @@ const CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS = [
     {
         spec: { channelId: 1 },
         options: { unique: true },
-    },
-    {
-        spec: { channelCategory: 1, dmConversionRateShrunk: -1 },
-        options: { name: 'idx_category_score' },
-    },
-    {
-        spec: { profileUpdatedAt: 1 },
-        options: { name: 'idx_stale_profile', sparse: true },
     },
 ];
 
@@ -378,28 +249,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ChannelIntelligenceService: () => (/* binding */ ChannelIntelligenceService),
 /* harmony export */   isAccountSpecificError: () => (/* binding */ isAccountSpecificError)
 /* harmony export */ });
-/* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
-/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
-/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
-/* harmony import */ var _channel_classifier__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-classifier */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts");
-/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
-/* harmony import */ var _scoring_expected_value__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../scoring/expected-value */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _policy_message_policy__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../policy/message-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-policy.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
+/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
+/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /**
  * Channel Intelligence Service — MongoDB-backed per-channel learning.
  *
- * Evolved from tg-aut's version. Key changes:
- * - ALL lifecycle thresholds are percentile-based (no hardcoded values)
- * - Removed hourly buckets (no time-of-day optimization)
- * - Added saturation tracking (totalSendsToChannel / participantsCount)
- * - Added conversion recording for ROI
- * - Added channel classification updates
- * - Scoring includes saturation penalty, conversion bonus, category fitness
- *
+ * Final V2 writer for bounded message evidence, channel outcomes, safety, and DMs.
  * All writes use atomic $inc/$set to avoid read-modify-write races.
  */
 
@@ -408,23 +267,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
-
-
-
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
-// --- EWMA config ---
-const EWMA_ALPHA = 0.15;
-// --- Deletion timing thresholds (ms) ---
-const AUTOMOD_THRESHOLD = 30000;
-const BOT_THRESHOLD = 2 * 60000;
-const HUMAN_THRESHOLD = 10 * 60000;
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('pool');
 const CONCURRENT_WRITE_RETRY_LIMIT = 5;
-// getTopChannels over-fetch: fetch more than the caller's limit so malformed/pacing-gated docs that
-// still match the query cannot consume slots and under-fill the result. Post-filter trims to limit.
-const FETCH_OVERSCAN_FACTOR = 3;
-const MAX_TOP_CHANNEL_FETCH = 1000;
 class ChannelIntelligenceService {
     constructor(collection) {
         if (!isCollectionLike(collection)) {
@@ -449,170 +293,153 @@ class ChannelIntelligenceService {
     }
     // --- Read ---
     async get(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
         const doc = await this.collection.findOne({ channelId: safeChannelId });
-        return doc ? normalizeConversionFields(doc) : doc;
+        return doc;
     }
     /**
      * Read the root V2 projection. Migration provenance is checked while legacy writers remain;
      * after final cleanup a structurally valid root V2 document is canonical on its own.
      */
     async getV2(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
         const doc = await this.collection.findOne({ channelId: safeChannelId });
         if (!doc)
             return null;
         return readCurrentChannelIntelligenceV2(doc)
-            ?? (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(doc);
+            ?? (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.migrateLegacyChannelIntelligence)(doc);
     }
     async batchGetV2(channelIds) {
-        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelIds)(channelIds);
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelIds)(channelIds);
         if (safeChannelIds.length === 0)
             return [];
         const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }));
         return rows.flatMap((doc) => {
-            const v2 = readCurrentChannelIntelligenceV2(doc) ?? (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(doc);
+            const v2 = readCurrentChannelIntelligenceV2(doc) ?? (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.migrateLegacyChannelIntelligence)(doc);
             return v2 ? [v2] : [];
         });
     }
     async batchGet(channelIds, projection) {
-        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelIds)(channelIds);
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelIds)(channelIds);
         if (safeChannelIds.length === 0)
             return [];
         const opts = projection ? { projection } : undefined;
         const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }, opts));
-        return rows.filter(isChannelIntelligenceDocument).map(normalizeConversionFields);
+        return rows.filter(isChannelIntelligenceDocument);
     }
-    async getTopChannels(limit = 50) {
-        const safeLimit = normalizeLimit(limit, 50);
-        const now = Date.now();
-        const cursor = this.collection.find({
-            stage: { $nin: ['hostile'] },
-        });
-        // Over-fetch before validation so malformed-but-query-matching docs cannot consume the limit and
-        // under-fill the result. Post-filter (validation) then trims to safeLimit. Cap the over-fetch so a
-        // pathological collection can't be fully scanned.
-        const fetchLimit = Math.min(safeLimit * FETCH_OVERSCAN_FACTOR, MAX_TOP_CHANNEL_FETCH);
-        const rows = await readCursorArray(isSortableCursorLike(cursor) ? cursor.sort({ dmConversionRateShrunk: -1 }).limit(fetchLimit) : cursor);
-        const eligibleRows = rows
-            .filter(isChannelIntelligenceDocument)
-            .map(normalizeConversionFields)
-            .sort((a, b) => compareTopChannelDocs(a, b, now));
-        if (isSortableCursorLike(cursor)) {
-            return eligibleRows.slice(0, safeLimit);
-        }
-        return eligibleRows
-            .slice(0, safeLimit);
-    }
-    /**
-     * Recover hostile channels that have cooled down.
-     * Hostile channels are excluded from promotion selection, so their stage never gets
-     * re-evaluated. This method finds eligible hostile channels and resets them to 'learning'.
-     * Should be called periodically (e.g., once per health check cycle).
-     */
-    async recoverStaleHostileChannels() {
+    /** Recover blocked channels after their cooldown so current safety evidence can be retried. */
+    async recoverStaleBlockedChannels() {
         const now = Date.now();
         const threeDaysAgo = now - 3 * 24 * 3600000;
-        const legacyFilter = {
-            stage: 'hostile',
-            stageUpdatedAt: { $lt: threeDaysAgo },
+        const filter = {
+            schemaVersion: _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
+            'safety.status': 'blocked',
+            'safety.statusUpdatedAtMs': { $lt: threeDaysAgo },
         };
-        // Mark sidecars stale in one bulk update. V2 readers safely derive from this canonical document
-        // until the next compact sidecar refresh; this avoids copying any pool data in a recovery sweep.
         const update = {
             $set: {
-                stage: 'learning',
-                stageUpdatedAt: now,
-                'errors.consecutiveErrors': 0,
-                updatedAt: new Date(now),
-                writeVersion: `recovery:${now}`,
+                'safety.status': 'active',
+                'safety.statusUpdatedAtMs': now,
+                'safety.consecutiveErrors': 0,
+                'timestamps.updatedAtMs': now,
             },
         };
         if (this.collection.updateMany) {
-            const legacyResult = await this.collection.updateMany(legacyFilter, update);
-            const cleanResult = await this.collection.updateMany({
-                schemaVersion: _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
-                stage: { $exists: false },
-                'lifecycle.state': 'blocked',
-                'lifecycle.updatedAtMs': { $lt: threeDaysAgo },
-            }, {
-                $set: {
-                    'lifecycle.state': 'learning',
-                    'lifecycle.updatedAtMs': now,
-                    'timestamps.updatedAtMs': now,
-                },
-                $inc: { revision: 1 },
-            });
-            return legacyResult.modifiedCount + cleanResult.modifiedCount;
+            const result = await this.collection.updateMany(filter, update);
+            return result.modifiedCount;
         }
-        // Fallback: iterate and updateOne
-        const cursor = this.collection.find(legacyFilter);
+        const cursor = this.collection.find(filter);
         let count = 0;
         const docs = await readCursorArray(cursor);
         for (const doc of docs) {
-            await this.collection.updateOne({ channelId: doc.channelId }, update);
+            await this.collection.updateOne(buildCleanV2Filter(doc.channelId, doc), update);
             count++;
         }
         return count;
     }
     // --- Upsert ---
     async ensureDoc(channelId, topic = 'general_chat') {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
-        const safeTopic = normalizeLabel(topic, 'general_chat');
-        const defaults = (0,_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__.createDefaultIntelligence)(safeChannelId, safeTopic);
-        const operation = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.buildV2RootBackfillOperation)(defaults);
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $setOnInsert: {
-                ...defaults,
-                ...(operation ? operation.update.$set : {}),
+        const now = Date.now();
+        // New records must be final-schema records.  Legacy fields are retained only on existing
+        // documents until the one-time database cleanup; creating them again makes cutover impossible.
+        const defaults = {
+            schemaVersion: _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
+            channelId: safeChannelId,
+            timestamps: { firstSeenAtMs: now, lastPromotionAtMs: 0, updatedAtMs: now },
+            messagePool: [],
+            outcomes: { attempted: 0, survived: 0, deleted: 0 },
+            exploration: { seedProbeCounts: { legacy: 0, custom: 0, ai: 0 } },
+            safety: {
+                status: 'active',
+                statusUpdatedAtMs: now,
+                consecutiveErrors: 0,
+                lastErrorType: null,
+                lastErrorAtMs: 0,
             },
+            DMs: { credited: 0, updatedAtMs: 0 },
+        };
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $setOnInsert: defaults,
         }, { upsert: true });
+        // Existing records are hydrated additively before any V2 mutation. This preserves every
+        // legacy field for rollback/export while making the V2 root the only live write target.
+        await this.syncV2FromLegacy(safeChannelId);
+        const current = await this.collection.findOne({ channelId: safeChannelId });
+        if (current && !isV2OnlyDocument(current)) {
+            const v2 = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.migrateLegacyChannelIntelligence)(current);
+            if (v2) {
+                // Very old records may have no legacy version token, so the normal CAS backfill cannot
+                // address them. Only fill a missing root; never overwrite an already-hydrated V2 record.
+                await this.collection.updateOne({
+                    channelId: safeChannelId,
+                    $or: [
+                        { timestamps: { $exists: false } },
+                        { outcomes: { $exists: false } },
+                        { exploration: { $exists: false } },
+                        { safety: { $exists: false } },
+                        { DMs: { $exists: false } },
+                        { messagePool: { $exists: false } },
+                    ],
+                }, { $set: v2 });
+            }
+        }
     }
     async insertPoolEntryIfAbsent(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
-        const { filter, update } = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.buildInsertIfAbsentUpdate)(entry);
-        const clean = await this.isV2Only(safeChannelId);
+        await this.ensureDoc(safeChannelId);
+        const { filter, update } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildInsertIfAbsentUpdate)(entry);
         await this.collection.updateOne({
             channelId: safeChannelId,
             ...filter,
             // The pool stores only confirmed survivors. Keep it strictly bounded; a one-time compaction
             // script handles oversized historical documents without making live writes complex.
-            $expr: { $lt: [{ $size: { $ifNull: ['$messagePool', []] } }, _pool__WEBPACK_IMPORTED_MODULE_7__.POOL.MAX_ENTRIES_PER_CHANNEL] },
-        }, clean
-            ? {
-                ...update,
-                $set: { 'timestamps.updatedAtMs': Date.now() },
-                $inc: { revision: 1 },
-            }
-            : update);
+            $expr: { $lt: [{ $size: { $ifNull: ['$messagePool', []] } }, _pool__WEBPACK_IMPORTED_MODULE_3__.POOL.MAX_ENTRIES_PER_CHANNEL] },
+        }, {
+            ...update,
+            $set: { 'timestamps.updatedAtMs': Date.now() },
+        });
     }
     async recordPoolEntrySent(channelId, entryKey, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return false;
-        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.buildSentUpdate)(safeEntryKey, nowMs, legacyKeys);
-        const clean = await this.isV2Only(safeChannelId);
+        await this.ensureDoc(safeChannelId);
+        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildSentUpdate)(safeEntryKey, nowMs, legacyKeys);
         const setFields = {
             ...update.$set,
-            hasEverExplored: true,
             'timestamps.lastPromotionAtMs': nowMs,
             'timestamps.updatedAtMs': nowMs,
         };
-        if (clean)
-            delete setFields.hasEverExplored;
-        else {
-            setFields.updatedAt = new Date(nowMs);
-            setFields.writeVersion = nextWriteVersion(safeChannelId);
-        }
         const result = await this.collection.updateOne({
             channelId: safeChannelId,
             $or: [
@@ -622,12 +449,9 @@ class ChannelIntelligenceService {
         }, {
             ...update,
             $set: setFields,
-            ...(clean ? { $inc: { revision: 1 } } : {}),
         }, { arrayFilters });
         const matchedCount = result.matchedCount;
         const matched = typeof matchedCount === 'number' && matchedCount > 0;
-        if (clean && matched)
-            await this.refreshCleanV2(safeChannelId);
         return matched;
     }
     /**
@@ -638,19 +462,13 @@ class ChannelIntelligenceService {
      * per-account): the $inc filters on { channelId } and touches only that channel's seedProbeCounts.
      */
     async incrementSeedProbe(channelId, source) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        // V2 derives probe attempts from messagePool[].attempted. Never recreate the retired counter.
-        if (await this.isV2Only(safeChannelId))
-            return;
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { [`seedProbeCounts.${source}`]: 1 },
-            $set: {
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
+            $inc: { [`exploration.seedProbeCounts.${source}`]: 1 },
+            $set: { 'timestamps.updatedAtMs': Date.now() },
         });
     }
     /**
@@ -658,37 +476,26 @@ class ChannelIntelligenceService {
      * candidates are added only after a real promotion attempt reaches the outcome-tracking path.
      */
     async ensurePoolInitialized(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        const doc = await this.get(safeChannelId);
-        if (!doc)
-            return;
-        if (Array.isArray(doc.messagePool))
-            return;
-        const clean = isV2OnlyDocument(doc);
-        await this.collection.updateOne(clean ? buildCleanV2Filter(safeChannelId, doc) : buildVersionedChannelFilter(safeChannelId, doc), {
+        await this.collection.updateOne({ channelId: safeChannelId, messagePool: { $exists: false } }, {
             $set: {
                 messagePool: [],
-                ...(clean
-                    ? { 'timestamps.updatedAtMs': Date.now() }
-                    : { updatedAt: new Date(), writeVersion: nextWriteVersion(safeChannelId) }),
+                'timestamps.updatedAtMs': Date.now(),
             },
-            ...(clean ? { $inc: { revision: 1 } } : {}),
         });
-        if (clean)
-            await this.refreshCleanV2(safeChannelId);
-        else
-            await this.syncV2FromLegacy(safeChannelId);
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return;
-        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs, legacyKeys);
-        const clean = await this.isV2Only(safeChannelId);
+        await this.ensureDoc(safeChannelId);
+        // The bounded pool tracks message-specific evidence only. Channel-wide survival is recorded
+        // once per validated queued message through recordSurvival(), even when this pool is full.
+        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs, legacyKeys);
         await this.collection.updateOne({
             channelId: safeChannelId,
             $or: [
@@ -697,50 +504,98 @@ class ChannelIntelligenceService {
             ],
         }, {
             ...update,
-            $inc: {
-                ...update.$inc,
-                ...(clean ? { revision: 1 } : {}),
-            },
+            $inc: update.$inc,
             $set: {
                 ...update.$set,
                 'timestamps.updatedAtMs': nowMs,
-                ...(clean ? {} : { updatedAt: new Date(nowMs), writeVersion: nextWriteVersion(safeChannelId) }),
             },
         }, { arrayFilters });
         poolLog.debug('outcome', { chan: safeChannelId, key: safeEntryKey, result: String(outcome) });
         await this.syncPoolEntryStates(safeChannelId, nowMs);
-        await this.writeScoreAndLifecycle(safeChannelId);
     }
-    async recordExploreOutcome(channelId, outcome) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        const safeOutcome = normalizeExploreOutcome(outcome);
-        if (!safeChannelId || !safeOutcome)
-            return;
+    /**
+     * Persist a message that has already survived validation. When the three-slot pool is full, a
+     * newly proven message may replace only a conclusively deleted entry; proven survivors remain.
+     */
+    async recordSurvivingPoolEntry(channelId, entry, nowMs) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
+        const safeNowMs = safeNonNegative(nowMs);
+        if (!safeChannelId || !safeNowMs || !(0,_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry)(entry))
+            return false;
         await this.ensureDoc(safeChannelId);
-        // The pool already records every durable exploration outcome in V2.
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const incFields = { exploreAttempts: 1 };
-        if (safeOutcome === 'survived') {
-            incFields['exploreSurvived'] = 1;
+        const verifiedEntry = {
+            ...entry,
+            attempted: Math.max(1, safeNonNegative(entry.attempted)),
+            survived: Math.max(1, safeNonNegative(entry.survived)),
+            deleted: safeNonNegative(entry.deleted),
+            channelSideFailed: safeNonNegative(entry.channelSideFailed),
+            lastSentAtMs: Math.max(safeNowMs, safeNonNegative(entry.lastSentAtMs)),
+            lastValidatedAtMs: Math.max(safeNowMs, safeNonNegative(entry.lastValidatedAtMs)),
+            state: 'active',
+        };
+        const keys = [verifiedEntry.key, ...(verifiedEntry.legacyKeys ?? [])];
+        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
+            const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildOutcomeUpdate)(verifiedEntry.key, 'survived', safeNowMs, verifiedEntry.legacyKeys ?? []);
+            const existing = await this.collection.updateOne({
+                channelId: safeChannelId,
+                $or: [
+                    { 'messagePool.key': { $in: keys } },
+                    { 'messagePool.legacyKeys': { $in: keys } },
+                ],
+            }, {
+                $inc: update.$inc,
+                $set: {
+                    ...update.$set,
+                    'messagePool.$[e].lastSentAtMs': safeNowMs,
+                    'timestamps.lastPromotionAtMs': safeNowMs,
+                    'timestamps.updatedAtMs': safeNowMs,
+                },
+            }, { arrayFilters });
+            if (isMatchedUpdateResult(existing)) {
+                await this.syncPoolEntryStates(safeChannelId, safeNowMs);
+                return true;
+            }
+            const doc = await this.get(safeChannelId);
+            const entries = Array.isArray(doc?.messagePool) ? doc.messagePool : null;
+            // A cleanup/migration must handle malformed historical rows; a live replacement never drops
+            // them just to make room for a new message.
+            if (!entries || !entries.every(_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry))
+                return false;
+            const replacement = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.compactMessagePool)([...entries, verifiedEntry]);
+            // Live learning may renew a stale slot, but it never throws away a still-valid survivor just
+            // because the new one is more recent. Historical over-cap cleanup is handled separately.
+            if (replacement.evicted.some(hasNetPoolSurvival))
+                return false;
+            const compacted = replacement.kept;
+            if (!compacted.some((candidate) => candidate.key === verifiedEntry.key))
+                return false;
+            const result = await this.collection.updateOne(buildCleanV2Filter(safeChannelId, doc), {
+                $set: {
+                    messagePool: compacted,
+                    'timestamps.lastPromotionAtMs': safeNowMs,
+                    'timestamps.updatedAtMs': safeNowMs,
+                },
+            });
+            if (isMatchedUpdateResult(result)) {
+                await this.syncPoolEntryStates(safeChannelId, safeNowMs);
+                return true;
+            }
         }
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: incFields,
-            $set: {
-                hasEverExplored: true,
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        });
+        poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'record-surviving-pool-entry' });
+        return false;
+    }
+    async recordExploreOutcome(_channelId, _outcome) {
+        // V2 persists exploration evidence through bounded pool outcomes; this compatibility hook has
+        // no separate counter to write.
     }
     async syncPoolEntryStates(channelId, nowMs = Date.now()) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeNowMs = safeNonNegative(nowMs);
         if (!safeChannelId || safeNowMs <= 0)
             return;
         let engine;
         try {
-            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
+            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
         }
         catch {
             return;
@@ -776,12 +631,13 @@ class ChannelIntelligenceService {
             }
             // Reconciliation never writes messagePool, so these independent state-only updates do not
             // need to invalidate its root snapshot. Keeping one filter lets every pending entry update.
-            const filter = buildVersionedChannelFilter(safeChannelId, doc);
+            const filter = buildCleanV2Filter(safeChannelId, doc);
             let staleSnapshot = false;
             for (const entry of pending) {
                 const result = await this.collection.updateOne(filter, {
                     $set: {
                         'messagePool.$[e].state': entry.nextState,
+                        'timestamps.updatedAtMs': safeNowMs,
                     },
                 }, { arrayFilters: [{ 'e.key': entry.key }] });
                 if (!isMatchedUpdateResult(result)) {
@@ -796,100 +652,62 @@ class ChannelIntelligenceService {
         poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'sync-pool-states' });
     }
     // --- Outcome recording ---
-    async recordSuccess(channelId, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+    async recordSuccess(channelId, _isFollowup) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        if (await this.isV2Only(safeChannelId)) {
-            const now = Date.now();
-            await this.collection.updateOne({ channelId: safeChannelId }, {
-                $inc: isFollowup
-                    ? { 'followup.accepted': 1, revision: 1 }
-                    : { 'historical.totalSendsToChannel': 1, revision: 1 },
-                $set: {
-                    'timestamps.lastPromotionAtMs': now,
-                    'timestamps.updatedAtMs': now,
-                },
-            });
-            await this.refreshCleanV2(safeChannelId);
-            return;
-        }
-        await this.ensureLegacyOutcomeSubdocuments(safeChannelId);
-        await this.repairNumericFields(safeChannelId, isFollowup
-            ? ['totalSendsToChannel', 'followupTotal', 'followupSuccessCount']
-            : ['totalSendsToChannel']);
-        const incFields = {
-            totalSendsToChannel: 1,
-        };
-        if (isFollowup) {
-            incFields['followupTotal'] = 1;
-            incFields['followupSuccessCount'] = 1;
-        }
-        const setFields = {
-            'errors.consecutiveErrors': 0,
-            updatedAt: new Date(),
-            writeVersion: nextWriteVersion(safeChannelId),
-        };
-        if (!isFollowup) {
-            setFields['lastPromotedAt'] = Date.now();
-        }
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
-        if (!doc)
-            return;
-        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
-    }
-    async recordDeletion(channelId, survivalMs, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        await this.ensureDoc(safeChannelId);
-        if (await this.isV2Only(safeChannelId)) {
-            const now = Date.now();
-            await this.collection.updateOne({ channelId: safeChannelId }, {
-                $inc: isFollowup ? { 'followup.deleted': 1, revision: 1 } : { revision: 1 },
-                $set: { 'timestamps.updatedAtMs': now },
-            });
-            await this.refreshCleanV2(safeChannelId);
-            return;
-        }
-        await this.ensureLegacyOutcomeSubdocuments(safeChannelId);
-        if (isFollowup) {
-            await this.repairNumericFields(safeChannelId, ['followupTotal']);
-        }
-        const bucket = this.classifyDeletionTiming(survivalMs);
-        const incFields = {
-            [`deletionTiming.${bucket}`]: 1,
-        };
-        if (isFollowup) {
-            incFields['followupTotal'] = 1;
-        }
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, {
-            $inc: incFields,
+        const now = Date.now();
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $inc: { 'outcomes.attempted': 1 },
             $set: {
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
+                'timestamps.lastPromotionAtMs': now,
+                'timestamps.updatedAtMs': now,
+                'safety.consecutiveErrors': 0,
             },
-        }, { returnDocument: 'after' });
-        if (!doc)
+        });
+    }
+    /** Record a validated message survival independently of the bounded reusable-message pool. */
+    async recordSurvival(channelId) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
+        if (!safeChannelId)
             return;
-        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
+        await this.ensureDoc(safeChannelId);
+        const now = Date.now();
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $inc: { 'outcomes.survived': 1 },
+            $set: { 'timestamps.updatedAtMs': now },
+        });
+    }
+    async recordDeletion(channelId, _survivalMs, _isFollowup) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
+        if (!safeChannelId)
+            return;
+        await this.ensureDoc(safeChannelId);
+        const now = Date.now();
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $inc: { 'outcomes.deleted': 1 },
+            $set: { 'timestamps.updatedAtMs': now },
+        });
+        await this.collection.updateOne({
+            channelId: safeChannelId,
+            'outcomes.attempted': { $gte: 10 },
+            $expr: {
+                $gt: [
+                    { $divide: [{ $ifNull: ['$outcomes.deleted', 0] }, { $ifNull: ['$outcomes.attempted', 1] }] },
+                    0.3,
+                ],
+            },
+        }, { $set: { 'safety.status': 'blocked', 'safety.statusUpdatedAtMs': now } });
     }
     async recordFailure(channelId, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        if (await this.isV2Only(safeChannelId)) {
-            await this.collection.updateOne({ channelId: safeChannelId }, { $set: { 'timestamps.updatedAtMs': Date.now() }, $inc: { revision: 1 } });
-            await this.refreshCleanV2(safeChannelId);
-            return;
-        }
-        await this.ensureLegacyOutcomeSubdocuments(safeChannelId);
         const now = Date.now();
         const safeErrorType = normalizeErrorType(errorType);
-        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(safeErrorType);
-        const errorCategory = this.categorizeError(safeErrorType, errorClass);
+        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(safeErrorType);
         const accountOnly = errorClass === 'account';
         poolLog.debug('skip-channel', {
             chan: safeChannelId,
@@ -897,298 +715,47 @@ class ChannelIntelligenceService {
             err: safeErrorType,
             charged: accountOnly ? 'no' : 'yes',
         });
-        const incFields = {
-            [`errors.${errorCategory}`]: 1,
-        };
-        // Only increment consecutiveErrors for channel-level issues, not per-account bans/floods
+        await this.collection.updateOne({ channelId: safeChannelId }, {
+            $set: {
+                'timestamps.updatedAtMs': now,
+                'safety.lastErrorType': safeErrorType,
+                'safety.lastErrorAtMs': now,
+            },
+            ...(accountOnly ? {} : { $inc: { 'safety.consecutiveErrors': 1 } }),
+        });
         if (!accountOnly) {
-            incFields['errors.consecutiveErrors'] = 1;
+            await this.collection.updateOne({ channelId: safeChannelId, 'safety.consecutiveErrors': { $gte: 3 } }, { $set: { 'safety.status': 'blocked', 'safety.statusUpdatedAtMs': now } });
         }
-        const setFields = {
-            'errors.lastErrorType': safeErrorType,
-            'errors.lastErrorAt': now,
-            updatedAt: new Date(),
-            writeVersion: nextWriteVersion(safeChannelId),
-        };
-        const doc = await this.collection.findOneAndUpdate({ channelId: safeChannelId }, { $inc: incFields, $set: setFields }, { returnDocument: 'after' });
-        if (!doc)
-            return;
-        await this.writeScoreAndLifecycle(safeChannelId, normalizeConversionFields(doc));
     }
     // --- Conversion recording (ROI) ---
     /**
      * Record a STAGE-1 channel->DM open using the same timestamp-aware resolver as migration reads.
      * The compare-and-set loop protects concurrent writers without arbitrarily preferring either alias.
      */
-    async recordDmConversion(channelId, fractionalWeight) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+    async recordDMConversion(channelId, fractionalWeight) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const weight = this.normalizeFractionalWeight(fractionalWeight);
         if (weight === null)
             return;
         await this.ensureDoc(safeChannelId);
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const current = await this.get(safeChannelId);
-            if (!current)
-                return;
-            const now = Date.now();
-            const resolved = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.resolveConversion)(current);
-            const nextCredits = resolved.credits + weight;
-            if (isV2OnlyDocument(current)) {
-                const result = await this.collection.updateOne(buildCleanV2Filter(safeChannelId, current), {
-                    $set: {
-                        'conversion.dmOpenCredits': nextCredits,
-                        'conversion.updatedAtMs': now,
-                        'timestamps.updatedAtMs': now,
-                    },
-                    $inc: { revision: 1 },
-                });
-                if (!isMatchedUpdateResult(result))
-                    continue;
-                await this.refreshCleanV2(safeChannelId);
-                return;
-            }
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(safeChannelId, current), {
-                $set: {
-                    dmConversions: nextCredits,
-                    conversions: nextCredits,
-                    dmConversionUpdatedAt: now,
-                    conversionUpdatedAt: now,
-                    updatedAt: new Date(now),
-                    writeVersion: nextWriteVersion(safeChannelId),
-                },
-            });
-            if (!isMatchedUpdateResult(result))
-                continue;
-            await this.writeScoreAndLifecycle(safeChannelId);
-            return;
-        }
-        poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'record-dm-conversion' });
-    }
-    // --- Channel classification ---
-    async updateClassification(channelId, classification) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const safeClassification = isRecord(classification) ? classification : {};
-        const category = isChannelCategory(safeClassification['category']) ? safeClassification['category'] : 'unclassified';
+        const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                channelCategory: category,
-                categoryConfidence: clamp01(asNumber(safeClassification['confidence'])),
-                promotionFitScore: clamp01(asNumber(safeClassification['promotionFitScore'])),
-                categoryUpdatedAt: Date.now(),
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
+            $inc: { 'DMs.credited': weight },
+            $set: { 'DMs.updatedAtMs': now, 'timestamps.updatedAtMs': now },
         });
-        await this.syncV2FromLegacy(safeChannelId);
-    }
-    // --- Saturation update ---
-    async updateSaturationRate(channelId, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const doc = await this.get(safeChannelId);
-        const safeParticipantsCount = safePositive(participantsCount);
-        if (!doc || safeParticipantsCount === null)
-            return;
-        const rate = safeNonNegative(doc.totalSendsToChannel) / safeParticipantsCount;
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                saturationRate: Math.round(rate * 1000) / 1000,
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        });
-        await this.syncV2FromLegacy(safeChannelId);
-    }
-    // --- Post-success periodic updates ---
-    /**
-     * Refresh classification and saturation after outcome recording.
-     * Call after recordSuccess/recordDeletion — skips work unless ~50 pulls elapsed.
-     */
-    async refreshChannelMeta(channelId, title, username, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const doc = await this.get(safeChannelId);
-        if (!doc)
-            return;
-        const totalAttempts = sumPoolAttempts(doc.messagePool);
-        // Reclassify every ~50 durable pool attempts (and on first classification).
-        if (totalAttempts % 50 < 2 || doc.channelCategory === 'unclassified') {
-            const classification = _channel_classifier__WEBPACK_IMPORTED_MODULE_3__.ChannelClassifier.classify(title, username, doc);
-            await this.updateClassification(safeChannelId, classification);
-        }
-        // Update saturation rate on every call (lightweight)
-        const safeParticipantsCount = safePositive(participantsCount);
-        if (safeParticipantsCount !== null) {
-            await this.updateSaturationRate(safeChannelId, safeParticipantsCount);
-        }
-    }
-    // --- GramJS signal updates ---
-    async updateOnlineTrend(channelId, onlineCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const doc = await this.get(safeChannelId);
-        if (!doc)
-            return;
-        const safeOnlineCount = safeNonNegative(onlineCount);
-        const onlineTrend = asRecord(doc.onlineTrend);
-        const prevEwma = safeNonNegative(onlineTrend['ewma']);
-        const sampleCount = safeNonNegative(onlineTrend['sampleCount']);
-        const newEwma = sampleCount === 0
-            ? safeOnlineCount
-            : prevEwma * (1 - EWMA_ALPHA) + safeOnlineCount * EWMA_ALPHA;
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                'onlineTrend.ewma': Math.round(newEwma * 100) / 100,
-                'onlineTrend.lastSampled': Date.now(),
-                'onlineTrend.sampleCount': sampleCount + 1,
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        });
-        await this.syncV2FromLegacy(safeChannelId);
-    }
-    async updateViewEngagement(channelId, views, participantsCount) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const safeViews = safeNonNegativeInput(views);
-        const safeParticipantsCount = safePositive(participantsCount);
-        if (safeParticipantsCount === null || safeViews === null)
-            return;
-        const ratio = safeViews / safeParticipantsCount;
-        const doc = await this.get(safeChannelId);
-        if (!doc)
-            return;
-        const viewEngagement = asRecord(doc.viewEngagement);
-        const prevRatio = safeNonNegative(viewEngagement['ewmaRatio']);
-        const checksCount = safeNonNegative(viewEngagement['checksCount']);
-        const newRatio = checksCount === 0
-            ? ratio
-            : prevRatio * (1 - EWMA_ALPHA) + ratio * EWMA_ALPHA;
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                'viewEngagement.ewmaRatio': Math.round(newRatio * 1000) / 1000,
-                'viewEngagement.lastChecked': Date.now(),
-                'viewEngagement.checksCount': checksCount + 1,
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        });
-        await this.syncV2FromLegacy(safeChannelId);
-    }
-    // --- Profile update ---
-    async updateProfile(channelId, topic, topicConfidence, language, languageConfidence) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
-        if (!safeChannelId)
-            return;
-        if (await this.isV2Only(safeChannelId))
-            return;
-        const safeTopic = normalizeLabel(topic, 'general_chat');
-        const safeLanguage = normalizeLabel(language, 'unknown');
-        await this.ensureDoc(safeChannelId, safeTopic);
-        await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                topic: safeTopic,
-                topicConfidence: clamp01(topicConfidence),
-                language: safeLanguage,
-                languageConfidence: clamp01(languageConfidence),
-                profileUpdatedAt: Date.now(),
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
-        });
-        await this.syncV2FromLegacy(safeChannelId);
     }
     // --- Promotion tracking ---
     async recordPromotion(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        if (await this.isV2Only(safeChannelId)) {
-            const now = Date.now();
-            await this.collection.updateOne({ channelId: safeChannelId }, {
-                $set: { 'timestamps.lastPromotionAtMs': now, 'timestamps.updatedAtMs': now },
-                $inc: { revision: 1 },
-            });
-            return;
-        }
+        const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $set: {
-                lastPromotedAt: Date.now(),
-                updatedAt: new Date(),
-                writeVersion: nextWriteVersion(safeChannelId),
-            },
+            $set: { 'timestamps.lastPromotionAtMs': now, 'timestamps.updatedAtMs': now },
         });
-        await this.syncV2FromLegacy(safeChannelId);
-    }
-    // --- Scoring ---
-    async backfillConversionScoringFields(options = {}) {
-        const docs = (await readCursorArray(this.collection.find({})))
-            .filter(isChannelIntelligenceDocument)
-            .map(normalizeConversionFields);
-        const prior = options.fitPriorFromDocs === true
-            ? (() => {
-                const rates = [];
-                const exposures = [];
-                for (const doc of docs) {
-                    const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
-                    if (exposure <= 0)
-                        continue;
-                    rates.push(safeNonNegative(doc.dmConversions) / exposure);
-                    exposures.push(exposure);
-                }
-                return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.fitGammaPriorFromRates)(rates, exposures);
-            })()
-            : (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.normalizeConversionPrior)(options.prior);
-        if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.hasMeaningfulConversionPrior)(prior)) {
-            throw new Error('Conversion scoring backfill requires an explicit persisted conversion prior');
-        }
-        let updated = 0;
-        for (const doc of docs) {
-            if (await this.backfillSingleConversionScoringDoc(doc.channelId, doc, prior)) {
-                updated += 1;
-            }
-        }
-        return {
-            scanned: docs.length,
-            updated,
-            prior,
-        };
-    }
-    /**
-     * Recompute expected value with percentile-based modifiers.
-     * Delegates to the standalone computeExpectedValue() function.
-     */
-    recomputeExpectedValue(doc, percentiles) {
-        let getRank;
-        if (percentiles) {
-            try {
-                const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
-                getRank = (v, m) => pe.getPercentileRankSync(v, m);
-            }
-            catch {
-                // PercentileEngine not initialized
-            }
-        }
-        return (0,_scoring_expected_value__WEBPACK_IMPORTED_MODULE_5__.computeExpectedValue)(doc, percentiles, getRank);
     }
     /**
      * Keep root V2 facts derived from the exact legacy snapshot that won the preceding atomic write.
@@ -1201,289 +768,13 @@ class ChannelIntelligenceService {
                 return;
             if (readCurrentChannelIntelligenceV2(doc))
                 return;
-            const operation = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.buildV2RootBackfillOperation)(doc);
+            const operation = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.buildV2RootBackfillOperation)(doc);
             if (!operation)
                 return;
             const result = await this.collection.updateOne(operation.filter, operation.update);
             if (isMatchedUpdateResult(result))
                 return;
         }
-    }
-    /** Reconcile derived root V2 facts without consulting or recreating retired compatibility fields. */
-    async refreshCleanV2(channelId, snapshot) {
-        let doc = snapshot ?? await this.get(channelId);
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            if (!doc || !isV2OnlyDocument(doc))
-                return;
-            const v2 = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.reconcileChannelIntelligenceV2)(doc);
-            if (!v2)
-                return;
-            const result = await this.collection.updateOne(buildCleanV2Filter(channelId, doc), {
-                // Only derived fields belong to reconciliation. Live counters are updated atomically by
-                // their owning operations and must never be copied from a stale snapshot.
-                $set: {
-                    timestamps: v2.timestamps,
-                    lifecycle: v2.lifecycle,
-                    primary: v2.primary,
-                },
-                $inc: { revision: 1 },
-            });
-            if (isMatchedUpdateResult(result))
-                return;
-            doc = await this.get(channelId);
-        }
-        poolLog.warn('retry-exhausted', { chan: channelId, path: 'refresh-clean-v2' });
-    }
-    async isV2Only(channelId) {
-        const doc = await this.collection.findOne({ channelId });
-        return !!doc && isV2OnlyDocument(doc);
-    }
-    async loadPercentilesForDerivedScoring() {
-        try {
-            return await _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance().getPercentiles();
-        }
-        catch {
-            return null;
-        }
-    }
-    // --- Internals ---
-    /**
-     * Compute and write score + lifecycle using percentile-based thresholds.
-     */
-    async writeScoreAndLifecycle(channelId, doc) {
-        let currentDoc = doc ?? await this.get(channelId);
-        if (!currentDoc)
-            return;
-        if (isV2OnlyDocument(currentDoc)) {
-            await this.refreshCleanV2(channelId, currentDoc);
-            return;
-        }
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const scoreFields = this.buildDerivedScoreFields(currentDoc, await this.loadPercentilesForDerivedScoring());
-            // The fleet is in an additive migration. Keep the legacy aliases until every consumer has
-            // deployed V2; cleanup is an explicit later operation, never an incidental outcome write.
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: scoreFields });
-            if (isMatchedUpdateResult(result)) {
-                await this.syncV2FromLegacy(channelId);
-                return;
-            }
-            currentDoc = await this.get(channelId);
-            if (!currentDoc)
-                return;
-        }
-    }
-    async backfillSingleConversionScoringDoc(channelId, doc, prior) {
-        let currentDoc = doc;
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            if (!currentDoc)
-                return false;
-            const backfillFields = this.buildConversionBackfillFields(currentDoc, prior);
-            if (!backfillFields)
-                return false;
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, currentDoc), { $set: backfillFields });
-            if (isMatchedUpdateResult(result)) {
-                return true;
-            }
-            currentDoc = await this.get(channelId);
-        }
-        return false;
-    }
-    async ensureLegacyOutcomeSubdocuments(channelId) {
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const doc = await this.get(channelId);
-            if (!doc)
-                return;
-            const setFields = {};
-            if (!isRecord(doc.deletionTiming)) {
-                setFields['deletionTiming'] = { automod: 0, bot: 0, human: 0, late: 0 };
-            }
-            else {
-                const deletionTiming = asRecord(doc.deletionTiming);
-                repairNumericLeaf(setFields, 'deletionTiming.automod', deletionTiming['automod']);
-                repairNumericLeaf(setFields, 'deletionTiming.bot', deletionTiming['bot']);
-                repairNumericLeaf(setFields, 'deletionTiming.human', deletionTiming['human']);
-                repairNumericLeaf(setFields, 'deletionTiming.late', deletionTiming['late']);
-            }
-            if (!isRecord(doc.errors)) {
-                setFields['errors'] = { consecutiveErrors: 0 };
-            }
-            else {
-                const errors = asRecord(doc.errors);
-                repairNumericLeaf(setFields, 'errors.SLOWMODE_WAIT', errors['SLOWMODE_WAIT']);
-                repairNumericLeaf(setFields, 'errors.PEER_FLOOD', errors['PEER_FLOOD']);
-                repairNumericLeaf(setFields, 'errors.FLOOD_WAIT', errors['FLOOD_WAIT']);
-                repairNumericLeaf(setFields, 'errors.CHANNEL_RESTRICTED', errors['CHANNEL_RESTRICTED']);
-                repairNumericLeaf(setFields, 'errors.TRANSIENT', errors['TRANSIENT']);
-                repairNumericLeaf(setFields, 'errors.consecutiveErrors', errors['consecutiveErrors']);
-            }
-            if (!isRecord(doc.onlineTrend)) {
-                setFields['onlineTrend'] = { ewma: 0, lastSampled: 0, sampleCount: 0 };
-            }
-            if (!isRecord(doc.viewEngagement)) {
-                setFields['viewEngagement'] = { ewmaRatio: 0, lastChecked: 0, checksCount: 0 };
-            }
-            if (Object.keys(setFields).length === 0)
-                return;
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, doc), {
-                $set: {
-                    ...setFields,
-                    updatedAt: new Date(),
-                    writeVersion: nextWriteVersion(channelId),
-                },
-            });
-            if (isMatchedUpdateResult(result)) {
-                return;
-            }
-        }
-    }
-    async repairNumericFields(channelId, paths) {
-        for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const doc = await this.get(channelId);
-            if (!doc)
-                return;
-            const setFields = {};
-            for (const path of paths) {
-                repairNumericLeaf(setFields, path, readPath(doc, path));
-            }
-            if (Object.keys(setFields).length === 0)
-                return;
-            const result = await this.collection.updateOne(buildVersionedChannelFilter(channelId, doc), {
-                $set: {
-                    ...setFields,
-                    updatedAt: new Date(),
-                    writeVersion: nextWriteVersion(channelId),
-                },
-            });
-            if (isMatchedUpdateResult(result)) {
-                return;
-            }
-        }
-    }
-    buildDerivedScoreFields(doc, percentiles = null) {
-        const followupTotal = safeNonNegative(doc.followupTotal);
-        const followupSuccessCount = safeNonNegative(doc.followupSuccessCount);
-        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.countSurvivedSends)(doc.messagePool);
-        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
-        const conversionPrior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.normalizeConversionPrior)(percentiles?.conversionPrior);
-        const dmConversionRateShrunk = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionRateShrunk)(doc.dmConversions, exposure, conversionPrior);
-        const followupSuccessRate = followupTotal > 0
-            ? Math.round(Math.min(1, followupSuccessCount / followupTotal) * 1000) / 1000
-            : safeRate(doc.followupSuccessRate, 0.5);
-        const nextDoc = { ...doc, followupSuccessRate };
-        const ev = this.recomputeExpectedValue(nextDoc, percentiles);
-        const scoreFields = {
-            expectedValue: Math.round(ev * 1000) / 1000,
-            survivedSends,
-            dmConversionRateShrunk: Math.round(dmConversionRateShrunk * 1000000) / 1000000,
-            scoreUpdatedAt: Date.now(),
-            followupSuccessRate,
-        };
-        scoreFields['conversionRateShrunk'] = scoreFields['dmConversionRateShrunk'];
-        scoreFields['conversionUpdatedAt'] = safeTimestamp(doc.dmConversionUpdatedAt ?? doc.conversionUpdatedAt);
-        // Pool-fill lifecycle: this channel's seedProbeCounts resets to zeros the moment IT crosses from
-        // LEARNING (< PROVEN_SURVIVOR_TARGET survivors) to PROVEN (>= target) — scoped to this doc/channelId
-        // only, so a later erosion back under the target re-probes with a clean slate. writeScoreAndLifecycle
-        // runs after every pool-outcome/send/deletion write, so this check fires on the same doc each time.
-        const survivorCount = (0,_policy_message_policy__WEBPACK_IMPORTED_MODULE_8__.countPoolSurvivors)(doc.messagePool);
-        const hadSeedProbes = Boolean(doc.seedProbeCounts)
-            && (safeNonNegative(doc.seedProbeCounts?.legacy) > 0
-                || safeNonNegative(doc.seedProbeCounts?.custom) > 0
-                || safeNonNegative(doc.seedProbeCounts?.ai) > 0);
-        if (survivorCount >= _pool__WEBPACK_IMPORTED_MODULE_7__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET && hadSeedProbes) {
-            scoreFields['seedProbeCounts'] = { legacy: 0, custom: 0, ai: 0 };
-        }
-        const totalAttempts = sumPoolAttempts(doc.messagePool);
-        const deletionTiming = asRecord(doc.deletionTiming);
-        const totalDeletions = safeNonNegative(deletionTiming['automod']) + safeNonNegative(deletionTiming['bot'])
-            + safeNonNegative(deletionTiming['human']) + safeNonNegative(deletionTiming['late']);
-        const errors = asRecord(doc.errors);
-        const currentStage = doc.stage;
-        let newStage = currentStage;
-        if (percentiles) {
-            const pe = _percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.getInstance();
-            const deleteRate = totalAttempts > 0 ? totalDeletions / totalAttempts : 0;
-            const deleteRank = pe.getPercentileRankSync(deleteRate, 'deleteRate');
-            if (deleteRate > 0.3 && deleteRank >= 0.90) {
-                newStage = 'hostile';
-            }
-            else if (currentStage === 'hostile') {
-                const severity = Math.max(0, deleteRank - 0.90) / 0.10;
-                const cooldownMs = 24 * 3600000 * (1 + severity * 6);
-                if (Date.now() - safeTimestamp(doc.stageUpdatedAt) > cooldownMs && safeNonNegative(errors['consecutiveErrors']) === 0) {
-                    newStage = 'learning';
-                }
-            }
-            else if (currentStage === 'new' && totalAttempts >= Math.max(3, percentiles.messageVolume.p10)) {
-                newStage = 'learning';
-            }
-            else if (currentStage === 'learning' && totalAttempts >= percentiles.messageVolume.p25 && ev >= 0.5) {
-                newStage = 'optimized';
-            }
-        }
-        else {
-            const fallbackDeleteRate = totalAttempts > 0 ? totalDeletions / totalAttempts : 0;
-            if (fallbackDeleteRate > 0.3 && totalDeletions > 10) {
-                newStage = 'hostile';
-            }
-            else if (currentStage === 'hostile') {
-                if (Date.now() - safeTimestamp(doc.stageUpdatedAt) > 72 * 3600000 && safeNonNegative(errors['consecutiveErrors']) === 0) {
-                    newStage = 'learning';
-                }
-            }
-            else if (currentStage === 'new' && totalAttempts >= 5) {
-                newStage = 'learning';
-            }
-            else if (currentStage === 'learning' && totalAttempts >= 30 && ev >= 0.5) {
-                newStage = 'optimized';
-            }
-        }
-        if (newStage !== currentStage) {
-            scoreFields['stage'] = newStage;
-            scoreFields['stageUpdatedAt'] = Date.now();
-        }
-        scoreFields['updatedAt'] = new Date();
-        scoreFields['writeVersion'] = nextWriteVersion(doc.channelId);
-        return scoreFields;
-    }
-    buildConversionBackfillFields(doc, prior) {
-        const survivedSends = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.countSurvivedSends)(doc.messagePool);
-        const exposure = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.resolveConversionExposure)(doc);
-        const dmConversionRateShrunk = roundConversionRate((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionRateShrunk)(doc.dmConversions, exposure, prior));
-        const currentSurvivedSends = safeNonNegative(doc.survivedSends);
-        const currentConversionRateShrunk = roundConversionRate(safeNonNegative(doc.dmConversionRateShrunk));
-        if (currentSurvivedSends === survivedSends && currentConversionRateShrunk === dmConversionRateShrunk) {
-            return null;
-        }
-        return {
-            survivedSends,
-            dmConversionRateShrunk,
-            updatedAt: new Date(),
-            writeVersion: nextWriteVersion(doc.channelId),
-        };
-    }
-    classifyDeletionTiming(survivalMs) {
-        if (!Number.isFinite(survivalMs) || survivalMs < 0)
-            return 'automod';
-        if (survivalMs < AUTOMOD_THRESHOLD)
-            return 'automod';
-        if (survivalMs < BOT_THRESHOLD)
-            return 'bot';
-        if (survivalMs < HUMAN_THRESHOLD)
-            return 'human';
-        return 'late';
-    }
-    categorizeError(errorType, errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(errorType)) {
-        const known = ['SLOWMODE_WAIT', 'PEER_FLOOD', 'FLOOD_WAIT', 'CHANNEL_RESTRICTED'];
-        const upper = errorType.toUpperCase();
-        if (errorClass === 'channel')
-            return 'CHANNEL_RESTRICTED';
-        if (isTerminalChannelError(upper))
-            return 'CHANNEL_RESTRICTED';
-        for (const k of known) {
-            if (upper.includes(k))
-                return k;
-        }
-        return 'TRANSIENT';
     }
     normalizeFractionalWeight(value) {
         if (!Number.isFinite(value) || value <= 0)
@@ -1492,15 +783,13 @@ class ChannelIntelligenceService {
     }
     // --- Index creation ---
     async ensureIndexes() {
-        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
+        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
             try {
                 await this.collection.createIndex(definition.spec, definition.options);
             }
             catch (error) {
-                // Self-heal a same-NAME index whose spec changed (Mongo rejects it as IndexOptionsConflict /
-                // IndexKeySpecsConflict). This happens across the conversionRateShrunk -> dmConversionRateShrunk
-                // rename: the old idx_category_score still exists on the old key. Drop it by name and recreate
-                // on the new key so boot does NOT depend on running the migration script first.
+                // Self-heal a same-name index whose spec changed (Mongo rejects it as IndexOptionsConflict /
+                // IndexKeySpecsConflict). This keeps boot independent from a separate index migration.
                 const msg = String(error?.message ?? error);
                 const indexName = definition.options?.name;
                 const isConflict = /same name|IndexOptionsConflict|IndexKeySpecsConflict|already exists with different options/i.test(msg);
@@ -1515,80 +804,17 @@ class ChannelIntelligenceService {
         }
     }
 }
-function sumPoolAttempts(value) {
-    if (!Array.isArray(value))
-        return 0;
-    return value.reduce((sum, entry) => sum + safeNonNegative(asRecord(entry)['attempted']), 0);
-}
-function roundConversionRate(value) {
-    if (!Number.isFinite(value) || value <= 0)
-        return 0;
-    return Math.round(value * 1000000) / 1000000;
-}
-function compareTopChannelDocs(left, right, now) {
-    const leftEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionEfficiency)(left.dmConversionRateShrunk, left.dmConversionUpdatedAt, now);
-    const rightEfficiency = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_6__.computeConversionEfficiency)(right.dmConversionRateShrunk, right.dmConversionUpdatedAt, now);
-    if (rightEfficiency !== leftEfficiency)
-        return rightEfficiency - leftEfficiency;
-    const leftRate = safeNonNegative(left.dmConversionRateShrunk);
-    const rightRate = safeNonNegative(right.dmConversionRateShrunk);
-    if (rightRate !== leftRate)
-        return rightRate - leftRate;
-    return safeNonNegative(right.expectedValue) - safeNonNegative(left.expectedValue);
-}
 function safeNonNegative(value) {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
-}
-function safeRate(value, fallback) {
-    if (typeof value !== 'number' || !Number.isFinite(value))
-        return fallback;
-    return Math.max(0, Math.min(1, value));
-}
-function repairNumericLeaf(setFields, path, value) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        setFields[path] = 0;
-    }
-}
-function readPath(value, path) {
-    return path.split('.').reduce((current, key) => (isRecord(current) ? current[key] : undefined), value);
-}
-function safePositive(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
-}
-function safeNonNegativeInput(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 function safeTimestamp(value) {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
-function normalizeLimit(value, fallback) {
-    const normalized = Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-    return Math.max(1, Math.min(normalized, 500));
-}
-function clamp01(value) {
-    if (!Number.isFinite(value))
-        return 0;
-    return Math.max(0, Math.min(1, value));
-}
-function isChannelCategory(value) {
-    return value === 'high_intent'
-        || value === 'social_chat'
-        || value === 'regional_social'
-        || value === 'off_topic'
-        || value === 'unclassified';
-}
 function normalizeErrorType(value) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : 'TRANSIENT';
 }
-function isTerminalChannelError(value) {
-    return value.includes('CHANNEL_PRIVATE')
-        || value.includes('CHANNEL_INVALID')
-        || value.includes('PEER_ID_INVALID')
-        || value.includes('TOPIC_CLOSED')
-        || value.includes('TOPIC_DELETED');
-}
 function isAccountSpecificError(value) {
-    return (0,_pool__WEBPACK_IMPORTED_MODULE_7__.classifyPoolError)(value) === 'account';
+    return (0,_pool__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(value) === 'account';
 }
 function normalizeLabel(value, fallback) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
@@ -1604,25 +830,20 @@ function hasPoolStateEvidence(entry) {
         || safeNonNegative(entry.lastSentAtMs) > 0
         || safeNonNegative(entry.lastValidatedAtMs) > 0;
 }
+function hasNetPoolSurvival(entry) {
+    return safeNonNegative(entry.survived) > safeNonNegative(entry.deleted);
+}
 function resolvePoolEntryState(entry, engine, nowMs) {
-    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_7__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
+    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
     const rank = engine.getPercentileRankSync(score, 'messageRawScore');
-    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_7__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
+    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_3__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
 }
-function buildVersionedChannelFilter(channelId, doc) {
-    const writeVersion = normalizeWriteVersion(doc?.writeVersion);
-    if (writeVersion) {
-        return { channelId, writeVersion };
-    }
-    const updatedAt = normalizeDate(doc?.updatedAt);
-    return updatedAt ? { channelId, updatedAt } : { channelId };
-}
-/** Uses the root revision after cleanup; accepts older clean documents once so they self-upgrade. */
+/** Uses the canonical update timestamp after legacy writer fields are removed. */
 function buildCleanV2Filter(channelId, doc) {
-    const revision = normalizeRevision(doc.revision);
-    return revision === null
-        ? { channelId, revision: { $exists: false } }
-        : { channelId, revision };
+    const updatedAtMs = safeTimestamp(doc.timestamps?.updatedAtMs);
+    return updatedAtMs > 0
+        ? { channelId, 'timestamps.updatedAtMs': updatedAtMs }
+        : { channelId };
 }
 function normalizeDate(value) {
     if (!(value instanceof Date))
@@ -1634,12 +855,6 @@ function normalizeWriteVersion(value) {
         return null;
     const normalized = value.trim();
     return normalized.length > 0 ? normalized : null;
-}
-function normalizeRevision(value) {
-    return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : null;
-}
-function nextWriteVersion(channelId) {
-    return `${channelId}:${Date.now()}:${Math.random().toString(36).slice(2, 10) || 'write'}`;
 }
 function isMatchedUpdateResult(value) {
     const result = isRecord(value) ? value : null;
@@ -1666,38 +881,29 @@ async function readCursorArray(cursor) {
 function isCursorToArrayLike(value) {
     return isRecord(value) && typeof value['toArray'] === 'function';
 }
-function isSortableCursorLike(value) {
-    return isRecord(value)
-        && typeof value['toArray'] === 'function'
-        && typeof value['sort'] === 'function'
-        && typeof value['limit'] === 'function';
-}
 function isChannelIntelligenceDocument(value) {
-    return isRecord(value) && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']) !== null;
+    return isRecord(value) && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(value['channelId']) !== null;
 }
 function isChannelIntelligenceV2(value) {
     if (!isRecord(value))
         return false;
     const timestamps = value['timestamps'];
-    const lifecycle = value['lifecycle'];
-    const primary = value['primary'];
-    const followup = value['followup'];
-    const historical = value['historical'];
-    const conversion = value['conversion'];
-    return value['schemaVersion'] === _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION
-        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']) !== null
+    const outcomes = value['outcomes'];
+    const exploration = value['exploration'];
+    const safety = value['safety'];
+    const DMs = value['DMs'];
+    return value['schemaVersion'] === _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION
+        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(value['channelId']) !== null
         && isRecord(timestamps)
-        && isRecord(lifecycle)
-        && isRecord(primary)
-        && isRecord(followup)
-        && isRecord(historical)
-        && isRecord(conversion);
+        && isRecord(outcomes)
+        && isRecord(exploration)
+        && isRecord(safety)
+        && isRecord(DMs);
 }
-/** A final-clean document has root V2 facts and no legacy lifecycle writer state. */
+/** A structurally complete V2 root is authoritative even while legacy fields remain for export. */
 function isV2OnlyDocument(value) {
     return isChannelIntelligenceV2(value)
-        && Array.isArray(value.messagePool)
-        && !Object.prototype.hasOwnProperty.call(value, 'stage');
+        && Array.isArray(value.messagePool);
 }
 function readCurrentChannelIntelligenceV2(doc) {
     if (!isChannelIntelligenceV2(doc))
@@ -1721,42 +927,11 @@ function readCurrentChannelIntelligenceV2(doc) {
         return null;
     return doc;
 }
-/**
- * DUAL-READ shim for the conversion-naming rename. Writes now target the new stage-1 keys
- * (dmConversions / dmConversionRateShrunk / dmConversionUpdatedAt), but docs written before the
- * one-time DB migration still carry the old keys (conversions / conversionRateShrunk /
- * conversionUpdatedAt). Coalesce new ?? old at the read boundary so ALL downstream code
- * (scoring, selection, classifier) only ever sees the new field names. Removed once the
- * migration has run and old keys no longer exist. Mutates in place (rows are fresh from the driver).
- */
-function normalizeConversionFields(doc) {
-    if (!isRecord(doc))
-        return doc;
-    const d = doc;
-    if (d['dmConversions'] !== undefined || d['conversions'] !== undefined) {
-        const resolved = (0,_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.resolveConversion)(d);
-        d['dmConversions'] = resolved.credits;
-        d['dmConversionUpdatedAt'] = resolved.updatedAtMs;
-    }
-    if (d['dmConversionRateShrunk'] === undefined && d['conversionRateShrunk'] !== undefined)
-        d['dmConversionRateShrunk'] = d['conversionRateShrunk'];
-    if (d['dmConversionUpdatedAt'] === undefined && d['conversionUpdatedAt'] !== undefined)
-        d['dmConversionUpdatedAt'] = d['conversionUpdatedAt'];
-    return doc;
-}
 function shouldReplace(options) {
     return isRecord(options) && options['replace'] === true;
 }
 function asRecord(value) {
     return isRecord(value) ? value : {};
-}
-function asNumber(value) {
-    return typeof value === 'number' ? value : Number.NaN;
-}
-function normalizeExploreOutcome(value) {
-    return value === 'channelSideFailed' || value === 'survived'
-        ? value
-        : null;
 }
 
 
@@ -1771,108 +946,102 @@ function normalizeExploreOutcome(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS: () => (/* binding */ CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS),
+/* harmony export */   CHANNEL_INTELLIGENCE_LEGACY_FIELDS: () => (/* binding */ CHANNEL_INTELLIGENCE_LEGACY_FIELDS),
 /* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* binding */ CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
 /* harmony export */   buildV2RootBackfillOperation: () => (/* binding */ buildV2RootBackfillOperation),
 /* harmony export */   countResolvedPrimaryAttempts: () => (/* binding */ countResolvedPrimaryAttempts),
 /* harmony export */   hasV2SemanticParity: () => (/* binding */ hasV2SemanticParity),
 /* harmony export */   migrateLegacyChannelIntelligence: () => (/* binding */ migrateLegacyChannelIntelligence),
 /* harmony export */   reconcileChannelIntelligenceV2: () => (/* binding */ reconcileChannelIntelligenceV2),
-/* harmony export */   resolveConversion: () => (/* binding */ resolveConversion),
+/* harmony export */   resolveDMCredits: () => (/* binding */ resolveDMCredits),
 /* harmony export */   sourceForLegacy: () => (/* binding */ sourceForLegacy)
 /* harmony export */ });
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
 
-/** Root-level durable-facts schema version. Full legacy-field cleanup requires a separate reader/writer cutover. */
+/** Persisted schema version. Keep this at 2: this is the completed V2 schema, not V3. */
 const CHANNEL_INTELLIGENCE_SCHEMA_VERSION = 2;
+/** Required top-level groups in every final channel-intelligence record. */
+const CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS = [
+    'timestamps', 'outcomes', 'exploration', 'safety', 'DMs',
+];
 /**
- * Derives a clean V2 projection without discarding legacy values. The cleanup migration archives
- * legacy-only fields before it unsets them; this mapper is intentionally not an archival step.
+ * Retired root fields that are preserved only until the one-time archive-and-cleanup operation.
+ * Keep this list central: readiness checks and the finalizer must agree exactly on what cleanup
+ * means, otherwise a document can be declared clean while still carrying obsolete state.
+ */
+const CHANNEL_INTELLIGENCE_LEGACY_FIELDS = [
+    'stage', 'stageUpdatedAt', 'firstSeenAt',
+    'topic', 'topicConfidence', 'language', 'languageConfidence', 'profileUpdatedAt',
+    'strategies', 'followupSuccessRate', 'followupSuccessCount', 'followupTotal',
+    'deletionTiming', 'onlineTrend', 'viewEngagement', 'errors', 'lastPromotedAt',
+    'hasEverExplored', 'exploreAttempts', 'exploreSurvived', 'seedProbeCounts',
+    'cooldownUntil', 'nextEligibleAt', 'minSendIntervalMs', 'pacingObservedAtMs',
+    'expectedValue', 'scoreUpdatedAt', 'totalSendsToChannel', 'saturationRate',
+    'dmConversions', 'conversions', 'survivedSends',
+    'dmConversionRateShrunk', 'conversionRateShrunk', 'dmConversionUpdatedAt', 'conversionUpdatedAt',
+    'channelCategory', 'categoryConfidence', 'categoryUpdatedAt', 'promotionFitScore',
+    // Earlier V2 projections and cutover provenance. None are part of the frozen root schema.
+    'revision', 'lifecycle', 'primary', 'followup', 'historical', 'conversion',
+    'updatedAt', 'writeVersion', 'v2Source', 'v2',
+];
+/**
+ * Builds the final V2 projection without deleting or rewriting legacy values. The aggregate
+ * outcomes use only trustworthy whole-channel counters or the existing pool; ambiguous legacy
+ * follow-up-success counters are deliberately not treated as survival evidence.
  */
 function migrateLegacyChannelIntelligence(value, nowMs = Date.now()) {
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value?.channelId);
     if (!channelId)
         return null;
-    const messages = normalizePoolEntries(value?.messagePool);
-    const resolved = (0,_pool__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals)(messages);
-    const followupAccepted = nonNegative(value?.followupSuccessCount);
-    const followupTotal = nonNegative(value?.followupTotal);
-    const updatedAtMs = timestampMs(value?.updatedAt, nowMs);
-    const conversion = resolveConversion(value);
+    const currentTimestamps = asRecord(value.timestamps);
+    const messages = normalizePoolEntries(value.messagePool);
+    const pool = (0,_pool__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals)(messages);
+    const legacyTiming = asRecord(value.deletionTiming);
+    const historical = asRecord(value.historical);
+    const primaryResolved = asRecord(asRecord(value.primary)['resolved']);
+    // Root aggregates are monotonic durable facts.  Compatibility writers may still update the
+    // legacy counters, but they must never erase outcomes recorded after the pool reached its cap.
+    const currentOutcomes = asRecord(value.outcomes);
+    const updatedAtMs = latestTimestamp([value.updatedAt, currentTimestamps['updatedAtMs']], nowMs);
+    const primaryAttempts = nonNegative(primaryResolved['survived'])
+        + nonNegative(primaryResolved['deleted'])
+        + nonNegative(primaryResolved['channelRejected']);
+    const attempted = Math.max(nonNegative(value.totalSendsToChannel), nonNegative(historical['totalSendsToChannel']), nonNegative(currentOutcomes['attempted']), primaryAttempts, sumPoolAttempts(messages));
+    const survived = Math.max(nonNegative(value.survivedSends), nonNegative(currentOutcomes['survived']), nonNegative(primaryResolved['survived']), pool.survived);
+    const deleted = Math.max(nonNegative(currentOutcomes['deleted']), nonNegative(legacyTiming['automod'])
+        + nonNegative(legacyTiming['bot'])
+        + nonNegative(legacyTiming['human'])
+        + nonNegative(legacyTiming['late']), nonNegative(primaryResolved['deleted']), pool.deleted);
     return {
         schemaVersion: CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
         channelId,
-        revision: 1,
         timestamps: {
-            firstSeenAtMs: timestampMs(value?.firstSeenAt, updatedAtMs),
-            lastPromotionAtMs: timestampMs(value?.lastPromotedAt, 0),
+            firstSeenAtMs: earliestTimestamp([value.firstSeenAt, currentTimestamps['firstSeenAtMs']], updatedAtMs),
+            lastPromotionAtMs: latestTimestamp([value.lastPromotedAt, currentTimestamps['lastPromotionAtMs']], 0),
             updatedAtMs,
         },
-        lifecycle: {
-            state: mapLifecycle(value?.stage),
-            updatedAtMs: timestampMs(value?.stageUpdatedAt, updatedAtMs),
-        },
         messagePool: messages,
-        primary: { resolved },
-        followup: {
-            accepted: followupAccepted,
-            // Legacy followupTotal increments for both accepted sends and deletions.
-            deleted: Math.max(0, followupTotal - followupAccepted),
+        outcomes: { attempted, survived, deleted },
+        exploration: {
+            seedProbeCounts: resolveSeedProbeCounts(value),
         },
-        historical: {
-            totalSendsToChannel: nonNegative(value?.totalSendsToChannel),
-            retiredPool: { survived: 0, deleted: 0, channelRejected: 0 },
-        },
-        conversion: {
-            dmOpenCredits: conversion.credits,
-            updatedAtMs: conversion.updatedAtMs,
-        },
+        safety: resolveSafety(value, updatedAtMs),
+        DMs: resolveDMCredits(value),
     };
 }
-/**
- * Recompute the durable facts for an already-clean V2 document. Unlike the legacy mapper this
- * never consults retired fields, so post-cleanup writers cannot accidentally resurrect them.
- */
+/** Normalizes a final-clean V2 record without recreating retired fields or recounting the pool. */
 function reconcileChannelIntelligenceV2(value, nowMs = Date.now()) {
     if (!isRootV2(value))
         return null;
-    const current = value;
-    const messages = normalizePoolEntries(value.messagePool);
-    const retiredPool = normalizeHistoricalPoolOutcomes(current.historical?.retiredPool);
-    const resolved = (0,_pool__WEBPACK_IMPORTED_MODULE_0__.addPoolOutcomeTotals)(retiredPool, (0,_pool__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals)(messages));
-    const previousState = isLifecycleState(current.lifecycle?.state) ? current.lifecycle.state : 'new';
-    const nextState = deriveLifecycle(previousState, current.lifecycle?.updatedAtMs, resolved, nowMs);
-    const lifecycleUpdatedAtMs = nextState === previousState
-        ? timestampMs(current.lifecycle?.updatedAtMs, nowMs)
-        : nowMs;
-    return {
-        schemaVersion: CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
-        channelId: (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value.channelId),
-        revision: revisionOf(current),
-        timestamps: {
-            firstSeenAtMs: timestampMs(current.timestamps?.firstSeenAtMs, nowMs),
-            lastPromotionAtMs: timestampMs(current.timestamps?.lastPromotionAtMs, 0),
-            updatedAtMs: nowMs,
-        },
-        lifecycle: { state: nextState, updatedAtMs: lifecycleUpdatedAtMs },
-        messagePool: messages,
-        primary: { resolved },
-        followup: {
-            accepted: nonNegative(current.followup?.accepted),
-            deleted: nonNegative(current.followup?.deleted),
-        },
-        historical: {
-            totalSendsToChannel: nonNegative(current.historical?.totalSendsToChannel),
-            retiredPool,
-        },
-        conversion: {
-            dmOpenCredits: nonNegative(current.conversion?.dmOpenCredits),
-            updatedAtMs: timestampMs(current.conversion?.updatedAtMs, 0),
-        },
-    };
+    const reconciled = migrateLegacyChannelIntelligence(value, nowMs);
+    return reconciled
+        ? { ...reconciled, timestamps: { ...reconciled.timestamps, updatedAtMs: nowMs } }
+        : null;
 }
-/** Builds a lossless, root-level V2 write without touching the canonical message pool. */
+/** Builds a version-checked additive projection. `messagePool` is intentionally never overwritten. */
 function buildV2RootBackfillOperation(value, nowMs = Date.now()) {
     const v2 = migrateLegacyChannelIntelligence(value, nowMs);
     if (!v2)
@@ -1885,41 +1054,38 @@ function buildV2RootBackfillOperation(value, nowMs = Date.now()) {
         update: {
             $set: {
                 schemaVersion: CHANNEL_INTELLIGENCE_SCHEMA_VERSION,
-                revision: v2.revision,
                 timestamps: v2.timestamps,
-                lifecycle: v2.lifecycle,
-                primary: v2.primary,
-                followup: v2.followup,
-                historical: v2.historical,
-                conversion: v2.conversion,
+                outcomes: v2.outcomes,
+                exploration: v2.exploration,
+                safety: v2.safety,
+                DMs: v2.DMs,
                 v2Source: sourceForLegacy(value, nowMs),
             },
         },
     };
 }
-/**
- * Verifies that an additive root projection still represents the live legacy fields exactly.
- * Cleanup calls this before retiring those fields, so a shape-valid but stale V2 root is rejected.
- */
+/** Ensures the additive root still represents the current legacy writer snapshot. */
 function hasV2SemanticParity(value, nowMs = Date.now()) {
     if (!isRootV2(value) || !isRecord(value.v2Source))
         return false;
-    const expected = migrateLegacyChannelIntelligence(value, nowMs);
+    // Some historical writers supplied a writeVersion but no updatedAt. Their initial hydration
+    // used a wall-clock fallback; use the persisted source timestamp for repeatable parity checks.
+    const source = asRecord(value.v2Source);
+    const stableNowMs = timestampMs(value.updatedAt, timestampMs(source['legacyUpdatedAtMs'], nowMs));
+    const expected = migrateLegacyChannelIntelligence(value, stableNowMs);
     if (!expected)
         return false;
     const actual = value;
     return sameJson(expected, {
         schemaVersion: actual.schemaVersion,
         channelId: actual.channelId,
-        revision: 1,
         timestamps: actual.timestamps,
-        lifecycle: actual.lifecycle,
         messagePool: actual.messagePool,
-        primary: actual.primary,
-        followup: actual.followup,
-        historical: actual.historical,
-        conversion: actual.conversion,
-    }) && sameJson(sourceForLegacy(value, nowMs), value.v2Source);
+        outcomes: actual.outcomes,
+        exploration: actual.exploration,
+        safety: actual.safety,
+        DMs: actual.DMs,
+    }) && sameJson(sourceForLegacy(value, stableNowMs), value.v2Source);
 }
 function sourceForLegacy(value, nowMs = Date.now()) {
     const legacyUpdatedAtMs = timestampMs(value.updatedAt, nowMs);
@@ -1929,10 +1095,74 @@ function sourceForLegacy(value, nowMs = Date.now()) {
         ...(writeVersion ? { legacyWriteVersion: writeVersion } : {}),
     };
 }
+/** Resolve raw DMs attribution across legacy aliases and both additive V2 group names. */
+function resolveDMCredits(value) {
+    const DMs = asRecord(value.DMs);
+    const canonical = asRecord(value.conversion);
+    const DMUpdatedAtMs = timestampMs(value.dmConversionUpdatedAt, 0);
+    const legacyUpdatedAtMs = timestampMs(value.conversionUpdatedAt, 0);
+    const legacy = legacyUpdatedAtMs > DMUpdatedAtMs
+        ? { credited: nonNegative(value.conversions), updatedAtMs: legacyUpdatedAtMs }
+        : { credited: nonNegative(value.dmConversions ?? value.conversions), updatedAtMs: Math.max(DMUpdatedAtMs, legacyUpdatedAtMs) };
+    const candidates = [
+        ...(Object.keys(DMs).length > 0
+            ? [{ credited: nonNegative(DMs['credited']), updatedAtMs: timestampMs(DMs['updatedAtMs'], 0) }]
+            : []),
+        ...(Object.keys(canonical).length > 0
+            ? [{ credited: nonNegative(canonical['dmOpenCredits']), updatedAtMs: timestampMs(canonical['updatedAtMs'], 0) }]
+            : []),
+        ...(value.dmConversions !== undefined || value.conversions !== undefined ? [legacy] : []),
+    ];
+    const latest = candidates.reduce((current, candidate) => !current || candidate.updatedAtMs > current.updatedAtMs ? candidate : current, null);
+    // The candidates are ordered final DMs, prior nested V2, then legacy aliases. Equal timestamps
+    // deliberately keep the earlier source, while an untimestamped legacy count still survives.
+    return latest ?? { credited: 0, updatedAtMs: 0 };
+}
+/** @deprecated Compatibility helper for old callers. */
 function countResolvedPrimaryAttempts(outcomes) {
-    return nonNegative(outcomes.survived)
-        + nonNegative(outcomes.deleted)
-        + nonNegative(outcomes.channelRejected);
+    return nonNegative(outcomes.survived) + nonNegative(outcomes.deleted) + nonNegative(outcomes.channelRejected);
+}
+function resolveSafety(value, fallbackUpdatedAtMs) {
+    const safety = asRecord(value.safety);
+    const errors = asRecord(value.errors);
+    const lifecycle = asRecord(value.lifecycle);
+    const status = safety['status'] === 'blocked' || lifecycle['state'] === 'blocked' || value.stage === 'hostile'
+        ? 'blocked'
+        : 'active';
+    const lastErrorType = safety['lastErrorType'] ?? errors['lastErrorType'];
+    return {
+        status,
+        statusUpdatedAtMs: timestampMs(safety['statusUpdatedAtMs'] ?? lifecycle['updatedAtMs'] ?? value.stageUpdatedAt, fallbackUpdatedAtMs),
+        consecutiveErrors: nonNegative(safety['consecutiveErrors'] ?? errors['consecutiveErrors']),
+        lastErrorType: typeof lastErrorType === 'string' && lastErrorType.trim() ? lastErrorType.trim() : null,
+        lastErrorAtMs: timestampMs(safety['lastErrorAtMs'] ?? errors['lastErrorAt'], 0),
+    };
+}
+function resolveSeedProbeCounts(value) {
+    const exploration = asRecord(value.exploration);
+    const probes = isRecord(value.seedProbeCounts)
+        ? value.seedProbeCounts
+        : asRecord(exploration['seedProbeCounts']);
+    return {
+        legacy: nonNegative(probes['legacy']),
+        custom: nonNegative(probes['custom']),
+        ai: nonNegative(probes['ai']),
+    };
+}
+function isRootV2(value) {
+    return value.schemaVersion === CHANNEL_INTELLIGENCE_SCHEMA_VERSION
+        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value.channelId) !== null
+        && isRecord(value.timestamps)
+        && Array.isArray(value.messagePool)
+        && isRecord(value.outcomes)
+        && isRecord(value.exploration)
+        && isRecord(value.safety)
+        && isRecord(value.DMs);
+}
+function hasLegacyWriterState(value) {
+    return value.updatedAt !== undefined
+        || value.writeVersion !== undefined
+        || value.stage !== undefined;
 }
 function buildVersionFilter(value, channelId) {
     const writeVersion = normalizeWriteVersion(value.writeVersion);
@@ -1941,7 +1171,6 @@ function buildVersionFilter(value, channelId) {
     if (value.updatedAt instanceof Date && Number.isFinite(value.updatedAt.getTime())) {
         return { channelId, updatedAt: value.updatedAt };
     }
-    // A backfill without a concurrency token could overwrite fresh evidence. Skip it for manual repair.
     return null;
 }
 function normalizePoolEntries(value) {
@@ -1963,55 +1192,36 @@ function isPoolEntry(value) {
         && isFiniteNumber(value.lastSentAtMs)
         && isFiniteNumber(value.lastValidatedAtMs);
 }
-function mapLifecycle(value) {
-    switch (value) {
-        case 'optimized': return 'proven';
-        case 'hostile': return 'blocked';
-        case 'learning': return 'learning';
-        default: return 'new';
-    }
+function sumPoolAttempts(entries) {
+    return entries.reduce((total, entry) => total + nonNegative(entry.attempted), 0);
 }
 function timestampMs(value, fallback) {
     if (value instanceof Date && Number.isFinite(value.getTime()))
         return value.getTime();
     return isFiniteNumber(value) && value > 0 ? value : fallback;
 }
-/** One resolver used by V2 migration and live writers; newest timestamp wins, then dm alias. */
-function resolveConversion(value) {
-    // After cleanup the root conversion fact is the sole canonical value. During compatibility mode,
-    // aliases remain authoritative because a concurrently-written legacy field can be newer than the
-    // last root projection.
-    if (value.dmConversions === undefined && value.conversions === undefined && isRecord(value.conversion)) {
-        return {
-            credits: nonNegative(value.conversion['dmOpenCredits']),
-            updatedAtMs: timestampMs(value.conversion['updatedAtMs'], 0),
-        };
-    }
-    const dmUpdatedAtMs = timestampMs(value.dmConversionUpdatedAt, 0);
-    const legacyUpdatedAtMs = timestampMs(value.conversionUpdatedAt, 0);
-    if (legacyUpdatedAtMs > dmUpdatedAtMs) {
-        return { credits: nonNegative(value.conversions), updatedAtMs: legacyUpdatedAtMs };
-    }
-    return {
-        credits: nonNegative(value.dmConversions ?? value.conversions),
-        updatedAtMs: Math.max(dmUpdatedAtMs, legacyUpdatedAtMs),
-    };
+function latestTimestamp(values, fallback) {
+    const timestamps = values.map((value) => timestampMs(value, 0)).filter((value) => value > 0);
+    return timestamps.length > 0 ? Math.max(...timestamps) : fallback;
 }
-function isRootV2(value) {
-    return value.schemaVersion === CHANNEL_INTELLIGENCE_SCHEMA_VERSION
-        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value.channelId) !== null
-        && isRecord(value.timestamps)
-        && isRecord(value.lifecycle)
-        && isRecord(value.primary)
-        && isRecord(value.followup)
-        && isRecord(value.historical)
-        && isRecord(value.conversion)
-        && Array.isArray(value.messagePool);
+function earliestTimestamp(values, fallback) {
+    const timestamps = values.map((value) => timestampMs(value, 0)).filter((value) => value > 0);
+    return timestamps.length > 0 ? Math.min(...timestamps) : fallback;
 }
-function revisionOf(value) {
-    return isFiniteNumber(value.revision) && value.revision >= 1
-        ? Math.floor(value.revision)
-        : 1;
+function nonNegative(value) {
+    return isFiniteNumber(value) && value > 0 ? value : 0;
+}
+function isFiniteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value);
+}
+function normalizeWriteVersion(value) {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function asRecord(value) {
+    return isRecord(value) ? value : {};
 }
 function sameJson(left, right) {
     return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
@@ -2026,44 +1236,6 @@ function canonicalize(value) {
         return out;
     }, {});
 }
-function isLifecycleState(value) {
-    return value === 'new' || value === 'learning' || value === 'proven' || value === 'blocked';
-}
-function deriveLifecycle(previous, previousUpdatedAtMs, outcomes, nowMs) {
-    const attempts = countResolvedPrimaryAttempts(outcomes);
-    const rejected = nonNegative(outcomes.deleted) + nonNegative(outcomes.channelRejected);
-    if (attempts >= 10 && rejected / attempts > 0.3)
-        return 'blocked';
-    if (previous === 'blocked' && nowMs - timestampMs(previousUpdatedAtMs, nowMs) < 3 * 86400000) {
-        return 'blocked';
-    }
-    if (nonNegative(outcomes.survived) >= 3)
-        return 'proven';
-    if (attempts >= 5)
-        return 'learning';
-    return 'new';
-}
-function nonNegative(value) {
-    return isFiniteNumber(value) && value > 0 ? value : 0;
-}
-function normalizeHistoricalPoolOutcomes(value) {
-    if (!isRecord(value))
-        return { survived: 0, deleted: 0, channelRejected: 0 };
-    return {
-        survived: nonNegative(value.survived),
-        deleted: nonNegative(value.deleted),
-        channelRejected: nonNegative(value.channelRejected),
-    };
-}
-function isFiniteNumber(value) {
-    return typeof value === 'number' && Number.isFinite(value);
-}
-function normalizeWriteVersion(value) {
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 
 /***/ },
@@ -2077,99 +1249,12 @@ function isRecord(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* binding */ PROMOTION_MESSAGE_STRATEGIES),
-/* harmony export */   createDefaultIntelligence: () => (/* binding */ createDefaultIntelligence)
+/* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* binding */ PROMOTION_MESSAGE_STRATEGIES)
 /* harmony export */ });
 /** Source labels retained with queued messages for diagnostics and deletion policy. */
 const PROMOTION_MESSAGE_STRATEGIES = [
     'ai_contextual', 'natural_template', 'legacy',
 ];
-// --- Defaults factory ---
-function createDefaultIntelligence(channelId, topic = 'general_chat') {
-    const now = Date.now();
-    return {
-        channelId,
-        stage: 'new',
-        stageUpdatedAt: now,
-        firstSeenAt: now,
-        topic,
-        topicConfidence: 0,
-        language: 'english',
-        languageConfidence: 0,
-        profileUpdatedAt: 0,
-        followupSuccessRate: 0.5,
-        followupSuccessCount: 0,
-        followupTotal: 0,
-        deletionTiming: { automod: 0, bot: 0, human: 0, late: 0 },
-        onlineTrend: { ewma: 0, lastSampled: 0, sampleCount: 0 },
-        viewEngagement: { ewmaRatio: 0, lastChecked: 0, checksCount: 0 },
-        errors: { consecutiveErrors: 0 },
-        lastPromotedAt: 0,
-        messagePool: [],
-        hasEverExplored: false,
-        exploreAttempts: 0,
-        exploreSurvived: 0,
-        seedProbeCounts: { legacy: 0, custom: 0, ai: 0 },
-        expectedValue: 0.5,
-        scoreUpdatedAt: now,
-        totalSendsToChannel: 0,
-        saturationRate: 0,
-        dmConversions: 0,
-        survivedSends: 0,
-        dmConversionRateShrunk: 0,
-        dmConversionUpdatedAt: 0,
-        channelCategory: 'unclassified',
-        categoryConfidence: 0,
-        categoryUpdatedAt: 0,
-        promotionFitScore: 0.25,
-        updatedAt: new Date(),
-        writeVersion: `init:${channelId}:${now}`,
-    };
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts"
-/*!*********************************************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts ***!
-  \*********************************************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CONVERSION_PRIOR_REDIS_KEY: () => (/* binding */ CONVERSION_PRIOR_REDIS_KEY),
-/* harmony export */   readPersistedConversionPrior: () => (/* binding */ readPersistedConversionPrior),
-/* harmony export */   writePersistedConversionPrior: () => (/* binding */ writePersistedConversionPrior)
-/* harmony export */ });
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-
-const CONVERSION_PRIOR_REDIS_KEY = 'percentiles:channels:conversion-prior';
-async function readPersistedConversionPrior(redis) {
-    if (!redis || typeof redis.get !== 'function')
-        return null;
-    try {
-        const raw = await redis.get(CONVERSION_PRIOR_REDIS_KEY);
-        if (!raw)
-            return null;
-        const parsed = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.normalizeConversionPrior)(JSON.parse(raw));
-        return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.hasMeaningfulConversionPrior)(parsed) ? parsed : null;
-    }
-    catch {
-        return null;
-    }
-}
-async function writePersistedConversionPrior(redis, prior) {
-    if (!redis || typeof redis.set !== 'function') {
-        throw new Error('Redis set client is required to persist the conversion prior');
-    }
-    const normalized = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.normalizeConversionPrior)(prior);
-    if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_0__.hasMeaningfulConversionPrior)(normalized)) {
-        throw new Error('Cannot persist an empty conversion prior');
-    }
-    await redis.set(CONVERSION_PRIOR_REDIS_KEY, JSON.stringify(normalized));
-}
 
 
 /***/ },
@@ -2183,32 +1268,25 @@ async function writePersistedConversionPrior(redis, prior) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
-/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
-/* harmony export */   CONVERSION_PRIOR_REDIS_KEY: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.CONVERSION_PRIOR_REDIS_KEY),
-/* harmony export */   ChannelClassifier: () => (/* reexport safe */ _channel_classifier__WEBPACK_IMPORTED_MODULE_2__.ChannelClassifier),
+/* harmony export */   CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS),
+/* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_LEGACY_FIELDS: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_LEGACY_FIELDS),
+/* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
-/* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__.PROMOTION_MESSAGE_STRATEGIES),
+/* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_3__.PROMOTION_MESSAGE_STRATEGIES),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine),
-/* harmony export */   buildV2RootBackfillOperation: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.buildV2RootBackfillOperation),
-/* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.countResolvedPrimaryAttempts),
-/* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__.createDefaultIntelligence),
-/* harmony export */   hasV2SemanticParity: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.hasV2SemanticParity),
-/* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.migrateLegacyChannelIntelligence),
-/* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.readPersistedConversionPrior),
-/* harmony export */   reconcileChannelIntelligenceV2: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.reconcileChannelIntelligenceV2),
-/* harmony export */   resolveConversion: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__.resolveConversion),
-/* harmony export */   writePersistedConversionPrior: () => (/* reexport safe */ _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__.writePersistedConversionPrior)
+/* harmony export */   buildV2RootBackfillOperation: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.buildV2RootBackfillOperation),
+/* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.countResolvedPrimaryAttempts),
+/* harmony export */   hasV2SemanticParity: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.hasV2SemanticParity),
+/* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.migrateLegacyChannelIntelligence),
+/* harmony export */   reconcileChannelIntelligenceV2: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.reconcileChannelIntelligenceV2),
+/* harmony export */   resolveDMCredits: () => (/* reexport safe */ _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__.resolveDMCredits)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence-service */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-service.ts");
 /* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
-/* harmony import */ var _channel_classifier__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-classifier */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-classifier.ts");
-/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
-/* harmony import */ var _conversion_prior_store__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./conversion-prior-store */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts");
-/* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
-/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
-
-
+/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
+/* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
+/* harmony import */ var _channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./channel-intelligence-v2 */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-v2.ts");
 
 
 
@@ -2230,34 +1308,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PercentileEngine: () => (/* binding */ PercentileEngine)
 /* harmony export */ });
 /* harmony import */ var _pool_constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/constants */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/constants.ts");
-/* harmony import */ var _conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./conversion-prior-store */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
 /**
- * Percentile Engine — computes dynamic thresholds from activeChannels collection.
+ * Bounded pool percentile engine.
  *
- * Cached in Redis (cross-process sharing) and in-memory (per-process).
- * Both promote-clients and tg-aut read the same Redis cache.
- * Refreshes every 30 minutes.
+ * The only live percentile is the raw score distribution for reusable message-pool entries.
+ * It is used solely to bench weak entries; channel selection relies on V2 outcomes directly.
  */
 
-
-
-const REDIS_KEY = 'percentiles:channels';
-const REDIS_TTL = 3600; // 1 hour
-const REFRESH_MS = 30 * 60 * 1000; // 30 minutes
-const BUCKET_METRICS = [
-    'successRate',
-    'deleteRate',
-    'failureRate',
-    'messageRawScore',
-    'participantsCount',
-    'deletedCount',
-    'messageVolume',
-    'followupSurvivalRate',
-    'conversionRate',
-    'conversionRateShrunk',
-    'saturationRate',
-];
+const REDIS_KEY = 'percentiles:message-pool';
+const REDIS_TTL_SECONDS = 3600;
+const REFRESH_MS = 30 * 60 * 1000;
 class PercentileEngine {
     constructor(activeChannelCollection, redis, intelligenceCollection = undefined) {
         this.cache = null;
@@ -2276,7 +1336,7 @@ class PercentileEngine {
         this.intelligenceCollection = intelligenceCollection;
     }
     static init(collection, redis, intelligenceCollection, options = {}) {
-        if (!PercentileEngine.instance || shouldReplace(options)) {
+        if (!PercentileEngine.instance || options.replace === true) {
             PercentileEngine.instance = new PercentileEngine(collection, redis, intelligenceCollection);
         }
         return PercentileEngine.instance;
@@ -2291,439 +1351,144 @@ class PercentileEngine {
         PercentileEngine.instance = undefined;
     }
     async getPercentiles() {
-        if (this.cache && Date.now() - this.lastComputed < REFRESH_MS) {
-            const persistedPrior = await (0,_conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior)(this.redis);
-            if ((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.hasMeaningfulConversionPrior)(persistedPrior)) {
-                if (!sameConversionPrior(this.cache.conversionPrior, persistedPrior)) {
-                    this.cache.conversionPrior = persistedPrior;
-                }
-                return this.cache;
-            }
-            if ((0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.hasMeaningfulConversionPrior)(this.cache.conversionPrior)) {
-                return this.cache;
-            }
-        }
-        // Try Redis first (cross-process sharing)
+        if (this.cache && Date.now() - this.lastComputed < REFRESH_MS)
+            return this.cache;
         try {
             const cached = await this.redis.get(REDIS_KEY);
-            if (cached) {
-                const parsed = parsePercentiles(JSON.parse(cached));
-                if (parsed) {
-                    parsed.conversionPrior = await this.resolveConversionPriorSnapshot();
-                    this.cache = parsed;
-                    this.lastComputed = Date.now();
-                    return parsed;
-                }
+            const parsed = cached ? parsePercentiles(JSON.parse(cached)) : null;
+            if (parsed) {
+                this.cache = parsed;
+                this.lastComputed = Date.now();
+                return parsed;
             }
         }
         catch {
-            // Redis unavailable, compute fresh
+            // Redis is optional cache storage; calculate locally when unavailable or malformed.
         }
         return this.computeAndCache();
     }
-    /**
-     * Synchronous access to cached percentiles. Returns null if not yet computed.
-     * Use getPercentiles() for guaranteed data.
-     */
     getCachedPercentiles() {
         return this.cache;
     }
-    /**
-     * Returns percentile rank (0.0 to 1.0) of a value within a metric.
-     * Uses interpolation between bucket boundaries.
-     * Async version — ensures percentiles are loaded.
-     */
     async getPercentileRank(value, metric) {
-        if (!isBucketMetric(metric))
+        if (metric !== 'messageRawScore')
             return 0.5;
-        const percentiles = await this.getPercentiles();
-        return this.computeMetricRank(value, metric, percentiles[metric]);
+        return this.computeRank(value, (await this.getPercentiles()).messageRawScore);
     }
-    /**
-     * Synchronous percentile rank — uses cached data only.
-     * Returns 0.5 (median assumption) if cache is empty.
-     */
     getPercentileRankSync(value, metric) {
-        if (!isBucketMetric(metric))
+        if (metric !== 'messageRawScore')
             return 0.5;
-        const p = sanitizeBuckets(this.cache?.[metric]);
-        if (!p || p.count === 0)
-            return 0.5;
-        return this.computeMetricRank(value, metric, p);
-    }
-    computeMetricRank(value, metric, buckets) {
-        if (metric === 'conversionRate' && Number.isFinite(value) && value <= 0) {
-            return 0.5;
-        }
-        return this.computeRank(value, buckets);
-    }
-    computeRank(value, p) {
-        const buckets = sanitizeBuckets(p);
-        if (!buckets || buckets.count === 0)
-            return 0.5;
-        if (!Number.isFinite(value))
-            return 0.5;
-        let rank;
-        if (value <= buckets.p10) {
-            rank = 0.05 + 0.05 * (value / Math.max(0.001, buckets.p10));
-        }
-        else if (value <= buckets.p25) {
-            rank = 0.10 + 0.15 * ((value - buckets.p10) / Math.max(0.001, buckets.p25 - buckets.p10));
-        }
-        else if (value <= buckets.p50) {
-            rank = 0.25 + 0.25 * ((value - buckets.p25) / Math.max(0.001, buckets.p50 - buckets.p25));
-        }
-        else if (value <= buckets.p75) {
-            rank = 0.50 + 0.25 * ((value - buckets.p50) / Math.max(0.001, buckets.p75 - buckets.p50));
-        }
-        else if (value <= buckets.p90) {
-            rank = 0.75 + 0.15 * ((value - buckets.p75) / Math.max(0.001, buckets.p90 - buckets.p75));
-        }
-        else {
-            rank = 0.90 + 0.10 * Math.min(1, (value - buckets.p90) / Math.max(0.001, buckets.p90 - buckets.p75));
-        }
-        return Math.max(0, Math.min(1, rank));
+        return this.computeRank(value, this.cache?.messageRawScore ?? emptyBuckets());
     }
     async computeAndCache() {
         const nowMs = Date.now();
-        const recencyHalfLifeMs = _pool_constants__WEBPACK_IMPORTED_MODULE_0__.POOL.RECENCY_HALF_LIFE_DAYS * 24 * 60 * 60 * 1000;
-        const pipeline = [
-            { $match: { banned: { $ne: true }, forbidden: { $ne: true } } },
-            {
-                $addFields: {
-                    _safeSuccess: safeMongoNumber('$successMsgCount'),
-                    _safeDeleted: safeMongoNumber('$deletedCount'),
-                    _safeFailures: safeMongoNumber('$failureMsgCount'),
-                    _safeParticipants: safeMongoNumber('$participantsCount'),
-                    _safeFollowupSuccess: safeMongoNumber('$followupMsgSuccessCount'),
-                },
-            },
-            {
-                $addFields: {
-                    _totalAttempts: {
-                        $add: ['$_safeSuccess', '$_safeFollowupSuccess'],
-                    },
-                    _successRate: null,
-                    _deleteRate: {
-                        $cond: [
-                            { $gt: ['$_safeSuccess', 0] },
-                            {
-                                $divide: [
-                                    { $add: ['$_safeDeleted', 1] },
-                                    { $add: ['$_safeSuccess', 2] },
-                                ],
-                            },
-                            null,
-                        ],
-                    },
-                    _failureRate: {
-                        $cond: [
-                            { $gt: [{ $add: ['$_safeSuccess', '$_safeFailures'] }, 0] },
-                            {
-                                $divide: [
-                                    { $add: ['$_safeFailures', 1] },
-                                    { $add: ['$_safeSuccess', '$_safeFailures', 2] },
-                                ],
-                            },
-                            null,
-                        ],
-                    },
-                    _saturation: {
-                        $cond: [
-                            {
-                                $and: [
-                                    { $gt: ['$_safeSuccess', 0] },
-                                    { $gt: ['$_safeParticipants', 0] },
-                                ],
-                            },
-                            {
-                                $divide: [
-                                    { $add: ['$_safeSuccess', '$_safeFollowupSuccess'] },
-                                    '$_safeParticipants',
-                                ],
-                            },
-                            null,
-                        ],
-                    },
-                },
-            },
-            {
-                $facet: {
-                    successRateValues: [
-                        { $match: { _successRate: { $ne: null } } },
-                        { $sort: { _successRate: 1 } },
-                        { $group: { _id: null, values: { $push: '$_successRate' }, count: { $sum: 1 } } },
-                    ],
-                    deleteRateValues: [
-                        { $match: { _deleteRate: { $ne: null } } },
-                        { $sort: { _deleteRate: 1 } },
-                        { $group: { _id: null, values: { $push: '$_deleteRate' }, count: { $sum: 1 } } },
-                    ],
-                    failureRateValues: [
-                        { $match: { _failureRate: { $ne: null } } },
-                        { $sort: { _failureRate: 1 } },
-                        { $group: { _id: null, values: { $push: '$_failureRate' }, count: { $sum: 1 } } },
-                    ],
-                    participantsValues: [
-                        { $match: { _safeParticipants: { $gt: 0 } } },
-                        { $sort: { _safeParticipants: 1 } },
-                        { $group: { _id: null, values: { $push: '$_safeParticipants' }, count: { $sum: 1 } } },
-                    ],
-                    deletedCountValues: [
-                        { $sort: { _safeDeleted: 1 } },
-                        { $group: { _id: null, values: { $push: '$_safeDeleted' }, count: { $sum: 1 } } },
-                    ],
-                    messageVolumeValues: [
-                        { $match: { _totalAttempts: { $gt: 0 } } },
-                        { $sort: { _totalAttempts: 1 } },
-                        { $group: { _id: null, values: { $push: '$_totalAttempts' }, count: { $sum: 1 } } },
-                    ],
-                    saturationValues: [
-                        { $match: { _saturation: { $ne: null } } },
-                        { $sort: { _saturation: 1 } },
-                        { $group: { _id: null, values: { $push: '$_saturation' }, count: { $sum: 1 } } },
-                    ],
-                },
-            },
-        ];
-        let result = {};
+        const source = this.intelligenceCollection ?? this.activeChannelCollection;
+        let messageRawScore = emptyBuckets();
         try {
-            const activeResults = await this.activeChannelCollection.aggregate(pipeline).toArray();
-            const firstResult = Array.isArray(activeResults) ? activeResults[0] : null;
-            result = isRecord(firstResult) ? firstResult : {};
+            const [result] = await source.aggregate(messageRawScorePipeline(nowMs)).toArray();
+            messageRawScore = extractBuckets(isRecord(result) ? result['messageRawScoreValues'] : null);
         }
         catch {
-            // Active channel aggregation unavailable, keep safe default buckets.
+            // An unavailable aggregation leaves pool benching at its neutral median fallback.
         }
-        this.cache = {
-            successRate: this.extractBuckets(result['successRateValues']),
-            deleteRate: this.extractBuckets(result['deleteRateValues']),
-            failureRate: this.extractBuckets(result['failureRateValues']),
-            messageRawScore: emptyBuckets(),
-            participantsCount: this.extractBuckets(result['participantsValues']),
-            deletedCount: this.extractBuckets(result['deletedCountValues']),
-            messageVolume: this.extractBuckets(result['messageVolumeValues']),
-            saturationRate: this.extractBuckets(result['saturationValues']),
-            followupSurvivalRate: { p10: 0, p25: 0.2, p50: 0.5, p75: 0.7, p90: 0.9, count: 0 },
-            conversionRate: { p10: 0, p25: 0, p50: 0, p75: 0.01, p90: 0.05, count: 0 },
-            conversionRateShrunk: { p10: 0, p25: 0, p50: 0, p75: 0.01, p90: 0.05, count: 0 },
-            conversionPrior: (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.normalizeConversionPrior)(null),
-        };
-        // Compute followupSurvivalRate, conversionRate, conversionRateShrunk, and message raw-score
-        // distributions from the intelligence collection. The shared conversion prior is loaded from
-        // the persisted epoch snapshot so it stays coherent across processes and restarts.
-        if (this.intelligenceCollection) {
-            try {
-                const [intelResult] = await this.intelligenceCollection.aggregate([
-                    {
-                        $addFields: {
-                            _safeFollowupTotal: safeMongoNumber('$followupTotal'),
-                            _safeFollowupSuccess: safeMongoNumber('$followupSuccessCount'),
-                            // Match resolveConversion exactly: aliases remain authoritative until both are absent.
-                            _safeConversions: safeMongoNumber(mongoResolvedConversionCredits()),
-                            _safePoolAttempts: safeMongoPoolAttemptSum('$messagePool'),
-                            _safeSurvivedSends: safeMongoNumber('$survivedSends'),
-                            _safeConversionRateShrunk: safeMongoNumber({ $ifNull: ['$dmConversionRateShrunk', '$conversionRateShrunk'] }),
-                        },
-                    },
-                    {
-                        $facet: {
-                            followupRateValues: [
-                                { $match: { _safeFollowupTotal: { $gt: 4 } } },
-                                { $addFields: { _fuRate: { $divide: ['$_safeFollowupSuccess', '$_safeFollowupTotal'] } } },
-                                { $sort: { _fuRate: 1 } },
-                                { $group: { _id: null, values: { $push: '$_fuRate' }, count: { $sum: 1 } } },
-                            ],
-                            conversionRateValues: [
-                                { $match: { _safePoolAttempts: { $gt: 0 } } },
-                                {
-                                    $addFields: {
-                                        _convRate: {
-                                            $divide: [
-                                                { $add: ['$_safeConversions', _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.CONVERSION_PRIOR_ALPHA] },
-                                                { $add: ['$_safePoolAttempts', _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.CONVERSION_PRIOR_ALPHA + _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.CONVERSION_PRIOR_BETA] },
-                                            ],
-                                        },
-                                    },
-                                },
-                                { $sort: { _convRate: 1 } },
-                                { $group: { _id: null, values: { $push: '$_convRate' }, count: { $sum: 1 } } },
-                            ],
-                            conversionRateShrunkValues: [
-                                { $match: { _safeConversionRateShrunk: { $gt: 0 } } },
-                                { $sort: { _safeConversionRateShrunk: 1 } },
-                                { $group: { _id: null, values: { $push: '$_safeConversionRateShrunk' }, count: { $sum: 1 } } },
-                            ],
-                            messageRawScoreValues: [
-                                { $unwind: '$messagePool' },
-                                {
-                                    $addFields: {
-                                        _poolAttempted: safeMongoNumber('$messagePool.attempted'),
-                                        _poolSurvived: safeMongoNumber('$messagePool.survived'),
-                                        _poolDeleted: safeMongoNumber('$messagePool.deleted'),
-                                        _poolChannelSideFailed: safeMongoNumber('$messagePool.channelSideFailed'),
-                                        _poolLastValidatedAtMs: safeMongoNumber('$messagePool.lastValidatedAtMs'),
-                                    },
-                                },
-                                {
-                                    $addFields: {
-                                        _poolEvidence: {
-                                            $add: [
-                                                '$_poolAttempted',
-                                                '$_poolSurvived',
-                                                '$_poolDeleted',
-                                                '$_poolChannelSideFailed',
-                                                '$_poolLastValidatedAtMs',
-                                            ],
-                                        },
-                                        _poolWeightedFailures: {
-                                            $add: [
-                                                '$_poolChannelSideFailed',
-                                                { $multiply: ['$_poolDeleted', 2] },
-                                            ],
-                                        },
-                                        _poolAgeMs: {
-                                            $max: [
-                                                0,
-                                                { $subtract: [nowMs, '$_poolLastValidatedAtMs'] },
-                                            ],
-                                        },
-                                    },
-                                },
-                                { $match: { _poolEvidence: { $gt: 0 } } },
-                                {
-                                    $addFields: {
-                                        _poolSurvivalRate: {
-                                            $divide: [
-                                                { $add: ['$_poolSurvived', 1] },
-                                                { $add: ['$_poolSurvived', '$_poolWeightedFailures', 2] },
-                                            ],
-                                        },
-                                        _poolRecencyFactor: {
-                                            $pow: [
-                                                0.5,
-                                                { $divide: ['$_poolAgeMs', recencyHalfLifeMs] },
-                                            ],
-                                        },
-                                    },
-                                },
-                                {
-                                    $addFields: {
-                                        _poolRawScore: {
-                                            $multiply: [
-                                                '$_poolSurvivalRate',
-                                                {
-                                                    $add: [
-                                                        0.5,
-                                                        { $multiply: [0.5, '$_poolRecencyFactor'] },
-                                                    ],
-                                                },
-                                            ],
-                                        },
-                                    },
-                                },
-                                { $sort: { _poolRawScore: 1 } },
-                                { $group: { _id: null, values: { $push: '$_poolRawScore' }, count: { $sum: 1 } } },
-                            ],
-                        },
-                    },
-                ]).toArray();
-                if (intelResult) {
-                    const fuBuckets = this.extractBuckets(intelResult['followupRateValues']);
-                    if (fuBuckets.count > 0)
-                        this.cache.followupSurvivalRate = fuBuckets;
-                    const convBuckets = this.extractBuckets(intelResult['conversionRateValues']);
-                    if (convBuckets.count > 0)
-                        this.cache.conversionRate = convBuckets;
-                    const shrunkBuckets = this.extractBuckets(intelResult['conversionRateShrunkValues']);
-                    if (shrunkBuckets.count > 0)
-                        this.cache.conversionRateShrunk = shrunkBuckets;
-                    const messageScoreBuckets = this.extractBuckets(intelResult['messageRawScoreValues']);
-                    if (messageScoreBuckets.count > 0)
-                        this.cache.messageRawScore = messageScoreBuckets;
-                }
-            }
-            catch {
-                // Intelligence collection not available, keep defaults
-            }
-        }
-        this.cache.conversionPrior = await this.resolveConversionPriorSnapshot();
-        this.lastComputed = Date.now();
+        this.cache = { messageRawScore };
+        this.lastComputed = nowMs;
         try {
-            await this.redis.set(REDIS_KEY, JSON.stringify(this.cache), 'EX', REDIS_TTL);
+            await this.redis.set(REDIS_KEY, JSON.stringify(this.cache), 'EX', REDIS_TTL_SECONDS);
         }
         catch {
-            // Redis write failed, local cache still valid
+            // The local cache remains valid when Redis writes fail.
         }
         return this.cache;
     }
-    extractBuckets(facetResult) {
-        if (!Array.isArray(facetResult)) {
-            return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
+    computeRank(value, buckets) {
+        const p = sanitizeBuckets(buckets);
+        if (!p || p.count === 0 || !Number.isFinite(value))
+            return 0.5;
+        let rank;
+        if (value <= p.p10) {
+            rank = 0.05 + 0.05 * (value / Math.max(0.001, p.p10));
         }
-        const firstFacet = facetResult[0];
-        if (!isRecord(firstFacet) || !Array.isArray(firstFacet['values']) || firstFacet['values'].length === 0) {
-            return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
+        else if (value <= p.p25) {
+            rank = 0.10 + 0.15 * ((value - p.p10) / Math.max(0.001, p.p25 - p.p10));
         }
-        const values = firstFacet['values']
-            .filter((value) => typeof value === 'number' && Number.isFinite(value))
-            .sort((a, b) => a - b);
-        const n = values.length;
-        if (n === 0) {
-            return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
+        else if (value <= p.p50) {
+            rank = 0.25 + 0.25 * ((value - p.p25) / Math.max(0.001, p.p50 - p.p25));
         }
-        return {
-            p10: values[Math.floor(n * 0.10)] ?? 0,
-            p25: values[Math.floor(n * 0.25)] ?? 0,
-            p50: values[Math.floor(n * 0.50)] ?? 0,
-            p75: values[Math.floor(n * 0.75)] ?? 0,
-            p90: values[Math.floor(n * 0.90)] ?? 0,
-            count: n,
-        };
+        else if (value <= p.p75) {
+            rank = 0.50 + 0.25 * ((value - p.p50) / Math.max(0.001, p.p75 - p.p50));
+        }
+        else if (value <= p.p90) {
+            rank = 0.75 + 0.15 * ((value - p.p75) / Math.max(0.001, p.p90 - p.p75));
+        }
+        else {
+            rank = 0.90 + 0.10 * Math.min(1, (value - p.p90) / Math.max(0.001, p.p90 - p.p75));
+        }
+        return Math.max(0, Math.min(1, rank));
     }
-    async resolveConversionPriorSnapshot() {
-        return await (0,_conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior)(this.redis) ?? (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.normalizeConversionPrior)(null);
-    }
+}
+function messageRawScorePipeline(nowMs) {
+    const recencyHalfLifeMs = _pool_constants__WEBPACK_IMPORTED_MODULE_0__.POOL.RECENCY_HALF_LIFE_DAYS * 24 * 60 * 60 * 1000;
+    return [
+        { $unwind: '$messagePool' },
+        {
+            $addFields: {
+                _attempted: safeMongoNumber('$messagePool.attempted'),
+                _survived: safeMongoNumber('$messagePool.survived'),
+                _deleted: safeMongoNumber('$messagePool.deleted'),
+                _channelSideFailed: safeMongoNumber('$messagePool.channelSideFailed'),
+                _lastValidatedAtMs: safeMongoNumber('$messagePool.lastValidatedAtMs'),
+            },
+        },
+        {
+            $addFields: {
+                _evidence: { $add: ['$_attempted', '$_survived', '$_deleted', '$_channelSideFailed', '$_lastValidatedAtMs'] },
+                _weightedFailures: { $add: ['$_channelSideFailed', { $multiply: ['$_deleted', 2] }] },
+                _ageMs: { $max: [0, { $subtract: [nowMs, '$_lastValidatedAtMs'] }] },
+            },
+        },
+        { $match: { _evidence: { $gt: 0 } } },
+        {
+            $addFields: {
+                _rawScore: {
+                    $multiply: [
+                        { $divide: [{ $add: ['$_survived', 1] }, { $add: ['$_survived', '$_weightedFailures', 2] }] },
+                        { $add: [0.5, { $multiply: [0.5, { $pow: [0.5, { $divide: ['$_ageMs', recencyHalfLifeMs] }] }] }] },
+                    ],
+                },
+            },
+        },
+        { $sort: { _rawScore: 1 } },
+        { $group: { _id: null, values: { $push: '$_rawScore' }, count: { $sum: 1 } } },
+        { $project: { _id: 0, messageRawScoreValues: [{ values: '$values', count: '$count' }] } },
+    ];
 }
 function parsePercentiles(value) {
     if (!isRecord(value))
         return null;
-    const parsed = {};
-    for (const metric of BUCKET_METRICS) {
-        if (metric === 'successRate') {
-            parsed[metric] = emptyBuckets();
-            continue;
-        }
-        const buckets = sanitizeBuckets(value[metric]);
-        if (!buckets)
-            return null;
-        parsed[metric] = buckets;
-    }
-    const conversionPrior = parseStoredConversionPrior(value['conversionPrior']);
-    if (!conversionPrior)
-        return null;
-    parsed.conversionPrior = conversionPrior;
-    return parsed;
+    const messageRawScore = sanitizeBuckets(value['messageRawScore']);
+    return messageRawScore ? { messageRawScore } : null;
 }
-function isBucketMetric(metric) {
-    return BUCKET_METRICS.includes(metric);
-}
-function parseStoredConversionPrior(value) {
-    if (!isRecord(value))
-        return null;
-    const shape = typeof value['shape'] === 'number' && Number.isFinite(value['shape']) && value['shape'] > 0;
-    const rate = typeof value['rate'] === 'number' && Number.isFinite(value['rate']) && value['rate'] > 0;
-    if (!shape || !rate)
-        return null;
-    return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_2__.normalizeConversionPrior)(value);
-}
-function sameConversionPrior(left, right) {
-    if (!left || !right)
-        return false;
-    return left.shape === right.shape
-        && left.rate === right.rate
-        && left.fittedAt === right.fittedAt
-        && left.channelCount === right.channelCount;
+function extractBuckets(facetResult) {
+    if (!Array.isArray(facetResult))
+        return emptyBuckets();
+    const first = facetResult[0];
+    if (!isRecord(first) || !Array.isArray(first['values']))
+        return emptyBuckets();
+    const values = first['values']
+        .filter((value) => typeof value === 'number' && Number.isFinite(value))
+        .sort((left, right) => left - right);
+    if (values.length === 0)
+        return emptyBuckets();
+    const n = values.length;
+    return {
+        p10: values[Math.floor(n * 0.10)] ?? 0,
+        p25: values[Math.floor(n * 0.25)] ?? 0,
+        p50: values[Math.floor(n * 0.50)] ?? 0,
+        p75: values[Math.floor(n * 0.75)] ?? 0,
+        p90: values[Math.floor(n * 0.90)] ?? 0,
+        count: n,
+    };
 }
 function emptyBuckets() {
     return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
@@ -2731,14 +1496,8 @@ function emptyBuckets() {
 function sanitizeBuckets(value) {
     if (!isRecord(value))
         return null;
-    const raw = [
-        safeNumber(value['p10']),
-        safeNumber(value['p25']),
-        safeNumber(value['p50']),
-        safeNumber(value['p75']),
-        safeNumber(value['p90']),
-    ];
-    if (raw.some(item => item === null))
+    const raw = ['p10', 'p25', 'p50', 'p75', 'p90'].map((key) => safeNumber(value[key]));
+    if (raw.some((item) => item === null))
         return null;
     let previous = 0;
     const ordered = raw.map((item) => {
@@ -2746,76 +1505,20 @@ function sanitizeBuckets(value) {
         previous = next;
         return next;
     });
-    const count = Math.max(0, Math.floor(safeNumber(value['count']) ?? 0));
     return {
         p10: ordered[0] ?? 0,
         p25: ordered[1] ?? 0,
         p50: ordered[2] ?? 0,
         p75: ordered[3] ?? 0,
         p90: ordered[4] ?? 0,
-        count,
+        count: Math.max(0, Math.floor(safeNumber(value['count']) ?? 0)),
     };
+}
+function safeMongoNumber(input) {
+    return { $max: [0, { $convert: { input, to: 'double', onError: 0, onNull: 0 } }] };
 }
 function safeNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-function safeMongoNumber(input) {
-    return {
-        $max: [
-            0,
-            {
-                $convert: {
-                    input,
-                    to: 'double',
-                    onError: 0,
-                    onNull: 0,
-                },
-            },
-        ],
-    };
-}
-/** Mongo equivalent of resolveConversion during the legacy alias migration. */
-function mongoResolvedConversionCredits() {
-    return {
-        $cond: [
-            {
-                $and: [
-                    { $eq: [{ $type: '$dmConversions' }, 'missing'] },
-                    { $eq: [{ $type: '$conversions' }, 'missing'] },
-                ],
-            },
-            { $ifNull: ['$conversion.dmOpenCredits', 0] },
-            {
-                $cond: [
-                    { $gt: [{ $ifNull: ['$conversionUpdatedAt', 0] }, { $ifNull: ['$dmConversionUpdatedAt', 0] }] },
-                    { $ifNull: ['$conversions', 0] },
-                    { $ifNull: ['$dmConversions', '$conversions'] },
-                ],
-            },
-        ],
-    };
-}
-function safeMongoPoolAttemptSum(input) {
-    return {
-        $sum: {
-            $map: {
-                input: { $ifNull: [input, []] },
-                as: 'entry',
-                in: {
-                    $cond: [
-                        {
-                            $and: [
-                                { $isNumber: '$$entry.attempted' },
-                                { $gt: ['$$entry.attempted', 0] },
-                            ],
-                        },
-                        '$$entry.attempted',
-                        0,
-                    ],
-                },
-            },
-        },
-    };
 }
 function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -2824,12 +1527,7 @@ function isAggregateableCollectionLike(value) {
     return isRecord(value) && typeof value['aggregate'] === 'function';
 }
 function isRedisLike(value) {
-    return isRecord(value)
-        && typeof value['get'] === 'function'
-        && typeof value['set'] === 'function';
-}
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
+    return isRecord(value) && typeof value['get'] === 'function' && typeof value['set'] === 'function';
 }
 
 
@@ -2900,13 +1598,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_HEALTH_MIN_FLEET_SIZE: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.ACCOUNT_HEALTH_MIN_FLEET_SIZE),
 /* harmony export */   ACCOUNT_SEND_KEY_TTL_MS: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.ACCOUNT_SEND_KEY_TTL_MS),
 /* harmony export */   ACCOUNT_SEND_WINDOW_MS: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.ACCOUNT_SEND_WINDOW_MS),
+/* harmony export */   CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_LEGACY_FIELDS: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_LEGACY_FIELDS),
 /* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
-/* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.CONVERSION_FRESHNESS_HALF_LIFE_MS),
-/* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.CONVERSION_PRIOR_ALPHA),
-/* harmony export */   CONVERSION_PRIOR_BETA: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.CONVERSION_PRIOR_BETA),
-/* harmony export */   CONVERSION_PRIOR_REDIS_KEY: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CONVERSION_PRIOR_REDIS_KEY),
-/* harmony export */   ChannelClassifier: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.ChannelClassifier),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.ChannelIntelligenceService),
 /* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _attribution__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService),
 /* harmony export */   MESSAGE_SAFETY: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.MESSAGE_SAFETY),
@@ -2926,7 +1621,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountSendCap),
 /* harmony export */   RedisPromotionTracker: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker),
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.TEMP_BLOCK_TTL_SECONDS),
-/* harmony export */   UNKNOWN_CONVERSION_FRESHNESS: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.UNKNOWN_CONVERSION_FRESHNESS),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.addPoolOutcomeTotals),
 /* harmony export */   buildInsertIfAbsentUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.buildInsertIfAbsentUpdate),
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.buildOutcomeUpdate),
@@ -2941,17 +1635,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeAccountDeletionRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountDeletionRate),
 /* harmony export */   computeAccountFailureRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountFailureRate),
 /* harmony export */   computeAccountHealth: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountHealth),
-/* harmony export */   computeConversionEfficiency: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.computeConversionEfficiency),
-/* harmony export */   computeConversionFreshness: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.computeConversionFreshness),
-/* harmony export */   computeConversionRateShrunk: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.computeConversionRateShrunk),
-/* harmony export */   computeExpectedValue: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.computeExpectedValue),
 /* harmony export */   computePercentileRank: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computePercentileRank),
-/* harmony export */   computeSmoothedConversionRate: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.computeSmoothedConversionRate),
-/* harmony export */   countPoolAttempts: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.countPoolAttempts),
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.countPoolSurvivors),
 /* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.countResolvedPrimaryAttempts),
-/* harmony export */   countSurvivedSends: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.countSurvivedSends),
-/* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.createDefaultIntelligence),
 /* harmony export */   createPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.createPoolMessageIndex),
 /* harmony export */   createPromotionRuntime: () => (/* reexport safe */ _runtime__WEBPACK_IMPORTED_MODULE_8__.createPromotionRuntime),
 /* harmony export */   deletionRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.deletionRate),
@@ -2960,12 +1646,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   evaluateFollowUpScheduling: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.evaluateFollowUpScheduling),
 /* harmony export */   evaluatePromotionChannelEligibility: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.evaluatePromotionChannelEligibility),
 /* harmony export */   failureRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.failureRate),
-/* harmony export */   fitGammaPriorFromRates: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.fitGammaPriorFromRates),
 /* harmony export */   formatFields: () => (/* reexport safe */ _logging__WEBPACK_IMPORTED_MODULE_3__.formatFields),
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasFailureRateEvidence),
-/* harmony export */   hasMeaningfulConversionPrior: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.hasMeaningfulConversionPrior),
-/* harmony export */   hasRecordedConversions: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.hasRecordedConversions),
 /* harmony export */   hasV2SemanticParity: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.hasV2SemanticParity),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
@@ -2973,25 +1656,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   legacyPoolEntryKeyV1: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.legacyPoolEntryKeyV1),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.messageIndexToStrategy),
 /* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence),
-/* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.normalizeConversionPrior),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
 /* harmony export */   poolEntryLegacyKeys: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryLegacyKeys),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolOutcomeTotals),
 /* harmony export */   rawScore: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.rawScore),
-/* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
 /* harmony export */   reconcileChannelIntelligenceV2: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.reconcileChannelIntelligenceV2),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.resolveAccountDailyCap),
-/* harmony export */   resolveConversion: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.resolveConversion),
-/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.resolveConversionExposure),
-/* harmony export */   sampleGammaPosteriorRate: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_9__.sampleGammaPosteriorRate),
-/* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_10__.selectPromotionChannels),
+/* harmony export */   resolveDMCredits: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.resolveDMCredits),
+/* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.selectPromotionChannels),
 /* harmony export */   selectPromotionMessageCandidates: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.selectPromotionMessageCandidates),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.shouldRetainPoolCandidate),
-/* harmony export */   survivalRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.survivalRate),
-/* harmony export */   writePersistedConversionPrior: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.writePersistedConversionPrior)
+/* harmony export */   survivalRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.survivalRate)
 /* harmony export */ });
 /* harmony import */ var _attribution__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./attribution */ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/index.ts");
 /* harmony import */ var _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-intelligence */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/index.ts");
@@ -3002,9 +1680,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _redis__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./redis */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/index.ts");
 /* harmony import */ var _runtime__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./runtime */ "../../packages/tg-channel-state/src/channel-message-promotions/runtime/index.ts");
-/* harmony import */ var _scoring__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./scoring */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/index.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
 
 
 
@@ -3158,10 +1834,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 
 
 
@@ -3173,9 +1848,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__.PromoLogger('promo');
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
@@ -3224,7 +1898,7 @@ class PromotionFlowRunner {
         this.options = safeOptions;
         this.messageQueue = isMessageQueueLike(safeOptions.messageQueue)
             ? safeOptions.messageQueue
-            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_9__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -3346,7 +2020,6 @@ class PromotionFlowRunner {
             catch (error) {
                 this.log('warn', `Promotion intelligence docs batch load failed; selecting with cold-start docs error=${this.normalizeError(error)}`);
             }
-            const conversionPrior = await this.loadSelectionConversionPrior();
             let blockedChannelIds = new Set();
             try {
                 blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
@@ -3358,7 +2031,6 @@ class PromotionFlowRunner {
                 channels,
                 intelligenceDocs,
                 batchTarget,
-                conversionPrior,
                 blockedChannelIds,
             });
             const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
@@ -3371,11 +2043,9 @@ class PromotionFlowRunner {
                 `selected=${selection.selected.length}`,
                 `proven=${selection.proven.length}`,
                 `untested=${selection.untested.length}`,
-                `stale=${selection.stale.length}`,
                 `skipped=${selection.skipped.length}`,
                 `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
                 `explorePct=${selection.explorePercent.toFixed(2)}`,
-                `reEvalPct=${selection.reEvalPercent.toFixed(2)}`,
                 `blocked=${blockedChannelIds.size}`,
                 `stats=${this.formatStats(stats)}`,
             ].join('; '));
@@ -3458,36 +2128,15 @@ class PromotionFlowRunner {
         this.log('debug', `Promotion channel attempt start; ${this.formatChannel(channel)} isFollowUp=${isFollowUp}`);
         const percentiles = await this.loadPercentiles(channel);
         let doc = null;
-        let legacySeedProbeCounts;
-        let legacyMessagePool;
-        let legacyExploration = {};
         try {
             const loaded = await this.adapter.getIntelligenceDoc(channel.channelId);
             doc = isChannelIntelligenceV2(loaded) ? loaded : (0,_channel_intelligence_channel_intelligence_v2__WEBPACK_IMPORTED_MODULE_1__.migrateLegacyChannelIntelligence)(loaded);
-            const legacyDoc = loaded;
-            if (!isChannelIntelligenceV2(loaded) && isSeedProbeCounts(legacyDoc?.seedProbeCounts)) {
-                legacySeedProbeCounts = legacyDoc.seedProbeCounts;
-            }
-            if (!isChannelIntelligenceV2(loaded) && Array.isArray(loaded?.messagePool)) {
-                legacyMessagePool = loaded.messagePool;
-            }
-            if (!isChannelIntelligenceV2(loaded)) {
-                const legacy = loaded;
-                if (typeof legacy?.exploreAttempts === 'number')
-                    legacyExploration.exploreAttempts = legacy.exploreAttempts;
-                if (typeof legacy?.exploreSurvived === 'number')
-                    legacyExploration.exploreSurvived = legacy.exploreSurvived;
-            }
         }
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
         const mergedChannel = mergePromotionHealthSignals(channel, doc);
-        const planningChannel = {
-            ...mergedChannel,
-            ...(Array.isArray(legacyMessagePool) ? { messagePool: legacyMessagePool } : {}),
-            ...legacyExploration,
-        };
+        const planningChannel = mergedChannel;
         const eligible = await this.evaluateEligibility(planningChannel, doc, percentiles, isFollowUp);
         if (!eligible)
             return 'skipped';
@@ -3506,10 +2155,7 @@ class PromotionFlowRunner {
             failStreak: stats.failStreak,
             ...(availableMessageIds !== undefined ? { availableMessageIds } : {}),
             ...(Array.isArray(planningChannel.messagePool) ? { messagePool: planningChannel.messagePool } : {}),
-            // Compatibility-only hints for documents that still carry the retired exploration fields.
-            ...(planningChannel.exploreAttempts !== undefined ? { exploreAttempts: planningChannel.exploreAttempts } : {}),
-            ...(planningChannel.exploreSurvived !== undefined ? { exploreSurvived: planningChannel.exploreSurvived } : {}),
-            ...(legacySeedProbeCounts ? { seedProbeCounts: legacySeedProbeCounts } : {}),
+            ...(doc ? { seedProbeCounts: doc.exploration.seedProbeCounts } : {}),
             legacyAvailable: (availableMessageIds?.length ?? 0) > 0,
             ...(percentiles ? { percentiles } : {}),
             nowMs: Date.now(),
@@ -3684,7 +2330,7 @@ class PromotionFlowRunner {
         const result = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluatePromotionChannelEligibility)({
             channel: healthChannel,
             scoringEnabled: this.options.scoringEnabled && !!percentiles,
-            lifecycleStage: normalizeLifecycleStage(doc?.lifecycle?.state),
+            safetyStatus: doc?.safety.status ?? null,
             percentiles,
             recentlyQueued: this.messageQueue.isQueued(channel.channelId)
                 || this.followUpTimers.has(channel.channelId)
@@ -3759,7 +2405,6 @@ class PromotionFlowRunner {
         const pacingStatus = 'skipped';
         try {
             await this.options.account.recordSuccess(channel.channelId, isFollowUp);
-            await this.options.account.intelligence.refreshChannelMeta(channel.channelId, channel.title || '', channel.username || null, channel.participantsCount || 0);
         }
         catch (error) {
             intelligenceStatus = 'fail';
@@ -3898,17 +2543,31 @@ class PromotionFlowRunner {
         }
     }
     async recordPoolOutcome(message, outcome) {
-        if (message.isFollowUp || outcome === 'deleted')
+        if (message.isFollowUp)
             return 'skipped';
         try {
             const entry = createPoolEntryFromText(message.messageText, message.poolSource);
             if (!entry)
                 return 'skipped';
-            await this.options.account.ensurePoolEntry(message.channelId, entry);
+            // Only independently validated survivors earn a new pool slot.  A deletion may refer to an
+            // existing pooled message, but must not add a failed fresh message to the reusable pool.
+            if (outcome === 'survived') {
+                await this.options.account.ensurePoolEntry(message.channelId, entry);
+            }
             const recorded = await this.options.account.recordPoolEntrySent(message.channelId, entry.key, Date.now(), entry.legacyKeys ?? []);
-            if (recorded === false)
-                return 'skipped';
-            await this.options.account.recordPoolEntryOutcome(message.channelId, entry.key, 'survived', Date.now(), entry.legacyKeys ?? []);
+            if (recorded === false) {
+                if (outcome !== 'survived')
+                    return 'skipped';
+                // Older account adapters cannot safely replace a full pool. Treat that as a skipped pool
+                // update rather than failing an otherwise valid promotion during a rolling deployment.
+                const recordSurviving = this.options.account.recordSurvivingPoolEntry;
+                if (typeof recordSurviving !== 'function')
+                    return 'skipped';
+                return await recordSurviving.call(this.options.account, message.channelId, entry, Date.now())
+                    ? 'ok'
+                    : 'skipped';
+            }
+            await this.options.account.recordPoolEntryOutcome(message.channelId, entry.key, outcome, Date.now(), entry.legacyKeys ?? []);
             return 'ok';
         }
         catch (error) {
@@ -4124,18 +2783,6 @@ class PromotionFlowRunner {
             return null;
         }
     }
-    async loadSelectionConversionPrior() {
-        if (!this.options.scoringEnabled)
-            return null;
-        if (!this.adapter.getConversionPrior) {
-            throw new Error('Promotion selection requires adapter.getConversionPrior when scoring is enabled');
-        }
-        const prior = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_8__.normalizeConversionPrior)(await this.adapter.getConversionPrior());
-        if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_8__.hasMeaningfulConversionPrior)(prior)) {
-            throw new Error('Promotion selection requires a warmed persisted conversion prior');
-        }
-        return prior;
-    }
     async shouldProcessNextChannel(channel) {
         try {
             if (!isExactTrue(await this.adapter.isActive())) {
@@ -4253,13 +2900,12 @@ class PromotionFlowRunner {
     describeSelection(selection, intelligenceDocs) {
         const intelligenceByChannel = new Map();
         for (const doc of intelligenceDocs) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(doc.channelId);
+            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(doc.channelId);
             if (channelId)
                 intelligenceByChannel.set(channelId, doc);
         }
         const proven = this.toChannelIdSet(selection.proven);
         const untested = this.toChannelIdSet(selection.untested);
-        const stale = this.toChannelIdSet(selection.stale);
         const skipCounts = new Map();
         for (const channel of selection.skipped) {
             const reason = this.getSkippedSelectionReason(channel, intelligenceByChannel).bucket;
@@ -4268,13 +2914,11 @@ class PromotionFlowRunner {
         return {
             skipBreakdown: this.formatCounts(skipCounts),
             selectedSample: this.summarizeSelectionChannels(selection.selected, (channel) => {
-                const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channel.channelId);
+                const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
                 if (channelId && proven.has(channelId))
                     return 'proven';
                 if (channelId && untested.has(channelId))
                     return 'untested';
-                if (channelId && stale.has(channelId))
-                    return 'stale';
                 return 'backfill';
             }),
             skippedSample: this.summarizeSelectionChannels(selection.skipped, (channel) => {
@@ -4285,23 +2929,22 @@ class PromotionFlowRunner {
     toChannelIdSet(channels) {
         const ids = new Set();
         for (const channel of channels) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channel.channelId);
+            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
             if (channelId)
                 ids.add(channelId);
         }
         return ids;
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
         if (!channelId)
             return { bucket: 'invalid-channel-id', sample: 'invalid-channel-id' };
         const doc = intelligenceByChannel.get(channelId);
         if (!doc)
             return { bucket: 'duplicate-or-invalid', sample: 'duplicate-or-invalid' };
-        // Preserve the established operational label while the lifecycle vocabulary changes to V2.
-        if (doc.lifecycle.state === 'blocked')
-            return { bucket: 'hostile', sample: 'hostile' };
-        return { bucket: 'selection-filter', sample: `selection-filter:${doc.lifecycle.state}` };
+        if (doc.safety.status === 'blocked')
+            return { bucket: 'safety-blocked', sample: 'safety-blocked' };
+        return { bucket: 'selection-filter', sample: 'selection-filter' };
     }
     summarizeSelectionChannels(channels, label) {
         if (channels.length === 0)
@@ -4482,7 +3125,7 @@ function normalizeChannels(value) {
 function normalizeChannel(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     if (!channelId)
         return null;
     return {
@@ -4507,12 +3150,6 @@ function normalizeAvailableMessageIds(value) {
         .map((item) => (typeof item === 'string' ? item.trim() : ''))
         .filter((item) => item.length > 0);
 }
-function isSeedProbeCounts(value) {
-    if (!isRecord(value))
-        return false;
-    return ['legacy', 'custom', 'ai'].every((key) => value[key] === undefined
-        || (typeof value[key] === 'number' && Number.isFinite(value[key])));
-}
 function normalizeReadyMessages(value) {
     if (!Array.isArray(value))
         return [];
@@ -4527,7 +3164,7 @@ function normalizeReadyMessages(value) {
 function normalizeReadyMessage(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     const messageId = asNumber(value['messageId']);
     if (!channelId || !isValidMessageId(messageId))
         return null;
@@ -4549,9 +3186,6 @@ function normalizeReadyMessage(value) {
         ...(poolSource ? { poolSource } : {}),
         ...(poolMode ? { poolMode } : {}),
     };
-}
-function normalizeLifecycleStage(value) {
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 function safeNonNegativeInt(value) {
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
@@ -4617,10 +3251,11 @@ function isChannelIntelligenceV2(value) {
         && value['schemaVersion'] === 2
         && typeof value['channelId'] === 'string'
         && Array.isArray(value['messagePool'])
-        && isRecord(value['lifecycle'])
-        && isRecord(value['primary'])
-        && isRecord(value['historical'])
-        && isRecord(value['conversion']);
+        && isRecord(value['timestamps'])
+        && isRecord(value['outcomes'])
+        && isRecord(value['exploration'])
+        && isRecord(value['safety'])
+        && isRecord(value['DMs']);
 }
 function isAccountLike(value) {
     return isRecord(value)
@@ -4638,8 +3273,7 @@ function isAccountLike(value) {
         && typeof value['recordSend'] === 'function'
         && typeof value['blockChannelPermanent'] === 'function'
         && typeof value['blockChannelTemporary'] === 'function'
-        && typeof value['blockedChannelsForMobile'] === 'function'
-        && typeof value['intelligence']['refreshChannelMeta'] === 'function';
+        && typeof value['blockedChannelsForMobile'] === 'function';
 }
 function shouldRollbackDailySendBudget(result) {
     // The daily send cap must count ONLY successful sends. Any non-sent outcome — including
@@ -5308,7 +3942,7 @@ function evaluateDeletionPolicy(messageIndex, availableMessageCount = 0) {
     }
     const actions = [];
     if (safeMessageIndex === 'followUp') {
-        actions.push('increment_dm_restriction');
+        actions.push('increment_DM_restriction');
     }
     else if (safeMessageIndex === 'custom' || safeMessageIndex === 'ai') {
         actions.push('increment_word_restriction');
@@ -5349,12 +3983,12 @@ function evaluatePromotionChannelEligibility(input) {
     if (!isRecord(safeInput.channel)) {
         return { eligible: false, reason: 'Invalid channel' };
     }
-    const { channel, now = Date.now(), previousResult, lifecycleStage, recentlyQueued = false, } = safeInput;
+    const { channel, now = Date.now(), previousResult, safetyStatus, recentlyQueued = false, } = safeInput;
     const safeNow = safeTimestamp(now, Date.now());
     if (recentlyQueued === true)
         return { eligible: false, reason: 'Recently promoted (in queue)' };
-    if (lifecycleStage === 'hostile') {
-        return { eligible: false, reason: 'Legacy hostile stage active' };
+    if (safetyStatus === 'blocked') {
+        return { eligible: false, reason: 'Channel safety block active' };
     }
     const health = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelPromotionHealth)({ ...channel, now: safeNow });
     if (!health.promotable)
@@ -5467,7 +4101,7 @@ __webpack_require__.r(__webpack_exports__);
 function selectPromotionMessageCandidates(input) {
     const malformedInput = !isRecord(input);
     const safeInput = malformedInput ? {} : input;
-    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, wordRestriction, dMRestriction, availableMessageIds, messagePool, exploreAttempts, exploreSurvived, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
+    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, wordRestriction, dMRestriction, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
     const safeIsFollowUp = isFollowUp === true;
     // V2 derives probe caps from durable pool attempt counters. The optional legacy counter is only a
     // compatibility hint and is never required to plan a safe message.
@@ -5497,7 +4131,7 @@ function selectPromotionMessageCandidates(input) {
         // When probing is exhausted but the channel already has SOME survivors, reuse the available pool
         // (force it to the front) before legacy — don't waste sends re-probing a capped channel, and
         // don't ignore the partial pool we did build. Otherwise (still probing) keep exploring to learn.
-        const seedPool = selectPoolReuseCandidate(messagePool, exploreAttempts, exploreSurvived, random, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(nowMs), percentiles ?? null, minSendIntervalMs, 
+        const seedPool = selectPoolReuseCandidate(messagePool, survivorCount, random, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(nowMs), percentiles ?? null, minSendIntervalMs, 
         /* forceSurvivor */ seedExhausted && survivorCount > 0);
         return withPoolCandidate(seedPool, buildSeedLadder({
             seedProbeCounts: effectiveSeedProbeCounts,
@@ -5536,7 +4170,9 @@ function pickRandomSurvivor(messagePool, random) {
 /** Distinct (by semantic-core key) pool entries that meet the survivor bar. One entry per key. */
 function distinctSurvivorsByKey(messagePool) {
     return distinctPoolEntriesByContent(messagePool, (entry) => entry.state !== 'benched'
-        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED);
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
+        // A message that was later deleted has lost its survivor slot until it proves itself again.
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.deleted));
 }
 /** Counter-only smoothed rate (used for follow-ups, which have no dedicated pool source). */
 function computeCounterDeletionRate(deletedCounter) {
@@ -5593,7 +4229,7 @@ function resolveLegacyAvailable(legacyAvailable, availableMessageIds) {
  *   - The chosen probe leads; the remaining still-available sources follow (so a delete falls through
  *     to another source this cycle); legacy + fallback always backstop.
  *   - When every fresh-freeform source is at its cap, only legacy/fallback remain — the channel stops
- *     probing and the hostile stage removes it if it keeps deleting.
+ *     probing and channel safety blocks it if it keeps deleting.
  */
 function buildSeedLadder(opts) {
     const { seedProbeCounts, legacyAvailable, availableMessageIds, random } = opts;
@@ -5674,7 +4310,7 @@ function withPoolCandidate(poolCandidate, candidates) {
         return candidates;
     return [poolCandidate, ...candidates.filter((candidate) => candidate.randomIndex !== poolCandidate.randomIndex)];
 }
-function selectPoolReuseCandidate(value, exploreAttempts, exploreSurvived, random, nowMs, percentiles, minSendIntervalMs, forceSurvivor = false) {
+function selectPoolReuseCandidate(value, survivorCount, random, nowMs, percentiles, minSendIntervalMs, forceSurvivor = false) {
     const entries = normalizeReusablePoolEntries(value);
     const benchableEntries = normalizeBenchablePoolEntries(value);
     if (entries.length === 0 && benchableEntries.length === 0)
@@ -5691,14 +4327,14 @@ function selectPoolReuseCandidate(value, exploreAttempts, exploreSurvived, rando
         // generation, so prefer it unconditionally — but only if a genuine survivor (survived ≥ min)
         // exists; otherwise fall through so the caller's legacy backstop applies.
         if (forceSurvivor) {
-            const survivorPool = (rotated.length > 0 ? rotated : eligible).filter((item) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(item.entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED);
+            const survivorPool = (rotated.length > 0 ? rotated : eligible).filter((item) => hasReusablePoolSurvival(item.entry));
             if (survivorPool.length > 0) {
                 const survivor = pickWeightedEntry(survivorPool, random);
                 return survivor ? buildPoolCandidate(survivor.entry) : null;
             }
             return null;
         }
-        if (!shouldReusePoolCandidate(exploreAttempts, exploreSurvived, random))
+        if (!shouldReusePartialPool(survivorCount, random))
             return null;
         const selected = pickWeightedEntry(rotated.length > 0 ? rotated : eligible, random);
         return selected ? buildPoolCandidate(selected.entry) : null;
@@ -5725,10 +4361,14 @@ function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function normalizeReusablePoolEntries(value) {
-    return distinctPoolEntriesByContent(value, (entry) => entry.state !== 'benched' && hasPoolEntryEvidence(entry));
+    return distinctPoolEntriesByContent(value, (entry) => entry.state !== 'benched' && hasReusablePoolSurvival(entry));
 }
 function normalizeBenchablePoolEntries(value) {
-    return distinctPoolEntriesByContent(value, hasPoolEntryEvidence);
+    return distinctPoolEntriesByContent(value, hasReusablePoolSurvival);
+}
+function hasReusablePoolSurvival(entry) {
+    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.deleted);
 }
 /** Read-time compatibility for historical pools that used a non-canonical stored key. */
 function distinctPoolEntriesByContent(value, include) {
@@ -5758,24 +4398,9 @@ function isPoolEntry(value) {
         && typeof value['text'] === 'string'
         && (0,_pool__WEBPACK_IMPORTED_MODULE_0__.isMessageSource)(value['source']);
 }
-function hasPoolEntryEvidence(entry) {
-    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.attempted) > 0
-        || (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) > 0
-        || (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.deleted) > 0
-        || (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.channelSideFailed) > 0
-        || (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.lastSentAtMs) > 0
-        || (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.lastValidatedAtMs) > 0;
-}
-function shouldReusePoolCandidate(exploreAttempts, exploreSurvived, random) {
-    const attempts = normalizeNonNegativeValue(exploreAttempts);
-    if (attempts <= 0)
-        return false;
-    const survived = Math.min(attempts, normalizeNonNegativeValue(exploreSurvived));
-    const exploreRate = survived / Math.max(1, attempts);
-    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) >= exploreRate;
-}
-function normalizeNonNegativeValue(value) {
-    return typeof value === 'number' ? (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(value) : 0;
+function shouldReusePartialPool(survivorCount, random) {
+    const probability = Math.max(0, Math.min(1, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(survivorCount) / _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET));
+    return probability > 0 && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) < probability;
 }
 function createSourceCandidate(source, availableMessageIds, random) {
     if (source === 'ai') {
@@ -5832,7 +4457,8 @@ function selectBenchedProbeCandidate(entries, nowMs, minSendIntervalMs) {
     return due[0] ?? null;
 }
 function resolveBenchedProbeIntervalMs(value) {
-    const baseIntervalMs = Math.max(_pool__WEBPACK_IMPORTED_MODULE_0__.POOL.MIN_SEND_INTERVAL_FLOOR_MS, normalizeNonNegativeValue(value));
+    const safeIntervalMs = typeof value === 'number' ? (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(value) : 0;
+    const baseIntervalMs = Math.max(_pool__WEBPACK_IMPORTED_MODULE_0__.POOL.MIN_SEND_INTERVAL_FLOOR_MS, safeIntervalMs);
     return Math.max(baseIntervalMs * 12, 60 * 60 * 1000);
 }
 function keepAboveMedian(entries) {
@@ -6158,8 +4784,8 @@ const POOL = {
     RECENCY_HALF_LIFE_DAYS: 14,
     MIN_SEND_INTERVAL_FLOOR_MS: 300000,
     BENCH_PERCENTILE: 0.10,
-    /** Storage bound for distinct candidates retained per channel. */
-    MAX_ENTRIES_PER_CHANNEL: 12,
+    /** Storage bound for distinct survivors retained per channel. */
+    MAX_ENTRIES_PER_CHANNEL: 3,
 };
 /**
  * Safe, dynamic message-selection thresholds. All message-branch decisions read these — no inline
@@ -6192,7 +4818,7 @@ const MESSAGE_SAFETY = {
      * still bounded so a dead template set doesn't loop forever. AI (Gemini) is the most expensive, so it
      * gets the tightest leash. A source that burns its cap without contributing survivors is exhausted;
      * when every fresh-freeform source is exhausted and the pool is still short, drop to legacy/fallback
-     * and let the hostile stage remove the channel if it keeps deleting.
+     * and let channel safety block it if it keeps deleting.
      */
     SEED_CAP_LEGACY: null,
     SEED_CAP_CUSTOM: 6,
@@ -6407,15 +5033,18 @@ function comparePoolEntries(left, right) {
         || left.key.localeCompare(right.key);
 }
 function poolTier(entry) {
-    if (nonNegative(entry.survived) > 0 && entry.state === 'active')
+    if (hasNetSurvival(entry) && entry.state === 'active')
         return 4;
-    if (nonNegative(entry.survived) > 0)
+    if (hasNetSurvival(entry))
         return 3;
     if (nonNegative(entry.attempted) === 0)
         return 2;
     if (entry.state === 'active' && nonNegative(entry.deleted) === 0 && nonNegative(entry.channelSideFailed) === 0)
         return 1;
     return 0;
+}
+function hasNetSurvival(entry) {
+    return nonNegative(entry.survived) > nonNegative(entry.deleted);
 }
 function poolNetQuality(entry) {
     return nonNegative(entry.survived)
@@ -6736,8 +5365,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var ___WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-
 
 
 
@@ -7647,15 +6274,6 @@ class BasePromotionEngine {
         catch {
             return null;
         }
-    }
-    async conversionPriorForRunner() {
-        const engine = this.percentileEngineOrNull();
-        if (!engine)
-            return null;
-        const percentiles = await engine.getPercentiles();
-        return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_11__.hasMeaningfulConversionPrior)(percentiles.conversionPrior)
-            ? percentiles.conversionPrior
-            : null;
     }
 }
 function normalizePoolMessageText(value) {
@@ -9007,18 +7625,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createPromotionRuntime: () => (/* binding */ createPromotionRuntime)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-service */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-service.ts");
-/* harmony import */ var _channel_intelligence_conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channel-intelligence/conversion-prior-store */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/conversion-prior-store.ts");
-/* harmony import */ var _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channel-intelligence/percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
-/* harmony import */ var _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../attribution/conversion-attribution */ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts");
-/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
-/* harmony import */ var _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../redis/redis-account-health-store */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-health-store.ts");
-/* harmony import */ var _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../redis/redis-account-send-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-send-cap.ts");
-/* harmony import */ var _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../redis/redis-account-channel-block */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-channel-block.ts");
-/* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-
-
+/* harmony import */ var _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channel-intelligence/percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
+/* harmony import */ var _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../attribution/conversion-attribution */ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts");
+/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
+/* harmony import */ var _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../redis/redis-account-health-store */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-health-store.ts");
+/* harmony import */ var _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../redis/redis-account-send-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-send-cap.ts");
+/* harmony import */ var _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../redis/redis-account-channel-block */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-channel-block.ts");
+/* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
 
 
@@ -9038,7 +7652,7 @@ class PromotionAccountContext {
         return this.runtime.intelligence;
     }
     async recordSend(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (this.runtime.tracker && safeChannelId) {
             await this.runtime.tracker.recordSend(safeChannelId, this.mobile, this.clientId);
         }
@@ -9062,7 +7676,7 @@ class PromotionAccountContext {
         return this.runtime.channelBlock.filterBlocked(this.mobile, channelIds);
     }
     async recordSuccess(channelId, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
@@ -9071,7 +7685,7 @@ class PromotionAccountContext {
         }
     }
     async recordDeletion(channelId, survivalMs, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordDeletion(safeChannelId, survivalMs, isFollowup);
@@ -9080,11 +7694,11 @@ class PromotionAccountContext {
         }
     }
     async recordFailure(channelId, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordFailure(safeChannelId, errorType);
-        if (this.runtime.accountHealth && (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_4__.classifyPoolError)(errorType) === 'account') {
+        if (this.runtime.accountHealth && (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(errorType) === 'account') {
             // Health + send-cap are keyed PER-MOBILE, not per-clientId: each mobile is a separate Telegram
             // account with its own spam limits, so mobiles under one clientId must not share/contaminate
             // each other's health or send budget.
@@ -9092,32 +7706,53 @@ class PromotionAccountContext {
         }
     }
     async recordSurvival(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
-        if (!safeChannelId || !this.runtime.accountHealth)
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
+        if (!safeChannelId)
             return;
-        await this.runtime.accountHealth.recordSurvived(this.mobile);
+        let failure;
+        try {
+            await this.runtime.intelligence.recordSurvival(safeChannelId);
+        }
+        catch (error) {
+            failure = error;
+        }
+        try {
+            if (this.runtime.accountHealth)
+                await this.runtime.accountHealth.recordSurvived(this.mobile);
+        }
+        catch (error) {
+            failure ?? (failure = error);
+        }
+        if (failure)
+            throw failure;
     }
     async ensurePoolEntry(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.ensureDoc(safeChannelId);
         await this.runtime.intelligence.insertPoolEntryIfAbsent(safeChannelId, entry);
     }
     async recordPoolEntrySent(channelId, entryKey, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
         return this.runtime.intelligence.recordPoolEntrySent(safeChannelId, entryKey, nowMs, legacyKeys);
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordPoolEntryOutcome(safeChannelId, entryKey, outcome, nowMs, legacyKeys);
     }
+    async recordSurvivingPoolEntry(channelId, entry, nowMs) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
+        if (!safeChannelId)
+            return false;
+        return this.runtime.intelligence.recordSurvivingPoolEntry(safeChannelId, entry, nowMs);
+    }
     async recordExploreOutcome(channelId, outcome) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordExploreOutcome(safeChannelId, outcome);
@@ -9184,41 +7819,32 @@ class PromotionRuntime {
         if (safeOptions['enableAttribution'] === true && !useAttribution) {
             throw new Error('PromotionRuntime conversion attribution requires a Redis client with get/set/lrange/pipeline');
         }
-        // Percentile scoring is mandatory when requested (no circuit breaker): fail hard if
-        // its dependencies (Redis + active-channel collection) are missing, rather than
-        // silently falling back to a non-scored engine.
+        // Pool percentile evaluation is mandatory when requested: fail hard if its dependencies
+        // are missing rather than silently skipping bounded-pool benching.
         if (safeOptions['enablePercentiles'] === true && !usePercentiles) {
-            throw new Error('PromotionRuntime channel scoring requires a Redis client with sorted-set support and an active-channel collection');
+            throw new Error('PromotionRuntime pool percentile evaluation requires a Redis client and an active-channel collection');
         }
         const percentiles = usePercentiles && activeChannelCollection
-            ? _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.init(activeChannelCollection, percentileRedis, channelIntelligenceCollection, { replace })
-            : (_channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.reset(), null);
+            ? _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.init(activeChannelCollection, percentileRedis, channelIntelligenceCollection, { replace })
+            : (_channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.reset(), null);
         const accountHealth = accountCapRedis
-            ? _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_5__.RedisAccountHealthStore.init(accountCapRedis, { replace })
-            : (_redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_5__.RedisAccountHealthStore.reset(), null);
+            ? _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__.RedisAccountHealthStore.init(accountCapRedis, { replace })
+            : (_redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__.RedisAccountHealthStore.reset(), null);
         const accountCap = accountCapRedis
-            ? _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_6__.RedisAccountSendCap.init(accountCapRedis, { replace })
-            : (_redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_6__.RedisAccountSendCap.reset(), null);
+            ? _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__.RedisAccountSendCap.init(accountCapRedis, { replace })
+            : (_redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__.RedisAccountSendCap.reset(), null);
         // Per-mobile channel block store shares the lock Redis; available whenever locks are enabled.
         const channelBlock = useLocks && lockRedis
-            ? _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_7__.RedisAccountChannelBlock.init(lockRedis, { replace })
-            : (_redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_7__.RedisAccountChannelBlock.reset(), null);
+            ? _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.init(lockRedis, { replace })
+            : (_redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.reset(), null);
         const tracker = useAttribution
-            ? _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.init(trackerRedis, { replace })
-            : (_redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.reset(), null);
+            ? _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.init(trackerRedis, { replace })
+            : (_redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.reset(), null);
         const attribution = tracker
-            ? _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_3__.ConversionAttributionService.init(intelligence, tracker, { replace })
-            : (_attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_3__.ConversionAttributionService.reset(), null);
+            ? _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.init(intelligence, tracker, { replace })
+            : (_attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.reset(), null);
         if (percentiles && safeOptions['warmPercentiles'] !== false) {
             await percentiles.getPercentiles();
-        }
-        if (safeOptions['runStartupConversionBackfill'] === true) {
-            const startupPrior = percentiles?.getCachedPercentiles()?.conversionPrior
-                ?? await (0,_channel_intelligence_conversion_prior_store__WEBPACK_IMPORTED_MODULE_1__.readPersistedConversionPrior)(percentileRedis);
-            if (!(0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_9__.hasMeaningfulConversionPrior)(startupPrior)) {
-                throw new Error('PromotionRuntime startup conversion backfill requires a persisted conversion prior');
-            }
-            await intelligence.backfillConversionScoringFields({ prior: startupPrior });
         }
         const runtime = new PromotionRuntime({
             intelligence,
@@ -9241,12 +7867,12 @@ class PromotionRuntime {
     static reset() {
         PromotionRuntime.instance = null;
         _channel_intelligence_channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService.reset();
-        _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_2__.PercentileEngine.reset();
-        _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_5__.RedisAccountHealthStore.reset();
-        _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_6__.RedisAccountSendCap.reset();
-        _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_7__.RedisAccountChannelBlock.reset();
-        _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.reset();
-        _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_3__.ConversionAttributionService.reset();
+        _channel_intelligence_percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.reset();
+        _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__.RedisAccountHealthStore.reset();
+        _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__.RedisAccountSendCap.reset();
+        _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.reset();
+        _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.reset();
+        _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.reset();
     }
     createAccountContext(options) {
         const safeOptions = asRecord(options);
@@ -9333,489 +7959,6 @@ function isRecord(value) {
 
 /***/ },
 
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts"
-/*!*************************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts ***!
-  \*************************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* binding */ CONVERSION_FRESHNESS_HALF_LIFE_MS),
-/* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* binding */ CONVERSION_PRIOR_ALPHA),
-/* harmony export */   CONVERSION_PRIOR_BETA: () => (/* binding */ CONVERSION_PRIOR_BETA),
-/* harmony export */   UNKNOWN_CONVERSION_FRESHNESS: () => (/* binding */ UNKNOWN_CONVERSION_FRESHNESS),
-/* harmony export */   computeConversionEfficiency: () => (/* binding */ computeConversionEfficiency),
-/* harmony export */   computeConversionFreshness: () => (/* binding */ computeConversionFreshness),
-/* harmony export */   computeConversionRateShrunk: () => (/* binding */ computeConversionRateShrunk),
-/* harmony export */   computeSmoothedConversionRate: () => (/* binding */ computeSmoothedConversionRate),
-/* harmony export */   countPoolAttempts: () => (/* binding */ countPoolAttempts),
-/* harmony export */   countSurvivedSends: () => (/* binding */ countSurvivedSends),
-/* harmony export */   fitGammaPriorFromRates: () => (/* binding */ fitGammaPriorFromRates),
-/* harmony export */   hasMeaningfulConversionPrior: () => (/* binding */ hasMeaningfulConversionPrior),
-/* harmony export */   hasRecordedConversions: () => (/* binding */ hasRecordedConversions),
-/* harmony export */   normalizeConversionPrior: () => (/* binding */ normalizeConversionPrior),
-/* harmony export */   resolveConversionExposure: () => (/* binding */ resolveConversionExposure),
-/* harmony export */   sampleGammaPosteriorRate: () => (/* binding */ sampleGammaPosteriorRate)
-/* harmony export */ });
-const CONVERSION_PRIOR_ALPHA = 1;
-const CONVERSION_PRIOR_BETA = 1;
-const CONVERSION_FRESHNESS_HALF_LIFE_MS = 14 * 24 * 60 * 60 * 1000;
-const UNKNOWN_CONVERSION_FRESHNESS = 0.5;
-const DEFAULT_CONVERSION_PRIOR = {
-    shape: 0.001,
-    rate: 1,
-    fittedAt: 0,
-    channelCount: 0,
-};
-function hasRecordedConversions(value) {
-    return safeNonNegative(value) > 0;
-}
-function countPoolAttempts(messagePool) {
-    if (!Array.isArray(messagePool))
-        return 0;
-    return messagePool.reduce((sum, entry) => {
-        if (!isRecord(entry))
-            return sum;
-        return sum + safeNonNegative(entry['attempted']);
-    }, 0);
-}
-function countSurvivedSends(messagePool) {
-    if (!Array.isArray(messagePool))
-        return 0;
-    return messagePool.reduce((sum, entry) => {
-        if (!isRecord(entry))
-            return sum;
-        return sum + safeNonNegative(entry['survived']);
-    }, 0);
-}
-/**
- * Exposure denominator for the conversion rate = the total number of times we've posted
- * to the channel (the DM-per-send denominator).
- *
- * `survivedSends` (per-message pool survival) and `totalSendsToChannel` measure OVERLAPPING
- * populations: survivedSends ⊆ totalSendsToChannel. Pool-survival counters only accumulate
- * under the new pool system, so a channel can have thousands of legacy `totalSendsToChannel`
- * but only a handful of `survivedSends`. Using survivedSends alone as the denominator there
- * collapses it to a tiny number → conversions/1 explodes (e.g. crs=8.57, an impossible rate)
- * and ranks that channel above genuine converters.
- *
- * So exposure = max(survivedSends, totalSendsToChannel): total-send history always FLOORS the
- * denominator (honest exposure), and survived-sends can only RAISE it, never collapse it. As
- * pool data accrues, survivedSends approaches totalSendsToChannel and the delete-safety intent
- * (deleted messages reduce survived, hence the rate) is preserved without the inflation.
- */
-function resolveConversionExposure(doc) {
-    const record = isRecord(doc) ? doc : {};
-    const survivedSends = countSurvivedSends(record['messagePool']);
-    const totalSends = safeNonNegative(record['totalSendsToChannel']);
-    return Math.max(survivedSends, totalSends);
-}
-function computeSmoothedConversionRate(conversions, messagePool) {
-    const attempts = countPoolAttempts(messagePool);
-    if (attempts <= 0)
-        return null;
-    const safeConversions = safeNonNegative(conversions);
-    return (safeConversions + CONVERSION_PRIOR_ALPHA)
-        / (attempts + CONVERSION_PRIOR_ALPHA + CONVERSION_PRIOR_BETA);
-}
-function normalizeConversionPrior(value) {
-    if (!isRecord(value))
-        return { ...DEFAULT_CONVERSION_PRIOR };
-    const shape = safePositive(value['shape']);
-    const rate = safePositive(value['rate']);
-    if (shape === null || rate === null)
-        return { ...DEFAULT_CONVERSION_PRIOR };
-    return {
-        shape,
-        rate,
-        fittedAt: safeTimestamp(value['fittedAt']),
-        channelCount: Math.floor(safeNonNegative(value['channelCount'])),
-    };
-}
-function hasMeaningfulConversionPrior(value) {
-    const prior = normalizeConversionPrior(value);
-    return prior.fittedAt > 0 && prior.channelCount > 0;
-}
-/**
- * Fit the Gamma-Poisson prior from the fleet's per-channel conversion rates via
- * moment-matching (mean + variance). The Gamma `rate` parameter is the prior's
- * PSEUDO-EXPOSURE — the number of "prior sends" the prior counts for, i.e. how much
- * real exposure a channel needs before its own data outweighs the prior.
- *
- * On a high-variance fleet, moment-matching alone yields a very weak `rate` (e.g. 0.7),
- * so a channel with 1 real send but 9 attributed DMs gets crs=(shape+9)/(rate+1)≈5 — an
- * impossible rate that tops the ranking on almost no evidence. To fix this we FLOOR the
- * pseudo-exposure at a fleet-derived minimum: `exposures` (per-channel total exposure) are
- * passed in, and the prior must be worth at least a low-percentile channel's exposure. This
- * is fully data-derived (no hardcoded sample count) — a 1-send channel is dominated by the
- * prior until it accumulates a fleet-typical amount of exposure.
- */
-function fitGammaPriorFromRates(rates, exposures) {
-    if (!Array.isArray(rates))
-        return { ...DEFAULT_CONVERSION_PRIOR };
-    const samples = rates.filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0);
-    if (samples.length === 0)
-        return { ...DEFAULT_CONVERSION_PRIOR };
-    // Fleet-derived pseudo-exposure floor: the ~25th percentile of real per-channel exposure,
-    // so the prior counts for at least a low-but-typical channel's worth of sends. Data-driven.
-    const pseudoExposureFloor = exposureFloorFromSamples(exposures);
-    const applyFloor = (rate) => Math.max(rate, pseudoExposureFloor);
-    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
-    if (!(mean > 0)) {
-        return {
-            ...DEFAULT_CONVERSION_PRIOR,
-            channelCount: samples.length,
-        };
-    }
-    if (samples.length < 2) {
-        const rate = applyFloor(1);
-        return {
-            shape: clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape),
-            rate,
-            fittedAt: Date.now(),
-            channelCount: samples.length,
-        };
-    }
-    const variance = computeSampleVariance(samples, mean);
-    if (!(variance > 0)) {
-        const rate = applyFloor(1000);
-        return {
-            shape: clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape),
-            rate,
-            fittedAt: Date.now(),
-            channelCount: samples.length,
-        };
-    }
-    const unclampedRate = mean / variance;
-    const rate = applyFloor(clamp(unclampedRate, 0.001, 10000, 1));
-    // shape = mean * rate keeps the prior mean at `mean` (Gamma mean = shape/rate).
-    const shape = clampPositive(mean * rate, DEFAULT_CONVERSION_PRIOR.shape);
-    return {
-        shape,
-        rate,
-        fittedAt: Date.now(),
-        channelCount: samples.length,
-    };
-}
-/**
- * Fleet-derived pseudo-exposure floor for the prior = the MEAN per-channel exposure.
- *
- * The mean (not a low percentile) is deliberate: the channelIntelligence fleet is dominated
- * by thousands of near-zero-send channels, so p25/median exposure is tiny (~3-17 sends) —
- * far too weak a floor to shrink a 1-send/9-DM outlier below genuine high-exposure converters.
- * The mean (~400 on the real fleet, right-skewed so it sits well above the median) is the
- * "typical exposure a promoted channel accumulates", and empirically it's the point where a
- * tiny-sample outlier is shrunk BELOW a real strong converter (verified against live data).
- * Fully data-derived — no authored percentile or sample count. Returns 0 when no exposures
- * are supplied so callers that omit them keep the pre-floor behaviour (back-compatible).
- */
-function exposureFloorFromSamples(exposures) {
-    if (!Array.isArray(exposures))
-        return 0;
-    const values = exposures.filter((value) => typeof value === 'number' && Number.isFinite(value) && value > 0);
-    if (values.length === 0)
-        return 0;
-    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
-    return Math.max(1, mean);
-}
-function computeConversionRateShrunk(conversions, survivedSends, prior) {
-    const safeConversions = safeNonNegative(conversions);
-    const safeSurvivedSends = safeNonNegative(survivedSends);
-    if (safeConversions <= 0 && safeSurvivedSends <= 0)
-        return 0;
-    const safePrior = normalizeConversionPrior(prior);
-    return (safePrior.shape + safeConversions) / (safePrior.rate + safeSurvivedSends);
-}
-function computeConversionFreshness(conversionUpdatedAt, now = Date.now(), halfLifeMs = CONVERSION_FRESHNESS_HALF_LIFE_MS) {
-    const safeNow = safeTimestamp(now) || Date.now();
-    const updatedAt = safeTimestamp(conversionUpdatedAt);
-    const safeHalfLifeMs = safePositive(halfLifeMs) ?? CONVERSION_FRESHNESS_HALF_LIFE_MS;
-    if (updatedAt <= 0)
-        return UNKNOWN_CONVERSION_FRESHNESS;
-    if (updatedAt >= safeNow)
-        return 1;
-    const ageMs = safeNow - updatedAt;
-    return Math.pow(0.5, ageMs / safeHalfLifeMs);
-}
-function computeConversionEfficiency(conversionRateShrunk, conversionUpdatedAt, now = Date.now()) {
-    return safeNonNegative(conversionRateShrunk) * computeConversionFreshness(conversionUpdatedAt, now);
-}
-function sampleGammaPosteriorRate(conversions, survivedSends, prior, random = Math.random) {
-    const safePrior = normalizeConversionPrior(prior);
-    const shape = safePrior.shape + safeNonNegative(conversions);
-    const rate = safePrior.rate + safeNonNegative(survivedSends);
-    if (!(shape > 0) || !(rate > 0))
-        return 0;
-    const sample = gammaSample(shape, random) / rate;
-    return Number.isFinite(sample) && sample >= 0 ? sample : 0;
-}
-function safeNonNegative(value) {
-    const numeric = coerceFiniteNumber(value);
-    return Number.isFinite(numeric) && numeric > 0
-        ? numeric
-        : 0;
-}
-function safePositive(value) {
-    const numeric = coerceFiniteNumber(value);
-    return Number.isFinite(numeric) && numeric > 0
-        ? numeric
-        : null;
-}
-function safeTimestamp(value) {
-    const numeric = coerceFiniteNumber(value);
-    return Number.isFinite(numeric) && numeric > 0
-        ? numeric
-        : 0;
-}
-function coerceFiniteNumber(value) {
-    if (typeof value === 'number')
-        return Number.isFinite(value) ? value : Number.NaN;
-    if (typeof value === 'bigint')
-        return Number(value);
-    if (value && typeof value === 'object') {
-        try {
-            const viaValueOf = value.valueOf?.();
-            if (typeof viaValueOf === 'number')
-                return Number.isFinite(viaValueOf) ? viaValueOf : Number.NaN;
-            if (typeof viaValueOf === 'bigint')
-                return Number(viaValueOf);
-            if (viaValueOf !== undefined && viaValueOf !== value) {
-                const coerced = Number(viaValueOf);
-                if (Number.isFinite(coerced))
-                    return coerced;
-            }
-        }
-        catch {
-            // Ignore exotic coercion failures and fall through to Number().
-        }
-    }
-    const coerced = Number(value);
-    return Number.isFinite(coerced) ? coerced : Number.NaN;
-}
-function computeSampleVariance(values, mean) {
-    if (values.length < 2)
-        return 0;
-    const squared = values.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0);
-    return squared / (values.length - 1);
-}
-function clamp(value, min, max, fallback) {
-    if (!Number.isFinite(value))
-        return fallback;
-    return Math.max(min, Math.min(max, value));
-}
-function clampPositive(value, fallback) {
-    return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-function safeUnitRandom(random) {
-    try {
-        const value = random();
-        if (!Number.isFinite(value))
-            return 0.5;
-        return Math.max(1e-10, Math.min(0.999999999, value));
-    }
-    catch {
-        return 0.5;
-    }
-}
-function standardNormal(random) {
-    const u1 = safeUnitRandom(random);
-    const u2 = safeUnitRandom(random);
-    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-}
-function gammaSample(shape, random) {
-    if (!Number.isFinite(shape) || shape <= 0)
-        return 0;
-    if (shape < 1) {
-        const sample = gammaSample(shape + 1, random);
-        return sample * Math.pow(safeUnitRandom(random), 1 / shape);
-    }
-    const d = shape - 1 / 3;
-    const c = 1 / Math.sqrt(9 * d);
-    for (let iteration = 0; iteration < 1000; iteration += 1) {
-        let x = 0;
-        let v = 0;
-        do {
-            x = standardNormal(random);
-            v = Math.pow(1 + c * x, 3);
-        } while (v <= 0);
-        if (Math.log(safeUnitRandom(random)) < 0.5 * x * x + d - d * v + d * Math.log(v)) {
-            return d * v;
-        }
-    }
-    return shape;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts"
-/*!************************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts ***!
-  \************************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   computeExpectedValue: () => (/* binding */ computeExpectedValue)
-/* harmony export */ });
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _conversion_rate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/**
- * Standalone expected value scoring function.
- *
- * Can be used for batch computation in CommonTgService analytics
- * without needing the full ChannelIntelligenceService.
- */
-
-
-function safeNonNegative(value, fallback = 0) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-function safeRate(value, fallback) {
-    if (typeof value !== 'number' || !Number.isFinite(value))
-        return fallback;
-    return Math.max(0, Math.min(1, value));
-}
-function safeTimestamp(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
-}
-/**
- * Compute expected value for a channel intelligence document.
- * Same formula as ChannelIntelligenceService.recomputeExpectedValue().
- *
- * @param doc - The channel intelligence document
- * @param percentiles - Optional percentile data for conversion/saturation modifiers
- * @param getPercentileRank - Optional function to compute percentile rank
- */
-function computeExpectedValue(doc, percentiles, getPercentileRank) {
-    const safeDoc = asRecord(doc);
-    const now = Date.now();
-    // Pool outcomes are the only message-quality evidence used by the planner. Aggregate every
-    // persisted entry so the channel score cannot be skewed by a stale per-strategy sidecar.
-    const poolEV = poolExpectedValue(safeDoc['messagePool']);
-    // Followup modifier
-    const followupTotal = safeNonNegative(safeDoc['followupTotal']);
-    const followupSuccessRate = safeRate(safeDoc['followupSuccessRate'], 0.5);
-    const fuBonus = followupTotal < 5 ? 0 : (followupSuccessRate - 0.5) * 0.2;
-    // Automod penalty
-    const deletionTiming = asRecord(safeDoc['deletionTiming']);
-    const automodDeletions = safeNonNegative(deletionTiming['automod']);
-    const totalDel = automodDeletions + safeNonNegative(deletionTiming['bot'])
-        + safeNonNegative(deletionTiming['human']) + safeNonNegative(deletionTiming['late']);
-    const automodPenalty = totalDel === 0 ? 0 : (automodDeletions / totalDel) * 0.3;
-    // Online bonus
-    const onlineTrend = asRecord(safeDoc['onlineTrend']);
-    const onlineAge = safeAgeMs(onlineTrend['lastSampled'], now);
-    const onlineEwma = safeNonNegative(onlineTrend['ewma']);
-    const onlineBonus = (onlineAge < 30 * 60000 && onlineEwma > 50)
-        ? Math.min(0.1, onlineEwma / 1000) : 0;
-    // View engagement bonus
-    const viewEngagement = asRecord(safeDoc['viewEngagement']);
-    const viewAge = safeAgeMs(viewEngagement['lastChecked'], now);
-    const viewBonus = (viewAge < 60 * 60000 && safeNonNegative(viewEngagement['checksCount']) >= 3)
-        ? Math.max(0, Math.min(0.1, (safeRate(viewEngagement['ewmaRatio'], 0) - 0.3) * 0.15)) : 0;
-    // Error penalty
-    const errors = asRecord(safeDoc['errors']);
-    const errorPenalty = Math.min(0.4, safeNonNegative(errors['consecutiveErrors']) * 0.08);
-    // Percentile-based modifiers
-    let conversionBonus = 0;
-    let saturationPenalty = 0;
-    if (percentiles && getPercentileRank) {
-        const conversionRate = (0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeSmoothedConversionRate)(safeDoc['dmConversions'], safeDoc['messagePool']);
-        if ((0,_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasRecordedConversions)(safeDoc['dmConversions']) && conversionRate !== null) {
-            const conversionRank = safeRank(getPercentileRank, conversionRate, 'conversionRate');
-            conversionBonus = conversionRank >= 0.75 ? 0.15 : conversionRank >= 0.50 ? 0.08 : 0;
-        }
-        const saturationRank = safeRank(getPercentileRank, safeNonNegative(safeDoc['saturationRate']), 'saturationRate');
-        saturationPenalty = saturationRank >= 0.90 ? 0.25
-            : saturationRank >= 0.75 ? 0.12
-                : 0;
-    }
-    // Channel category fitness
-    const channelCategory = typeof safeDoc['channelCategory'] === 'string' ? safeDoc['channelCategory'] : 'unclassified';
-    const categoryBonus = channelCategory === 'high_intent' ? 0.10
-        : channelCategory === 'social_chat' ? 0.03
-            : channelCategory === 'off_topic' ? -0.15
-                : 0;
-    return Math.max(0.01, Math.min(0.99, poolEV + fuBonus + onlineBonus + viewBonus + conversionBonus + categoryBonus
-        - automodPenalty - errorPenalty - saturationPenalty));
-}
-function safeRank(getPercentileRank, value, metric) {
-    try {
-        const rank = getPercentileRank(value, metric);
-        return Number.isFinite(rank) ? Math.max(0, Math.min(1, rank)) : 0;
-    }
-    catch {
-        return 0;
-    }
-}
-function safeAgeMs(value, now) {
-    const timestamp = safeTimestamp(value);
-    if (timestamp <= 0 || timestamp > now)
-        return Number.POSITIVE_INFINITY;
-    return now - timestamp;
-}
-function asRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
-}
-function poolExpectedValue(value) {
-    if (!Array.isArray(value))
-        return 0.5;
-    const counters = value.reduce((total, entry) => {
-        const record = asRecord(entry);
-        total.attempted += safeNonNegative(record['attempted']);
-        total.survived += safeNonNegative(record['survived']);
-        total.deleted += safeNonNegative(record['deleted']);
-        total.channelSideFailed += safeNonNegative(record['channelSideFailed']);
-        return total;
-    }, { attempted: 0, survived: 0, deleted: 0, channelSideFailed: 0 });
-    return counters.attempted > 0 ? (0,_pool__WEBPACK_IMPORTED_MODULE_0__.survivalRate)(counters) : 0.5;
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/index.ts"
-/*!***************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/scoring/index.ts ***!
-  \***************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.CONVERSION_FRESHNESS_HALF_LIFE_MS),
-/* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.CONVERSION_PRIOR_ALPHA),
-/* harmony export */   CONVERSION_PRIOR_BETA: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.CONVERSION_PRIOR_BETA),
-/* harmony export */   UNKNOWN_CONVERSION_FRESHNESS: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.UNKNOWN_CONVERSION_FRESHNESS),
-/* harmony export */   computeConversionEfficiency: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeConversionEfficiency),
-/* harmony export */   computeConversionFreshness: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeConversionFreshness),
-/* harmony export */   computeConversionRateShrunk: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeConversionRateShrunk),
-/* harmony export */   computeExpectedValue: () => (/* reexport safe */ _expected_value__WEBPACK_IMPORTED_MODULE_0__.computeExpectedValue),
-/* harmony export */   computeSmoothedConversionRate: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeSmoothedConversionRate),
-/* harmony export */   countPoolAttempts: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.countPoolAttempts),
-/* harmony export */   countSurvivedSends: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.countSurvivedSends),
-/* harmony export */   fitGammaPriorFromRates: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.fitGammaPriorFromRates),
-/* harmony export */   hasMeaningfulConversionPrior: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasMeaningfulConversionPrior),
-/* harmony export */   hasRecordedConversions: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.hasRecordedConversions),
-/* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.normalizeConversionPrior),
-/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.resolveConversionExposure),
-/* harmony export */   sampleGammaPosteriorRate: () => (/* reexport safe */ _conversion_rate__WEBPACK_IMPORTED_MODULE_1__.sampleGammaPosteriorRate)
-/* harmony export */ });
-/* harmony import */ var _expected_value__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./expected-value */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/expected-value.ts");
-/* harmony import */ var _conversion_rate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-
-
-
-
-/***/ },
-
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/selection/channel-selection.ts"
 /*!*****************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/selection/channel-selection.ts ***!
@@ -9828,12 +7971,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   selectPromotionChannels: () => (/* binding */ selectPromotionChannels)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/index.ts");
-/* harmony import */ var _scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../scoring/conversion-rate */ "../../packages/tg-channel-state/src/channel-message-promotions/scoring/conversion-rate.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
 
-
-const DEFAULT_STALE_AFTER_MS = 7 * 86400000;
 function shuffle(items, random) {
     for (let i = items.length - 1; i > 0; i--) {
         const j = Math.floor(safeUnitRandom(random) * (i + 1));
@@ -9847,7 +7987,7 @@ function shuffle(items, random) {
 }
 function selectPromotionChannels(options) {
     const safeOptions = isRecord(options) ? options : {};
-    const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, now: inputNow = Date.now(), staleAfterMs: inputStaleAfterMs = DEFAULT_STALE_AFTER_MS, conversionPrior: inputConversionPrior = null, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, } = safeOptions;
+    const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, } = safeOptions;
     // Channels this mobile cannot post in (per-mobile: USER_BANNED 3h / forbidden permanent). Filtered
     // out entirely in pre-flight so we never select an unsendable channel for this account.
     const blockedChannelIds = inputBlockedChannelIds instanceof Set
@@ -9855,16 +7995,12 @@ function selectPromotionChannels(options) {
         : new Set(Array.isArray(inputBlockedChannelIds) ? inputBlockedChannelIds : []);
     const channels = Array.isArray(inputChannels) ? inputChannels : [];
     const intelligenceDocs = Array.isArray(inputIntelligenceDocs) ? inputIntelligenceDocs : [];
-    const now = safeTimestamp(inputNow, Date.now());
-    const staleAfterMs = safePositive(inputStaleAfterMs, DEFAULT_STALE_AFTER_MS);
-    const reEvalPercent = 0;
-    const conversionPrior = resolveConversionPrior(inputConversionPrior);
     const intelligenceByChannel = new Map();
     for (const rawDoc of intelligenceDocs) {
         const doc = normalizeSelectionIntelligence(rawDoc);
         if (!doc)
             continue;
-        const normalizedDocId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(doc.channelId);
+        const normalizedDocId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(doc.channelId);
         if (normalizedDocId && !intelligenceByChannel.has(normalizedDocId)) {
             intelligenceByChannel.set(normalizedDocId, doc);
         }
@@ -9873,7 +8009,6 @@ function selectPromotionChannels(options) {
     const tieBreakScores = new Map();
     const proven = [];
     const untested = [];
-    const stale = [];
     const skipped = [];
     const seenChannelIds = new Set();
     const validChannels = [];
@@ -9884,7 +8019,7 @@ function selectPromotionChannels(options) {
                 skipped.push(rawChannel);
             continue;
         }
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId || seenChannelIds.has(channelId)) {
             skipped.push(channel);
             continue;
@@ -9892,12 +8027,11 @@ function selectPromotionChannels(options) {
         seenChannelIds.add(channelId);
         validChannels.push(channel);
     }
-    // Requested batch size. The cap is applied LAST (after the blocked/hostile filter below) against
-    // the count of SENDABLE channels — never against the raw pre-filter count — so a mobile with many
-    // blocked/hostile channels still gets a full batch of channels it can actually post in.
+    // The cap is applied last against sendable channels, never the raw pre-filter count, so a mobile
+    // with many blocked channels still gets a full batch of channels it can actually post in.
     const safeBatchTarget = Math.max(0, Number.isFinite(inputBatchTarget) ? Math.floor(inputBatchTarget) : 0);
     for (const channel of validChannels) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId) {
             skipped.push(channel);
             continue;
@@ -9908,27 +8042,26 @@ function selectPromotionChannels(options) {
             continue;
         }
         const doc = intelligenceByChannel.get(channelId);
-        if (!doc || doc.lifecycle.state === 'new' || isExploreCandidate(doc)) {
+        if (!doc) {
             untested.push(channel);
         }
-        else if (doc.lifecycle.state === 'blocked') {
-            // Hostile = high message-deletion rate. Exclude (wasteful + spam-risk); recovers via stage flow.
+        else if (doc.safety.status === 'blocked') {
+            // Channel safety is the only channel-level exclusion in the simplified schema.
             skipped.push(channel);
         }
+        else if (isExploreCandidate(doc)) {
+            untested.push(channel);
+        }
         else {
-            const freshness = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.computeConversionFreshness)(doc.conversion.updatedAtMs, now);
-            const explorationSample = (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.sampleGammaPosteriorRate)(doc.conversion.dmOpenCredits, resolveV2ConversionExposure(doc), conversionPrior, random);
-            rankScores.set(channelId, explorationSample * freshness);
+            rankScores.set(channelId, poolEvidenceScore(doc));
             tieBreakScores.set(channelId, v2EvidenceScore(doc));
             proven.push(channel);
         }
     }
-    // Order proven channels by a fresh Thompson/Gamma sample of their DM conversion rate (× freshness)
-    // each cycle — this is deliberate exploration, so the top of the list legitimately varies cycle to
-    // cycle. The V2 evidence tie-break only decides the (rare) exact-sample-collision case.
+    // Order proven channels only by bounded-pool outcome evidence.
     proven.sort((a, b) => {
-        const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(a.channelId);
-        const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(b.channelId);
+        const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(a.channelId);
+        const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(b.channelId);
         const scoreDiff = (rankScores.get(bChannelId ?? '') || 0) - (rankScores.get(aChannelId ?? '') || 0);
         if (scoreDiff !== 0)
             return scoreDiff;
@@ -9937,12 +8070,11 @@ function selectPromotionChannels(options) {
     // Shuffle unexplored so the backfill gives every new channel a fair chance over time, rather than
     // always filling slots with the same doc-order-first channels.
     shuffle(untested, random);
-    // Cap AGAINST SENDABLE channels (proven + untested = everything that survived the blocked/hostile
-    // filter), not the raw pre-filter count — so a mobile with many blocked channels still gets a full
-    // batch of postable ones.
+    // Cap against sendable channels (proven plus untested), not the raw pre-filter count, so a mobile
+    // with many blocked channels still gets a full batch of postable ones.
     const batchTarget = Math.min(safeBatchTarget, proven.length + untested.length);
-    // Assemble the batch DM-FIRST with adaptive backfill:
-    //   proven (highest DM first) take priority; unexplored fill whatever slots remain up to
+    // Assemble the batch from pool evidence, with untested channels filling unused capacity:
+    //   proven channels ranked by survival evidence take priority; unexplored fill unused capacity up to
     //   batchTarget. e.g. 60 proven -> 60 proven + 40 unexplored; 30 proven -> 30 + 70; 150 proven ->
     //   100 proven + 0 unexplored. The cap is applied LAST, on the already-filtered + ranked set.
     const selected = [];
@@ -9951,7 +8083,7 @@ function selectPromotionChannels(options) {
     const pushUnique = (channel, isProven) => {
         if (selected.length >= batchTarget)
             return;
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId || selectedIds.has(channelId))
             return; // de-dup within the batch
         selectedIds.add(channelId);
@@ -9970,22 +8102,14 @@ function selectPromotionChannels(options) {
         selected,
         proven,
         untested,
-        stale,
         skipped,
         explorePercent,
-        reEvalPercent,
     };
-}
-function safePositive(value, fallback) {
-    return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-function safeTimestamp(value, fallback) {
-    return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 function normalizeChannel(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value['channelId']);
     if (!channelId)
         return null;
     return {
@@ -9994,8 +8118,7 @@ function normalizeChannel(value) {
     };
 }
 function isExploreCandidate(doc) {
-    return safeNonNegative(doc.primary.resolved.survived) <= 0
-        && safeNonNegative(doc.conversion.dmOpenCredits) <= 0;
+    return safeNonNegative(doc.outcomes.survived) <= 0;
 }
 function normalizeSelectionIntelligence(value) {
     if (isChannelIntelligenceV2(value))
@@ -10008,20 +8131,23 @@ function isChannelIntelligenceV2(value) {
         && !Array.isArray(value)
         && value.schemaVersion === 2
         && Array.isArray(value.messagePool)
-        && isRecord(value.lifecycle)
-        && isRecord(value.primary)
-        && isRecord(value.conversion)
-        && isRecord(value.historical)
-        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(value.channelId) !== null;
+        && isRecord(value.timestamps)
+        && isRecord(value.outcomes)
+        && isRecord(value.exploration)
+        && isRecord(value.safety)
+        && isRecord(value.DMs)
+        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value.channelId) !== null;
 }
-function resolveV2ConversionExposure(doc) {
-    return Math.max(safeNonNegative(doc.primary.resolved.survived), safeNonNegative(doc.historical.totalSendsToChannel));
+function poolEvidenceScore(doc) {
+    const attempted = safeNonNegative(doc.outcomes.attempted);
+    const survived = safeNonNegative(doc.outcomes.survived);
+    const deleted = safeNonNegative(doc.outcomes.deleted);
+    const resolved = Math.min(attempted, survived + deleted);
+    return (survived + 1) / (resolved + 2);
 }
 function v2EvidenceScore(doc) {
-    const attempts = (0,_channel_intelligence__WEBPACK_IMPORTED_MODULE_0__.countResolvedPrimaryAttempts)(doc.primary.resolved);
-    if (attempts <= 0)
-        return 0.5;
-    return (safeNonNegative(doc.primary.resolved.survived) + 1) / (attempts + 2);
+    return safeNonNegative(doc.outcomes.survived) * 1000
+        - safeNonNegative(doc.outcomes.deleted);
 }
 function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -10036,9 +8162,6 @@ function safeUnitRandom(random) {
     catch {
         return 0.5;
     }
-}
-function resolveConversionPrior(value) {
-    return (0,_scoring_conversion_rate__WEBPACK_IMPORTED_MODULE_1__.normalizeConversionPrior)(value);
 }
 function safeNonNegative(value) {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
@@ -10704,13 +8827,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_SEND_KEY_TTL_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_KEY_TTL_MS),
 /* harmony export */   ACCOUNT_SEND_WINDOW_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_WINDOW_MS),
 /* harmony export */   BasePromotionEngine: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BasePromotionEngine),
+/* harmony export */   CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_FINAL_ROOT_FIELDS),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
+/* harmony export */   CHANNEL_INTELLIGENCE_LEGACY_FIELDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_LEGACY_FIELDS),
 /* harmony export */   CHANNEL_INTELLIGENCE_SCHEMA_VERSION: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_SCHEMA_VERSION),
-/* harmony export */   CONVERSION_FRESHNESS_HALF_LIFE_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_FRESHNESS_HALF_LIFE_MS),
-/* harmony export */   CONVERSION_PRIOR_ALPHA: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_PRIOR_ALPHA),
-/* harmony export */   CONVERSION_PRIOR_BETA: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_PRIOR_BETA),
-/* harmony export */   CONVERSION_PRIOR_REDIS_KEY: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CONVERSION_PRIOR_REDIS_KEY),
-/* harmony export */   ChannelClassifier: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ChannelClassifier),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
 /* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService),
 /* harmony export */   DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES),
@@ -10741,7 +8861,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountSendCap),
 /* harmony export */   RedisPromotionTracker: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisPromotionTracker),
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.TEMP_BLOCK_TTL_SECONDS),
-/* harmony export */   UNKNOWN_CONVERSION_FRESHNESS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.UNKNOWN_CONVERSION_FRESHNESS),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.addPoolOutcomeTotals),
 /* harmony export */   buildInsertIfAbsentUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildInsertIfAbsentUpdate),
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildOutcomeUpdate),
@@ -10757,18 +8876,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeAccountDeletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountDeletionRate),
 /* harmony export */   computeAccountFailureRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountFailureRate),
 /* harmony export */   computeAccountHealth: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountHealth),
-/* harmony export */   computeConversionEfficiency: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeConversionEfficiency),
-/* harmony export */   computeConversionFreshness: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeConversionFreshness),
-/* harmony export */   computeConversionRateShrunk: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeConversionRateShrunk),
-/* harmony export */   computeExpectedValue: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeExpectedValue),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.computeLiveCanSendMsgs),
 /* harmony export */   computePercentileRank: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computePercentileRank),
-/* harmony export */   computeSmoothedConversionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeSmoothedConversionRate),
-/* harmony export */   countPoolAttempts: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countPoolAttempts),
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countPoolSurvivors),
 /* harmony export */   countResolvedPrimaryAttempts: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countResolvedPrimaryAttempts),
-/* harmony export */   countSurvivedSends: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countSurvivedSends),
-/* harmony export */   createDefaultIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createDefaultIntelligence),
 /* harmony export */   createPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createPoolMessageIndex),
 /* harmony export */   createPromotionRuntime: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createPromotionRuntime),
 /* harmony export */   deletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deletionRate),
@@ -10780,7 +8891,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   evaluateFollowUpScheduling: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling),
 /* harmony export */   evaluatePromotionChannelEligibility: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.evaluatePromotionChannelEligibility),
 /* harmony export */   failureRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.failureRate),
-/* harmony export */   fitGammaPriorFromRates: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.fitGammaPriorFromRates),
 /* harmony export */   formatFields: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.formatFields),
 /* harmony export */   generateAIMsg: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.generateAIMsg),
 /* harmony export */   generateCustomMessage: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.generateCustomMessage),
@@ -10793,8 +8903,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getTelegramCommonChatIds: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getTelegramCommonChatIds),
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasFailureRateEvidence),
-/* harmony export */   hasMeaningfulConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasMeaningfulConversionPrior),
-/* harmony export */   hasRecordedConversions: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasRecordedConversions),
 /* harmony export */   hasV2SemanticParity: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasV2SemanticParity),
 /* harmony export */   isLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.isLimitReached),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageSource),
@@ -10805,7 +8913,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeHydratedChannelFacts),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy),
 /* harmony export */   migrateLegacyChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.migrateLegacyChannelIntelligence),
-/* harmony export */   normalizeConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizeConversionPrior),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
@@ -10813,22 +8920,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals),
 /* harmony export */   processChannelDialog: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.processChannelDialog),
 /* harmony export */   rawScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.rawScore),
-/* harmony export */   readPersistedConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPersistedConversionPrior),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
 /* harmony export */   reconcileChannelIntelligenceV2: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.reconcileChannelIntelligenceV2),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
-/* harmony export */   resolveConversion: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveConversion),
-/* harmony export */   resolveConversionExposure: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveConversionExposure),
+/* harmony export */   resolveDMCredits: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveDMCredits),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.resolvePromotionFailureAction),
-/* harmony export */   sampleGammaPosteriorRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.sampleGammaPosteriorRate),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionChannels),
 /* harmony export */   selectPromotionMessageCandidates: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionMessageCandidates),
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.shouldHydrateBeforeFinalReject),
 /* harmony export */   shouldMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.shouldMatch),
 /* harmony export */   shouldNotMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.shouldNotMatch),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.shouldRetainPoolCandidate),
-/* harmony export */   survivalRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.survivalRate),
-/* harmony export */   writePersistedConversionPrior: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.writePersistedConversionPrior)
+/* harmony export */   survivalRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.survivalRate)
 /* harmony export */ });
 /* harmony import */ var _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-message-promotions */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
 /* harmony import */ var _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-message-promotions/promotion-engine/BasePromotionEngine */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/BasePromotionEngine.ts");
@@ -30303,15 +28406,15 @@ class JobManager {
         if (!replierRecoveryHandled) {
             this.recoverReplierIfNeeded(recoveryPlan.actions.some((action) => action.component === 'telegram.replier'), replierHealth);
         }
-        // Recover hostile channels that have cooled down (3+ days, 0 consecutive errors)
+        // Recover channels whose safety block has cooled down (three days).
         try {
-            const recovered = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.ChannelIntelligenceService.getInstance().recoverStaleHostileChannels();
+            const recovered = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.ChannelIntelligenceService.getInstance().recoverStaleBlockedChannels();
             if (recovered > 0)
-                this.log('info', `♻️ Recovered ${recovered} stale hostile channels → learning`);
+                this.log('info', `Recovered ${recovered} stale blocked channels`);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'JobManager.recoverStaleHostileChannels', false);
-            this.log('warn', `Stale hostile-channel recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'JobManager.recoverStaleBlockedChannels', false);
+            this.log('warn', `Stale blocked-channel recovery failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         const reactionRecoveryRequested = recoveryPlan.actions.some((action) => action.component === 'reaction.service');
         if (!reactionRecoveryHandled) {
@@ -35123,7 +33226,7 @@ async function handleNewUserMessage(event, chatId, firstName) {
                     limit: 100,
                 });
                 logger.debug(`Attribution common chat lookup for ${chatId}: commonChats=${commonChatIds.length}`);
-                const attribution = await attributionService.attributeDmConversion(commonChatIds);
+                const attribution = await attributionService.attributeDMConversion(commonChatIds);
                 const attributedChannels = (Array.isArray(attribution.attributedChannels)
                     ? attribution.attributedChannels
                     : []).map((item) => ({
@@ -50633,7 +48736,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         return {
             adapter: {
                 getPercentiles: () => this.percentileEngineOrNull(),
-                getConversionPrior: () => this.conversionPriorForRunner(),
             },
             runnerOptions: { scoringEnabled: true },
         };
@@ -50730,7 +48832,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 this.parseLogNumber(fields.failStreak) > 0 ? `streak ${fields.failStreak}` : '',
                 this.parseLogNumber(fields.deletedCount) > 0 ? `del ${fields.deletedCount}` : '',
                 this.parseLogNumber(fields.freeformDeleted) > 0 ? `wordBlock ${fields.freeformDeleted}` : '',
-                this.parseLogNumber(fields.followUpDeleted) > 0 ? `dmBlock ${fields.followUpDeleted}` : '',
+                this.parseLogNumber(fields.followUpDeleted) > 0 ? `DMBlock ${fields.followUpDeleted}` : '',
             ].filter(Boolean);
             return [
                 '🧭 PROMO plan',
@@ -50875,7 +48977,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             selected: this.parseLogNumber(fields.selected),
             proven: this.parseLogNumber(fields.proven),
             untested: this.parseLogNumber(fields.untested),
-            stale: this.parseLogNumber(fields.stale),
             skipped: this.parseLogNumber(fields.skipped),
             skipBreakdown: this.parseCountRecord(fields.skipBreakdown),
             selectedSamples: [],
@@ -51611,7 +49712,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 logger.debug(`Channel ${channelId} exhausted default templates after deletion; keeping AI/custom/fallback eligible`);
                 return;
             }
-            if (deletionPolicy.actions.includes('increment_dm_restriction')) {
+            if (deletionPolicy.actions.includes('increment_DM_restriction')) {
                 try {
                     await db.updateActiveChannel({ channelId }, {
                         followUpDeletedCount: this.finiteNumber(channelInfo.followUpDeletedCount ?? channelInfo.dMRestriction) + 1,
@@ -58410,7 +56511,7 @@ function isAccountSpecificError(value) {
  * @swagger
  * /diagnostics/intelligence/summary:
  *   get:
- *     summary: Channel intelligence stage distribution and health
+ *     summary: Channel intelligence safety distribution and health
  *     tags: [Diagnostics]
  *     responses:
  *       200:
@@ -58426,28 +56527,26 @@ router.get("/diagnostics/intelligence/summary", async (req, res) => {
             return;
         }
         const allDocs = await intelCollection.find({}).toArray();
-        const stages = allDocs.reduce((map, d) => {
-            const lifecycle = d?.lifecycle?.state || d?.stage || 'unknown';
-            const survived = Number(d?.primary?.resolved?.survived || 0);
-            if (!map[lifecycle])
-                map[lifecycle] = { count: 0, avgPrimarySurvival: 0, totalPrimarySurvival: 0 };
-            map[lifecycle].count++;
-            map[lifecycle].totalPrimarySurvival += Number.isFinite(survived) ? survived : 0;
+        const safetyStatuses = allDocs.reduce((map, d) => {
+            const status = d?.safety?.status || 'unknown';
+            const survived = Number(d?.outcomes?.survived || 0);
+            if (!map[status])
+                map[status] = { count: 0, avgSurvived: 0, totalSurvived: 0 };
+            map[status].count++;
+            map[status].totalSurvived += Number.isFinite(survived) ? survived : 0;
             return map;
         }, {});
-        for (const k of Object.keys(stages)) {
-            stages[k].avgPrimarySurvival = stages[k].count > 0
-                ? +(stages[k].totalPrimarySurvival / stages[k].count).toFixed(3)
+        for (const status of Object.keys(safetyStatuses)) {
+            safetyStatuses[status].avgSurvived = safetyStatuses[status].count > 0
+                ? +(safetyStatuses[status].totalSurvived / safetyStatuses[status].count).toFixed(3)
                 : 0;
         }
-        const blocked = allDocs.filter((doc) => (doc?.lifecycle?.state || doc?.stage) === 'blocked'
-            || doc?.stage === 'hostile');
-        const withErrors = allDocs.filter((doc) => (doc?.errors?.consecutiveErrors || 0) > 0);
+        const blocked = allDocs.filter((doc) => doc?.safety?.status === 'blocked');
+        const withErrors = allDocs.filter((doc) => (doc?.safety?.consecutiveErrors || 0) > 0);
         res.json(formatResponse(true, {
-            stages,
-            blockedChannelsCount: blocked.length,
-            // Compatibility alias for existing dashboards during the diagnostics migration.
-            consecutiveErrorsCount: withErrors.length,
+            safetyStatuses,
+            blockedCount: blocked.length,
+            channelsWithConsecutiveErrors: withErrors.length,
             isAccountSpecificErrorFn: 'loaded',
         }, "Intelligence summary", req.requestId));
     }
@@ -58526,28 +56625,28 @@ router.get("/diagnostics/intelligence/test-error-classification", async (req, re
 });
 /**
  * @swagger
- * /diagnostics/intelligence/recover-hostile:
+ * /diagnostics/intelligence/recover-blocked:
  *   post:
- *     summary: Manually trigger hostile channel recovery
+ *     summary: Manually trigger stale blocked-channel recovery
  *     tags: [Diagnostics]
  */
-router.post("/diagnostics/intelligence/recover-hostile", async (req, res) => {
+router.post("/diagnostics/intelligence/recover-blocked", async (req, res) => {
     try {
         const intel = _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.ChannelIntelligenceService.getInstance();
-        const recovered = await intel.recoverStaleHostileChannels();
+        const recovered = await intel.recoverStaleBlockedChannels();
         if (res.headersSent) {
             return;
         }
-        res.json(formatResponse(true, { recovered }, `Recovered ${recovered} hostile channels`, req.requestId));
+        res.json(formatResponse(true, { recovered }, `Recovered ${recovered} stale blocked channels`, req.requestId));
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "diagnostics.intelligence.recover");
         sendDiagnosticsFailure(req, res, {
-            operation: "diagnostics-intelligence-recover-hostile",
+            operation: "diagnostics-intelligence-recover-blocked",
             component: "promotion.engine",
             owner: "promotion",
-            summary: "Channel intelligence hostile recovery diagnostics failed",
-            message: "Failed to recover hostile channels",
+            summary: "Channel intelligence blocked-channel recovery diagnostics failed",
+            message: "Failed to recover stale blocked channels",
             error,
             action: "manual",
             readOnly: false,
