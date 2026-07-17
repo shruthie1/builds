@@ -1109,10 +1109,15 @@ function resolveDMCredits(value) {
             : []),
         ...(value.dmConversions !== undefined || value.conversions !== undefined ? [legacy] : []),
     ];
-    const latest = candidates.reduce((current, candidate) => !current || candidate.updatedAtMs > current.updatedAtMs ? candidate : current, null);
-    // The candidates are ordered final DMs, prior nested V2, then legacy aliases. Equal timestamps
-    // deliberately keep the earlier source, while an untimestamped legacy count still survives.
-    return latest ?? { credited: 0, updatedAtMs: 0 };
+    if (candidates.length === 0)
+        return { credited: 0, updatedAtMs: 0 };
+    // Attribution aliases are cumulative snapshots, not independent events. Keep the largest known
+    // credit total while retaining the newest observation timestamp so a legacy projection can never
+    // reduce a V2 value during a rolling cutover.
+    return {
+        credited: Math.max(...candidates.map((candidate) => candidate.credited)),
+        updatedAtMs: Math.max(...candidates.map((candidate) => candidate.updatedAtMs)),
+    };
 }
 /** @deprecated Compatibility helper for old callers. */
 function countResolvedPrimaryAttempts(outcomes) {
@@ -1122,13 +1127,22 @@ function resolveSafety(value, fallbackUpdatedAtMs) {
     const safety = asRecord(value.safety);
     const errors = asRecord(value.errors);
     const lifecycle = asRecord(value.lifecycle);
-    const status = safety['status'] === 'blocked' || lifecycle['state'] === 'blocked' || value.stage === 'hostile'
-        ? 'blocked'
-        : 'active';
+    const rootStatus = safety['status'] === 'blocked' ? 'blocked' : 'active';
+    const rootStatusUpdatedAtMs = timestampMs(safety['statusUpdatedAtMs'], 0);
+    const legacyStatusUpdatedAtMs = timestampMs(lifecycle['updatedAtMs'] ?? value.stageUpdatedAt, 0);
+    const legacyBlocked = lifecycle['state'] === 'blocked' || value.stage === 'hostile';
+    // A V2 success path may clear a historical block. Honor that newer decision rather than
+    // re-blocking a channel from the preserved legacy lifecycle snapshot.
+    const useLegacyBlock = legacyBlocked
+        && rootStatus !== 'blocked'
+        && (!Object.keys(safety).length || legacyStatusUpdatedAtMs > rootStatusUpdatedAtMs);
+    const status = useLegacyBlock ? 'blocked' : rootStatus;
     const lastErrorType = safety['lastErrorType'] ?? errors['lastErrorType'];
     return {
         status,
-        statusUpdatedAtMs: timestampMs(safety['statusUpdatedAtMs'] ?? lifecycle['updatedAtMs'] ?? value.stageUpdatedAt, fallbackUpdatedAtMs),
+        statusUpdatedAtMs: useLegacyBlock
+            ? timestampMs(lifecycle['updatedAtMs'] ?? value.stageUpdatedAt, fallbackUpdatedAtMs)
+            : timestampMs(safety['statusUpdatedAtMs'], fallbackUpdatedAtMs),
         consecutiveErrors: nonNegative(safety['consecutiveErrors'] ?? errors['consecutiveErrors']),
         lastErrorType: typeof lastErrorType === 'string' && lastErrorType.trim() ? lastErrorType.trim() : null,
         lastErrorAtMs: timestampMs(safety['lastErrorAtMs'] ?? errors['lastErrorAt'], 0),
@@ -1136,13 +1150,12 @@ function resolveSafety(value, fallbackUpdatedAtMs) {
 }
 function resolveSeedProbeCounts(value) {
     const exploration = asRecord(value.exploration);
-    const probes = isRecord(value.seedProbeCounts)
-        ? value.seedProbeCounts
-        : asRecord(exploration['seedProbeCounts']);
+    const legacyProbes = asRecord(value.seedProbeCounts);
+    const currentProbes = asRecord(exploration['seedProbeCounts']);
     return {
-        legacy: nonNegative(probes['legacy']),
-        custom: nonNegative(probes['custom']),
-        ai: nonNegative(probes['ai']),
+        legacy: Math.max(nonNegative(legacyProbes['legacy']), nonNegative(currentProbes['legacy'])),
+        custom: Math.max(nonNegative(legacyProbes['custom']), nonNegative(currentProbes['custom'])),
+        ai: Math.max(nonNegative(legacyProbes['ai']), nonNegative(currentProbes['ai'])),
     };
 }
 function isRootV2(value) {
