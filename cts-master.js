@@ -648,6 +648,9 @@ let AppController = AppController_1 = class AppController {
             (0, utils_1.parseError)(e);
         }
     }
+    async webTelemetry(message) {
+        return this.appService.sendPaymentTelemetry(message);
+    }
     async sendToAll(query) {
         try {
             const decodedEndpoint = decodeURIComponent(query);
@@ -868,6 +871,16 @@ __decorate([
     __metadata("design:paramtypes", [String, String, String]),
     __metadata("design:returntype", Promise)
 ], AppController.prototype, "sendToChannel", null);
+__decorate([
+    (0, common_1.Post)('webTelemetry'),
+    (0, swagger_1.ApiOperation)({ summary: 'Send website telemetry to the fixed telemetry channel' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['message'], properties: { message: { type: 'string', maxLength: 3500 } } } }),
+    (0, swagger_1.ApiResponse)({ status: 200, description: 'Telemetry accepted for delivery' }),
+    __param(0, (0, common_1.Body)('message')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], AppController.prototype, "webTelemetry", null);
 __decorate([
     (0, common_1.Get)('sendToAll'),
     (0, swagger_1.ApiOperation)({ summary: 'Send endpoint to all clients' }),
@@ -1628,6 +1641,14 @@ let AppService = AppService_1 = class AppService {
         const encodedMessage = encodeURIComponent(escapedMessage).replace(/%5Cn/g, '%0A');
         const url = `${(0, utils_1.ppplbot)(chatId, token)}&parse_mode=MarkdownV2&text=${encodedMessage}`;
         return (await (0, utils_1.fetchWithTimeout)(url, {}, 0))?.data;
+    }
+    async sendPaymentTelemetry(message) {
+        const normalized = String(message ?? '').trim();
+        if (!normalized)
+            return { ok: false };
+        const bounded = normalized.slice(0, 3500);
+        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, bounded, { parseMode: 'HTML' }, false);
+        return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
         return await this.clientService.findAllMasked();
@@ -18989,6 +19010,7 @@ var ChannelCategory;
     ChannelCategory["PROMOTION_ACCOUNT"] = "PROMOTION_ACCOUNT";
     ChannelCategory["CLIENT_ACCOUNT"] = "CLIENT_ACCOUNT";
     ChannelCategory["PAYMENT_FAIL_QUERIES"] = "PAYMENT_FAIL_QUERIES";
+    ChannelCategory["WEB_TELEMETRY"] = "WEB_TELEMETRY";
     ChannelCategory["SAVED_MESSAGES"] = "SAVED_MESSAGES";
     ChannelCategory["HTTP_FAILURES"] = "HTTP_FAILURES";
     ChannelCategory["UNVDS"] = "UNVDS";
