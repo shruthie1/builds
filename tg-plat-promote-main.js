@@ -23061,8 +23061,8 @@ class TelegramManager {
         }
     }
     /**
-     * Persist promotion-source attribution on userData and channel intelligence. It maps a DM to
-     * channels via common chats and Redis last-promoter records, without using conversion for selection.
+     * Record promotion-source attribution in its dedicated claim record and channel intelligence.
+     * Conversation state in userData remains exclusively owned by tg-aut.
      */
     async attributePromotionConversion(event, chatId) {
         if (this.attributedChats.has(chatId))
@@ -24658,23 +24658,10 @@ class UserDataDtoCrud {
                 .map((channelId) => String(channelId || '').trim().replace(/^-100/, '').replace(/^-/, ''))
                 .filter((channelId) => /^\d+$/.test(channelId) && channelId !== '0');
             const now = Date.now();
-            const result = await this.client.db("tgclients").collection('userData').updateOne({ chatId: normalizedChatId, profile }, {
-                $set: {
-                    promotionChannels: normalizedChannels,
-                    attributionMethod: normalizedChannels.length > 0 ? 'telegram_lookup' : 'none',
-                    attributedAt: now,
-                },
-                $setOnInsert: {
-                    chatId: normalizedChatId,
-                    profile,
-                    totalCount: 0,
-                    lastMsgTimeStamp: now,
-                },
-            }, { upsert: true });
-            if (!result.acknowledged)
-                return false;
-            await this.client.db("tgclients").collection('promotionAttributionClaims').updateOne({ _id: `${profile}:${normalizedChatId}`, token: claimToken }, { $set: { completedAt: now, promotionChannels: normalizedChannels } });
-            return true;
+            // Attribution must never create or mutate conversation state. Keep its idempotency
+            // record separate from userData, which is owned and fully initialized by tg-aut.
+            const result = await this.client.db("tgclients").collection('promotionAttributionClaims').updateOne({ _id: `${profile}:${normalizedChatId}`, token: claimToken }, { $set: { completedAt: now, promotionChannels: normalizedChannels } });
+            return result.acknowledged && result.matchedCount === 1;
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error completing promotion attribution", false);
