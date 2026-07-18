@@ -22346,6 +22346,7 @@ class TelegramManager {
         // Only these chatIds are ever checked — never the whole userData history.
         this.pendingRouteChats = new Map();
         this.routeConversionInterval = null;
+        this.routeConversionReconcileInFlight = false;
         this.ROUTE_CONVERSION_RECONCILE_MS = 10 * 60 * 1000; // sweep every 10 min
         this.PENDING_ROUTE_TTL_MS = 10 * 60 * 1000; // entry lives ~10 min then expires
         this.passwordResetTimeout = null;
@@ -22432,7 +22433,12 @@ class TelegramManager {
         // Prime the route username from the live account once at startup so we don't route to the
         // startup-config value until the first 5-min health check runs.
         void this.refreshRouteUsername();
-        // Sweep pending routed users every 10 min and credit those who reached the main account.
+        this.startRouteConversionReconciler();
+    }
+    /** Sweep pending routed users every 10 min; reused after a Telegram reconnect. */
+    startRouteConversionReconciler() {
+        if (this.routeConversionInterval)
+            return;
         this.routeConversionInterval = setInterval(() => { void this.reconcileRoutedUsers(); }, this.ROUTE_CONVERSION_RECONCILE_MS);
         this.routeConversionInterval.unref?.();
     }
@@ -22684,6 +22690,7 @@ class TelegramManager {
             if (!this.connectionCheckInterval) {
                 this.connectionCheckInterval = setInterval(this.checkConnection.bind(this), CONNECTION_CHECK_INTERVAL);
             }
+            this.startRouteConversionReconciler();
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: Reconnection failed`);
@@ -23035,9 +23042,6 @@ class TelegramManager {
         };
     }
     async sendPromoteRouteStageMessage(chatId, stage) {
-        // Track this user as a routing candidate with the current time; the sweep credits them if
-        // they reach the main account, and drops the entry once its TTL passes.
-        this.pendingRouteChats.set(chatId, Date.now());
         const payload = this.getPromoteRouteMessage(stage);
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_14__.sleep)(1200);
         await this.setVideoRecording(chatId);
@@ -23046,6 +23050,9 @@ class TelegramManager {
             message: payload.message,
             linkPreview: payload.linkPreview,
         });
+        // Only a confirmed Telegram send enters the conversion reconciler. Register this before
+        // ancillary stats writes so a stats failure cannot discard a route that was delivered.
+        this.pendingRouteChats.set(chatId, Date.now());
         const appService = _app_service__WEBPACK_IMPORTED_MODULE_9__.AppService.getInstance();
         await appService.updateMsgCount(this.clientDetails.clientId);
         if (this.promoterInstance) {
@@ -23060,16 +23067,27 @@ class TelegramManager {
      * window passed. Each user is counted at most once. Only these chatIds are checked, never the whole history.
      */
     async reconcileRoutedUsers() {
-        if (this.pendingRouteChats.size === 0)
+        if (this.routeConversionReconcileInFlight || this.pendingRouteChats.size === 0)
             return;
+        this.routeConversionReconcileInFlight = true;
         try {
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
             const chatIds = Array.from(this.pendingRouteChats.keys());
             const converted = await db.countReachedMainAccountChatIds(chatIds);
-            for (const chatId of converted)
-                this.pendingRouteChats.delete(chatId);
+            if (converted === null) {
+                logger.warn(`[RoutedUser] ${this.clientDetails.mobile} conversion lookup failed; retaining ${this.pendingRouteChats.size} pending route(s)`);
+                return;
+            }
             if (converted.length > 0) {
-                await db.incrementRoutedUserCountBy(converted.length);
+                const update = await db.incrementRoutedUserCountBy(converted.length);
+                if (!update?.acknowledged) {
+                    throw new Error(`Routed-user counter update was not acknowledged for ${converted.length} conversion(s)`);
+                }
+                // Delete only after Mongo has durably acknowledged the increment. A transient DB
+                // failure leaves candidates pending for the next reconciliation instead of losing
+                // their count.
+                for (const chatId of converted)
+                    this.pendingRouteChats.delete(chatId);
                 if (this.promoterInstance)
                     this.promoterInstance.converted += converted.length;
                 logger.info(`[RoutedUser] ${this.clientDetails.mobile} credited ${converted.length} routed user(s); ${this.pendingRouteChats.size} still pending`);
@@ -23084,13 +23102,16 @@ class TelegramManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: route conversion reconcile failed`, false);
         }
+        finally {
+            this.routeConversionReconcileInFlight = false;
+        }
     }
     async handlePromoteInboundRoute(chatId) {
         const db = _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
         const existingState = this.routeStateMap.get(chatId);
         const userData = await db.getUserData(chatId);
         if (userData) {
-            // Routed-user counting (routedUserCount) is handled by the hourly
+            // Routed-user counting (routedUserCount) is handled by the 10-minute
             // reconcileRoutedUsers() job — it credits a routed user once they reach the main
             // account. The old inline increment here almost never fired (routed users rarely
             // re-message the promote account) and would double-count against the reconciler.
@@ -24917,15 +24938,19 @@ class UserDataDtoCrud {
         return this.incrementRoutedUserCountBy(1);
     }
     /**
-     * Returns which of the given chatIds have reached the main account (userData with totalCount > 0)
-     * for this client's profile. Used by the routing-conversion reconciler, which only ever checks
-     * chatIds THIS promote client actually routed — not the whole userData history — so the caller
-     * can credit and drop exactly those from its pending set.
+     * Returns which routed chatIds reached the main account (userData.totalCount > 0) for this
+     * client's profile. The caller only checks its own pending routes, never all userData history.
+     * Returns null when the lookup could not run. Callers must keep pending routes in that case:
+     * an unavailable MongoDB is not evidence that no user converted.
      */
     async countReachedMainAccountChatIds(chatIds) {
         try {
             const profile = process.env.dbcoll;
-            if (!profile || chatIds.length === 0)
+            if (!profile) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error('Missing dbcoll'), 'Cannot check routed user conversions', false);
+                return null;
+            }
+            if (chatIds.length === 0)
                 return [];
             const userDataCollection = this.client.db("tgclients").collection('userData');
             const docs = await userDataCollection
@@ -24935,13 +24960,18 @@ class UserDataDtoCrud {
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error counting reached-main-account users");
-            return [];
+            return null;
         }
     }
     async incrementRoutedUserCountBy(count) {
         try {
             if (!Number.isFinite(count) || count <= 0)
                 return null;
+            const clientId = process.env.clientId?.trim();
+            if (!clientId) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error('Missing clientId'), 'Cannot increment routed user count', false);
+                return null;
+            }
             const promoteClientStatDb = this.client.db("tgclients").collection('promoteClientStats');
             // ATOMIC ON-WRITE MIGRATION (convertedCount -> routedUserCount): a plain $inc would start
             // from 0 on a pre-rename doc still holding convertedCount, and a later blind $rename would
@@ -24949,7 +24979,7 @@ class UserDataDtoCrud {
             // routedUserCount = floor0($routedUserCount ?? $convertedCount) + count, then drop old key.
             // {$gt:[base,0]} floors NaN/negative -> 0 (BSON NaN sorts below 0, so $gt is false) so a
             // corrupt legacy value can't poison the counter — matching the channelIntelligence fold.
-            return await promoteClientStatDb.updateOne({ clientId: process.env.clientId }, [
+            return await promoteClientStatDb.updateOne({ clientId }, [
                 {
                     $set: {
                         routedUserCount: {
@@ -24961,7 +24991,12 @@ class UserDataDtoCrud {
                     },
                 },
                 { $unset: ['convertedCount'] },
-            ]);
+            ], 
+            // A newly provisioned promote client can receive a routed conversion before a
+            // stats row is created by the normal lifecycle path. Preserve that conversion:
+            // the equality filter seeds clientId for an upsert and the pipeline seeds the
+            // counter. All other stats remain optional and are filled by their own writers.
+            { upsert: true });
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error incrementing routed user count");
