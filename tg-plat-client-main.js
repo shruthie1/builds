@@ -26021,45 +26021,6 @@ class UserDataDtoCrud {
             return { newUser: !!newUser, userDetails: safeDetails };
         }
     }
-    async updatePromotionAttribution(chatId, promotionChannels, attributionMethod) {
-        try {
-            const normalizedChatId = String(chatId || '').trim();
-            if (!normalizedChatId) {
-                logger.warn('Skipping promotion attribution update: chatId missing');
-                return false;
-            }
-            const normalizedPromotionChannels = (Array.isArray(promotionChannels) ? promotionChannels : [])
-                .map((channelId) => {
-                const normalized = String(channelId || '').trim().replace(/^-100/, '');
-                return normalized.startsWith('-') ? normalized.slice(1) : normalized;
-            })
-                .filter((channelId) => /^\d+$/.test(channelId) && channelId !== '0');
-            const normalizedAttributionMethod = attributionMethod === 'telegram_lookup' && normalizedPromotionChannels.length > 0
-                ? 'telegram_lookup'
-                : 'none';
-            const profile = process.env.dbcoll?.trim() || 'default_profile';
-            const now = Date.now();
-            const result = await this.db.updateOne({ chatId: normalizedChatId, profile }, {
-                $set: {
-                    promotionChannels: normalizedPromotionChannels,
-                    attributionMethod: normalizedAttributionMethod,
-                    attributedAt: now,
-                },
-                $setOnInsert: {
-                    chatId: normalizedChatId,
-                    profile,
-                    ...USER_DEFAULTS,
-                    totalCount: 0,
-                    lastMsgTimeStamp: now,
-                },
-            }, { upsert: true });
-            return result.acknowledged;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error updating promotion attribution');
-            return false;
-        }
-    }
     async resetUnpaid() {
         const result = await this.db.updateMany({ lastMsgTimeStamp: { $lt: Date.now() - 30 * 24 * 60 * 60 * 1000 }, profile: process.env.dbcoll, "paidCount": { $gt: 0 }, "payAmount": 0 }, { $set: { paidCount: 0 } });
         return result;
@@ -32822,15 +32783,6 @@ function isValidChannelId(channelId) {
     const normalized = normalizeChannelId(channelId);
     return /^\d+$/.test(normalized) && normalized !== '0';
 }
-function hasCompletedAttribution(userData) {
-    if (!userData)
-        return false;
-    if (Array.isArray(userData.promotionChannels) &&
-        userData.promotionChannels.some((channelId) => isValidChannelId(channelId))) {
-        return true;
-    }
-    return typeof userData.attributedAt === 'number' && Number.isFinite(userData.attributedAt) && userData.attributedAt > 0;
-}
 function normalizeSenderId(senderId) {
     if (!senderId)
         return null;
@@ -32857,16 +32809,12 @@ async function handleNewUserMessage(event, chatId, firstName) {
     logger.log(`[SPECIAL CASE] New user detected - chatId: ${chatId}, firstName: ${firstName}`);
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
     await db.recordNewUserContact(chatId, firstName);
-    // ROI Attribution - fire and forget
+    // Channel-intelligence attribution is best-effort. It records aggregate channel conversions;
+    // userData deliberately remains conversation state and is never stamped with attribution.
     const senderId = normalizeSenderId(event.message.senderId);
     if (senderId) {
         (async () => {
             try {
-                const userData = await db.read(chatId);
-                if (hasCompletedAttribution(userData)) {
-                    logger.debug(`Attribution skipped for ${chatId}: existing promotion attribution stamp is already present`);
-                    return;
-                }
                 logger.debug(`Attribution lookup starting for ${chatId}`);
                 let attributionService;
                 try {
@@ -32874,12 +32822,10 @@ async function handleNewUserMessage(event, chatId, firstName) {
                 }
                 catch (runtimeError) {
                     logger.debug(`Attribution skipped for ${chatId}: promotion runtime unavailable: ${runtimeError}`);
-                    await db.updatePromotionAttribution(chatId, [], 'none');
                     return;
                 }
                 if (!attributionService) {
                     logger.debug(`Attribution skipped for ${chatId}: promotion runtime attribution is not initialized`);
-                    await db.updatePromotionAttribution(chatId, [], 'none');
                     return;
                 }
                 const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getClient();
@@ -32897,11 +32843,6 @@ async function handleNewUserMessage(event, chatId, firstName) {
                     mobile: typeof item?.mobile === 'string' ? item.mobile : 'unknown',
                     weight: typeof item?.weight === 'number' ? item.weight : 0,
                 })).filter((item) => isValidChannelId(item.channelId));
-                const persisted = await db.updatePromotionAttribution(chatId, attributedChannels.map((item) => item.channelId), attributedChannels.length > 0 ? 'telegram_lookup' : 'none');
-                if (!persisted) {
-                    logger.debug(`Attribution persistence failed for ${chatId}`);
-                    return;
-                }
                 if (attributedChannels.length > 0) {
                     logger.log(`Attribution for ${chatId}: ${attributedChannels.map(a => `ch=${a.channelId} mobile=${a.mobile} w=${(a.weight * 100).toFixed(0)}%`).join(', ')}`);
                 }
