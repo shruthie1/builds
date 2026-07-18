@@ -709,17 +709,18 @@ let AppController = AppController_1 = class AppController {
     }
     async getData(res) {
         this.appService.checkAndRefresh();
-        res.setHeader('Content-Type', 'text/html');
-        let resp = '<html><head></head><body>';
-        resp += await this.appService.getData();
-        resp += '</body></html>';
-        resp += `<script>
-                console.log("hi");
-                setInterval(() => {
-                  window.location.reload();
-                }, 20000);
-            </script>`;
-        res.send(resp);
+        const data = await this.appService.getData();
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(`<!doctype html>
+      <html>
+        <head><title>UMS dashboard</title></head>
+        <body>
+          ${data}
+          <script>
+            setInterval(() => window.location.reload(), 20000);
+          </script>
+        </body>
+      </html>`);
     }
 };
 exports.AppController = AppController;
@@ -1868,15 +1869,13 @@ let AppService = AppService_1 = class AppService {
         }
         const reply3 = await this.getPromotionStats();
         console.log(reply3);
-        return `<div>
-        <div style="display: flex; margin-bottom: 60px">
-          <div style="flex: 1;">${reply} </div>
-      < div style = "flex: 1; " > ${reply2} </div>
+        return `<div style="font-family: system-ui, sans-serif; line-height: 1.45; padding: 16px;">
+        <div style="display: flex; gap: 32px; margin-bottom: 32px; align-items: flex-start;">
+          <div style="flex: 1; min-width: 0;">${reply}</div>
+          <div style="flex: 1; min-width: 0;">${reply2}</div>
         </div>
-        < div style = "display: flex;" >
-          <div style="flex: 1; " > ${reply3} </div>
-            </div>
-            </div>`;
+        <div>${reply3}</div>
+      </div>`;
     }
     async getPromotionStats() {
         let resp = '';
@@ -51489,29 +51488,29 @@ module.exports = require("util");
 /******/ 	});
 /************************************************************************/
 /******/ 	// The module cache
-/******/ 	var __webpack_module_cache__ = {};
+/******/ 	const __webpack_module_cache__ = {};
 /******/ 	
 /******/ 	// The require function
 /******/ 	function __webpack_require__(moduleId) {
 /******/ 		// Check if module is in cache
-/******/ 		var cachedModule = __webpack_module_cache__[moduleId];
+/******/ 		const cachedModule = __webpack_module_cache__[moduleId];
 /******/ 		if (cachedModule !== undefined) {
 /******/ 			return cachedModule.exports;
 /******/ 		}
-/******/ 		// Check if module exists (development only)
-/******/ 		if (__webpack_modules__[moduleId] === undefined) {
-/******/ 			var e = new Error("Cannot find module '" + moduleId + "'");
-/******/ 			e.code = 'MODULE_NOT_FOUND';
-/******/ 			throw e;
-/******/ 		}
 /******/ 		// Create a new module (and put it into the cache)
-/******/ 		var module = __webpack_module_cache__[moduleId] = {
+/******/ 		const module = __webpack_module_cache__[moduleId] = {
 /******/ 			// no module.id needed
 /******/ 			// no module.loaded needed
 /******/ 			exports: {}
 /******/ 		};
 /******/ 	
 /******/ 		// Execute the module function
+/******/ 		if (!(moduleId in __webpack_modules__)) {
+/******/ 			delete __webpack_module_cache__[moduleId];
+/******/ 			const e = new Error("Cannot find module '" + moduleId + "'");
+/******/ 			e.code = 'MODULE_NOT_FOUND';
+/******/ 			throw e;
+/******/ 		}
 /******/ 		__webpack_modules__[moduleId].call(module.exports, module, module.exports, __webpack_require__);
 /******/ 	
 /******/ 		// Return the exports of the module
@@ -51523,8 +51522,8 @@ module.exports = require("util");
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __webpack_require__("./src/main.ts");
-/******/ 	var __webpack_export_target__ = exports;
+/******/ 	let __webpack_exports__ = __webpack_require__("./src/main.ts");
+/******/ 	const __webpack_export_target__ = exports;
 /******/ 	for(var __webpack_i__ in __webpack_exports__) __webpack_export_target__[__webpack_i__] = __webpack_exports__[__webpack_i__];
 /******/ 	if(__webpack_exports__.__esModule) Object.defineProperty(__webpack_export_target__, "__esModule", { value: true });
 /******/ 	
