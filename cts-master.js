@@ -20607,6 +20607,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, BufferClientService_1.name);
         this.bufferClientModel = bufferClientModel;
         this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT = 20;
+        this.readyRotationInProgress = false;
         this.promoteClientService = promoteClientServiceRef;
     }
     async getPrimaryClientMobiles(clientId) {
@@ -21114,6 +21115,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             status: 'active',
             channels: { $lt: this.config.channelTarget },
             mobile: { $nin: Array.from(excludedMobiles) },
+            warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
         };
         if (clientId)
             query.clientId = clientId;
@@ -21528,18 +21530,19 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
     }
     async rotateReadyBufferClients() {
-        if (!this.beginMaintenanceRun('rotateReadyBufferClients'))
+        if (this.readyRotationInProgress) {
+            this.logger.warn('Ready buffer rotation skipped: another ready rotation is already running');
             return false;
+        }
         if (this.telegramService.hasActiveClientSetup()) {
             this.logger.warn('Ready buffer rotation skipped: active client setup exists');
-            this.endMaintenanceRun();
             return false;
         }
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
-            this.logger.warn('Ready buffer rotation skipped: channel join/leave work is active');
-            this.endMaintenanceRun();
+        if (this.isMaintenanceRunActive() && !this.isJoinOrLeaveMaintenanceRun()) {
+            this.logger.warn('Ready buffer rotation skipped: non-join maintenance is active');
             return false;
         }
+        this.readyRotationInProgress = true;
         try {
             const clients = await this.clientService.findAll();
             const clientMap = new Map(clients.map((client) => [client.clientId, client]));
@@ -21553,7 +21556,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             })
                 .sort({ lastUpdateAttempt: 1, mobile: 1 })
                 .exec();
-            const { attempted, rotated, deferred, skipped } = await this.processReadyRotationSweep(readyClients, clientMap, (bufferClient) => this.isPrimaryClientMobile(bufferClient.mobile, primaryClientMobiles));
+            const { attempted, rotated, deferred, skipped } = await this.processReadyRotationSweep(readyClients, clientMap, (bufferClient) => this.isPrimaryClientMobile(bufferClient.mobile, primaryClientMobiles)
+                || this.joinChannelMap.has(bufferClient.mobile)
+                || this.leaveChannelMap.has(bufferClient.mobile));
             this.logger.log(`Ready buffer rotation sweep complete: candidates=${readyClients.length}, attempted=${attempted}, rotated=${rotated}, deferred=${deferred}, skipped=${skipped}`);
             return attempted > 0;
         }
@@ -21567,7 +21572,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return false;
         }
         finally {
-            this.endMaintenanceRun();
+            this.readyRotationInProgress = false;
         }
     }
     async _checkBufferClientsInternal() {
@@ -21760,6 +21765,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 channels: { $lt: this.config.channelTarget },
                 mobile: { $nin: Array.from(new Set([...preservedMobiles, ...primaryClientMobiles])) },
                 status: 'active',
+                warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
             };
             if (clientId)
                 query.clientId = clientId;
@@ -33484,6 +33490,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, PromoteClientService_1.name);
         this.promoteClientModel = promoteClientModel;
         this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT = 30;
+        this.readyRotationInProgress = false;
         this.bufferClientService = bufferClientServiceRef;
     }
     get model() {
@@ -33844,6 +33851,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             status: 'active',
             channels: { $lt: this.config.channelTarget },
             mobile: { $nin: Array.from(this.joinChannelMap.keys()) },
+            warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
         };
         if (clientId)
             query.clientId = clientId;
@@ -34093,6 +34101,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     channels: { $lt: this.config.channelTarget },
                     mobile: { $nin: Array.from(preservedMobiles) },
                     status: 'active',
+                    warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
                 })
                     .sort({ channels: -1 })
                     .limit(this.config.maxMapSize);
@@ -34190,18 +34199,19 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
     }
     async rotateReadyPromoteClients() {
-        if (!this.beginMaintenanceRun('rotateReadyPromoteClients'))
+        if (this.readyRotationInProgress) {
+            this.logger.warn('Ready promote rotation skipped: another ready rotation is already running');
             return false;
+        }
         if (this.telegramService.hasActiveClientSetup()) {
             this.logger.warn('Ready promote rotation skipped: active client setup exists');
-            this.endMaintenanceRun();
             return false;
         }
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
-            this.logger.warn('Ready promote rotation skipped: channel join/leave work is active');
-            this.endMaintenanceRun();
+        if (this.isMaintenanceRunActive() && !this.isJoinOrLeaveMaintenanceRun()) {
+            this.logger.warn('Ready promote rotation skipped: non-join maintenance is active');
             return false;
         }
+        this.readyRotationInProgress = true;
         try {
             const clients = await this.clientService.findAll();
             const clientMap = new Map(clients.map((client) => [client.clientId, client]));
@@ -34214,7 +34224,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             })
                 .sort({ lastUpdateAttempt: 1, mobile: 1 })
                 .exec();
-            const { attempted, rotated, deferred, skipped } = await this.processReadyRotationSweep(readyClients, clientMap);
+            const { attempted, rotated, deferred, skipped } = await this.processReadyRotationSweep(readyClients, clientMap, (promoteClient) => this.joinChannelMap.has(promoteClient.mobile)
+                || this.leaveChannelMap.has(promoteClient.mobile));
             this.logger.log(`Ready promote rotation sweep complete: candidates=${readyClients.length}, attempted=${attempted}, rotated=${rotated}, deferred=${deferred}, skipped=${skipped}`);
             return attempted > 0;
         }
@@ -34228,7 +34239,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             return false;
         }
         finally {
-            this.endMaintenanceRun();
+            this.readyRotationInProgress = false;
         }
     }
     async _checkPromoteClientsInternal() {
@@ -38763,6 +38774,12 @@ class BaseClientService {
     }
     isMaintenanceRunActive() {
         return this.activeMaintenanceRun !== null;
+    }
+    isJoinOrLeaveMaintenanceRun() {
+        return this.activeMaintenanceRun?.name === 'prepareBufferJoinChannels'
+            || this.activeMaintenanceRun?.name === 'preparePromoteJoinChannels'
+            || this.activeMaintenanceRun?.name === 'processJoinChannelInterval'
+            || this.activeMaintenanceRun?.name === 'processLeaveChannelInterval';
     }
     async processClient(doc, client) {
         if (doc.inUse === true) {
