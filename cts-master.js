@@ -1647,7 +1647,7 @@ let AppService = AppService_1 = class AppService {
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, bounded, { parseMode: 'HTML' }, false);
+        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, bounded, { parseMode: 'HTML' });
         return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
