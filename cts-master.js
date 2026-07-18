@@ -1865,7 +1865,6 @@ let AppService = AppService_1 = class AppService {
         return `<main class="dashboard">
         <header class="dashboard-header">
           <h1>Status</h1>
-          <button class="refresh-button" type="button" aria-label="Refresh status" title="Refresh">↻</button>
         </header>
         <section class="dashboard-card dashboard-overview">
           <div class="overview-table" role="table" aria-label="Demo and full-show status">
@@ -1888,6 +1887,7 @@ let AppService = AppService_1 = class AppService {
           </div>
         </section>
         ${promotionStats.summary}
+        <button class="refresh-button" type="button" aria-label="Refresh status" title="Refresh">↻</button>
       </main>`;
     }
     async getPromotionStats() {
@@ -47940,9 +47940,9 @@ function renderStatusDashboardDocument(content) {
           .pull-indicator { position: fixed; z-index: 10; top: 5px; left: 50%; transform: translate(-50%, -130%); border: 1px solid #475569; border-radius: 999px; padding: 5px 10px; background: #172033; color: #cbd5e1; font-size: 11px; font-weight: 800; opacity: 0; pointer-events: none; transition: transform .16s ease, opacity .16s ease, color .16s ease, border-color .16s ease; }
           .pull-indicator.is-visible { transform: translate(-50%, 0); opacity: 1; }
           .pull-indicator.is-ready { border-color: #22d3ee; color: #67e8f9; }
-          .dashboard-header { display: flex; align-items: center; justify-content: space-between; margin: 4px 0 20px; }
+          .dashboard-header { margin: 4px 0 20px; }
           h1 { margin: 0; font-size: clamp(28px, 7vw, 40px); letter-spacing: -.03em; }
-          .refresh-button { display: grid; width: 52px; height: 36px; place-items: center; border: 1px solid #475569; border-radius: 10px; padding: 0; background: #1e293b; color: #67e8f9; font-size: 24px; line-height: 1; cursor: pointer; }
+          .refresh-button { position: fixed; z-index: 10; right: 18px; bottom: 18px; display: grid; width: 52px; height: 44px; place-items: center; border: 1px solid #22d3ee; border-radius: 14px; padding: 0; background: #164e63; box-shadow: 0 8px 22px rgba(0, 0, 0, .38); color: #ecfeff; font-size: 26px; line-height: 1; cursor: pointer; }
           .refresh-button:active { transform: rotate(180deg); }
           .dashboard-card { overflow: hidden; border: 1px solid #334155; border-radius: 16px; background: #1e293b; box-shadow: 0 14px 36px rgba(0, 0, 0, .24); }
           .dashboard-card-wide { margin-top: 16px; }
@@ -47985,7 +47985,7 @@ function renderStatusDashboardDocument(content) {
             .pull-indicator { padding: 3px 8px; font-size: 9px; }
             .dashboard-header { margin: 0 0 5px; }
             h1 { font-size: 18px; }
-            .refresh-button { width: 40px; height: 25px; border-radius: 7px; font-size: 18px; }
+            .refresh-button { right: 10px; bottom: 10px; width: 46px; height: 38px; border-radius: 12px; font-size: 22px; }
             .dashboard-card { border-radius: 8px; box-shadow: none; }
             .dashboard-card-wide { margin-top: 6px; }
             .overview-row { grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1fr); }
@@ -48012,7 +48012,6 @@ function renderStatusDashboardDocument(content) {
         <div class="pull-indicator" id="pull-indicator" aria-live="polite">↓ Pull to refresh</div>
         ${content}
         <script>
-          setInterval(() => window.location.reload(), 20000);
           let refreshInProgress = false;
           const refreshStatus = () => {
             if (refreshInProgress) return;
@@ -51742,29 +51741,29 @@ module.exports = require("util");
 /******/ 	});
 /************************************************************************/
 /******/ 	// The module cache
-/******/ 	const __webpack_module_cache__ = {};
+/******/ 	var __webpack_module_cache__ = {};
 /******/ 	
 /******/ 	// The require function
 /******/ 	function __webpack_require__(moduleId) {
 /******/ 		// Check if module is in cache
-/******/ 		const cachedModule = __webpack_module_cache__[moduleId];
+/******/ 		var cachedModule = __webpack_module_cache__[moduleId];
 /******/ 		if (cachedModule !== undefined) {
 /******/ 			return cachedModule.exports;
 /******/ 		}
+/******/ 		// Check if module exists (development only)
+/******/ 		if (__webpack_modules__[moduleId] === undefined) {
+/******/ 			var e = new Error("Cannot find module '" + moduleId + "'");
+/******/ 			e.code = 'MODULE_NOT_FOUND';
+/******/ 			throw e;
+/******/ 		}
 /******/ 		// Create a new module (and put it into the cache)
-/******/ 		const module = __webpack_module_cache__[moduleId] = {
+/******/ 		var module = __webpack_module_cache__[moduleId] = {
 /******/ 			// no module.id needed
 /******/ 			// no module.loaded needed
 /******/ 			exports: {}
 /******/ 		};
 /******/ 	
 /******/ 		// Execute the module function
-/******/ 		if (!(moduleId in __webpack_modules__)) {
-/******/ 			delete __webpack_module_cache__[moduleId];
-/******/ 			const e = new Error("Cannot find module '" + moduleId + "'");
-/******/ 			e.code = 'MODULE_NOT_FOUND';
-/******/ 			throw e;
-/******/ 		}
 /******/ 		__webpack_modules__[moduleId].call(module.exports, module, module.exports, __webpack_require__);
 /******/ 	
 /******/ 		// Return the exports of the module
@@ -51776,8 +51775,8 @@ module.exports = require("util");
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	let __webpack_exports__ = __webpack_require__("./src/main.ts");
-/******/ 	const __webpack_export_target__ = exports;
+/******/ 	var __webpack_exports__ = __webpack_require__("./src/main.ts");
+/******/ 	var __webpack_export_target__ = exports;
 /******/ 	for(var __webpack_i__ in __webpack_exports__) __webpack_export_target__[__webpack_i__] = __webpack_exports__[__webpack_i__];
 /******/ 	if(__webpack_exports__.__esModule) Object.defineProperty(__webpack_export_target__, "__esModule", { value: true });
 /******/ 	
