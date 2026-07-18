@@ -243,12 +243,74 @@ const CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS = [
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CHANNEL_INTELLIGENCE_ROOT_FIELDS: () => (/* binding */ CHANNEL_INTELLIGENCE_ROOT_FIELDS)
+/* harmony export */   CHANNEL_INTELLIGENCE_ROOT_FIELDS: () => (/* binding */ CHANNEL_INTELLIGENCE_ROOT_FIELDS),
+/* harmony export */   isChannelIntelligence: () => (/* binding */ isChannelIntelligence)
 /* harmony export */ });
+/* harmony import */ var _pool_constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/constants */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/constants.ts");
+/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+
+
+
 /** Required top-level groups in every channel-intelligence record. */
 const CHANNEL_INTELLIGENCE_ROOT_FIELDS = [
     'timestamps', 'messagePool', 'outcomes', 'exploration', 'safety', 'DMs',
 ];
+/** Runtime boundary for every reader and writer of the frozen document shape. */
+function isChannelIntelligence(value) {
+    if (!isRecord(value))
+        return false;
+    const timestamps = value['timestamps'];
+    const outcomes = value['outcomes'];
+    const exploration = value['exploration'];
+    const safety = value['safety'];
+    const DMs = value['DMs'];
+    const messagePool = value['messagePool'];
+    return typeof value['channelId'] === 'string'
+        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(value['channelId']) === value['channelId']
+        && Array.isArray(messagePool)
+        && messagePool.length <= _pool_constants__WEBPACK_IMPORTED_MODULE_0__.POOL.MAX_ENTRIES_PER_CHANNEL
+        && messagePool.every(isValidPoolEntry)
+        && isRecord(timestamps)
+        && isNonNegativeNumber(timestamps['firstSeenAtMs'])
+        && isNonNegativeNumber(timestamps['lastPromotionAtMs'])
+        && isNonNegativeNumber(timestamps['updatedAtMs'])
+        && isRecord(outcomes)
+        && isNonNegativeNumber(outcomes['attempted'])
+        && isNonNegativeNumber(outcomes['survived'])
+        && isNonNegativeNumber(outcomes['deleted'])
+        && isRecord(exploration)
+        && isRecord(exploration['seedProbeCounts'])
+        && isNonNegativeNumber(exploration['seedProbeCounts']['legacy'])
+        && isNonNegativeNumber(exploration['seedProbeCounts']['custom'])
+        && isNonNegativeNumber(exploration['seedProbeCounts']['ai'])
+        && isRecord(safety)
+        && (safety['status'] === 'active' || safety['status'] === 'blocked')
+        && isNonNegativeNumber(safety['statusUpdatedAtMs'])
+        && isNonNegativeNumber(safety['consecutiveErrors'])
+        && (safety['lastErrorType'] === null || typeof safety['lastErrorType'] === 'string')
+        && isNonNegativeNumber(safety['lastErrorAtMs'])
+        && isRecord(DMs)
+        && isNonNegativeNumber(DMs['credited'])
+        && isNonNegativeNumber(DMs['updatedAtMs']);
+}
+function isValidPoolEntry(value) {
+    return (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_1__.isPoolEntry)(value)
+        && value.key.trim().length > 0
+        && value.text.trim().length > 0
+        && value.attempted >= 0
+        && value.survived >= 0
+        && value.deleted >= 0
+        && value.channelSideFailed >= 0
+        && value.lastSentAtMs >= 0
+        && value.lastValidatedAtMs >= 0;
+}
+function isNonNegativeNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 
 /***/ },
@@ -264,11 +326,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ChannelIntelligenceService: () => (/* binding */ ChannelIntelligenceService),
 /* harmony export */   isAccountSpecificError: () => (/* binding */ isAccountSpecificError)
 /* harmony export */ });
-/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
-/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
+/* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /**
  * Channel Intelligence Service — MongoDB-backed per-channel learning.
  *
@@ -280,7 +343,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_4__.PromoLogger('pool');
+
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('pool');
 const CONCURRENT_WRITE_RETRY_LIMIT = 5;
 class ChannelIntelligenceService {
     constructor(collection) {
@@ -305,22 +369,22 @@ class ChannelIntelligenceService {
         ChannelIntelligenceService.instance = undefined;
     }
     // --- Read ---
-    /** Read only the expected shape; malformed rows are excluded from promotion planning. */
+    /** Read only the complete final shape; malformed rows are excluded from promotion planning. */
     async get(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
         const doc = await this.collection.findOne({ channelId: safeChannelId });
         if (!doc)
             return null;
-        return isChannelIntelligence(doc) ? doc : null;
+        return (0,_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(doc) ? doc : null;
     }
     async batchGet(channelIds) {
-        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelIds)(channelIds);
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelIds)(channelIds);
         if (safeChannelIds.length === 0)
             return [];
         const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }));
-        return rows.filter(isChannelIntelligence);
+        return rows.filter(_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence);
     }
     /** Recover blocked channels after their cooldown so current safety evidence can be retried. */
     async recoverStaleBlockedChannels() {
@@ -353,12 +417,12 @@ class ChannelIntelligenceService {
     }
     // --- Upsert ---
     async ensureDoc(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const existing = await this.collection.findOne({ channelId: safeChannelId });
         if (existing) {
-            if (!isChannelIntelligence(existing)) {
+            if (!(0,_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(existing)) {
                 throw new Error(`Invalid channel intelligence document for channel ${safeChannelId}`);
             }
             return;
@@ -383,33 +447,38 @@ class ChannelIntelligenceService {
             $setOnInsert: defaults,
         }, { upsert: true });
         const inserted = await this.collection.findOne({ channelId: safeChannelId });
-        if (!isChannelIntelligence(inserted)) {
+        if (!(0,_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(inserted)) {
             throw new Error(`Unable to create channel intelligence document for channel ${safeChannelId}`);
         }
     }
     async insertPoolEntryIfAbsent(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        const { filter, update } = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.buildInsertIfAbsentUpdate)(entry);
-        await this.collection.updateOne({
+        const { filter, update } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildInsertIfAbsentUpdate)(entry);
+        const result = await this.collection.updateOne({
             channelId: safeChannelId,
             ...filter,
             // The pool stores only confirmed survivors and remains bounded during normal writes.
-            $expr: { $lt: [{ $size: { $ifNull: ['$messagePool', []] } }, _pool__WEBPACK_IMPORTED_MODULE_2__.POOL.MAX_ENTRIES_PER_CHANNEL] },
+            $expr: { $lt: [{ $size: { $ifNull: ['$messagePool', []] } }, _pool__WEBPACK_IMPORTED_MODULE_3__.POOL.MAX_ENTRIES_PER_CHANNEL] },
         }, {
             ...update,
             $set: { 'timestamps.updatedAtMs': Date.now() },
         });
+        poolLog.debug('insert', {
+            chan: safeChannelId,
+            key: entry.key,
+            inserted: isMatchedUpdateResult(result) ? 'yes' : 'no',
+        });
     }
-    async recordPoolEntrySent(channelId, entryKey, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+    async recordPoolEntrySent(channelId, entryKey, nowMs) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return false;
         await this.ensureDoc(safeChannelId);
-        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.buildSentUpdate)(safeEntryKey, nowMs, legacyKeys);
+        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildSentUpdate)(safeEntryKey, nowMs);
         const setFields = {
             ...update.$set,
             'timestamps.lastPromotionAtMs': nowMs,
@@ -417,16 +486,14 @@ class ChannelIntelligenceService {
         };
         const result = await this.collection.updateOne({
             channelId: safeChannelId,
-            $or: [
-                { 'messagePool.key': { $in: [safeEntryKey, ...legacyKeys] } },
-                { 'messagePool.legacyKeys': { $in: [safeEntryKey, ...legacyKeys] } },
-            ],
+            'messagePool.key': safeEntryKey,
         }, {
             ...update,
             $set: setFields,
         }, { arrayFilters });
         const matchedCount = result.matchedCount;
         const matched = typeof matchedCount === 'number' && matchedCount > 0;
+        poolLog.debug('sent', { chan: safeChannelId, key: safeEntryKey, matched: matched ? 'yes' : 'no' });
         return matched;
     }
     /**
@@ -437,21 +504,22 @@ class ChannelIntelligenceService {
      * per-account): the $inc filters on { channelId } and touches only that channel's seedProbeCounts.
      */
     async incrementSeedProbe(channelId, source) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
-        await this.collection.updateOne({ channelId: safeChannelId }, {
+        const result = await this.collection.updateOne({ channelId: safeChannelId }, {
             $inc: { [`exploration.seedProbeCounts.${source}`]: 1 },
             $set: { 'timestamps.updatedAtMs': Date.now() },
         });
+        poolLog.debug('seed-probe', { chan: safeChannelId, source, matched: isMatchedUpdateResult(result) ? 'yes' : 'no' });
     }
     /**
      * Ensures a channel has an empty pool container. This intentionally accepts no message entries:
      * candidates are added only after a real promotion attempt reaches the outcome-tracking path.
      */
     async ensurePoolInitialized(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -462,21 +530,18 @@ class ChannelIntelligenceService {
             },
         });
     }
-    async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs, legacyKeys = []) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+    async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeEntryKey = normalizeLabel(entryKey, '');
         if (!safeChannelId || !safeEntryKey)
             return;
         await this.ensureDoc(safeChannelId);
         // The bounded pool tracks message-specific evidence only. Channel-wide survival is recorded
         // once per validated queued message through recordSurvival(), even when this pool is full.
-        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs, legacyKeys);
-        await this.collection.updateOne({
+        const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildOutcomeUpdate)(safeEntryKey, outcome, nowMs);
+        const result = await this.collection.updateOne({
             channelId: safeChannelId,
-            $or: [
-                { 'messagePool.key': { $in: [safeEntryKey, ...legacyKeys] } },
-                { 'messagePool.legacyKeys': { $in: [safeEntryKey, ...legacyKeys] } },
-            ],
+            'messagePool.key': safeEntryKey,
         }, {
             ...update,
             $inc: update.$inc,
@@ -485,7 +550,12 @@ class ChannelIntelligenceService {
                 'timestamps.updatedAtMs': nowMs,
             },
         }, { arrayFilters });
-        poolLog.debug('outcome', { chan: safeChannelId, key: safeEntryKey, result: String(outcome) });
+        poolLog.debug('outcome', {
+            chan: safeChannelId,
+            key: safeEntryKey,
+            result: String(outcome),
+            matched: isMatchedUpdateResult(result) ? 'yes' : 'no',
+        });
         await this.syncPoolEntryStates(safeChannelId, nowMs);
     }
     /**
@@ -493,9 +563,9 @@ class ChannelIntelligenceService {
      * newly proven message may replace only a conclusively deleted entry; proven survivors remain.
      */
     async recordSurvivingPoolEntry(channelId, entry, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeNowMs = safeNonNegative(nowMs);
-        if (!safeChannelId || !safeNowMs || !(0,_pool__WEBPACK_IMPORTED_MODULE_2__.isPoolEntry)(entry))
+        if (!safeChannelId || !safeNowMs || !(0,_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry)(entry))
             return false;
         await this.ensureDoc(safeChannelId);
         const verifiedEntry = {
@@ -508,15 +578,11 @@ class ChannelIntelligenceService {
             lastValidatedAtMs: Math.max(safeNowMs, safeNonNegative(entry.lastValidatedAtMs)),
             state: 'active',
         };
-        const keys = [verifiedEntry.key, ...(verifiedEntry.legacyKeys ?? [])];
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
-            const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.buildOutcomeUpdate)(verifiedEntry.key, 'survived', safeNowMs, verifiedEntry.legacyKeys ?? []);
+            const { update, arrayFilters } = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.buildOutcomeUpdate)(verifiedEntry.key, 'survived', safeNowMs);
             const existing = await this.collection.updateOne({
                 channelId: safeChannelId,
-                $or: [
-                    { 'messagePool.key': { $in: keys } },
-                    { 'messagePool.legacyKeys': { $in: keys } },
-                ],
+                'messagePool.key': verifiedEntry.key,
             }, {
                 $inc: update.$inc,
                 $set: {
@@ -527,6 +593,7 @@ class ChannelIntelligenceService {
                 },
             }, { arrayFilters });
             if (isMatchedUpdateResult(existing)) {
+                poolLog.debug('survival-existing', { chan: safeChannelId, key: verifiedEntry.key, attempt: attempt + 1 });
                 await this.syncPoolEntryStates(safeChannelId, safeNowMs);
                 return true;
             }
@@ -534,16 +601,22 @@ class ChannelIntelligenceService {
             const entries = Array.isArray(doc?.messagePool) ? doc.messagePool : null;
             // A malformed pool is left untouched; live learning never replaces unknown data just to make
             // room for a new message.
-            if (!entries || !entries.every(_pool__WEBPACK_IMPORTED_MODULE_2__.isPoolEntry))
+            if (!entries || !entries.every(_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry)) {
+                poolLog.warn('survival-skipped', { chan: safeChannelId, key: verifiedEntry.key, reason: 'invalid-pool' });
                 return false;
-            const replacement = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.compactMessagePool)([...entries, verifiedEntry]);
+            }
+            const replacement = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.compactMessagePool)([...entries, verifiedEntry]);
             // Live learning may renew a stale slot, but it never throws away a still-valid survivor just
             // because the new one is more recent.
-            if (replacement.evicted.some(hasNetPoolSurvival))
+            if (replacement.evicted.some(hasNetPoolSurvival)) {
+                poolLog.debug('survival-skipped', { chan: safeChannelId, key: verifiedEntry.key, reason: 'protected-survivor' });
                 return false;
+            }
             const compacted = replacement.kept;
-            if (!compacted.some((candidate) => candidate.key === verifiedEntry.key))
+            if (!compacted.some((candidate) => candidate.key === verifiedEntry.key)) {
+                poolLog.debug('survival-skipped', { chan: safeChannelId, key: verifiedEntry.key, reason: 'not-retained' });
                 return false;
+            }
             const result = await this.collection.updateOne(buildCurrentDocumentFilter(safeChannelId, doc), {
                 $set: {
                     messagePool: compacted,
@@ -552,6 +625,7 @@ class ChannelIntelligenceService {
                 },
             });
             if (isMatchedUpdateResult(result)) {
+                poolLog.debug('survival-replaced', { chan: safeChannelId, key: verifiedEntry.key, attempt: attempt + 1 });
                 await this.syncPoolEntryStates(safeChannelId, safeNowMs);
                 return true;
             }
@@ -564,13 +638,13 @@ class ChannelIntelligenceService {
         // no separate counter to write.
     }
     async syncPoolEntryStates(channelId, nowMs = Date.now()) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         const safeNowMs = safeNonNegative(nowMs);
         if (!safeChannelId || safeNowMs <= 0)
             return;
         let engine;
         try {
-            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_0__.PercentileEngine.getInstance();
+            engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
         }
         catch {
             return;
@@ -628,7 +702,7 @@ class ChannelIntelligenceService {
     }
     // --- Outcome recording ---
     async recordSuccess(channelId, _isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -644,7 +718,7 @@ class ChannelIntelligenceService {
     }
     /** Record a validated message survival independently of the bounded reusable-message pool. */
     async recordSurvival(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -655,7 +729,7 @@ class ChannelIntelligenceService {
         });
     }
     async recordDeletion(channelId, _survivalMs, _isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -676,13 +750,13 @@ class ChannelIntelligenceService {
         }, { $set: { 'safety.status': 'blocked', 'safety.statusUpdatedAtMs': now } });
     }
     async recordFailure(channelId, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         const safeErrorType = normalizeErrorType(errorType);
-        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(safeErrorType);
+        const errorClass = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(safeErrorType);
         const accountOnly = errorClass === 'account';
         poolLog.debug('skip-channel', {
             chan: safeChannelId,
@@ -704,11 +778,10 @@ class ChannelIntelligenceService {
     }
     // --- Conversion recording (ROI) ---
     /**
-     * Record a STAGE-1 channel->DM open with timestamp-aware attribution.
-     * The compare-and-set loop protects concurrent writers without arbitrarily preferring either alias.
+     * Record a STAGE-1 channel->DM open with one atomic attribution update.
      */
     async recordDMConversion(channelId, fractionalWeight) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const weight = this.normalizeFractionalWeight(fractionalWeight);
@@ -723,7 +796,7 @@ class ChannelIntelligenceService {
     }
     // --- Promotion tracking ---
     async recordPromotion(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
@@ -739,7 +812,7 @@ class ChannelIntelligenceService {
     }
     // --- Index creation ---
     async ensureIndexes() {
-        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
+        for (const definition of _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS) {
             try {
                 await this.collection.createIndex(definition.spec, definition.options);
             }
@@ -770,7 +843,7 @@ function normalizeErrorType(value) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : 'TRANSIENT';
 }
 function isAccountSpecificError(value) {
-    return (0,_pool__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(value) === 'account';
+    return (0,_pool__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(value) === 'account';
 }
 function normalizeLabel(value, fallback) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
@@ -790,9 +863,9 @@ function hasNetPoolSurvival(entry) {
     return safeNonNegative(entry.survived) > safeNonNegative(entry.deleted);
 }
 function resolvePoolEntryState(entry, engine, nowMs) {
-    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_2__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
+    const score = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
     const rank = engine.getPercentileRankSync(score, 'messageRawScore');
-    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_2__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
+    return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_3__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
 }
 /** Uses the current update timestamp after retired writer fields are removed. */
 function buildCurrentDocumentFilter(channelId, doc) {
@@ -825,22 +898,6 @@ async function readCursorArray(cursor) {
 }
 function isCursorToArrayLike(value) {
     return isRecord(value) && typeof value['toArray'] === 'function';
-}
-function isChannelIntelligence(value) {
-    if (!isRecord(value))
-        return false;
-    const timestamps = value['timestamps'];
-    const outcomes = value['outcomes'];
-    const exploration = value['exploration'];
-    const safety = value['safety'];
-    const DMs = value['DMs'];
-    return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(value['channelId']) !== null
-        && Array.isArray(value['messagePool'])
-        && isRecord(timestamps)
-        && isRecord(outcomes)
-        && isRecord(exploration)
-        && isRecord(safety)
-        && isRecord(DMs);
 }
 function shouldReplace(options) {
     return isRecord(options) && options['replace'] === true;
@@ -879,7 +936,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CHANNEL_INTELLIGENCE_ROOT_FIELDS: () => (/* reexport safe */ _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_4__.CHANNEL_INTELLIGENCE_ROOT_FIELDS),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_3__.PROMOTION_MESSAGE_STRATEGIES),
-/* harmony export */   PercentileEngine: () => (/* reexport safe */ _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine)
+/* harmony export */   PercentileEngine: () => (/* reexport safe */ _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine),
+/* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_4__.isChannelIntelligence)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence-service */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-service.ts");
 /* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
@@ -1240,15 +1298,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   formatFields: () => (/* reexport safe */ _logging__WEBPACK_IMPORTED_MODULE_3__.formatFields),
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasFailureRateEvidence),
+/* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolMessageIndex),
-/* harmony export */   legacyPoolEntryKeyV1: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.legacyPoolEntryKeyV1),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.messageIndexToStrategy),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
-/* harmony export */   poolEntryLegacyKeys: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryLegacyKeys),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolOutcomeTotals),
 /* harmony export */   rawScore: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
@@ -1410,15 +1467,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionFlowRunner: () => (/* binding */ PromotionFlowRunner)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
-/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
+/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 
 
 
@@ -1429,8 +1487,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__.PromoLogger('promo');
+
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
@@ -1479,7 +1538,7 @@ class PromotionFlowRunner {
         this.options = safeOptions;
         this.messageQueue = isMessageQueueLike(safeOptions.messageQueue)
             ? safeOptions.messageQueue
-            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_7__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -1577,7 +1636,7 @@ class PromotionFlowRunner {
                 return;
             }
             const stats = await this.getStatsOrDefault('planning');
-            const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.calculatePromotionBatchLimit)({
+            const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculatePromotionBatchLimit)({
                 scoringEnabled: this.options.scoringEnabled,
                 daysLeft: stats.daysLeft,
                 successCount: stats.successCount,
@@ -1589,7 +1648,7 @@ class PromotionFlowRunner {
             let intelligenceDocs = [];
             try {
                 const loadedDocs = await this.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
-                intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(isChannelIntelligence) : [];
+                intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence) : [];
             }
             catch (error) {
                 this.log('warn', `Promotion intelligence docs batch load failed; selecting with cold-start docs error=${this.normalizeError(error)}`);
@@ -1601,7 +1660,7 @@ class PromotionFlowRunner {
             catch (error) {
                 this.log('warn', `Promotion per-mobile block lookup failed; proceeding without block filter; error=${this.normalizeError(error)}`);
             }
-            const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
+            const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_2__.selectPromotionChannels)({
                 channels,
                 intelligenceDocs,
                 batchTarget,
@@ -1704,7 +1763,7 @@ class PromotionFlowRunner {
         let doc = null;
         try {
             const loaded = await this.adapter.getIntelligenceDoc(channel.channelId);
-            doc = isChannelIntelligence(loaded) ? loaded : null;
+            doc = (0,_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence)(loaded) ? loaded : null;
         }
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
@@ -1734,7 +1793,7 @@ class PromotionFlowRunner {
             ...(percentiles ? { percentiles } : {}),
             nowMs: Date.now(),
         };
-        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.selectPromotionMessageCandidates)(messagePolicyInput);
+        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.selectPromotionMessageCandidates)(messagePolicyInput);
         this.log('debug', [
             'Promotion candidate plan',
             this.formatChannel(channel),
@@ -1767,11 +1826,11 @@ class PromotionFlowRunner {
             const result = await this.trySendPromotion(planningChannel, candidate, isFollowUp);
             await this.settleDailySendBudget(result, dailySendBudget);
             if (result.sent) {
-                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(stats.daysLeft));
+                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(stats.daysLeft));
                 return 'sent';
             }
             if (result.errorMessage) {
-                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(stats.daysLeft));
+                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(stats.daysLeft));
             }
             if (this.shouldAbortStartedRunnerWork()) {
                 this.log('debug', `Promotion candidate loop stopped after settling in-flight result because runner stopped; ${this.formatChannel(channel)} candidate=${this.formatCandidate(candidate)}`);
@@ -1846,7 +1905,7 @@ class PromotionFlowRunner {
                     completed.add(entry);
                 }
                 else if (result.status === 'deleted') {
-                    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
+                    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
                     await this.recordDeletion(message, deletionPolicy);
                     completed.add(entry);
                 }
@@ -1901,7 +1960,7 @@ class PromotionFlowRunner {
             this.log('warn', `Promotion adapter recent-queue check failed; continuing without adapter queue signal; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
         const healthChannel = mergePromotionHealthSignals(channel, doc);
-        const result = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluatePromotionChannelEligibility)({
+        const result = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluatePromotionChannelEligibility)({
             channel: healthChannel,
             scoringEnabled: this.options.scoringEnabled && !!percentiles,
             safetyStatus: doc?.safety.status ?? null,
@@ -2036,7 +2095,7 @@ class PromotionFlowRunner {
         });
     }
     resolveCandidateStrategy(candidate) {
-        return candidate.strategy || (0,_policy__WEBPACK_IMPORTED_MODULE_2__.messageIndexToStrategy)(candidate.randomIndex) || 'legacy';
+        return candidate.strategy || (0,_policy__WEBPACK_IMPORTED_MODULE_3__.messageIndexToStrategy)(candidate.randomIndex) || 'legacy';
     }
     async recordDeletion(message, deletionPolicy) {
         const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
@@ -2107,7 +2166,7 @@ class PromotionFlowRunner {
         const source = result.messageSource;
         if (!source)
             return;
-        if ((0,_policy__WEBPACK_IMPORTED_MODULE_2__.countPoolSurvivors)(channel.messagePool) >= _pool__WEBPACK_IMPORTED_MODULE_4__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET)
+        if ((0,_policy__WEBPACK_IMPORTED_MODULE_3__.countPoolSurvivors)(channel.messagePool) >= _pool__WEBPACK_IMPORTED_MODULE_5__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET)
             return;
         try {
             await this.options.account.intelligence.incrementSeedProbe(channel.channelId, source);
@@ -2128,7 +2187,7 @@ class PromotionFlowRunner {
             if (outcome === 'survived') {
                 await this.options.account.ensurePoolEntry(message.channelId, entry);
             }
-            const recorded = await this.options.account.recordPoolEntrySent(message.channelId, entry.key, Date.now(), entry.legacyKeys ?? []);
+            const recorded = await this.options.account.recordPoolEntrySent(message.channelId, entry.key, Date.now());
             if (recorded === false) {
                 if (outcome !== 'survived')
                     return 'skipped';
@@ -2141,7 +2200,7 @@ class PromotionFlowRunner {
                     ? 'ok'
                     : 'skipped';
             }
-            await this.options.account.recordPoolEntryOutcome(message.channelId, entry.key, outcome, Date.now(), entry.legacyKeys ?? []);
+            await this.options.account.recordPoolEntryOutcome(message.channelId, entry.key, outcome, Date.now());
             return 'ok';
         }
         catch (error) {
@@ -2155,7 +2214,7 @@ class PromotionFlowRunner {
             return;
         if (result.checkableByChannelId === false)
             return;
-        if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_5__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
+        if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
             return;
         try {
             await this.options.account.recordExploreOutcome(channelId, 'channelSideFailed');
@@ -2194,7 +2253,7 @@ class PromotionFlowRunner {
             if (errUpper.includes('USER_BANNED_IN_CHANNEL')) {
                 await this.options.account.blockChannelTemporary(channel.channelId);
             }
-            else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_5__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
+            else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
                 await this.options.account.blockChannelPermanent(channel.channelId);
             }
         }
@@ -2217,7 +2276,7 @@ class PromotionFlowRunner {
         }
         const existing = this.followUpTimers.get(message.channelId);
         const activeFollowUpCount = existing ? Math.max(0, this.followUpTimers.size - 1) : this.followUpTimers.size;
-        const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluateFollowUpScheduling)({
+        const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateFollowUpScheduling)({
             isFollowUp: message.isFollowUp,
             daysLeft: stats.daysLeft,
             channelAvailable: true,
@@ -2228,7 +2287,7 @@ class PromotionFlowRunner {
             this.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
             return;
         }
-        const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.calculateFollowUpDelay)(safeDelayMs(this.options.followUpDelayMs, 15 * 60000), safeDelayMs(this.options.followUpJitterMs, 30000));
+        const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculateFollowUpDelay)(safeDelayMs(this.options.followUpDelayMs, 15 * 60000), safeDelayMs(this.options.followUpJitterMs, 30000));
         if (existing)
             clearTimeout(existing);
         const timeout = setTimeout(() => {
@@ -2270,7 +2329,7 @@ class PromotionFlowRunner {
                 this.log('warn', `Follow-up execution stats load failed; skipping follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
                 return;
             }
-            const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluateFollowUpScheduling)({
+            const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateFollowUpScheduling)({
                 isFollowUp: message.isFollowUp,
                 daysLeft: stats.daysLeft,
                 channelAvailable: true,
@@ -2327,7 +2386,7 @@ class PromotionFlowRunner {
         const deletions = this.health.totalDeletions;
         const sends = this.health.totalSuccessfulSends;
         const deleteRate = deletions + sends > 0 ? deletions / (deletions + sends) : 0;
-        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.calculateHealthBasedPromotionDelay)({
+        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculateHealthBasedPromotionDelay)({
             successCount: stats.successCount,
             failedCount: stats.failedCount,
             failStreak: stats.failStreak,
@@ -2409,7 +2468,7 @@ class PromotionFlowRunner {
                 cap: 0,
                 count: 0,
                 remaining: 0,
-                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(daysLeft),
+                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(daysLeft),
             };
         }
     }
@@ -2436,7 +2495,7 @@ class PromotionFlowRunner {
                 cap: 0,
                 count: 0,
                 remaining: 0,
-                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(daysLeft),
+                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(daysLeft),
             };
         }
     }
@@ -2474,7 +2533,7 @@ class PromotionFlowRunner {
     describeSelection(selection, intelligenceDocs) {
         const intelligenceByChannel = new Map();
         for (const doc of intelligenceDocs) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(doc.channelId);
+            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(doc.channelId);
             if (channelId)
                 intelligenceByChannel.set(channelId, doc);
         }
@@ -2488,7 +2547,7 @@ class PromotionFlowRunner {
         return {
             skipBreakdown: this.formatCounts(skipCounts),
             selectedSample: this.summarizeSelectionChannels(selection.selected, (channel) => {
-                const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channel.channelId);
+                const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
                 if (channelId && proven.has(channelId))
                     return 'proven';
                 if (channelId && untested.has(channelId))
@@ -2503,14 +2562,14 @@ class PromotionFlowRunner {
     toChannelIdSet(channels) {
         const ids = new Set();
         for (const channel of channels) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channel.channelId);
+            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
             if (channelId)
                 ids.add(channelId);
         }
         return ids;
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
         if (!channelId)
             return { bucket: 'invalid-channel-id', sample: 'invalid-channel-id' };
         const doc = intelligenceByChannel.get(channelId);
@@ -2699,7 +2758,7 @@ function normalizeChannels(value) {
 function normalizeChannel(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     if (!channelId)
         return null;
     return {
@@ -2738,7 +2797,7 @@ function normalizeReadyMessages(value) {
 function normalizeReadyMessage(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     const messageId = asNumber(value['messageId']);
     if (!channelId || !isValidMessageId(messageId))
         return null;
@@ -2746,7 +2805,7 @@ function normalizeReadyMessage(value) {
     const availableMessageCount = normalizePositiveInt(value['availableMessageCount']);
     const strategy = normalizeMessageStrategy(value['strategy']);
     const messageText = normalizeMessageText(value['messageText']);
-    const poolSource = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_6__.isMessageSource)(value['poolSource']) ? value['poolSource'] : null;
+    const poolSource = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(value['poolSource']) ? value['poolSource'] : null;
     const poolMode = normalizePoolMode(value['poolMode']);
     return {
         channelId,
@@ -2770,7 +2829,7 @@ function normalizePositiveInt(value) {
         : null;
 }
 function normalizeMessageSource(value) {
-    return (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_6__.isMessageSource)(value) ? value : null;
+    return (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(value) ? value : null;
 }
 function safeElapsedMs(startTimestamp) {
     if (!Number.isFinite(startTimestamp) || startTimestamp <= 0)
@@ -2820,16 +2879,6 @@ function isAdapterLike(value) {
         && typeof value['sendPromotion'] === 'function'
         && typeof value['checkMessage'] === 'function';
 }
-function isChannelIntelligence(value) {
-    return isRecord(value)
-        && typeof value['channelId'] === 'string'
-        && Array.isArray(value['messagePool'])
-        && isRecord(value['timestamps'])
-        && isRecord(value['outcomes'])
-        && isRecord(value['exploration'])
-        && isRecord(value['safety'])
-        && isRecord(value['DMs']);
-}
 function isAccountLike(value) {
     return isRecord(value)
         && isRecord(value['intelligence'])
@@ -2862,12 +2911,10 @@ function createPoolEntry(result) {
 }
 function createPoolEntryFromText(text, source) {
     const normalizedText = normalizeMessageText(text);
-    if (!normalizedText || !(0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_6__.isMessageSource)(source))
+    if (!normalizedText || !(0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(source))
         return null;
-    const legacyKeys = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_6__.poolEntryLegacyKeys)(normalizedText);
     return {
-        key: (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey)(normalizedText),
-        ...(legacyKeys.length ? { legacyKeys } : {}),
+        key: (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.poolEntryKey)(normalizedText),
         text: normalizedText,
         source,
         attempted: 0,
@@ -2890,7 +2937,7 @@ function resolveQueuedPoolMode(message) {
     const explicit = normalizePoolMode(message.poolMode);
     if (explicit)
         return explicit;
-    return (0,_pool__WEBPACK_IMPORTED_MODULE_4__.isPoolMessageIndex)(message.messageIndex) ? 'reuse' : 'explore';
+    return (0,_pool__WEBPACK_IMPORTED_MODULE_5__.isPoolMessageIndex)(message.messageIndex) ? 'reuse' : 'explore';
 }
 function shouldRecordExploreFromCandidate(candidate, isFollowUp) {
     return resolveCandidatePoolMode(candidate, isFollowUp) === 'explore';
@@ -4502,11 +4549,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool_message_index__WEBPACK_IMPORTED_MODULE_7__.isPoolMessageIndex),
-/* harmony export */   legacyPoolEntryKeyV1: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.legacyPoolEntryKeyV1),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool_message_index__WEBPACK_IMPORTED_MODULE_7__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
-/* harmony export */   poolEntryLegacyKeys: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.poolEntryLegacyKeys),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _pool_compaction__WEBPACK_IMPORTED_MODULE_1__.poolOutcomeTotals),
 /* harmony export */   rawScore: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_5__.rawScore),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _account_cap__WEBPACK_IMPORTED_MODULE_3__.resolveAccountDailyCap),
@@ -4694,28 +4739,20 @@ function deriveProvenBySource(entries) {
 }
 /** Atomic new-entry insert. Caller combines the filter with its document selector. */
 function buildInsertIfAbsentUpdate(entry) {
-    const keys = entryKeys(entry.key, entry.legacyKeys);
     return {
-        // Match neither canonical keys nor V1 aliases. This keeps a V2 sender attached to an
-        // already-recorded V1 Latin entry until the optional key migration is run.
-        filter: {
-            $and: [
-                { 'messagePool.key': { $nin: keys } },
-                { 'messagePool.legacyKeys': { $nin: keys } },
-            ],
-        },
+        filter: { 'messagePool.key': { $ne: entry.key } },
         update: { $push: { messagePool: entry } },
     };
 }
 /** Send-time stamp used as the anti-repetition rotation anchor. */
-function buildSentUpdate(entryKey, nowMs, legacyKeys = []) {
+function buildSentUpdate(entryKey, nowMs) {
     return {
         update: { $set: { 'messagePool.$[e].lastSentAtMs': nowMs } },
-        arrayFilters: [poolEntryKeyFilter(entryKey, legacyKeys)],
+        arrayFilters: [{ 'e.key': entryKey }],
     };
 }
 /** Atomic per-entry outcome write; send-time state is handled separately by buildSentUpdate. */
-function buildOutcomeUpdate(entryKey, outcome, nowMs, legacyKeys = []) {
+function buildOutcomeUpdate(entryKey, outcome, nowMs) {
     const inc = {
         'messagePool.$[e].attempted': 1,
     };
@@ -4732,18 +4769,8 @@ function buildOutcomeUpdate(entryKey, outcome, nowMs, legacyKeys = []) {
     }
     return {
         update: { $inc: inc, $set: set },
-        arrayFilters: [poolEntryKeyFilter(entryKey, legacyKeys)],
+        arrayFilters: [{ 'e.key': entryKey }],
     };
-}
-function poolEntryKeyFilter(entryKey, legacyKeys) {
-    const keys = entryKeys(entryKey, legacyKeys);
-    return { $or: [{ 'e.key': { $in: keys } }, { 'e.legacyKeys': { $in: keys } }] };
-}
-function entryKeys(entryKey, legacyKeys) {
-    return [...new Set([
-            entryKey,
-            ...(Array.isArray(legacyKeys) ? legacyKeys : []),
-        ].filter((key) => typeof key === 'string' && key.trim().length > 0))];
 }
 
 
@@ -4760,10 +4787,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MESSAGE_SOURCES: () => (/* binding */ MESSAGE_SOURCES),
 /* harmony export */   isMessageSource: () => (/* binding */ isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* binding */ isPoolEntry),
-/* harmony export */   legacyPoolEntryKeyV1: () => (/* binding */ legacyPoolEntryKeyV1),
 /* harmony export */   normalizePoolMessageText: () => (/* binding */ normalizePoolMessageText),
-/* harmony export */   poolEntryKey: () => (/* binding */ poolEntryKey),
-/* harmony export */   poolEntryLegacyKeys: () => (/* binding */ poolEntryLegacyKeys)
+/* harmony export */   poolEntryKey: () => (/* binding */ poolEntryKey)
 /* harmony export */ });
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
@@ -4791,31 +4816,6 @@ function normalizePoolMessageText(text) {
         .toLowerCase()
         .normalize('NFKD')
         .replace(/[^\p{L}\p{N}\p{M} ]+/gu, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-/** The retired V1 algorithm is retained only to match existing safe Latin-script entries. */
-function legacyPoolEntryKeyV1(text) {
-    const normalized = normalizePoolMessageTextV1(text);
-    return `v1:${(0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(normalized, 'utf8').digest('hex')}`;
-}
-/**
- * V1 collapsed all non-ASCII text to the empty digest. Never use that alias for a new V2 entry:
- * doing so would make unrelated multilingual promotions share one historical row.
- */
-function poolEntryLegacyKeys(text) {
-    const normalizedV2 = normalizePoolMessageText(text);
-    // V1 discarded non-ASCII characters. A mixed-script message such as "hello नमस्ते"
-    // therefore shares V1's key with unrelated "hello ..." messages and must not alias it.
-    if (!normalizedV2 || /[^\x00-\x7F]/.test(normalizedV2) || !normalizePoolMessageTextV1(text))
-        return [];
-    return [legacyPoolEntryKeyV1(text)];
-}
-function normalizePoolMessageTextV1(text) {
-    return (text ?? '')
-        .toLowerCase()
-        .normalize('NFKD')
-        .replace(/[^a-z0-9 ]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -4914,8 +4914,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
 /* harmony import */ var _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
 /* harmony import */ var ___WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
-/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 
 
 
@@ -4927,7 +4928,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger("intelligence");
+
+const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__.PromoLogger("intelligence");
 /**
  * Shared, app-agnostic core of the promotion engine. Holds all infrastructure that
  * is identical (verified) between apps/tg-aut and apps/promote-clients:
@@ -5087,7 +5089,7 @@ class BasePromotionEngine {
                 if (!cache.has(id))
                     cache.set(id, undefined);
             const rawDocs = await account.intelligence.batchGet(ids);
-            const docs = rawDocs.filter((doc) => typeof doc === 'object' && doc !== null && !Array.isArray(doc));
+            const docs = rawDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_9__.isChannelIntelligence);
             for (const doc of docs) {
                 const id = this.normalizeChannelId(doc.channelId);
                 // Only overwrite a still-empty slot; respect a real doc a concurrent seed wrote meanwhile.
@@ -5237,7 +5239,7 @@ class BasePromotionEngine {
                 this.logRunnerMessage('warn', `[${this.mobile}] Promotion helper runner appears stuck; stopping current runner for restart. lastCycle=${runner?.lastCycleFinishedAt ?? 'n/a'} lastQueue=${runner?.lastQueueCheckFinishedAt ?? 'n/a'}`);
             },
             onError: (error) => {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `[${this.mobile}] Promotion helper supervisor error`, false);
+                this.logRunnerMessage('error', `[${this.mobile}] Promotion helper supervisor error: ${error}`);
             },
             sleep: async (ms) => { await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(ms); },
             minRestartDelayMs: 1000,
@@ -5808,7 +5810,7 @@ class BasePromotionEngine {
         return (0,___WEBPACK_IMPORTED_MODULE_8__.messageIndexToStrategy)(randomIndex);
     }
     resolveFailureAction(channelId, errorMsg) {
-        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_9__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_10__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
     }
     percentileEngineOrNull() {
         try {
@@ -7262,17 +7264,17 @@ class PromotionAccountContext {
         await this.runtime.intelligence.ensureDoc(safeChannelId);
         await this.runtime.intelligence.insertPoolEntryIfAbsent(safeChannelId, entry);
     }
-    async recordPoolEntrySent(channelId, entryKey, nowMs, legacyKeys = []) {
+    async recordPoolEntrySent(channelId, entryKey, nowMs) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
-        return this.runtime.intelligence.recordPoolEntrySent(safeChannelId, entryKey, nowMs, legacyKeys);
+        return this.runtime.intelligence.recordPoolEntrySent(safeChannelId, entryKey, nowMs);
     }
-    async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs, legacyKeys = []) {
+    async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
-        await this.runtime.intelligence.recordPoolEntryOutcome(safeChannelId, entryKey, outcome, nowMs, legacyKeys);
+        await this.runtime.intelligence.recordPoolEntryOutcome(safeChannelId, entryKey, outcome, nowMs);
     }
     async recordSurvivingPoolEntry(channelId, entry, nowMs) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_8__.normalizeChannelId)(channelId);
@@ -7498,7 +7500,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   selectPromotionChannels: () => (/* binding */ selectPromotionChannels)
 /* harmony export */ });
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _channel_intelligence__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/index.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+
 
 function shuffle(items, random) {
     for (let i = items.length - 1; i > 0; i--) {
@@ -7526,7 +7530,7 @@ function selectPromotionChannels(options) {
         const doc = normalizeSelectionIntelligence(rawDoc);
         if (!doc)
             continue;
-        const normalizedDocId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(doc.channelId);
+        const normalizedDocId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(doc.channelId);
         if (normalizedDocId && !intelligenceByChannel.has(normalizedDocId)) {
             intelligenceByChannel.set(normalizedDocId, doc);
         }
@@ -7545,7 +7549,7 @@ function selectPromotionChannels(options) {
                 skipped.push(rawChannel);
             continue;
         }
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId || seenChannelIds.has(channelId)) {
             skipped.push(channel);
             continue;
@@ -7557,7 +7561,7 @@ function selectPromotionChannels(options) {
     // with many blocked channels still gets a full batch of channels it can actually post in.
     const safeBatchTarget = Math.max(0, Number.isFinite(inputBatchTarget) ? Math.floor(inputBatchTarget) : 0);
     for (const channel of validChannels) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId) {
             skipped.push(channel);
             continue;
@@ -7586,8 +7590,8 @@ function selectPromotionChannels(options) {
     }
     // Order proven channels only by bounded-pool outcome evidence.
     proven.sort((a, b) => {
-        const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(a.channelId);
-        const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(b.channelId);
+        const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(a.channelId);
+        const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(b.channelId);
         const scoreDiff = (rankScores.get(bChannelId ?? '') || 0) - (rankScores.get(aChannelId ?? '') || 0);
         if (scoreDiff !== 0)
             return scoreDiff;
@@ -7609,7 +7613,7 @@ function selectPromotionChannels(options) {
     const pushUnique = (channel, isProven) => {
         if (selected.length >= batchTarget)
             return;
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channel.channelId);
         if (!channelId || selectedIds.has(channelId))
             return; // de-dup within the batch
         selectedIds.add(channelId);
@@ -7635,7 +7639,7 @@ function selectPromotionChannels(options) {
 function normalizeChannel(value) {
     if (!isRecord(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value['channelId']);
     if (!channelId)
         return null;
     return {
@@ -7647,19 +7651,7 @@ function isExploreCandidate(doc) {
     return safeNonNegative(doc.outcomes.survived) <= 0;
 }
 function normalizeSelectionIntelligence(value) {
-    return isChannelIntelligence(value) ? value : null;
-}
-function isChannelIntelligence(value) {
-    return typeof value === 'object'
-        && value !== null
-        && !Array.isArray(value)
-        && Array.isArray(value.messagePool)
-        && isRecord(value.timestamps)
-        && isRecord(value.outcomes)
-        && isRecord(value.exploration)
-        && isRecord(value.safety)
-        && isRecord(value.DMs)
-        && (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value.channelId) !== null;
+    return (0,_channel_intelligence__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(value) ? value : null;
 }
 function poolEvidenceScore(doc) {
     const attempted = safeNonNegative(doc.outcomes.attempted);
@@ -8417,18 +8409,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getTelegramCommonChatIds: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getTelegramCommonChatIds),
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasFailureRateEvidence),
+/* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence),
 /* harmony export */   isLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.isLimitReached),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageSource),
 /* harmony export */   isPaidUserLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.isPaidUserLimitReached),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolMessageIndex),
-/* harmony export */   legacyPoolEntryKeyV1: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.legacyPoolEntryKeyV1),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeHydratedChannelFacts),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
-/* harmony export */   poolEntryLegacyKeys: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryLegacyKeys),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals),
 /* harmony export */   processChannelDialog: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.processChannelDialog),
 /* harmony export */   rawScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.rawScore),
@@ -9804,7 +9795,7 @@ function setCache(key, messages) {
     cleanupCache();
 }
 async function getMessages(client, entity, { limit = 10, useCache = true, strategy = "fallback", // "strict" | "refresh" | "fallback"
- } = {}) {
+propagateError, } = {}) {
     const key = getKey(entity, limit);
     if (useCache) {
         if (strategy === "strict")
@@ -9828,14 +9819,33 @@ async function getMessages(client, entity, { limit = 10, useCache = true, strate
         return messages;
     }
     catch (err) {
-        logger.error("getMessagesWith error:", err?.message ?? String(err));
+        if (shouldPropagateError(propagateError, err))
+            throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error("getMessages error:", message);
         // Transient errors return [] so callers stay simple. But a PERMANENT error (frozen/revoked
         // account) must propagate — this is a hot path, so swallowing it to [] would let a dead account
         // run forever. Callers already catch and route permanent errors to the setup/swap flow.
-        if ((0,_isPermanentError__WEBPACK_IMPORTED_MODULE_1__["default"])({ message: err?.message ?? String(err), status: err?.code }))
+        if ((0,_isPermanentError__WEBPACK_IMPORTED_MODULE_1__["default"])({ message, status: getErrorStatus(err) }))
             throw err;
         return strategy === "fallback" && useCache ? getFromCache(key) || [] : [];
     }
+}
+function shouldPropagateError(predicate, error) {
+    if (!predicate)
+        return false;
+    try {
+        return predicate(error) === true;
+    }
+    catch {
+        return false;
+    }
+}
+function getErrorStatus(error) {
+    if (!error || typeof error !== "object")
+        return undefined;
+    const status = error.code;
+    return typeof status === "number" ? status : undefined;
 }
 
 
@@ -15115,6 +15125,82 @@ function selectRandomElements(array, n) {
         selectedElements.push(array[randomIndex]);
     }
     return selectedElements;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/randomized-maintenance-restart.ts"
+/*!**************************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/randomized-maintenance-restart.ts ***!
+  \**************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   chooseMaintenanceRestartDelayMs: () => (/* binding */ chooseMaintenanceRestartDelayMs),
+/* harmony export */   readMaintenanceRestartConfig: () => (/* binding */ readMaintenanceRestartConfig),
+/* harmony export */   scheduleRandomizedMaintenanceRestart: () => (/* binding */ scheduleRandomizedMaintenanceRestart)
+/* harmony export */ });
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+
+const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_MIN_HOURS = 24;
+const DEFAULT_MAX_HOURS = 30;
+const MAX_TIMER_HOURS = Math.floor(0x7fffffff / HOUR_MS);
+/** Read one bounded maintenance-restart policy shared by both Telegram runtimes. */
+function readMaintenanceRestartConfig(env = process.env) {
+    const enabled = env.SERVICE_MAINTENANCE_RESTART_ENABLED?.trim().toLowerCase() !== 'false';
+    const minHours = readPositiveHours(env.SERVICE_MAINTENANCE_RESTART_MIN_HOURS, DEFAULT_MIN_HOURS);
+    const requestedMaxHours = readPositiveHours(env.SERVICE_MAINTENANCE_RESTART_MAX_HOURS, DEFAULT_MAX_HOURS);
+    return {
+        enabled,
+        minHours,
+        maxHours: Math.max(minHours, requestedMaxHours),
+    };
+}
+/** Select a uniform delay in the configured inclusive time window. */
+function chooseMaintenanceRestartDelayMs(minHours, maxHours, random = Math.random) {
+    const safeMinHours = readPositiveHours(minHours, DEFAULT_MIN_HOURS);
+    const safeMaxHours = Math.max(safeMinHours, readPositiveHours(maxHours, DEFAULT_MAX_HOURS));
+    const rawSample = random();
+    const sample = Number.isFinite(rawSample) ? Math.min(Math.max(rawSample, 0), 1) : 0;
+    return Math.floor((safeMinHours + (safeMaxHours - safeMinHours) * sample) * HOUR_MS);
+}
+/**
+ * Schedule one graceful process restart. The delay is selected exactly once at
+ * startup, preventing health checks from shifting the restart target.
+ */
+function scheduleRandomizedMaintenanceRestart(options) {
+    const config = readMaintenanceRestartConfig(options.env);
+    if (!config.enabled) {
+        options.log('Maintenance restart disabled by environment', { service: options.service });
+        return null;
+    }
+    const now = options.now ?? Date.now;
+    const delayMs = chooseMaintenanceRestartDelayMs(config.minHours, config.maxHours, options.random);
+    const scheduledAtMs = now() + delayMs;
+    const timer = (0,_timers__WEBPACK_IMPORTED_MODULE_0__.scheduleUnrefTimeout)(() => {
+        Promise.resolve().then(options.restart).catch((error) => {
+            options.onError?.(error);
+        });
+    }, delayMs);
+    options.log('Maintenance restart scheduled', {
+        service: options.service,
+        minHours: config.minHours,
+        maxHours: config.maxHours,
+        delayHours: Number((delayMs / HOUR_MS).toFixed(2)),
+        scheduledAt: new Date(scheduledAtMs).toISOString(),
+    });
+    return {
+        delayMs,
+        scheduledAtMs,
+        cancel: () => clearTimeout(timer),
+    };
+}
+function readPositiveHours(value, fallback) {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_TIMER_HOURS) : fallback;
 }
 
 
@@ -20804,10 +20890,18 @@ class ReactionService {
     }
     async fetchReactableMessage(channel) {
         let messages = null;
+        const chatId = this.normalizeChannelId(channel.id);
+        const chatLabel = this.getDialogLogLabel(channel);
         try {
             const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_12__.EntityCacheManager.getInstance();
             const channelEntity = await entityCache.getEntity(channel.id, this.client) || channel.id;
-            messages = await (0,_tg_core_telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_4__.getMessages)(this.client, channelEntity, { limit: this.config.MESSAGES_PER_FETCH, useCache: false });
+            messages = await (0,_tg_core_telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_4__.getMessages)(this.client, channelEntity, {
+                limit: this.config.MESSAGES_PER_FETCH,
+                useCache: false,
+                // Invalid/private targets must leave this account's rotation instead of being
+                // retried as an empty history on every reaction loop.
+                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_10__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
+            });
             if (!messages || messages.length === 0) {
                 return null;
             }
@@ -20839,6 +20933,10 @@ class ReactionService {
             if (messages) {
                 messages.length = 0;
                 messages = null;
+            }
+            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_10__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
+                await this.onReactionError(error, chatId, undefined, chatLabel);
+                return null;
             }
             throw error;
         }
@@ -25525,11 +25623,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 /* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
 /* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _telegram_utils_updatePrivacy__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/updatePrivacy */ "./src/telegram-utils/updatePrivacy.ts");
-/* harmony import */ var _telegram_utils_checkMe__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram-utils/checkMe */ "./src/telegram-utils/checkMe.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _utils_memory_cleanup__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../utils/memory-cleanup */ "./src/utils/memory-cleanup.ts");
+/* harmony import */ var _telegram_utils_checkMe__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/checkMe */ "./src/telegram-utils/checkMe.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_memory_cleanup__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../utils/memory-cleanup */ "./src/utils/memory-cleanup.ts");
 
 
 
@@ -25545,8 +25642,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("HealthMonitor");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("HealthMonitor");
 const DEFAULT_HEALTH_CONFIG = {
     criticalFailureTimeoutMinutes: 5,
     systemHealthThreshold: 0.5, // 50%
@@ -25574,8 +25670,6 @@ async function sendHealthMonitorNotification(notification, failureContext) {
  */
 class HealthMonitor {
     constructor(config = DEFAULT_HEALTH_CONFIG) {
-        this.startTime = Date.now();
-        this.MAX_UPTIME_MS = 4 * 24 * 60 * 60 * 1000;
         this.maintenanceTimers = new Map();
         // Per-mobile debounce for the "stale/unhealthy but inbound still confident, skipping
         // replacement" warning — fires on every health tick otherwise (flood across many mobiles).
@@ -25629,38 +25723,6 @@ class HealthMonitor {
         }, `Failed to send ${reason} promotion observation notification for ${mobile}`);
     }
     async performHealthCheck(recoveryPlan) {
-        // Check if service has been running for more than 4 days
-        const uptime = Date.now() - this.startTime;
-        if (uptime >= this.MAX_UPTIME_MS) {
-            const uptimeHours = (uptime / (60 * 60 * 1000)).toFixed(2);
-            logger.warn(`Service has been running for ${uptimeHours} hours (4-day limit reached). Hiding privacy and exiting gracefully...`);
-            // Hide privacy on all connected clients in parallel before exit
-            const activeMobiles = this.mobileManager.getActiveMobiles();
-            await Promise.allSettled(activeMobiles.map(async (mobile) => {
-                try {
-                    const tgManager = this.mobileManager.getTelegramManager(mobile);
-                    if (tgManager?.client?.connected) {
-                        logger.info(`[${mobile}] Hiding privacy before shutdown...`);
-                        await (0,_telegram_utils_updatePrivacy__WEBPACK_IMPORTED_MODULE_10__.hidePrivacy)(tgManager.client);
-                    }
-                }
-                catch (error) {
-                    logger.warn(`[${mobile}] Failed to hide privacy before shutdown:`, error);
-                }
-            }));
-            await sendHealthMonitorNotification({
-                title: "Service auto-exit scheduled",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING,
-                summary: "Max uptime limit reached; privacy cleanup will run before exit.",
-                fields: [
-                    { label: "Uptime", value: `${uptimeHours}h` },
-                    { label: "Active mobiles", value: activeMobiles.length },
-                ],
-                tags: ["lifecycle", "shutdown"],
-            }, "Failed to send service auto-exit notification");
-            await (0,_utils__WEBPACK_IMPORTED_MODULE_2__.sleep)(2000);
-            await this.exitAfterCleanup("Max uptime exceeded", 0);
-        }
         const inactiveAtStart = !this.mobileManager.isActive();
         if (inactiveAtStart) {
             if (recoveryPlan?.hasActions) {
@@ -25838,7 +25900,7 @@ class HealthMonitor {
                 }
                 return; // Skip further checks for this cycle, let the recreated client stabilize.
             }
-            const me = await (0,_telegram_utils_checkMe__WEBPACK_IMPORTED_MODULE_11__.checkMe)(telegramManager.client, telegramManager.clientDetails);
+            const me = await (0,_telegram_utils_checkMe__WEBPACK_IMPORTED_MODULE_10__.checkMe)(telegramManager.client, telegramManager.clientDetails);
             const inboundSnapshot = this.mobileManager.getInboundActivitySnapshot(mobile);
             logger.info(`[${mobile}] Inbound activity confidence`, {
                 confidence: inboundSnapshot.confidence,
@@ -26185,7 +26247,7 @@ class HealthMonitor {
             metadata: action.metadata,
         });
         try {
-            _utils_memory_cleanup__WEBPACK_IMPORTED_MODULE_14__.MemoryCleanupService.getInstance().forceCleanup();
+            _utils_memory_cleanup__WEBPACK_IMPORTED_MODULE_13__.MemoryCleanupService.getInstance().forceCleanup();
         }
         catch (error) {
             logger.warn("Promotion memory cleanup failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Promotion memory cleanup failed"));
@@ -26210,17 +26272,17 @@ class HealthMonitor {
                 await telegramManager.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.updates.GetState());
                 // Check if DialogManager is ready before accessing dialogs
                 if (!telegramManager.dialogManager.isReady()) {
-                    logger.error(`${mobile}: DialogManager not initialized yet, skipping dialog access`);
+                    logger.warn(`${mobile}: DialogManager not initialized yet, skipping dialog access`);
                     return;
                 }
                 const dialogs = telegramManager.dialogManager.getDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_7__.DialogType.PERSONAL, 5);
                 if (!dialogs || dialogs.length === 0) {
-                    logger.error(`${mobile}: No personal dialogs found for maintenance task`);
+                    logger.debug(`${mobile}: No personal dialogs found for maintenance task`);
                     return;
                 }
                 const dialog = dialogs[dialogs.length - 1];
                 if (!dialog?.id) {
-                    logger.error(`${mobile}: Invalid dialog found, skipping immediate maintenance`);
+                    logger.debug(`${mobile}: Invalid dialog found, skipping immediate maintenance`);
                     return;
                 }
                 const entity = await telegramManager.dialogManager.getEntity(dialog.id);
@@ -26378,14 +26440,14 @@ class HealthMonitor {
                 }
                 catch (e) {
                     const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, `Liveness check failed during recovery for ${mobile}`);
-                    if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__["default"])(errorDetails)) {
+                    if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_11__["default"])(errorDetails)) {
                         await this.handlePermanentClientError(mobile, errorDetails.message || "Unable to fetch session/Recover session");
                         return false;
                     }
                 }
                 // If it's a critical error, don't keep retrying
                 const criticalMessage = error?.message || error?.errorMessage || "Unable to fetch session/Recover session";
-                if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__["default"])({ error, message: criticalMessage })) {
+                if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_11__["default"])({ error, message: criticalMessage })) {
                     logger.error(`Critical permanent error detected for ${mobile}, triggering replacement flow`, {
                         message: criticalMessage,
                     });
@@ -32119,19 +32181,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/Telegram.service */ "./src/core/Telegram.service.ts");
-/* harmony import */ var _core_connection__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../core/connection */ "./src/core/connection.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../core/app-service */ "./src/core/app-service.ts");
-/* harmony import */ var _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../core/inactive-mobile-scraper */ "./src/core/inactive-mobile-scraper.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _stats_notifications__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./stats-notifications */ "./src/server/stats-notifications.ts");
-/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! node-schedule-tz */ "node-schedule-tz");
-/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(node_schedule_tz__WEBPACK_IMPORTED_MODULE_11__);
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_randomized_maintenance_restart__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/randomized-maintenance-restart */ "../../packages/tg-core/src/utils/randomized-maintenance-restart.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../core/Telegram.service */ "./src/core/Telegram.service.ts");
+/* harmony import */ var _core_connection__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/connection */ "./src/core/connection.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../core/inactive-mobile-scraper */ "./src/core/inactive-mobile-scraper.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _stats_notifications__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./stats-notifications */ "./src/server/stats-notifications.ts");
+/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! node-schedule-tz */ "node-schedule-tz");
+/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_12___default = /*#__PURE__*/__webpack_require__.n(node_schedule_tz__WEBPACK_IMPORTED_MODULE_12__);
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -32146,10 +32209,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("scheduler");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("scheduler");
 async function sendPromoteOperatorNotification(notification, failureContext) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(new Error("Promote operator notification returned false"), failureContext, false);
             return false;
@@ -32165,27 +32229,36 @@ async function sendPromoteOperatorNotification(notification, failureContext) {
  * Setup scheduled jobs for the application
  */
 function setupScheduledJobs() {
+    (0,_tg_core_utils_randomized_maintenance_restart__WEBPACK_IMPORTED_MODULE_2__.scheduleRandomizedMaintenanceRestart)({
+        service: 'promote-clients',
+        restart: () => {
+            logger.warn('Maintenance restart due; sending SIGTERM for graceful shutdown');
+            process.kill(process.pid, 'SIGTERM');
+        },
+        log: (message, details) => logger.info(message, details),
+        onError: (error) => logger.error('Maintenance restart signal failed', error),
+    });
     // Initialize inactive mobile scraper and start hourly processing
-    const inactiveMobileScraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_8__.InactiveMobileScraper.getInstance();
+    const inactiveMobileScraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_9__.InactiveMobileScraper.getInstance();
     inactiveMobileScraper.startHourlyScraping();
     logger.info("🚀 Inactive mobile scraper started with hourly schedule");
     // Daily statistics job at 00:25 IST
-    node_schedule_tz__WEBPACK_IMPORTED_MODULE_11__.scheduleJob('daily-stats', '25 0 * * *', 'Asia/Kolkata', async () => {
+    node_schedule_tz__WEBPACK_IMPORTED_MODULE_12__.scheduleJob('daily-stats', '25 0 * * *', 'Asia/Kolkata', async () => {
         try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_7__.AppService.getInstance();
+            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_8__.AppService.getInstance();
             const stats = await appService.getDailyStats();
-            await (0,_stats_notifications__WEBPACK_IMPORTED_MODULE_10__.sendPromoteStatsNotification)((0,_stats_notifications__WEBPACK_IMPORTED_MODULE_10__.buildDailyStatsNotification)(stats, 'scheduler'), 'Scheduled daily stats notification failed');
+            await (0,_stats_notifications__WEBPACK_IMPORTED_MODULE_11__.sendPromoteStatsNotification)((0,_stats_notifications__WEBPACK_IMPORTED_MODULE_11__.buildDailyStatsNotification)(stats, 'scheduler'), 'Scheduled daily stats notification failed');
             // Reset stats after 30 seconds
             (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__.scheduleUnrefTimeout)(async () => {
                 try {
-                    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
+                    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
                     await db.resetPromoteClientStats();
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error resetting promote client stats");
                 }
                 try {
-                    _core_Telegram_service__WEBPACK_IMPORTED_MODULE_3__.TelegramService.getInstance().resetMobileStats();
+                    _core_Telegram_service__WEBPACK_IMPORTED_MODULE_4__.TelegramService.getInstance().resetMobileStats();
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error resetting mobile stats");
@@ -32215,8 +32288,8 @@ function setupScheduledJobs() {
     return healthCheckInterval;
 }
 async function runScheduledHealthRecovery() {
-    const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_9__.buildPromoteHealthSnapshot)();
-    const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(health);
+    const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)();
+    const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_6__.createHealthRecoveryPlan)(health);
     if (!recoveryPlan.hasActions) {
         logger.debug("Scheduled health recovery skipped; no actionable issues", {
             status: health.status,
@@ -32232,7 +32305,7 @@ async function runScheduledHealthRecovery() {
             action: action.action,
         })),
     });
-    await _core_app_service__WEBPACK_IMPORTED_MODULE_7__.AppService.getInstance().performHealthCheck(recoveryPlan);
+    await _core_app_service__WEBPACK_IMPORTED_MODULE_8__.AppService.getInstance().performHealthCheck(recoveryPlan);
 }
 /**
  * Setup process exit handlers
@@ -32254,31 +32327,31 @@ function setupExitHandlers() {
             process.exit(1);
         }, SHUTDOWN_TIMEOUT);
         try {
-            (0,_core_connection__WEBPACK_IMPORTED_MODULE_4__.stopConnection)();
+            (0,_core_connection__WEBPACK_IMPORTED_MODULE_5__.stopConnection)();
             try {
-                const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_7__.AppService.getInstance();
+                const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_8__.AppService.getInstance();
                 await appService.gracefulShutdown(`Exit handler: ${JSON.stringify(options)}`);
                 // Stop inactive mobile scraper
-                const inactiveMobileScraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_8__.InactiveMobileScraper.getInstance();
+                const inactiveMobileScraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_9__.InactiveMobileScraper.getInstance();
                 inactiveMobileScraper.stopHourlyScraping();
                 logger.info("🛑 Inactive mobile scraper stopped during graceful shutdown");
             }
             catch (gracefulError) {
                 logger.warn("⚠️ Graceful shutdown failed, falling back to manual cleanup:", gracefulError);
                 try {
-                    await _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance().closeConnection();
+                    await _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().closeConnection();
                 }
                 catch (err) {
                     logger.error("Error closing DB connection:", err);
                 }
                 try {
-                    await _core_Telegram_service__WEBPACK_IMPORTED_MODULE_3__.TelegramService.getInstance().disconnectAll();
+                    await _core_Telegram_service__WEBPACK_IMPORTED_MODULE_4__.TelegramService.getInstance().disconnectAll();
                 }
                 catch (err) {
                     logger.error("Error disconnecting Telegram clients:", err);
                 }
                 try {
-                    await _tg_dialogs__WEBPACK_IMPORTED_MODULE_12__.DialogManager.cleanupAllInstances();
+                    await _tg_dialogs__WEBPACK_IMPORTED_MODULE_13__.DialogManager.cleanupAllInstances();
                 }
                 catch (err) {
                     logger.error("Error closing DialogManager connection:", err);
@@ -32309,10 +32382,10 @@ function setupExitHandlers() {
         logger.info('------------An uncaught exception occurred:', err);
         try {
             if (JSON.stringify(err).includes('MongoPoolClearedError')) {
-                await _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance().closeConnection();
+                await _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().closeConnection();
                 (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__.scheduleUnrefTimeout)(async () => {
                     try {
-                        await _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance().connect();
+                        await _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().connect();
                     }
                     catch (error) {
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error reconnecting MongoDB after pool clear");
@@ -32322,7 +32395,7 @@ function setupExitHandlers() {
             const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(err, "Unhandled Rejection", false);
             await sendPromoteOperatorNotification({
                 title: "Promote uncaught exception",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.ERROR,
                 summary: errorDetails.message?.slice(0, 300),
                 fields: [
                     { label: "Error", value: errorDetails.error || "Error" },
@@ -32341,7 +32414,7 @@ function setupExitHandlers() {
             const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(reason, "Unhandled Rejection", false);
             await sendPromoteOperatorNotification({
                 title: "Promote unhandled rejection",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.ERROR,
                 summary: errorDetails.message?.slice(0, 300),
                 fields: [
                     { label: "Error", value: errorDetails.error || "Error" },
