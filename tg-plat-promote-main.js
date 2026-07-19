@@ -61,8 +61,9 @@ class ConversionAttributionService {
      * keeping this service pure attribution logic.
      *
      * @param commonChatIds - Channel IDs from GetCommonChats
+     * @param conversionId - Stable Telegram chat ID for exactly-once crediting
      */
-    async attributeDMConversion(commonChatIds) {
+    async attributeDMConversion(commonChatIds, conversionId) {
         const uniqueChatIds = normalizeCommonChatIds(commonChatIds);
         if (uniqueChatIds.length === 0)
             return { attributedChannels: [] };
@@ -85,11 +86,15 @@ class ConversionAttributionService {
             }
             if (candidates.length === 0)
                 return { attributedChannels: [] };
+            if (!await this.tracker.claimConversion(conversionId)) {
+                return { attributedChannels: [] };
+            }
             const equalWeight = 1 / candidates.length;
             if (!Number.isFinite(equalWeight) || equalWeight <= 0) {
                 return { attributedChannels: [] };
             }
             const attributions = [];
+            let persistedCount = 0;
             for (const candidate of candidates) {
                 attributions.push({
                     channelId: candidate.channelId,
@@ -98,9 +103,19 @@ class ConversionAttributionService {
                 });
                 try {
                     await this.intelligenceService.recordDMConversion(candidate.channelId, equalWeight);
+                    persistedCount += 1;
                 }
                 catch {
                     // Attribution discovery still returns so userData records the source channels.
+                }
+            }
+            if (persistedCount === 0) {
+                try {
+                    await this.tracker.releaseConversion(conversionId);
+                }
+                catch {
+                    // Keep the attribution result. The claim TTL still bounds a Redis
+                    // release failure, while avoiding a duplicate write in this call.
                 }
             }
             return { attributedChannels: attributions };
@@ -190,7 +205,10 @@ function isIntelligenceServiceLike(value) {
     return isRecord(value) && typeof value['recordDMConversion'] === 'function';
 }
 function isTrackerLike(value) {
-    return isRecord(value) && typeof value['getLastPromoter'] === 'function';
+    return isRecord(value)
+        && typeof value['getLastPromoter'] === 'function'
+        && typeof value['claimConversion'] === 'function'
+        && typeof value['releaseConversion'] === 'function';
 }
 function shouldReplace(options) {
     return isRecord(options) && options['replace'] === true;
@@ -1696,7 +1714,10 @@ class PromotionFlowRunner {
                 }
                 if (!(await this.shouldProcessNextChannel(channel)))
                     break;
-                const outcome = await this.processChannel(channel, false);
+                // Selection can sit in a paced batch for minutes. Reload the durable
+                // channel state immediately before planning so an operator ban or a
+                // restriction written after loadChannels() cannot receive a stale send.
+                const outcome = await this.processChannel(channel, false, true);
                 cycleTally.chans += 1;
                 if (outcome === 'sent')
                     cycleTally.sent += 1;
@@ -1752,11 +1773,27 @@ class PromotionFlowRunner {
             this.health.lastCycleFinishedAt = Date.now();
         }
     }
-    async processChannel(rawChannel, isFollowUp) {
-        const channel = normalizeChannel(rawChannel);
+    async processChannel(rawChannel, isFollowUp, refreshBeforePlanning = false) {
+        let channel = normalizeChannel(rawChannel);
         if (!channel) {
             this.log('warn', `Promotion channel attempt skipped; malformed channel=${this.safeJson(rawChannel)}`);
             return 'skipped';
+        }
+        if (refreshBeforePlanning) {
+            try {
+                const refreshed = normalizeChannel(await this.adapter.getChannel(channel.channelId));
+                if (!refreshed) {
+                    this.log('debug', `Promotion channel attempt skipped after final state reload; ${this.formatChannel(channel)}`);
+                    return 'skipped';
+                }
+                channel = refreshed;
+            }
+            catch (error) {
+                // Fail closed: sending from an old snapshot is less safe than deferring
+                // one channel until the next paced cycle.
+                this.log('warn', `Promotion final channel-state reload failed; skipping stale send; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
+                return 'skipped';
+            }
         }
         this.log('debug', `Promotion channel attempt start; ${this.formatChannel(channel)} isFollowUp=${isFollowUp}`);
         const percentiles = await this.loadPercentiles(channel);
@@ -1777,12 +1814,11 @@ class PromotionFlowRunner {
         const availableMessageIds = normalizeAvailableMessageIds(planningChannel.availableMsgs);
         const messagePolicyInput = {
             isFollowUp,
-            // Dual-read: prefer renamed fields, fall back to the deprecated names for old docs.
-            ...(pickFirstDefined(planningChannel.freeformDeletedCount, planningChannel.wordRestriction) !== undefined
-                ? { freeformDeletedCount: pickFirstDefined(planningChannel.freeformDeletedCount, planningChannel.wordRestriction) }
+            ...(planningChannel.freeformDeletedCount !== undefined
+                ? { freeformDeletedCount: planningChannel.freeformDeletedCount }
                 : {}),
-            ...(pickFirstDefined(planningChannel.followUpDeletedCount, planningChannel.dMRestriction) !== undefined
-                ? { followUpDeletedCount: pickFirstDefined(planningChannel.followUpDeletedCount, planningChannel.dMRestriction) }
+            ...(planningChannel.followUpDeletedCount !== undefined
+                ? { followUpDeletedCount: planningChannel.followUpDeletedCount }
                 : {}),
             deletedCount: planningChannel.deletedCount ?? null,
             failStreak: stats.failStreak,
@@ -2652,14 +2688,6 @@ function safeBatchTarget(value, policyLimit) {
         return safeLimit;
     const safeValue = safeNonNegativeInt(value);
     return Math.min(safeValue, safeLimit);
-}
-/** First non-null/undefined value — used to dual-read renamed fields with a deprecated fallback. */
-function pickFirstDefined(primary, fallback) {
-    if (primary !== undefined && primary !== null)
-        return primary;
-    if (fallback !== undefined && fallback !== null)
-        return fallback;
-    return undefined;
 }
 function safeDelayMs(value, fallback) {
     if (value !== undefined && Number.isFinite(value) && value >= 0)
@@ -3712,13 +3740,11 @@ __webpack_require__.r(__webpack_exports__);
 function selectPromotionMessageCandidates(input) {
     const malformedInput = !isRecord(input);
     const safeInput = malformedInput ? {} : input;
-    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, wordRestriction, dMRestriction, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
+    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
     const safeIsFollowUp = isFollowUp === true;
-    // Probe caps derive from durable pool attempt counters. The optional compatibility counter is only a
-    // compatibility hint and is never required to plan a safe message.
+    // Probe caps derive from durable pool attempt counters.
     const effectiveSeedProbeCounts = seedProbeCounts ?? deriveSeedProbeCounts(messagePool);
-    // Dual-read the renamed field, falling back to the deprecated name for old docs / callers.
-    const followUpDeleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(followUpDeletedCount ?? dMRestriction);
+    const followUpDeleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(followUpDeletedCount);
     // Follow-up: rate-driven. A channel that keeps deleting follow-ups drops the soft follow-up for a
     // plain legacy message. (Handled before the learning/proven fork — follow-ups never explore.)
     if (safeIsFollowUp) {
@@ -6946,6 +6972,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const MOBILE_HISTORY_TTL = 7200; // 2 hours
 const CHANNEL_LAST_MOBILE_TTL = 7200; // 2 hours, aligned with attribution window
+const CONVERSION_CLAIM_TTL = 3 * 3600; // Covers the attribution window plus retry overlap.
 const MAX_HISTORY_SIZE = 50;
 class RedisPromotionTracker {
     constructor(redis) {
@@ -7032,6 +7059,31 @@ class RedisPromotionTracker {
             return null;
         const parsed = parseJson(data);
         return normalizeLastPromoter(parsed);
+    }
+    /**
+     * Atomically reserve one DM conversion for attribution. A repeated Telegram
+     * update for the same chat must never credit channel intelligence twice.
+     */
+    async claimConversion(conversionId) {
+        const safeConversionId = normalizeKeyPart(conversionId);
+        if (!safeConversionId)
+            return false;
+        const result = await this.redis.set(`promote:conversion:${safeConversionId}`, 'claimed', 'EX', CONVERSION_CLAIM_TTL, 'NX');
+        return result === 'OK' || result === 1 || result === true;
+    }
+    /**
+     * Release a conversion only when no analytics write succeeded. This lets a
+     * later delivery retry transient storage failures without reopening claims
+     * that already produced partial credit.
+     */
+    async releaseConversion(conversionId) {
+        const safeConversionId = normalizeKeyPart(conversionId);
+        if (!safeConversionId)
+            return;
+        if (typeof this.redis.del !== 'function') {
+            throw new Error('RedisPromotionTracker redis DEL is required to release a conversion');
+        }
+        await this.redis.del(`promote:conversion:${safeConversionId}`);
     }
 }
 function parseJson(value) {
@@ -7857,6 +7909,16 @@ function getChannelDocStaleness(doc, policy = {}) {
     }
     const missingFields = getMissingCriticalFields(doc, policy.criticalFields ?? DEFAULT_CRITICAL_FIELDS);
     const lastHydratedAt = firstValidTimestamp(doc.lastHydratedAt, doc.lastLiveCheckedAt, doc.updatedAt);
+    if (doc.lastHydrationStatus === 'needs_hydration') {
+        return {
+            stale: true,
+            status: 'needs_hydration',
+            reason: doc.lastHydrationReason || 'explicit_rehydration_requested',
+            ageMs: lastHydratedAt ? Math.max(0, (policy.now ?? Date.now()) - lastHydratedAt) : null,
+            lastHydratedAt,
+            missingFields,
+        };
+    }
     if (missingFields.length > 0) {
         return {
             stale: true,
@@ -7905,28 +7967,29 @@ function shouldHydrateBeforeFinalReject(doc, policy = {}) {
     if (doc?.banned === true)
         return false;
     const stale = getChannelDocStaleness(doc, policy);
-    if (stale.stale)
-        return true;
-    return hasLegacyBlockingStateWithoutLiveHydration(doc);
+    return stale.stale;
 }
 function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
     const liveFacts = deriveTelegramChannelLiveFacts(liveFactsInput);
-    const canSendMsgs = computeLiveCanSendMsgs(liveFacts);
     // `banned` is a durable operator/global decision. A different Telegram
     // account being able to send is not authority to clear it.
     const banned = existing?.banned === true;
-    const recoveredSendability = !banned && canSendMsgs && (existing?.canSendMsgs === false
-        || existing?.private === true
-        || existing?.forbidden === true);
-    const sendability = evaluateChannelSendability(liveFacts);
+    // `forbidden` is a durable safety stop. `private`, by contrast, is a live
+    // Telegram accessibility fact and may clear after a verified observation.
+    const forbidden = existing?.forbidden === true || liveFacts.forbidden === true;
+    const liveCanSendMsgs = computeLiveCanSendMsgs(liveFacts);
+    const canSendMsgs = !banned && !forbidden && liveCanSendMsgs;
+    const recoveredSendability = canSendMsgs && (existing?.canSendMsgs === false
+        || existing?.private === true);
+    const sendability = evaluateChannelSendability({ ...liveFacts, banned, forbidden });
     const patch = {
         channelId: normalizeChannelId(liveFacts.channelId),
         title: liveFacts.title ?? existing?.title ?? null,
         username: liveFacts.username ?? existing?.username ?? null,
         participantsCount: safeNumber(liveFacts.participantsCount, existing?.participantsCount ?? 0),
         broadcast: liveFacts.broadcast,
-        private: canSendMsgs ? false : liveFacts.private,
-        forbidden: canSendMsgs ? false : liveFacts.forbidden,
+        private: liveCanSendMsgs ? false : liveFacts.private,
+        forbidden,
         canSendMsgs,
         megagroup: liveFacts.megagroup ?? existing?.megagroup ?? null,
         accessHash: liveFacts.accessHash ?? existing?.accessHash ?? null,
@@ -7947,14 +8010,14 @@ function evaluateChannelPromotionHealth(input, options = {}) {
     const now = safePositiveNumber(channel.now, Date.now());
     const sendabilityPass = channel.canSendMsgs === true
         && channel.private !== true
-        && channel.forbidden !== true;
+        && channel.forbidden !== true
+        && channel.broadcast !== true;
     const banned = channel.banned === true;
     const successMsgCount = safeNonNegativeNumber(channel.successMsgCount);
     const followupMsgSuccessCount = safeNonNegativeNumber(channel.followupMsgSuccessCount);
     const deletedCount = safeNonNegativeNumber(channel.deletedCount);
-    // Dual-read: prefer the renamed fields, fall back to the deprecated names for old docs.
-    const freeformDeletedCount = safeNonNegativeNumber(channel.freeformDeletedCount ?? channel.wordRestriction);
-    const followUpDeletedCount = safeNonNegativeNumber(channel.followUpDeletedCount ?? channel.dMRestriction);
+    const freeformDeletedCount = safeNonNegativeNumber(channel.freeformDeletedCount);
+    const followUpDeletedCount = safeNonNegativeNumber(channel.followUpDeletedCount);
     const participantsCount = safeNonNegativeNumber(channel.participantsCount);
     const contentHealth = classifyContentHealth(channel.messagePool, channel.hasEverExplored);
     const survivingMessages = successMsgCount + followupMsgSuccessCount;
@@ -7982,9 +8045,17 @@ function evaluateChannelPromotionHealth(input, options = {}) {
         };
     }
     if (!sendabilityPass) {
+        const reason = channel.broadcast === true
+            ? 'broadcast'
+            : channel.private === true
+                ? 'private'
+                : channel.forbidden === true
+                    ? 'forbidden'
+                    : channel.lastHydrationReason
+                        || (channel.canSendMsgs === false ? 'canSendMsgs_false' : 'canSendMsgs_missing');
         return {
             promotable: false,
-            reason: channel.lastHydrationReason || 'canSendMsgs_missing',
+            reason,
             score: 0,
             probeEligible: false,
             signals,
@@ -8103,15 +8174,6 @@ function getMissingCriticalFields(doc, fields) {
     return fields
         .filter((field) => doc[field] === undefined || doc[field] === null)
         .map((field) => String(field));
-}
-function hasLegacyBlockingStateWithoutLiveHydration(doc) {
-    if (!doc)
-        return true;
-    if (firstValidTimestamp(doc.lastHydratedAt, doc.lastLiveCheckedAt) !== null)
-        return false;
-    // A durable ban is never a hydration candidate. Only derived sendability may
-    // be refreshed from Telegram.
-    return doc.banned !== true && doc.canSendMsgs === false;
 }
 function canonicalRestrictionUpdate(reason, now) {
     return {
@@ -8460,9 +8522,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/telegram-utils/getParticipants */ "../../packages/tg-core/src/telegram-utils/getParticipants.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _telegram_channel__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./telegram-channel */ "../../packages/tg-channel-state/src/telegram-client/telegram-channel.ts");
-
+/* harmony import */ var _telegram_channel__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./telegram-channel */ "../../packages/tg-channel-state/src/telegram-client/telegram-channel.ts");
 
 
 
@@ -8472,15 +8532,12 @@ async function getChannelFromTg(client, channelId) {
         const channelEnt = channelId.startsWith("-")
             ? channelId
             : `-100${channelId}`;
-        let participantsCount = null;
-        // Check EntityCacheManager first, then fall back to client.getEntity
-        const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().get(channelId);
-        const entity = (cached ?? await client.getEntity(channelEnt));
-        if (!cached) {
-            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().put(channelId, entity);
-        }
-        participantsCount = await (0,_tg_core_telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_0__.getParticipantCount)(client, channelId, entity);
-        const liveFacts = await (0,_telegram_channel__WEBPACK_IMPORTED_MODULE_3__.getTelegramChannelLiveFacts)(client, {
+        // This function is called only for an explicit hydration decision.
+        // Do not use an entity-cache hit here: the whole point is to verify
+        // current Telegram accessibility before a promotion decision.
+        const entity = await client.getEntity(channelEnt);
+        const participantsCount = await (0,_tg_core_telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_0__.getParticipantCount)(client, channelId, entity);
+        const liveFacts = await (0,_telegram_channel__WEBPACK_IMPORTED_MODULE_2__.getTelegramChannelLiveFacts)(client, {
             channelId,
             entity,
             resolveParticipantsCount: () => participantsCount,
@@ -8496,6 +8553,9 @@ async function getChannelFromTg(client, channelId) {
             username: liveFacts.username || "",
             restricted: liveFacts.restricted === true,
             broadcast: liveFacts.broadcast === true,
+            left: liveFacts.left === true,
+            private: liveFacts.private === true,
+            forbidden: liveFacts.forbidden === true,
             sendMessages: liveFacts.sendMessages === true,
             sendPlain: liveFacts.sendPlain === true,
             canSendMsgs: liveFacts.canSendMsgs,
@@ -9368,7 +9428,6 @@ function toIso(value) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET),
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   BotConfig: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig),
 /* harmony export */   ChannelCategory: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory),
@@ -9384,12 +9443,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.SeededRandom),
 /* harmony export */   __resetTGConfigForTests: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.__resetTGConfigForTests),
 /* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.acceptPhoneCall),
+/* harmony export */   activeChannelCanSendUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.activeChannelCanSendUpdateExpression),
+/* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.activeChannelHydrationReasonUpdateExpression),
 /* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_33__.aggregateHealthStatus),
 /* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.analyzeText),
 /* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.attemptReverse),
 /* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.attemptReverseFuzzy),
 /* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.batchGetEntities),
 /* harmony export */   batchObfuscate: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_26__.batchObfuscate),
+/* harmony export */   buildActiveChannelUpsertPipeline: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_24__.buildActiveChannelUpsertPipeline),
 /* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_31__.checktghealth),
 /* harmony export */   cleanupMessageCache: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__.cleanupMessageCache),
 /* harmony export */   confirmPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_25__.confirmPhoneCall),
@@ -10641,8 +10703,10 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET: () => (/* binding */ ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET),
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* binding */ ACTIVE_CHANNEL_WRITABLE_KEYS),
+/* harmony export */   activeChannelCanSendUpdateExpression: () => (/* binding */ activeChannelCanSendUpdateExpression),
+/* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* binding */ activeChannelHydrationReasonUpdateExpression),
+/* harmony export */   buildActiveChannelUpsertPipeline: () => (/* binding */ buildActiveChannelUpsertPipeline),
 /* harmony export */   pickActiveChannelWrite: () => (/* binding */ pickActiveChannelWrite)
 /* harmony export */ });
 /**
@@ -10661,15 +10725,15 @@ const ACTIVE_CHANNEL_WRITABLE_KEYS = [
 ];
 /**
  * Legacy Telegram permission snapshots that used to be persisted independently.
- * Runtime writers remove these keys as documents are naturally refreshed; live
- * Telegram facts still contain them before being collapsed into canSendMsgs.
+ * They are observation-only inputs and must never be written by runtime code.
+ * Remove existing copies with the explicit, one-time schema migration; normal
+ * reads and writes intentionally leave old documents untouched.
  */
 const ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS = [
     'restricted',
     'sendMessages',
     'sendPlain',
 ];
-const ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET = Object.fromEntries(ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS.map((field) => [field, '']));
 const WRITABLE_KEY_SET = new Set(ACTIVE_CHANNEL_WRITABLE_KEYS);
 /**
  * Whitelist a would-be activeChannels write payload down to ONLY persisted keys, dropping any unknown
@@ -10687,6 +10751,46 @@ function pickActiveChannelWrite(data) {
         }
     }
     return out;
+}
+/**
+ * Mongo expression for a live sendability refresh. `banned` and `forbidden`
+ * are durable safety decisions, so an observed sendable dialog cannot make
+ * either document sendable again. This must run inside an update pipeline.
+ */
+function activeChannelCanSendUpdateExpression(liveCanSendMsgs) {
+    return {
+        $cond: [
+            { $or: [{ $eq: ['$banned', true] }, { $eq: ['$forbidden', true] }] },
+            false,
+            liveCanSendMsgs,
+        ],
+    };
+}
+/** Keep hydration diagnostics consistent with the persisted durable state. */
+function activeChannelHydrationReasonUpdateExpression(liveReason) {
+    return {
+        $switch: {
+            branches: [
+                { case: { $eq: ['$banned', true] }, then: 'banned' },
+                { case: { $eq: ['$forbidden', true] }, then: 'forbidden' },
+            ],
+            default: liveReason,
+        },
+    };
+}
+/**
+ * Converts a normal `$set` + `$setOnInsert` intent into an aggregation update
+ * pipeline. This is required whenever a write includes state-dependent Mongo
+ * expressions; normal update operators would persist those expression objects
+ * verbatim. The second stage supplies insert-only defaults without touching an
+ * existing value.
+ */
+function buildActiveChannelUpsertPipeline(setFields, setOnInsert) {
+    const defaults = {};
+    for (const [key, value] of Object.entries(setOnInsert)) {
+        defaults[key] = { $ifNull: [`$${key}`, value] };
+    }
+    return [{ $set: setFields }, { $set: defaults }];
 }
 
 
@@ -24457,6 +24561,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("dbservice");
+const PROMOTE_RUNTIME_CHANNEL_FLOOR = 230;
+const PROMOTE_RUNTIME_PHASE = 'session_rotated';
+/**
+ * Runtime selection is deliberately stricter than warmup progress: only
+ * accounts with the terminal lifecycle phase and the promotion channel floor
+ * can start a Telegram client. There is no legacy fallback.
+ */
+const getPromoteRuntimeEligibilityFilter = () => ({
+    status: 'active',
+    channels: { $gte: PROMOTE_RUNTIME_CHANNEL_FLOOR },
+    warmupPhase: PROMOTE_RUNTIME_PHASE,
+});
 class UserDataDtoCrud {
     constructor() {
         this.clients = {};
@@ -24711,25 +24827,30 @@ class UserDataDtoCrud {
                 if (doc.accessHash != null) {
                     setFields.accessHash = doc.accessHash;
                 }
-                // Collapse live Telegram permission bits into the canonical capability.
-                setFields.canSendMsgs = telegramCanSend;
+                // A bulk refresh sees only current Telegram facts; it must not
+                // overwrite a durable operator ban / forbidden safety stop already
+                // on the document. Keep this guard inside Mongo's atomic update so
+                // a concurrent operator ban wins over this refresh too.
+                setFields.canSendMsgs = (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.activeChannelCanSendUpdateExpression)(telegramCanSend);
                 const liveDoc = doc;
-                if (telegramCanSend) {
+                // `private` is a live Telegram fact. A freshly sendable
+                // dialog conclusively clears a stale private marker; a
+                // non-sendable source may explicitly assert it.
+                if (telegramCanSend)
                     setFields.private = false;
-                    setFields.forbidden = false;
-                }
-                else {
-                    if (typeof liveDoc.private === 'boolean')
-                        setFields.private = liveDoc.private;
+                else if (liveDoc.private === true)
+                    setFields.private = true;
+                if (!telegramCanSend) {
                     if (typeof liveDoc.forbidden === 'boolean')
                         setFields.forbidden = liveDoc.forbidden;
                 }
                 setFields.lastHydratedAt = Date.now();
                 setFields.lastLiveCheckedAt = Date.now();
                 setFields.lastHydrationStatus = 'success';
-                setFields.lastHydrationReason = telegramCanSend
+                const liveHydrationReason = telegramCanSend
                     ? 'live_sendable'
                     : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.evaluateChannelSendability)(doc).reason || 'live_unsendable';
+                setFields.lastHydrationReason = (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.activeChannelHydrationReasonUpdateExpression)(liveHydrationReason);
                 this.normalizeActiveChannelWrite(setFields);
                 const setOnInsert = {
                     channelId: this.normalizeChannelIdForDb(doc.channelId),
@@ -24744,11 +24865,9 @@ class UserDataDtoCrud {
                     forbidden: false,
                     reactRestricted: false,
                 };
-                // These fields go in $set with defaults to avoid $setOnInsert conflicts
-                if (!('private' in setFields))
-                    setFields.private = false;
-                if (!('forbidden' in setFields))
-                    setFields.forbidden = false;
+                // These fields default only on insert. A refresh can update
+                // `private` from verified Telegram facts but never clears
+                // an existing durable `forbidden` safety state.
                 if (!('reactRestricted' in setFields))
                     setFields.reactRestricted = false;
                 // Remove fields from $setOnInsert that are already in $set
@@ -24759,11 +24878,7 @@ class UserDataDtoCrud {
                 return {
                     updateOne: {
                         filter: { channelId: this.normalizeChannelIdForDb(doc.channelId) },
-                        update: {
-                            $set: setFields,
-                            $setOnInsert: setOnInsert,
-                            $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
-                        },
+                        update: (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.buildActiveChannelUpsertPipeline)(setFields, setOnInsert),
                         upsert: true,
                     },
                 };
@@ -24790,15 +24905,15 @@ class UserDataDtoCrud {
         if (data.banned === true || data.private === true || data.forbidden === true || data.broadcast === true) {
             data.canSendMsgs = false;
         }
-        else if (data.canSendMsgs === true) {
-            data.private = false;
-            data.forbidden = false;
-        }
         // Runtime refresh/hydration can never unban a globally disabled channel.
         if (data.banned === false)
             delete data.banned;
         if (data.banned !== true)
             delete data.bannedAt;
+        // `private` is refreshed from verified Telegram facts. `forbidden`
+        // remains durable: runtime may assert it but cannot clear it.
+        if (data.forbidden === false)
+            delete data.forbidden;
     }
     isUsableActiveChannelFilter(filter) {
         const channelId = typeof filter.channelId === 'string' ? filter.channelId.trim() : '';
@@ -24861,17 +24976,19 @@ class UserDataDtoCrud {
             const normalizedData = { ...data };
             delete normalizedData.channelId;
             this.normalizeActiveChannelWrite(normalizedData);
-            const setFields = { ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.pickActiveChannelWrite)(normalizedData), updatedAt: new Date() };
+            const setFields = {
+                ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.pickActiveChannelWrite)(normalizedData),
+                updatedAt: new Date(),
+            };
+            if (typeof setFields.canSendMsgs === 'boolean') {
+                setFields.canSendMsgs = (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.activeChannelCanSendUpdateExpression)(setFields.canSendMsgs);
+            }
             const setOnInsert = this.activeChannelSetOnInsert(String(normalizedFilter.channelId), Object.keys(setFields));
             // STRICT WRITE BOUNDARY: whitelist to canonical persisted keys ONLY. This was a naked
             // `{...normalizedData}` spread — the exact vector that leaked ~40 raw GramJS entity fields
             // (flags/defaultBannedRights/gigagroup/className/…) into ~1% of live docs. pickActiveChannelWrite
             // drops any key not in ACTIVE_CHANNEL_WRITABLE_KEYS, so an entity can never persist again.
-            const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, {
-                $set: setFields,
-                $setOnInsert: setOnInsert,
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
-            }, { upsert: true, returnDocument: 'after' });
+            const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.buildActiveChannelUpsertPipeline)(setFields, setOnInsert), { upsert: true, returnDocument: 'after' });
             return (result ?? null);
         }
         catch (error) {
@@ -24936,7 +25053,6 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, {
                 $inc: { deletedCount: increment },
                 $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ['deletedCount']),
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
             }, { upsert: true });
         }
         catch (error) {
@@ -24952,7 +25068,6 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, {
                 $inc: { successMsgCount: increment },
                 $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ['successMsgCount']),
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
             }, { upsert: true });
         }
         catch (error) {
@@ -24968,7 +25083,6 @@ class UserDataDtoCrud {
             const updateQuery = {
                 $inc: { failureMsgCount: increment },
                 $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ['failureMsgCount']),
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
             };
             if (message) {
                 updateQuery.$set = { message };
@@ -24988,7 +25102,6 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, {
                 $inc: { followupMsgSuccessCount: increment },
                 $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ['followupMsgSuccessCount']),
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
             }, { upsert: true });
         }
         catch (error) {
@@ -25004,7 +25117,6 @@ class UserDataDtoCrud {
             const updateQuery = {
                 $inc: { followupMsgFailureCount: increment },
                 $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ['followupMsgFailureCount']),
-                $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET,
             };
             if (message) {
                 updateQuery.$set = { message };
@@ -25021,7 +25133,7 @@ class UserDataDtoCrud {
             const normalizedFilter = this.normalizeFilterForDb(filter);
             if (!this.isUsableActiveChannelFilter(normalizedFilter))
                 return null;
-            return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: valueToRemove }, $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET });
+            return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: valueToRemove } });
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error removing from available messages");
@@ -25033,7 +25145,7 @@ class UserDataDtoCrud {
             const normalizedFilter = this.normalizeFilterForDb(filter);
             if (!this.isUsableActiveChannelFilter(normalizedFilter))
                 return null;
-            return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: valueToAdd }, $unset: _tg_core__WEBPACK_IMPORTED_MODULE_3__.ACTIVE_CHANNEL_LEGACY_PERMISSION_UNSET });
+            return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: valueToAdd } });
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error adding to available messages");
@@ -25390,9 +25502,8 @@ class UserDataDtoCrud {
                 ...filter,
                 clientId: process.env.clientId,
                 availableDate: { $lte: threeDaysLater },
-                channels: { $gte: 230 },
                 createdAt: { $lt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-                status: 'active'
+                ...getPromoteRuntimeEligibilityFilter(),
             };
             logger.info(`Getting available mobiles with filter: ${JSON.stringify(query, null, 2)} and currentDateStr: ${threeDaysLater}`);
             return await this.client
@@ -25407,6 +25518,7 @@ class UserDataDtoCrud {
                     lastUsed: 1,
                     clientId: 1,
                     status: 1,
+                    warmupPhase: 1,
                 },
             })
                 .sort({ availableDate: 1, lastUsed: 1, createdAt: 1, channels: -1 })
@@ -25424,8 +25536,7 @@ class UserDataDtoCrud {
                 {
                     $match: {
                         availableDate: { $lte: nextFiveDays },
-                        channels: { $gte: 150 },
-                        status: 'active'
+                        ...getPromoteRuntimeEligibilityFilter(),
                     }
                 },
                 {
@@ -25535,6 +25646,22 @@ class UserDataDtoCrud {
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error finding promote client");
+            return null;
+        }
+    }
+    async findRuntimePromoteClient(mobile) {
+        try {
+            return await this.client
+                .db("tgclients")
+                .collection('promoteClients')
+                .findOne({
+                mobile,
+                clientId: process.env.clientId,
+                ...getPromoteRuntimeEligibilityFilter(),
+            });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error finding runtime-eligible promote client");
             return null;
         }
     }
@@ -27791,9 +27918,9 @@ class MobileManager {
             }
             for (const mobile of mobiles) {
                 try {
-                    const promoteClient = await db.findPromoteClient({ mobile, clientId: process.env.clientId, status: 'active' });
+                    const promoteClient = await db.findRuntimePromoteClient(mobile);
                     if (!promoteClient) {
-                        throw new Error(`Active promote client doc missing for ${mobile}`);
+                        throw new Error(`Runtime-eligible promote client doc missing for ${mobile}`);
                     }
                     const clientDetails = {
                         clientId: client.clientId,
@@ -30147,11 +30274,18 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             logger.log(`[${this.mobile}] Retrying private channel via @${username}`);
             const finalText = (0,_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_10__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
             const validatedFinalText = this.assertSendablePromotionText(finalText);
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
-            if (sentMessage) {
+            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
+            // A verified username send is fresh evidence that this channel is
+            // reachable. Repair the stale private flag, but never let a
+            // best-effort persistence failure turn a completed Telegram send
+            // into a retry that could duplicate the message.
+            try {
                 await db.updateActiveChannel({ channelId: channelInfo.channelId }, { private: false, canSendMsgs: true });
             }
-            return sentMessage;
+            catch (persistError) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(persistError, `[${this.mobile}] Failed to persist private-channel recovery for ${channelInfo.channelId}`, false);
+            }
+            return sent;
         }
         catch (err) {
             if (this.isPromotionPreflightError(err))
@@ -30346,7 +30480,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             }
             if (finalActions.includes('increment_DM_restriction')) {
                 try {
-                    await db.updateActiveChannel({ channelId }, { followUpDeletedCount: ((channelInfo.followUpDeletedCount ?? channelInfo.dMRestriction) || 0) + 1 });
+                    await db.updateActiveChannel({ channelId }, { followUpDeletedCount: (channelInfo.followUpDeletedCount || 0) + 1 });
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Failed to increment followUpDeleted count for ${channelId}`, false);
@@ -30354,7 +30488,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             }
             if (finalActions.includes('increment_word_restriction')) {
                 try {
-                    await db.updateActiveChannel({ channelId }, { freeformDeletedCount: ((channelInfo.freeformDeletedCount ?? channelInfo.wordRestriction) || 0) + 1 });
+                    await db.updateActiveChannel({ channelId }, { freeformDeletedCount: (channelInfo.freeformDeletedCount || 0) + 1 });
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Failed to increment freeformDeleted count for ${channelId}`, false);
@@ -30498,8 +30632,8 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             messageId: existing?.messageId ?? null,
             messageIndex: existing?.messageIndex ?? null,
             availableMsgs: existing?.availableMsgs ?? _core_utils__WEBPACK_IMPORTED_MODULE_4__.defaultMessages,
-            freeformDeletedCount: existing?.freeformDeletedCount ?? existing?.wordRestriction ?? 0,
-            followUpDeletedCount: existing?.followUpDeletedCount ?? existing?.dMRestriction ?? 0,
+            freeformDeletedCount: existing?.freeformDeletedCount ?? 0,
+            followUpDeletedCount: existing?.followUpDeletedCount ?? 0,
             banned: hydrated.patch.banned === true,
             forbidden: hydrated.patch.forbidden === true,
             successMsgCount: existing?.successMsgCount ?? 0,
