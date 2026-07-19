@@ -10770,7 +10770,8 @@ async function createBot(ctx, options) {
         ctx.logger.info(ctx.phoneNumber, '[BOT CREATION] Successfully connected to BotFather');
         const waitForBotFatherReply = async (afterId, timeoutMs = 15000) => {
             const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
+            const maxAttempts = Math.max(1, Math.ceil(timeoutMs / 1000));
+            for (let attempt = 0; attempt < maxAttempts && Date.now() < deadline; attempt++) {
                 await (0, Helpers_1.sleep)(1000);
                 const msgs = await client.getMessages(entity, { limit: 5 });
                 const reply = (msgs || [])
@@ -35706,8 +35707,10 @@ let ClientRegistry = ClientRegistry_1 = class ClientRegistry {
         this.LOCK_TIMEOUT = 30000;
         this.LOCK_EXPIRY = 120000;
         this.CLIENT_TIMEOUT = 300000;
-        setInterval(() => this.cleanupInactiveClients(), 60000);
-        setInterval(() => this.cleanupExpiredLocks(), 30000);
+        this.inactiveClientCleanupInterval = setInterval(() => void this.cleanupInactiveClients(), 60000);
+        this.expiredLockCleanupInterval = setInterval(() => this.cleanupExpiredLocks(), 30000);
+        this.inactiveClientCleanupInterval.unref?.();
+        this.expiredLockCleanupInterval.unref?.();
     }
     static getInstance() {
         if (!ClientRegistry_1.instance) {
@@ -43099,6 +43102,14 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'videos' }),
     __metadata("design:type", Array)
 ], CreateUserDataDto.prototype, "videos", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Canonical common-channel IDs used for promotion attribution', default: [] }),
+    __metadata("design:type", Array)
+], CreateUserDataDto.prototype, "attributionChannelIds", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Unix timestamp of the latest attribution lookup', default: 0 }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "attributionUpdatedAt", void 0);
 
 
 /***/ },
@@ -43223,6 +43234,14 @@ __decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'Number of demo pictures sent', type: Number }),
     __metadata("design:type", Number)
 ], SearchDto.prototype, "picsSent", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Canonical common-channel IDs used for promotion attribution', type: [String] }),
+    __metadata("design:type", Array)
+], SearchDto.prototype, "attributionChannelIds", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Unix timestamp of the latest attribution lookup', type: Number }),
+    __metadata("design:type", Number)
+], SearchDto.prototype, "attributionUpdatedAt", void 0);
 
 
 /***/ },
@@ -43409,6 +43428,14 @@ __decorate([
     (0, mongoose_1.Prop)({ type: [String], required: true, default: [] }),
     __metadata("design:type", Array)
 ], UserData.prototype, "videos", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: [String], required: true, default: [] }),
+    __metadata("design:type", Array)
+], UserData.prototype, "attributionChannelIds", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
+    __metadata("design:type", Number)
+], UserData.prototype, "attributionUpdatedAt", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ required: false }),
     __metadata("design:type", Date)
@@ -48705,14 +48732,22 @@ function setProcessListeners(onShutdown) {
         console.log(`⚡ ${signal} received, shutting down...`);
         const cleanup = onShutdown ?? shutdownHandler;
         if (cleanup) {
+            let shutdownTimeout;
             try {
+                const timeout = new Promise((resolve) => {
+                    shutdownTimeout = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+                });
                 await Promise.race([
                     cleanup(),
-                    new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+                    timeout,
                 ]);
             }
             catch (err) {
                 console.error('❌ Error during graceful shutdown:', err);
+            }
+            finally {
+                if (shutdownTimeout)
+                    clearTimeout(shutdownTimeout);
             }
         }
         process.exit(0);
