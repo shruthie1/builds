@@ -380,6 +380,7 @@ const https = __importStar(__webpack_require__(/*! https */ "https"));
 const url_1 = __webpack_require__(/*! url */ "url");
 const utils_1 = __webpack_require__(/*! ./utils */ "./src/utils/index.ts");
 const client_service_1 = __webpack_require__(/*! ./components/clients/client.service */ "./src/components/clients/client.service.ts");
+const setup_client_dto_1 = __webpack_require__(/*! ./components/clients/dto/setup-client.dto */ "./src/components/clients/dto/setup-client.dto.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const cloudflare_cache_interceptor_1 = __webpack_require__(/*! ./interceptors/cloudflare-cache.interceptor */ "./src/interceptors/cloudflare-cache.interceptor.ts");
 const no_cache_decorator_1 = __webpack_require__(/*! ./decorators/no-cache.decorator */ "./src/decorators/no-cache.decorator.ts");
@@ -742,7 +743,7 @@ __decorate([
     __param(0, (0, common_1.Param)('clientId')),
     __param(1, (0, common_1.Query)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:paramtypes", [String, setup_client_dto_1.SetupClientQueryDto]),
     __metadata("design:returntype", Promise)
 ], AppController.prototype, "setupClient", null);
 __decorate([
@@ -1156,7 +1157,6 @@ exports.AppModule = AppModule = __decorate([
             transaction_module_1.TransactionModule,
             timestamp_module_1.TimestampModule,
             dynamic_data_module_1.DynamicDataModule,
-            event_manager_module_1.EventManagerModule,
             collection_insights_module_1.CollectionInsightsModule,
             file_module_1.FileModule.register(),
         ],
@@ -5384,11 +5384,7 @@ let TelegramService = TelegramService_1 = class TelegramService {
                         title: liveFacts.title || "",
                         broadcast: liveFacts.broadcast === true,
                         megagroup: liveFacts.megagroup === true,
-                        restricted: liveFacts.restricted === true,
-                        sendMessages: liveFacts.sendMessages === true,
-                        sendPlain: liveFacts.sendPlain === true,
                         username: liveFacts.username || "",
-                        forbidden: false
                     });
                 }
             }
@@ -15873,7 +15869,7 @@ __decorate([
     (0, swagger_1.ApiQuery)({ name: 'sortBy', required: false, type: String }),
     (0, swagger_1.ApiQuery)({ name: 'sortOrder', required: false, type: String }),
     (0, swagger_1.ApiQuery)({ name: 'search', required: false, type: String }),
-    (0, swagger_1.ApiQuery)({ name: 'filter', required: false, type: String, description: 'all | can_send | restricted | banned | with_errors | exhausted | high_deleted' }),
+    (0, swagger_1.ApiQuery)({ name: 'filter', required: false, type: String, description: 'all | can_send | unsendable | banned | exhausted | high_deleted' }),
     __param(0, (0, common_1.Query)('page')),
     __param(1, (0, common_1.Query)('limit')),
     __param(2, (0, common_1.Query)('sortBy')),
@@ -15891,12 +15887,8 @@ __decorate([
     (0, swagger_1.ApiQuery)({ name: 'broadcast', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'canSendMsgs', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'participantsCount', required: false, type: Number }),
-    (0, swagger_1.ApiQuery)({ name: 'restricted', required: false, type: Boolean }),
-    (0, swagger_1.ApiQuery)({ name: 'sendMessages', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'title', required: false, type: String }),
     (0, swagger_1.ApiQuery)({ name: 'username', required: false, type: String }),
-    (0, swagger_1.ApiQuery)({ name: 'wordRestriction', required: false, type: Number }),
-    (0, swagger_1.ApiQuery)({ name: 'dMRestriction', required: false, type: Number }),
     (0, swagger_1.ApiQuery)({ name: 'availableMsgs', required: false, type: [String] }),
     (0, swagger_1.ApiQuery)({ name: 'banned', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'reactRestricted', required: false, type: Boolean }),
@@ -16020,6 +16012,7 @@ const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout 
 const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
+const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
 let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsService {
     constructor(activeChannelModel, promoteMsgsService) {
         this.activeChannelModel = activeChannelModel;
@@ -16028,6 +16021,16 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
         this.DEFAULT_SKIP = 0;
         this.MIN_PARTICIPANTS_COUNT = 600;
         this.logger = new common_1.Logger(ActiveChannelsService_1.name);
+        this.writableFields = new Set([
+            'title', 'username', 'participantsCount', 'accessHash', 'broadcast',
+            'canSendMsgs', 'megagroup', 'availableMsgs', 'banned', 'bannedAt',
+            'forbidden', 'private', 'reactRestricted', 'reactRestrictedAt',
+            'clientsJoined', 'lastHydrationReason', 'lastHydrationStatus',
+            'lastHydratedAt', 'lastLiveCheckedAt', 'lastMessageTime', 'messageIndex',
+            'messageId', 'deletedCount', 'successMsgCount', 'failureMsgCount',
+            'followupMsgSuccessCount', 'followupMsgFailureCount',
+            'freeformDeletedCount', 'followUpDeletedCount', 'message',
+        ]);
         this.REACT_RESTRICTED_HEAL_MS = 3 * 24 * 60 * 60 * 1000;
     }
     async autoHealChannels() {
@@ -16071,48 +16074,42 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     'title',
                     'username',
                     'participantsCount',
+                    'accessHash',
                     'megagroup',
                     'broadcast',
                     'canSendMsgs',
-                    'restricted',
-                    'sendMessages',
-                    'sendPlain',
-                    'private',
-                    'forbidden',
-                    'banned',
-                    'bannedAt',
                     'reactRestricted',
-                    'wordRestriction',
-                    'dMRestriction',
+                    'lastHydrationReason',
+                    'lastHydrationStatus',
+                    'lastHydratedAt',
+                    'lastLiveCheckedAt',
                 ]);
+                if (typeof dto.private === 'boolean')
+                    setFields.private = dto.private;
+                if (dto.forbidden === true)
+                    setFields.forbidden = true;
                 const defaults = {
                     channelId: dto.channelId,
+                    title: '',
+                    username: '',
                     broadcast: false,
                     canSendMsgs: false,
                     participantsCount: 0,
-                    restricted: false,
-                    sendMessages: false,
-                    sendPlain: false,
                     reactRestricted: false,
-                    wordRestriction: 0,
-                    dMRestriction: 0,
+                    freeformDeletedCount: 0,
+                    followUpDeletedCount: 0,
                     availableMsgs: [],
-                    banned: false,
-                    bannedAt: null,
+                    banned: dto.banned === true,
+                    bannedAt: dto.banned === true ? (dto.bannedAt ?? Date.now()) : null,
                     megagroup: true,
                     private: false,
+                    forbidden: false,
                     createdAt: new Date(),
                 };
-                for (const key of Object.keys(setFields)) {
-                    delete defaults[key];
-                }
                 return {
                     updateOne: {
                         filter: { channelId: dto.channelId },
-                        update: {
-                            $set: setFields,
-                            $setOnInsert: defaults,
-                        },
+                        update: (0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto),
                         upsert: true,
                     },
                 };
@@ -16156,12 +16153,34 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             if (!channelId) {
                 throw new common_1.BadRequestException('Channel ID is required');
             }
-            const cleanDto = Object.fromEntries(Object.entries(updateActiveChannelDto).filter(([_, value]) => value !== undefined));
+            const cleanDto = Object.fromEntries(Object.entries(updateActiveChannelDto).filter(([key, value]) => value !== undefined && this.writableFields.has(key)));
             if (Object.keys(cleanDto).length === 0) {
                 throw new common_1.BadRequestException('At least one field to update is required');
             }
+            const existing = await this.activeChannelModel.findOne({ channelId }).lean().exec();
+            if (cleanDto.banned === true) {
+                cleanDto.bannedAt = cleanDto.bannedAt ?? Date.now();
+                cleanDto.canSendMsgs = false;
+            }
+            else if (cleanDto.banned === false) {
+                cleanDto.bannedAt = null;
+                cleanDto.canSendMsgs = false;
+                cleanDto.lastHydrationStatus = 'needs_hydration';
+                cleanDto.lastHydrationReason = 'operator_unbanned';
+            }
+            else if ((existing?.banned === true || existing?.forbidden === true)
+                && cleanDto.canSendMsgs === true) {
+                cleanDto.canSendMsgs = false;
+            }
+            if (cleanDto.private === true || cleanDto.forbidden === true || cleanDto.broadcast === true) {
+                cleanDto.canSendMsgs = false;
+            }
+            if (existing?.forbidden === true && cleanDto.forbidden === false)
+                delete cleanDto.forbidden;
             const updatedChannel = await this.activeChannelModel
-                .findOneAndUpdate({ channelId }, { $set: { ...cleanDto, updatedAt: new Date() } }, { new: true, upsert: true, lean: true })
+                .findOneAndUpdate({ channelId }, {
+                $set: { ...cleanDto, updatedAt: new Date() },
+            }, { new: true, upsert: true, lean: true })
                 .exec();
             return updatedChannel;
         }
@@ -16215,7 +16234,8 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             if (!filter || Object.keys(filter).length === 0) {
                 throw new common_1.BadRequestException('Search filter is required');
             }
-            for (const [key, value] of Object.entries(filter)) {
+            const normalizedFilter = { ...filter };
+            for (const [key, value] of Object.entries(normalizedFilter)) {
                 if (key.startsWith('$')) {
                     throw new common_1.BadRequestException(`Invalid search field: ${key}`);
                 }
@@ -16223,7 +16243,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     throw new common_1.BadRequestException(`Invalid search value for field: ${key}`);
                 }
             }
-            return await this.activeChannelModel.find(filter).lean().exec();
+            return await this.activeChannelModel.find(normalizedFilter).lean().exec();
         }
         catch (error) {
             throw this.handleError(error, 'Failed to search channels');
@@ -16263,10 +16283,10 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                         participantsCount: { $gt: this.MIN_PARTICIPANTS_COUNT },
                         username: { $ne: null },
                         canSendMsgs: true,
-                        restricted: { $ne: true },
                         banned: { $ne: true },
                         forbidden: { $ne: true },
                         private: { $ne: true },
+                        broadcast: { $ne: true },
                     },
                 ],
             };
@@ -16322,7 +16342,17 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                                 _id: null,
                                 total: { $sum: 1 },
                                 canSend: { $sum: { $cond: [{ $eq: ['$canSendMsgs', true] }, 1, 0] } },
-                                restricted: { $sum: { $cond: [{ $eq: ['$restricted', true] }, 1, 0] } },
+                                unsendable: { $sum: { $cond: [
+                                            { $and: [
+                                                    { $ne: ['$canSendMsgs', true] },
+                                                    { $ne: ['$banned', true] },
+                                                    { $ne: ['$forbidden', true] },
+                                                    { $ne: ['$private', true] },
+                                                    { $ne: ['$broadcast', true] },
+                                                ] },
+                                            1,
+                                            0,
+                                        ] } },
                                 banned: { $sum: { $cond: [{ $eq: ['$banned', true] }, 1, 0] } },
                                 forbidden: { $sum: { $cond: [{ $eq: ['$forbidden', true] }, 1, 0] } },
                                 reactRestricted: { $sum: { $cond: [{ $eq: ['$reactRestricted', true] }, 1, 0] } },
@@ -16367,10 +16397,10 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                         {
                             $group: {
                                 _id: null,
-                                wordRestricted: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$wordRestriction', 0] }, 0] }, 1, 0] } },
-                                dmRestricted: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$dMRestriction', 0] }, 0] }, 1, 0] } },
-                                totalWordRestrictions: { $sum: { $ifNull: ['$wordRestriction', 0] } },
-                                totalDmRestrictions: { $sum: { $ifNull: ['$dMRestriction', 0] } },
+                                freeformDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$freeformDeletedCount', 0] }, 0] }, 1, 0] } },
+                                followUpDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$followUpDeletedCount', 0] }, 0] }, 1, 0] } },
+                                totalFreeformDeletions: { $sum: { $ifNull: ['$freeformDeletedCount', 0] } },
+                                totalFollowUpDeletions: { $sum: { $ifNull: ['$followUpDeletedCount', 0] } },
                             },
                         },
                     ],
@@ -16384,12 +16414,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                                 totalPromos: { $sum: { $size: { $ifNull: ['$availableMsgs', []] } } },
                             },
                         },
-                    ],
-                    errorBreakdown: [
-                        { $match: { lastErrorType: { $ne: null, $exists: true } } },
-                        { $group: { _id: '$lastErrorType', count: { $sum: 1 } } },
-                        { $sort: { count: -1 } },
-                        { $limit: 15 },
                     ],
                     successRateDist: [
                         {
@@ -16428,7 +16452,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                         { $match: { failureMsgCount: { $gt: 0 } } },
                         { $sort: { failureMsgCount: -1 } },
                         { $limit: 10 },
-                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, successMsgCount: 1, failureMsgCount: 1, lastErrorType: 1 } },
+                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, successMsgCount: 1, failureMsgCount: 1 } },
                     ],
                     topByDeleted: [
                         { $match: { deletedCount: { $gt: 0 } } },
@@ -16454,7 +16478,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             overview: {
                 total: overview.total || 0,
                 canSend: overview.canSend || 0,
-                restricted: overview.restricted || 0,
+                unsendable: overview.unsendable || 0,
                 banned: overview.banned || 0,
                 forbidden: overview.forbidden || 0,
                 reactRestricted: overview.reactRestricted || 0,
@@ -16485,10 +16509,10 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 below600: partStats.below600 || 0,
             },
             restrictions: {
-                wordRestricted: restrictStats.wordRestricted || 0,
-                dmRestricted: restrictStats.dmRestricted || 0,
-                totalWordRestrictions: restrictStats.totalWordRestrictions || 0,
-                totalDmRestrictions: restrictStats.totalDmRestrictions || 0,
+                freeformDeletionChannels: restrictStats.freeformDeletionChannels || 0,
+                followUpDeletionChannels: restrictStats.followUpDeletionChannels || 0,
+                totalFreeformDeletions: restrictStats.totalFreeformDeletions || 0,
+                totalFollowUpDeletions: restrictStats.totalFollowUpDeletions || 0,
             },
             promos: {
                 withPromos: promoCov.withPromos || 0,
@@ -16496,10 +16520,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 avgPromoCount: Math.round((promoCov.avgPromoCount || 0) * 10) / 10,
                 totalPromos: promoCov.totalPromos || 0,
             },
-            errorBreakdown: (result.errorBreakdown || []).map((e) => ({
-                error: e._id,
-                count: e.count,
-            })),
             successRateDistribution: (result.successRateDist || []).map((b) => ({
                 range: b._id === 'other' ? 'other' : `${b._id}-${b._id + 20}%`,
                 count: b.count,
@@ -16518,17 +16538,20 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
         const query = {};
         if (filter === 'can_send') {
             query.canSendMsgs = true;
-            query.restricted = { $ne: true };
             query.banned = { $ne: true };
             query.forbidden = { $ne: true };
+            query.private = { $ne: true };
+            query.broadcast = { $ne: true };
         }
-        else if (filter === 'restricted')
-            query.restricted = true;
         else if (filter === 'banned') {
             query.$or = [{ banned: true }, { forbidden: true }];
         }
-        else if (filter === 'with_errors') {
-            query.lastErrorType = { $ne: null, $exists: true };
+        else if (filter === 'unsendable') {
+            query.canSendMsgs = { $ne: true };
+            query.banned = { $ne: true };
+            query.forbidden = { $ne: true };
+            query.private = { $ne: true };
+            query.broadcast = { $ne: true };
         }
         else if (filter === 'exhausted') {
             query.$expr = { $eq: [{ $size: { $ifNull: ['$availableMsgs', []] } }, 0] };
@@ -16588,13 +16611,13 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             throw this.handleError(error, 'Failed to execute query');
         }
     }
-    async resetWordRestrictions() {
+    async resetMessageDeletionCounters() {
         try {
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: reset word restrictions`)}`);
-            await this.activeChannelModel.updateMany({ banned: false }, { $set: { wordRestriction: 0, dMRestriction: 0, updatedAt: new Date() } });
+            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: reset message deletion counters`)}`);
+            await this.activeChannelModel.updateMany({ banned: false }, { $set: { freeformDeletedCount: 0, followUpDeletedCount: 0, updatedAt: new Date() } });
         }
         catch (error) {
-            throw this.handleError(error, 'Failed to reset word restrictions');
+            throw this.handleError(error, 'Failed to reset message deletion counters');
         }
     }
     async resetAvailableMsgs() {
@@ -16607,8 +16630,8 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 },
             }, {
                 $set: {
-                    wordRestriction: 0,
-                    dMRestriction: 0,
+                    freeformDeletedCount: 0,
+                    followUpDeletedCount: 0,
                     availableMsgs,
                     updatedAt: new Date(),
                 },
@@ -16623,8 +16646,8 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: update banned channels`)}`);
             await this.activeChannelModel.updateMany({ $or: [{ banned: true }, { private: true }] }, {
                 $set: {
-                    wordRestriction: 0,
-                    dMRestriction: 0,
+                    freeformDeletedCount: 0,
+                    followUpDeletedCount: 0,
                     updatedAt: new Date(),
                 },
             });
@@ -16686,10 +16709,7 @@ exports.CreateActiveChannelDto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 class CreateActiveChannelDto {
     constructor() {
-        this.sendPlain = false;
         this.reactRestricted = false;
-        this.wordRestriction = 0;
-        this.dMRestriction = 0;
         this.banned = false;
         this.bannedAt = null;
         this.private = false;
@@ -16715,18 +16735,6 @@ __decorate([
 __decorate([
     (0, swagger_1.ApiProperty)({ default: false }),
     __metadata("design:type", Boolean)
-], CreateActiveChannelDto.prototype, "restricted", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    __metadata("design:type", Boolean)
-], CreateActiveChannelDto.prototype, "sendMessages", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    __metadata("design:type", Boolean)
-], CreateActiveChannelDto.prototype, "sendPlain", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    __metadata("design:type", Boolean)
 ], CreateActiveChannelDto.prototype, "reactRestricted", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)(),
@@ -16736,14 +16744,6 @@ __decorate([
     (0, swagger_1.ApiProperty)(),
     __metadata("design:type", String)
 ], CreateActiveChannelDto.prototype, "username", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "wordRestriction", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "dMRestriction", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ type: [String] }),
     __metadata("design:type", Array)
@@ -16761,6 +16761,10 @@ __decorate([
     __metadata("design:type", Boolean)
 ], CreateActiveChannelDto.prototype, "megagroup", void 0);
 __decorate([
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    __metadata("design:type", String)
+], CreateActiveChannelDto.prototype, "accessHash", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ default: false, required: false }),
     __metadata("design:type", Boolean)
 ], CreateActiveChannelDto.prototype, "forbidden", void 0);
@@ -16771,6 +16775,66 @@ __decorate([
     }),
     __metadata("design:type", Boolean)
 ], CreateActiveChannelDto.prototype, "private", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    __metadata("design:type", String)
+], CreateActiveChannelDto.prototype, "lastHydrationReason", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    __metadata("design:type", String)
+], CreateActiveChannelDto.prototype, "lastHydrationStatus", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "lastHydratedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "lastLiveCheckedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "successMsgCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "failureMsgCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "followupMsgSuccessCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "followupMsgFailureCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "deletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "freeformDeletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "followUpDeletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "lastMessageTime", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: String, default: null }),
+    __metadata("design:type", String)
+], CreateActiveChannelDto.prototype, "messageIndex", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    __metadata("design:type", Number)
+], CreateActiveChannelDto.prototype, "messageId", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: String }),
+    __metadata("design:type", String)
+], CreateActiveChannelDto.prototype, "message", void 0);
 
 
 /***/ },
@@ -16904,22 +16968,7 @@ __decorate([
     (0, swagger_1.ApiProperty)({ default: false }),
     (0, mongoose_1.Prop)({ default: false }),
     __metadata("design:type", Boolean)
-], ActiveChannel.prototype, "restricted", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
 ], ActiveChannel.prototype, "broadcast", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], ActiveChannel.prototype, "sendMessages", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], ActiveChannel.prototype, "sendPlain", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ default: false }),
     (0, mongoose_1.Prop)({ default: false }),
@@ -16931,15 +16980,10 @@ __decorate([
     __metadata("design:type", Boolean)
 ], ActiveChannel.prototype, "megagroup", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "wordRestriction", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "dMRestriction", void 0);
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    (0, mongoose_1.Prop)({ type: String, default: null }),
+    __metadata("design:type", String)
+], ActiveChannel.prototype, "accessHash", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ type: [String], default: utils_1.defaultMessages }),
     (0, mongoose_1.Prop)({ type: [String], default: utils_1.defaultMessages }),
@@ -16981,14 +17025,34 @@ __decorate([
     __metadata("design:type", Boolean)
 ], ActiveChannel.prototype, "private", void 0);
 __decorate([
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    (0, mongoose_1.Prop)({ default: null }),
+    __metadata("design:type", String)
+], ActiveChannel.prototype, "lastHydrationReason", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, default: null }),
+    (0, mongoose_1.Prop)({ default: null }),
+    __metadata("design:type", String)
+], ActiveChannel.prototype, "lastHydrationStatus", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    (0, mongoose_1.Prop)({ type: Number, default: null }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "lastHydratedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
+    (0, mongoose_1.Prop)({ type: Number, default: null }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "lastLiveCheckedAt", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ type: Number, default: null }),
     (0, mongoose_1.Prop)({ type: Number, default: null }),
     __metadata("design:type", Number)
 ], ActiveChannel.prototype, "lastMessageTime", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: null }),
-    (0, mongoose_1.Prop)({ type: Number, default: null }),
-    __metadata("design:type", Number)
+    (0, swagger_1.ApiProperty)({ type: String, default: null }),
+    (0, mongoose_1.Prop)({ type: String, default: null }),
+    __metadata("design:type", String)
 ], ActiveChannel.prototype, "messageIndex", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ type: Number, default: null }),
@@ -17000,6 +17064,41 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, default: 0 }),
     __metadata("design:type", Number)
 ], ActiveChannel.prototype, "deletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "successMsgCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "failureMsgCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "followupMsgSuccessCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "followupMsgFailureCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, required: false }),
+    (0, mongoose_1.Prop)({ type: Number }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "freeformDeletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: Number, required: false }),
+    (0, mongoose_1.Prop)({ type: Number }),
+    __metadata("design:type", Number)
+], ActiveChannel.prototype, "followUpDeletedCount", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ type: String, required: false }),
+    (0, mongoose_1.Prop)({ type: String }),
+    __metadata("design:type", String)
+], ActiveChannel.prototype, "message", void 0);
 exports.ActiveChannel = ActiveChannel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'activeChannels',
@@ -20071,14 +20170,14 @@ let BufferClientController = BufferClientController_1 = class BufferClientContro
         return 'initiated Checking';
     }
     async refreshBufferSessions(body = {}) {
-        const mobile = typeof body?.mobile === 'string' && body.mobile.trim() ? body.mobile.trim() : undefined;
-        if (body?.apply !== true) {
-            return this.clientService.updateAllClientSessions({ dryRun: true, mobile });
+        if (body?.apply === true) {
+            throw new common_1.BadRequestException('Bulk session refresh is disabled. Only the strict READY rotation scheduler may create a backup session.');
         }
-        this.clientService.updateAllClientSessions({ dryRun: false, mobile }).catch((error) => {
-            console.error('Error refreshing buffer client sessions:', error);
-        });
-        return { initiated: true, dryRun: false, mobile: mobile || null };
+        return {
+            dryRun: true,
+            disabled: true,
+            reason: 'Bulk session refresh is disabled; session_rotated accounts must never be rotated again.',
+        };
     }
     async diagnoseWarmup() {
         return this.clientService.diagnoseWarmupPipeline();
@@ -20221,8 +20320,8 @@ __decorate([
 __decorate([
     (0, common_1.Post)('sessions/refresh'),
     (0, swagger_1.ApiOperation)({
-        summary: 'Refresh buffer client sessions explicitly',
-        description: 'Dry-runs by default. Pass apply=true to start session rotation for ready/session_rotated buffer clients.',
+        summary: 'Retired unsafe bulk session-refresh endpoint',
+        description: 'Bulk session creation is disabled. Session rotation is owned exclusively by the strict READY scheduler.',
     }),
     (0, swagger_1.ApiBody)({
         schema: {
@@ -20624,10 +20723,44 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     isPrimaryClientMobile(mobile, primaryClientMobiles) {
         return !!mobile && primaryClientMobiles.has(mobile);
     }
+    async findPrioritizedJoinCandidates(query) {
+        const limit = this.config.maxMapSize;
+        const operationalFloor = this.config.operationalChannelThreshold ?? 200;
+        const recoveryQuery = {
+            ...query,
+            warmupPhase: { $in: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+            channels: { $lt: operationalFloor },
+        };
+        const recoveryQueryResult = this.bufferClientModel
+            .find(recoveryQuery)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
+        if (recoveryCandidates.length >= limit)
+            return recoveryCandidates;
+        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
+        const standardQueryResult = this.bufferClientModel
+            .find(query)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
+        return [
+            ...recoveryCandidates,
+            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
+        ].slice(0, limit);
+    }
+    async resolveJoinCandidateQuery(query) {
+        const executable = query;
+        return typeof executable.exec === 'function'
+            ? executable.exec()
+            : Promise.resolve(query);
+    }
     isHealthyBufferClientForCap(doc, now) {
-        const phase = doc.warmupPhase || this.inferWarmupPhaseFromProgress(doc);
+        const phase = doc.warmupPhase;
+        if (!phase)
+            return false;
         if (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-            return true;
+            return (doc.channels || 0) >= (this.config.operationalChannelThreshold ?? 200);
         }
         const failedAttempts = doc.failedUpdateAttempts || 0;
         if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
@@ -20663,6 +20796,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             clientProcessingDelay: 10000,
             maxChannelJoinsPerDay: 25,
             joinsPerMobilePerRound: 4,
+            operationalChannelThreshold: 200,
         };
     }
     async updateNameAndBio(doc, client, failedAttempts) {
@@ -20907,6 +21041,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 mobile: canonicalMobile,
                 ...(session ? { session } : {}),
                 status,
+                warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
+                warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
+                enrolledAt: new Date(),
+                sessionRotatedAt: null,
             };
             return this.bufferClientModel.create({ ...createData });
         });
@@ -21054,9 +21192,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             throw error;
         }
     }
-    async setPrimaryInUse(clientId, mobile) {
+    async setPrimaryInUse(clientId, mobile, session) {
         const now = new Date();
-        const exists = await this.bufferClientModel.exists({ mobile, clientId });
+        const existsQuery = this.bufferClientModel.exists({ mobile, clientId });
+        if (session)
+            existsQuery.session(session);
+        const exists = await existsQuery;
         if (!exists) {
             throw new common_1.NotFoundException(`Primary buffer client ${mobile} for ${clientId} not found`);
         }
@@ -21069,19 +21210,20 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 inUse: false,
                 lastUsed: now,
             },
-        }).exec();
+        }, session ? { session } : undefined).exec();
         if ((revoked.modifiedCount || 0) > 0) {
             this.logger.info(`Revoked stale in-use buffer ownership for ${clientId}`, {
                 keepMobile: mobile,
                 revokedCount: revoked.modifiedCount,
             });
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-                '<b>Buffer Primary Reassigned</b>',
-                '',
-                `<b>Client ID:</b> ${clientId}`,
-                `<b>Primary Mobile:</b> ${mobile}`,
-                `<b>Revoked In-Use:</b> ${revoked.modifiedCount}`,
-            ].join('\n'), { parseMode: 'HTML' });
+            if (!session)
+                await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
+                    '<b>Buffer Primary Reassigned</b>',
+                    '',
+                    `<b>Client ID:</b> ${clientId}`,
+                    `<b>Primary Mobile:</b> ${mobile}`,
+                    `<b>Revoked In-Use:</b> ${revoked.modifiedCount}`,
+                ].join('\n'), { parseMode: 'HTML' });
         }
         const updatedBufferClient = await this.bufferClientModel
             .findOneAndUpdate({ mobile, clientId }, {
@@ -21090,7 +21232,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 status: 'active',
                 lastUsed: now,
             },
-        }, { new: true, returnDocument: 'after' })
+        }, { new: true, returnDocument: 'after', ...(session ? { session } : {}) })
             .exec();
         if (!updatedBufferClient) {
             throw new common_1.NotFoundException(`Primary buffer client ${mobile} for ${clientId} not found`);
@@ -21115,7 +21257,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             status: 'active',
             channels: { $lt: this.config.channelTarget },
             mobile: { $nin: Array.from(excludedMobiles) },
-            warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+            ...this.getJoinCapacityEligibilityFilter(),
         };
         if (clientId)
             query.clientId = clientId;
@@ -21123,11 +21265,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             clientId: clientId || 'all',
             excludedCount: excludedMobiles.size,
         });
-        const eligible = await this.bufferClientModel
-            .find(query)
-            .sort({ channels: -1 })
-            .limit(this.config.maxMapSize)
-            .exec();
+        const eligible = await this.findPrioritizedJoinCandidates(query);
         let added = 0;
         let leaveAdded = 0;
         for (const doc of eligible) {
@@ -21553,6 +21691,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 status: 'active',
                 inUse: { $ne: true },
                 warmupPhase: base_client_service_1.WarmupPhase.READY,
+                ...this.getOperationalChannelEligibilityFilter(),
             })
                 .sort({ lastUpdateAttempt: 1, mobile: 1 })
                 .exec();
@@ -21580,7 +21719,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         const promoteClients = await this.promoteClientService.findAll();
         const clientMap = new Map(clients.map((client) => [client.clientId, client]));
         const now = Date.now();
-        await this.selfHealLegacyOperationalState();
         const clientMainMobiles = clients.map((c) => c.mobile);
         const assignedBufferClients = await this.bufferClientModel
             .find({ clientId: { $exists: true, $ne: null }, status: 'active' })
@@ -21618,14 +21756,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const lastUpdateAttempt = bufferClient.lastUpdateAttempt ? new Date(bufferClient.lastUpdateAttempt).getTime() : 0;
             if (this.isOnCooldown(bufferClient.mobile, bufferClient.lastUpdateAttempt, now))
                 continue;
-            const lastUsed = client_helper_utils_1.ClientHelperUtils.getTimestamp(bufferClient.lastUsed);
-            const warmupPhase = bufferClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
-            if (warmupPhase === base_client_service_1.WarmupPhase.READY)
-                continue;
-            if (lastUsed > 0 && warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-                await this.backfillTimestamps(bufferClient.mobile, bufferClient, now);
+            const warmupPhase = bufferClient.warmupPhase;
+            if (!warmupPhase) {
+                this.logger.warn(`Skipping buffer client ${bufferClient.mobile}: incomplete lifecycle metadata`);
                 continue;
             }
+            if (warmupPhase === base_client_service_1.WarmupPhase.READY)
+                continue;
             const failedAttempts = bufferClient.failedUpdateAttempts || 0;
             const lastAttemptAgeHours = lastUpdateAttempt > 0
                 ? (now - lastUpdateAttempt) / (60 * 60 * 1000)
@@ -21765,7 +21902,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 channels: { $lt: this.config.channelTarget },
                 mobile: { $nin: Array.from(new Set([...preservedMobiles, ...primaryClientMobiles])) },
                 status: 'active',
-                warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+                ...this.getJoinCapacityEligibilityFilter(),
             };
             if (clientId)
                 query.clientId = clientId;
@@ -21774,7 +21911,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 preservedCount: preservedMobiles.size,
                 primaryClientCount: primaryClientMobiles.size,
             });
-            const clients = await this.bufferClientModel.find(query).sort({ channels: -1 }).limit(this.config.maxMapSize);
+            const clients = await this.findPrioritizedJoinCandidates(query);
             const joinSet = new Set();
             const leaveSet = new Set();
             let successCount = 0;
@@ -22004,125 +22141,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
         this.logger.log(`Dynamic batch completed: Created ${createdCount} new buffer clients (${attemptedCount} attempted)`);
         return { createdCount, attemptedCount, createdEntries };
-    }
-    async updateAllClientSessions(options = {}) {
-        const primaryClientMobiles = await this.getPrimaryClientMobiles();
-        const filter = {
-            status: 'active',
-            warmupPhase: { $in: ['ready', 'session_rotated'] },
-        };
-        if (options.mobile) {
-            filter.mobile = this.canonicalMobile(options.mobile);
-        }
-        const bufferClients = await this.bufferClientModel.find(filter).exec();
-        const result = {
-            dryRun: options.dryRun === true,
-            candidateCount: bufferClients.length,
-            protectedPrimaryClientCount: primaryClientMobiles.size,
-            skippedPrimary: 0,
-            recoveredMissingSessions: 0,
-            rotated: 0,
-            deactivated: 0,
-            failed: 0,
-            candidates: options.dryRun === true
-                ? bufferClients.map((client) => ({
-                    mobile: client.mobile,
-                    warmupPhase: client.warmupPhase,
-                    hasSession: Boolean(client.session?.trim()),
-                    protectedPrimary: this.isPrimaryClientMobile(client.mobile, primaryClientMobiles),
-                }))
-                : undefined,
-        };
-        this.logger.info('Starting bulk buffer session rotation', {
-            candidateCount: bufferClients.length,
-            protectedPrimaryClientCount: primaryClientMobiles.size,
-            dryRun: result.dryRun,
-            mobile: options.mobile || null,
-        });
-        if (result.dryRun) {
-            return result;
-        }
-        for (let i = 0; i < bufferClients.length; i++) {
-            const bufferClient = bufferClients[i];
-            if (this.isPrimaryClientMobile(bufferClient.mobile, primaryClientMobiles)) {
-                this.logger.debug(`Skipping session rotation for ${bufferClient.mobile}: currently attached as primary client mobile`);
-                result.skippedPrimary++;
-                continue;
-            }
-            try {
-                this.logger.log(`Creating new session for mobile: ${bufferClient.mobile} (${i + 1}/${bufferClients.length})`);
-                let activeSession = bufferClient.session?.trim() || '';
-                if (!activeSession) {
-                    let recoveredActiveClient = null;
-                    try {
-                        const recovered = await this.resolveActiveSessionForRotation(bufferClient.mobile);
-                        recoveredActiveClient = recovered?.activeClient || null;
-                        if (!recovered?.activeSession) {
-                            throw new Error(`No verified users session available for ${bufferClient.mobile}`);
-                        }
-                        activeSession = recovered.activeSession;
-                        result.recoveredMissingSessions++;
-                    }
-                    finally {
-                        if (recoveredActiveClient) {
-                            try {
-                                await recoveredActiveClient.destroy();
-                            }
-                            catch {
-                            }
-                        }
-                    }
-                }
-                const client = await connection_manager_1.connectionManager.getClient(bufferClient.mobile, { autoDisconnect: false, handler: true });
-                try {
-                    const hasPassword = await client.hasPassword();
-                    if (!hasPassword) {
-                        await client.set2fa();
-                        await (0, Helpers_1.sleep)(60000 + Math.random() * 30000);
-                    }
-                    await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-                    const newSession = await this.telegramService.createNewSession(bufferClient.mobile);
-                    if (!newSession || newSession === activeSession) {
-                        throw new Error(`Failed to create distinct active session for ${bufferClient.mobile}`);
-                    }
-                    const hasDistinctBackup = await this.ensureDistinctUsersBackupSession(bufferClient.mobile, newSession);
-                    if (!hasDistinctBackup) {
-                        throw new Error(`Failed to ensure distinct backup session for ${bufferClient.mobile}`);
-                    }
-                    await this.update(bufferClient.mobile, {
-                        session: newSession,
-                        lastUsed: null,
-                        message: 'Session updated successfully',
-                        warmupPhase: base_client_service_1.WarmupPhase.SESSION_ROTATED,
-                        sessionRotatedAt: new Date(),
-                    });
-                    result.rotated++;
-                }
-                catch (error) {
-                    const errorDetails = this.handleError(error, 'Failed to create new session', bufferClient.mobile);
-                    if ((0, isPermanentError_1.default)(errorDetails)) {
-                        await this.deactivateClient(bufferClient.mobile, `Session update failed: ${errorDetails.message}`, { permanent: true });
-                        result.deactivated++;
-                    }
-                    else {
-                        result.failed++;
-                    }
-                }
-                finally {
-                    await this.safeUnregisterClient(bufferClient.mobile);
-                    if (i < bufferClients.length - 1) {
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
-                    }
-                }
-            }
-            catch (error) {
-                this.logger.error(`Error creating client connection for ${bufferClient.mobile}`);
-                result.failed++;
-                if (i < bufferClients.length - 1)
-                    await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
-            }
-        }
-        return result;
     }
     async getBufferClientsByClientId(clientId, status) {
         const filter = { clientId };
@@ -22775,15 +22793,15 @@ __decorate([
     __metadata("design:type", Date)
 ], BufferClient.prototype, "otherAuthsRemovedAt", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({
-        description: 'Current warmup lifecycle phase.',
+    (0, swagger_1.ApiProperty)({
+        description: 'Current warmup lifecycle phase. Every pool document starts enrolled and advances only through lifecycle actions.',
         enum: ['enrolled', 'settling', 'identity', 'growing', 'maturing', 'ready', 'session_rotated']
     }),
     (0, mongoose_1.Prop)({
-        required: false,
+        required: true,
         type: String,
         enum: ['enrolled', 'settling', 'identity', 'growing', 'maturing', 'ready', 'session_rotated'],
-        default: null
+        default: 'enrolled'
     }),
     __metadata("design:type", String)
 ], BufferClient.prototype, "warmupPhase", void 0);
@@ -22793,8 +22811,8 @@ __decorate([
     __metadata("design:type", Number)
 ], BufferClient.prototype, "warmupJitter", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp when the account entered warmup enrollment.' }),
-    (0, mongoose_1.Prop)({ required: false, type: Date, default: null }),
+    (0, swagger_1.ApiProperty)({ description: 'Timestamp when the account entered warmup enrollment.' }),
+    (0, mongoose_1.Prop)({ required: true, type: Date, default: Date.now }),
     __metadata("design:type", Date)
 ], BufferClient.prototype, "enrolledAt", void 0);
 __decorate([
@@ -23187,8 +23205,6 @@ __decorate([
     (0, swagger_1.ApiQuery)({ name: 'broadcast', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'canSendMsgs', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'participantsCount', required: false, type: Number }),
-    (0, swagger_1.ApiQuery)({ name: 'restricted', required: false, type: Boolean }),
-    (0, swagger_1.ApiQuery)({ name: 'sendMessages', required: false, type: Boolean }),
     (0, swagger_1.ApiQuery)({ name: 'title', required: false, type: String }),
     (0, swagger_1.ApiQuery)({ name: 'username', required: false, type: String }),
     __param(0, (0, common_1.Query)()),
@@ -23303,6 +23319,7 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const channel_schema_1 = __webpack_require__(/*! ./schemas/channel.schema */ "./src/components/channels/schemas/channel.schema.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
 let ChannelsService = class ChannelsService {
     constructor(ChannelModel) {
         this.ChannelModel = ChannelModel;
@@ -23327,46 +23344,34 @@ let ChannelsService = class ChannelsService {
                 'megagroup',
                 'broadcast',
                 'canSendMsgs',
-                'restricted',
-                'sendMessages',
-                'sendPlain',
-                'private',
-                'forbidden',
-                'banned',
-                'bannedAt',
                 'reactRestricted',
-                'wordRestriction',
-                'dMRestriction',
                 'starred',
                 'score',
             ]);
+            if (typeof dto.private === 'boolean')
+                setFields.private = dto.private;
+            if (dto.forbidden === true)
+                setFields.forbidden = true;
+            if (dto.banned === true) {
+                setFields.banned = true;
+                setFields.bannedAt = dto.bannedAt ?? Date.now();
+            }
             const defaults = {
                 channelId: dto.channelId,
                 broadcast: false,
-                canSendMsgs: true,
+                canSendMsgs: false,
                 participantsCount: 0,
-                restricted: false,
-                sendMessages: false,
-                sendPlain: false,
                 reactRestricted: false,
-                wordRestriction: 0,
-                dMRestriction: 0,
                 availableMsgs: [],
                 banned: false,
                 bannedAt: null,
                 megagroup: true,
                 private: false,
             };
-            for (const key of Object.keys(setFields)) {
-                delete defaults[key];
-            }
             return {
                 updateOne: {
                     filter: { channelId: dto.channelId },
-                    update: {
-                        $set: setFields,
-                        $setOnInsert: defaults,
-                    },
+                    update: (0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto),
                     upsert: true,
                 },
             };
@@ -23382,7 +23387,20 @@ let ChannelsService = class ChannelsService {
         return channel;
     }
     async update(channelId, updateChannelDto) {
-        const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId }, { $set: updateChannelDto }, { new: true, upsert: true }).exec();
+        const existing = await this.ChannelModel.findOne({ channelId }).lean().exec();
+        const update = { ...updateChannelDto };
+        if ((existing?.banned === true || existing?.forbidden === true)
+            && update.canSendMsgs === true) {
+            update.canSendMsgs = false;
+        }
+        if (existing?.banned === true && update.banned === false)
+            delete update.banned;
+        if (existing?.forbidden === true && update.forbidden === false)
+            delete update.forbidden;
+        if (update.private === true || update.forbidden === true || update.banned === true) {
+            update.canSendMsgs = false;
+        }
+        const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId }, { $set: update }, { new: true, upsert: true }).exec();
         return updatedChannel;
     }
     async remove(channelId) {
@@ -23424,7 +23442,9 @@ let ChannelsService = class ChannelsService {
                 {
                     canSendMsgs: true,
                     broadcast: { $ne: true },
-                    restricted: { $ne: true }
+                    banned: { $ne: true },
+                    forbidden: { $ne: true },
+                    private: { $ne: true }
                 }
             ]
         };
@@ -23483,9 +23503,9 @@ let ChannelsService = class ChannelsService {
                     username: { $ne: null },
                     canSendMsgs: true,
                     banned: { $ne: true },
-                    restricted: { $ne: true },
                     forbidden: { $ne: true },
-                    private: { $ne: true }
+                    private: { $ne: true },
+                    broadcast: { $ne: true }
                 }
             ]
         };
@@ -23558,8 +23578,6 @@ class CreateChannelDto {
         this.private = false;
         this.forbidden = false;
         this.reactRestricted = false;
-        this.wordRestriction = 0;
-        this.dMRestriction = 0;
         this.banned = false;
         this.bannedAt = null;
         this.starred = false;
@@ -23582,7 +23600,9 @@ __decorate([
 ], CreateChannelDto.prototype, "broadcast", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({
-        description: 'Indicates if the channel can send messages'
+        description: 'Indicates if the channel can send messages',
+        default: false,
+        required: false
     }),
     __metadata("design:type", Boolean)
 ], CreateChannelDto.prototype, "canSendMsgs", void 0);
@@ -23592,27 +23612,6 @@ __decorate([
     }),
     __metadata("design:type", Number)
 ], CreateChannelDto.prototype, "participantsCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({
-        description: 'Whether the channel is restricted',
-        required: false
-    }),
-    __metadata("design:type", Boolean)
-], CreateChannelDto.prototype, "restricted", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({
-        description: 'Whether the channel can send messages',
-        required: false
-    }),
-    __metadata("design:type", Boolean)
-], CreateChannelDto.prototype, "sendMessages", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({
-        description: 'Whether plain text messages are banned by default rights',
-        required: false
-    }),
-    __metadata("design:type", Boolean)
-], CreateChannelDto.prototype, "sendPlain", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({
         description: 'Title of the channel'
@@ -23656,14 +23655,6 @@ __decorate([
     }),
     __metadata("design:type", Boolean)
 ], CreateChannelDto.prototype, "reactRestricted", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Word restriction count', default: 0, required: false }),
-    __metadata("design:type", Number)
-], CreateChannelDto.prototype, "wordRestriction", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'DM restriction count', default: 0, required: false }),
-    __metadata("design:type", Number)
-], CreateChannelDto.prototype, "dMRestriction", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Available messages', type: [String], required: false }),
     __metadata("design:type", Array)
@@ -23904,8 +23895,8 @@ __decorate([
     __metadata("design:type", Boolean)
 ], Channel.prototype, "broadcast", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ default: true }),
-    (0, mongoose_1.Prop)({ default: true }),
+    (0, swagger_1.ApiProperty)({ default: false }),
+    (0, mongoose_1.Prop)({ default: false }),
     __metadata("design:type", Boolean)
 ], Channel.prototype, "canSendMsgs", void 0);
 __decorate([
@@ -23913,21 +23904,6 @@ __decorate([
     (0, mongoose_1.Prop)({ type: mongoose.Schema.Types.Number, default: 0 }),
     __metadata("design:type", Number)
 ], Channel.prototype, "participantsCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], Channel.prototype, "restricted", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], Channel.prototype, "sendMessages", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], Channel.prototype, "sendPlain", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ required: true }),
     (0, mongoose_1.Prop)({ required: true }),
@@ -23963,16 +23939,6 @@ __decorate([
     (0, mongoose_1.Prop)({ default: null }),
     __metadata("design:type", Date)
 ], Channel.prototype, "reactRestrictedAt", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ default: 0 }),
-    __metadata("design:type", Number)
-], Channel.prototype, "wordRestriction", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ default: 0 }),
-    __metadata("design:type", Number)
-], Channel.prototype, "dMRestriction", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ type: [String], default: [] }),
     (0, mongoose_1.Prop)({ type: [mongoose.Schema.Types.Mixed], default: [] }),
@@ -24403,6 +24369,7 @@ let ClientService = ClientService_1 = class ClientService {
         this.logger = new utils_1.Logger(ClientService_1.name);
         this.lastUpdateMap = new Map();
         this.setupCooldownMap = new Map();
+        this.setupInFlightMap = new Map();
         this.clientsMap = new Map();
         this.cacheMetadata = { lastUpdated: 0, isStale: true };
         this.checkInterval = null;
@@ -24437,6 +24404,7 @@ let ClientService = ClientService_1 = class ClientService {
             this.clientsMap.clear();
             this.lastUpdateMap.clear();
             this.setupCooldownMap.clear();
+            this.setupInFlightMap.clear();
         }
         catch (e) {
             (0, parseError_1.parseError)(e, 'Error during Client Service shutdown');
@@ -24738,30 +24706,60 @@ let ClientService = ClientService_1 = class ClientService {
         this.logger.log(`Received New Client Request for - ${clientId}`);
         if (!(0, utils_1.toBoolean)(process.env.AUTO_CLIENT_SETUP)) {
             this.logger.log('Auto client setup disabled');
-            return;
+            return {
+                status: 'disabled',
+                swapped: false,
+                clientId,
+                message: 'Auto client setup is disabled',
+            };
         }
         if (!this.canSetupClient(clientId)) {
+            const cooldownRemainingMs = Math.max(0, (this.setupCooldownMap.get(clientId) || 0) + CONFIG.COOLDOWN_PERIOD - Date.now());
             this.logger.log(`Profile Setup Recently tried for ${clientId}, wait ::`, (0, utils_1.getReadableTimeDifference)(this.setupCooldownMap.get(clientId)));
-            return;
+            return {
+                status: 'cooldown',
+                swapped: false,
+                clientId,
+                message: 'Client setup is on cooldown',
+                cooldownRemainingMs,
+            };
         }
-        await this.handleSetupClient(clientId, setupClientQueryDto);
+        const inFlight = this.setupInFlightMap.get(clientId);
+        if (inFlight) {
+            this.logger.warn(`[${clientId}] Setup already in progress; joining the existing request`);
+            return inFlight;
+        }
+        let setupPromise;
+        setupPromise = this.handleSetupClient(clientId, setupClientQueryDto)
+            .finally(() => {
+            if (this.setupInFlightMap.get(clientId) === setupPromise) {
+                this.setupInFlightMap.delete(clientId);
+            }
+        });
+        this.setupInFlightMap.set(clientId, setupPromise);
+        return setupPromise;
     }
     canSetupClient(clientId) {
         const lastSetup = this.setupCooldownMap.get(clientId) || 0;
         return Date.now() > lastSetup + CONFIG.COOLDOWN_PERIOD;
     }
     async handleSetupClient(clientId, setupClientQueryDto) {
-        const existingClient = await this.findOne(clientId);
+        const existingClient = await this.findOne(clientId, false);
         if (!existingClient) {
             this.logger.error(`Client not found: ${clientId}`);
-            return;
+            return {
+                status: 'client_not_found',
+                swapped: false,
+                clientId,
+                message: `Client not found: ${clientId}`,
+            };
         }
         const existingClientMobile = existingClient.mobile;
         this.logger.log('setupClientQueryDto:', setupClientQueryDto);
         const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
         const query = {
             clientId,
-            mobile: { $ne: existingClientMobile },
+            mobile: setupClientQueryDto.mobile || { $ne: existingClientMobile },
             createdAt: { $lte: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
             availableDate: { $lte: today },
             channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
@@ -24773,16 +24771,25 @@ let ClientService = ClientService_1 = class ClientService {
         this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: existingClientMobile, candidateCount: candidateBufferClients.length, query });
         const newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session);
         if (!newBufferClient) {
-            if (this.isPermanentArchivalReason(setupClientQueryDto.reason)) {
+            let existingRetired = false;
+            if (this.isPermanentReplacementReason(setupClientQueryDto.reason)) {
                 this.logger.warn(`[${clientId}] No replacement buffer available, but setup reason is permanent; marking existing mobile inactive`, {
                     existingMobile: existingClientMobile,
                     reason: setupClientQueryDto.reason,
                 });
-                await this.markBufferInactiveForArchival(existingClientMobile, setupClientQueryDto.reason);
+                await this.retireReplacedMobile(existingClientMobile, setupClientQueryDto.reason);
+                existingRetired = true;
             }
             await this.notify(`Buffer not available ${clientId}: no safe buffer clients for swap`);
             this.logger.log('Buffer Clients not safely available');
-            return;
+            return {
+                status: 'no_candidate',
+                swapped: false,
+                clientId,
+                existingMobile: existingClientMobile,
+                existingRetired,
+                message: 'No safe buffer client is currently available',
+            };
         }
         this.setupCooldownMap.set(clientId, Date.now());
         try {
@@ -24797,11 +24804,19 @@ let ClientService = ClientService_1 = class ClientService {
             this.logger.debug(`[${clientId}] Active client setup registered`, {
                 existingMobile: existingClientMobile,
                 newMobile: newBufferClient.mobile,
-                archiveOld: setupClientQueryDto.archiveOld,
+                returnOldToPool: setupClientQueryDto.archiveOld,
                 formalities: setupClientQueryDto.formalities,
             });
             await connection_manager_1.connectionManager.getClient(newBufferClient.mobile);
             await this.updateClientSession(newBufferClient.session, newBufferClient.mobile);
+            return {
+                status: 'swapped',
+                swapped: true,
+                clientId,
+                existingMobile: existingClientMobile,
+                newMobile: newBufferClient.mobile,
+                message: 'Client swap completed',
+            };
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -24816,6 +24831,14 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.bufferClientService.createOrUpdate(newBufferClient.mobile, { availableDate });
             }
             this.telegramService.clearActiveClientSetup(newBufferClient.mobile);
+            return {
+                status: 'failed',
+                swapped: false,
+                clientId,
+                existingMobile: existingClientMobile,
+                newMobile: newBufferClient.mobile,
+                message: errorMessage.substring(0, 200),
+            };
         }
         finally {
             await connection_manager_1.connectionManager.unregisterClient(newBufferClient.mobile);
@@ -24827,12 +24850,12 @@ let ClientService = ClientService_1 = class ClientService {
             const scope = setupMobile ? ` for ${setupMobile}` : '';
             throw new common_1.BadRequestException(`No active client setup found${scope}`);
         }
-        const { archiveOld, clientId, existingMobile, formalities, newMobile, reason } = setup;
+        const { archiveOld: returnOldToPool, clientId, existingMobile, formalities, newMobile, reason } = setup;
         const days = setup.days ?? 0;
         this.logger.info(`[${clientId}] Starting client session cutover`, {
             existingMobile,
             newMobile,
-            archiveOld,
+            returnOldToPool,
             formalities,
             days,
             setupMobile: setupMobile || newMobile,
@@ -24873,7 +24896,7 @@ let ClientService = ClientService_1 = class ClientService {
                 throw new common_1.BadRequestException(`Invalid replacement session for ${newMobile}`);
             }
             const mirroredActiveName = this.buildMirroredActiveName(bufferDoc, existingClient.name);
-            await this.update(clientId, {
+            await this.commitClientCutover(clientId, existingMobile, {
                 mobile: newMobile,
                 username: updatedUsername,
                 session: newSession,
@@ -24886,14 +24909,7 @@ let ClientService = ClientService_1 = class ClientService {
                 updatedUsername,
                 mirroredActiveName,
             });
-            try {
-                await this.bufferClientService.setPrimaryInUse(clientId, newMobile);
-                this.logger.debug(`[${clientId}] Marked replacement buffer doc as the sole active/in-use primary`, { newMobile });
-            }
-            catch (bufferUpdateError) {
-                (0, parseError_1.parseError)(bufferUpdateError, `[${clientId}] Failed to mark ${newMobile} as in-use after cutover`);
-                this.logger.error(`[${clientId}] Failed to stamp replacement buffer usage after cutover`, { newMobile }, bufferUpdateError instanceof Error ? bufferUpdateError.stack : undefined);
-            }
+            this.logger.debug(`[${clientId}] Marked replacement buffer doc as the sole active/in-use primary`, { newMobile });
             this.logger.debug(`[${clientId}] Skipping delayed profile refresh — tg-aut handles on startup`);
             try {
                 if (existingClient.deployKey) {
@@ -24907,13 +24923,13 @@ let ClientService = ClientService_1 = class ClientService {
                 (0, parseError_1.parseError)(deployError, `[${clientId}] deployKey restart failed after cutover`);
                 await this.notify(`Deploy restart FAILED ${clientId}: ${newMobile} (cutover done)\n${deployMessage?.substring(0, 120)}`);
             }
-            this.logger.info(`[${clientId}] Starting old-client archival handling`, {
+            this.logger.info(`[${clientId}] Starting replaced-client pool-return handling`, {
                 existingMobile,
-                archiveOld,
+                returnOldToPool,
                 formalities,
                 days,
             });
-            await this.handleClientArchival(existingClient, existingMobile, formalities, archiveOld, days, reason);
+            await this.handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason);
             this.logger.info(`[${clientId}] Client session cutover finished`, { existingMobile, newMobile });
             await this.notify(`Swap complete ${clientId}: ${existingMobile} → ${newMobile}`);
         }
@@ -24934,18 +24950,49 @@ let ClientService = ClientService_1 = class ClientService {
             this.logger.debug(`[${clientId}] Cleared active setup state`, { newMobile });
         }
     }
-    async handleClientArchival(existingClient, existingMobile, formalities, archiveOld, days, reason) {
+    async commitClientCutover(clientId, expectedExistingMobile, updateClientDto) {
+        if (!updateClientDto.session?.trim()) {
+            throw new common_1.BadRequestException('Cannot update client with a blank session');
+        }
+        const cleanUpdateDto = this.cleanUpdateObject(updateClientDto);
+        cleanUpdateDto.mobile = this.canonicalMobile(cleanUpdateDto.mobile);
+        await this.notifyClientUpdate(clientId);
+        const session = await this.clientModel.db.startSession();
+        let updatedClient = null;
         try {
-            if (this.isPermanentArchivalReason(reason)) {
-                await this.markBufferInactiveForArchival(existingMobile, reason);
+            await session.withTransaction(async () => {
+                updatedClient = await this.clientModel
+                    .findOneAndUpdate({ clientId, mobile: this.canonicalMobile(expectedExistingMobile) }, { $set: cleanUpdateDto }, { new: true, runValidators: true, session })
+                    .lean()
+                    .exec();
+                if (!updatedClient) {
+                    throw new common_1.ConflictException(`Client "${clientId}" changed before cutover; expected mobile ${expectedExistingMobile}`);
+                }
+                await this.bufferClientService.setPrimaryInUse(clientId, cleanUpdateDto.mobile, session);
+            });
+        }
+        finally {
+            await session.endSession();
+        }
+        if (!updatedClient) {
+            throw new common_1.InternalServerErrorException(`Client cutover transaction did not return ${clientId}`);
+        }
+        this.clientsMap.set(clientId, updatedClient);
+        this.performPostUpdateTasks(updatedClient);
+        return updatedClient;
+    }
+    async handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason) {
+        try {
+            if (this.isPermanentReplacementReason(reason)) {
+                await this.retireReplacedMobile(existingMobile, reason);
                 return;
             }
             const existingClientUser = (await this.usersService.search({ mobile: existingMobile }))[0];
             if (!existingClientUser) {
-                const reasonMessage = `Archival failed: user document missing for old mobile ${existingMobile}`;
+                const reasonMessage = `Pool return failed: user document missing for replaced mobile ${existingMobile}`;
                 this.logger.warn(reasonMessage);
-                await this.markBufferInactiveForArchival(existingMobile, reasonMessage);
-                await this.notify(`Archival ${existingMobile}: user doc missing — buffer inactivated`);
+                await this.retireReplacedMobile(existingMobile, reasonMessage);
+                await this.notify(`Pool return ${existingMobile}: user doc missing — buffer inactivated`);
                 return;
             }
             if (formalities) {
@@ -24954,41 +25001,41 @@ let ClientService = ClientService_1 = class ClientService {
             else {
                 this.logger.log('Formalities skipped');
             }
-            if (archiveOld) {
-                await this.archiveOldClient(existingClient, existingClientUser, existingMobile, days);
+            if (returnOldToPool) {
+                await this.returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days);
             }
             else {
                 await this.bufferClientService.update(existingMobile, {
                     inUse: false,
                     lastUsed: new Date(),
                     status: 'inactive',
-                    message: reason || 'Deactivated during client swap (archival skipped)',
+                    message: reason || 'Deactivated during client swap (pool return skipped)',
                 });
-                this.logger.log('Client Archive Skipped');
-                await this.notify(`Archival skipped ${existingMobile}: inactivated without archival`);
+                this.logger.log('Replaced-client pool return skipped');
+                await this.notify(`Pool return skipped ${existingMobile}: inactivated`);
             }
         }
         catch (e) {
-            const errorDetails = (0, parseError_1.parseError)(e, `Error in Archiving Old Client: ${existingMobile}`, false);
+            const errorDetails = (0, parseError_1.parseError)(e, `Error returning replaced client to buffer pool: ${existingMobile}`, false);
             const errorMessage = e instanceof Error ? e.message : String(e);
             if ((0, isPermanentError_1.default)(errorDetails)) {
-                await this.markBufferInactiveForArchival(existingMobile, errorMessage);
+                await this.retireReplacedMobile(existingMobile, errorMessage);
             }
-            await this.notify(`Archival FAILED ${existingMobile}\n${errorMessage?.substring(0, 120)}`);
+            await this.notify(`Pool return FAILED ${existingMobile}\n${errorMessage?.substring(0, 120)}`);
         }
     }
-    isPermanentArchivalReason(reason) {
+    isPermanentReplacementReason(reason) {
         return !!reason && (0, isPermanentError_1.default)({ message: reason });
     }
-    async markBufferInactiveForArchival(mobile, reason) {
+    async retireReplacedMobile(mobile, reason) {
         try {
             await this.usersService.expireAccount(mobile, reason);
-            this.logger.warn(`Archived account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
+            this.logger.warn(`Replaced account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
             await this.notify(`Buffer inactivated ${mobile}: ${reason.substring(0, 120)}`);
         }
         catch (error) {
-            const errorDetails = (0, parseError_1.parseError)(error, `Failed to retire archived account: ${mobile}`, false);
-            this.logger.error(`Failed to retire archived account ${mobile}: ${errorDetails.message}`);
+            const errorDetails = (0, parseError_1.parseError)(error, `Failed to retire replaced account: ${mobile}`, false);
+            this.logger.error(`Failed to retire replaced account ${mobile}: ${errorDetails.message}`);
             await this.notify(`Buffer inactivate FAILED ${mobile}: ${reason.substring(0, 100)}\n${errorDetails.message.substring(0, 120)}`);
         }
     }
@@ -25002,44 +25049,47 @@ let ClientService = ClientService_1 = class ClientService {
             await connection_manager_1.connectionManager.unregisterClient(mobile);
         }
     }
-    async archiveOldClient(existingClient, existingClientUser, existingMobile, days) {
+    async returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days) {
         try {
             await this.assertDistinctUserBackupSession(existingMobile, existingClient.session);
-            const availableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + (days + 1) * 24 * 60 * 60 * 1000);
+            const existingBufferClient = await this.bufferClientService.findOne(existingMobile, false);
+            const availableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + days * 24 * 60 * 60 * 1000);
             const bufferClientDto = {
                 clientId: existingClient.clientId,
                 mobile: existingMobile,
                 availableDate,
                 session: existingClient.session,
                 tgId: existingClientUser.tgId,
-                channels: 170,
+                channels: Math.max(250, existingBufferClient?.channels ?? 0),
                 status: days > 35 ? 'inactive' : 'active',
                 inUse: false,
+                lastUsed: new Date(),
                 warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
-                sessionRotatedAt: new Date(),
+                sessionRotatedAt: null,
+                message: 'Returned to buffer pool; channel capacity will be verified',
             };
             const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
-            this.logger.log('client Archived:', updatedBufferClient);
-            await this.notify(`Archived ${existingMobile} → buffer pool, available ${availableDate}`);
+            this.logger.log('Client returned to buffer pool:', updatedBufferClient);
+            await this.notify(`Returned ${existingMobile} → buffer pool, available ${availableDate}`);
         }
         catch (error) {
-            const errorDetails = (0, parseError_1.parseError)(error, `Error in Archiving Old Client: ${existingMobile}`, true);
-            await this.notify(`Archival error ${existingMobile}\n${errorDetails.message?.substring(0, 120)}`);
+            const errorDetails = (0, parseError_1.parseError)(error, `Error returning old client to buffer pool: ${existingMobile}`, true);
+            await this.notify(`Pool return error ${existingMobile}\n${errorDetails.message?.substring(0, 120)}`);
             if ((0, isPermanentError_1.default)(errorDetails)) {
-                this.logger.log('Marking archived buffer inactive:', existingMobile);
-                await this.markBufferInactiveForArchival(existingMobile, errorDetails.message);
+                this.logger.log('Marking replaced buffer inactive:', existingMobile);
+                await this.retireReplacedMobile(existingMobile, errorDetails.message);
             }
             else {
-                const retryAvailableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + (days + 1) * 24 * 60 * 60 * 1000);
+                const retryAvailableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + days * 24 * 60 * 60 * 1000);
                 await this.bufferClientService.update(existingMobile, {
                     inUse: false,
                     status: 'active',
                     availableDate: retryAvailableDate,
-                    message: `Archival retry after transient error: ${errorDetails.message?.substring(0, 160)}`,
+                    message: `Pool return retry after transient error: ${errorDetails.message?.substring(0, 160)}`,
                 }).catch((updateError) => {
-                    this.logger.error(`Failed to release stranded archival reservation for ${existingMobile}: ${(0, parseError_1.parseError)(updateError, '', false).message}`);
+                    this.logger.error(`Failed to release stranded pool-return reservation for ${existingMobile}: ${(0, parseError_1.parseError)(updateError, '', false).message}`);
                 });
-                this.logger.log(`Released archival reservation for ${existingMobile} after transient error; available ${retryAvailableDate}`);
+                this.logger.log(`Released pool-return reservation for ${existingMobile} after transient error; available ${retryAvailableDate}`);
             }
         }
     }
@@ -25825,14 +25875,16 @@ class SetupClientQueryDto {
 }
 exports.SetupClientQueryDto = SetupClientQueryDto;
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Days to push availability forward', default: 0 }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Days to push availability forward (0-35)', default: 0, minimum: 0, maximum: 35 }),
     (0, class_validator_1.IsOptional)(),
     (0, class_transformer_1.Type)(() => Number),
-    (0, class_validator_1.IsNumber)(),
+    (0, class_validator_1.IsInt)(),
+    (0, class_validator_1.Min)(0),
+    (0, class_validator_1.Max)(35),
     __metadata("design:type", Number)
 ], SetupClientQueryDto.prototype, "days", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Archive the old client back to buffer pool', default: true }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Legacy flag: return the replaced client to the buffer pool', default: true }),
     (0, class_validator_1.IsOptional)(),
     (0, class_transformer_1.Type)(() => String),
     (0, class_transformer_1.Transform)(toBoolean),
@@ -26007,6 +26059,11 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
 ], Client.prototype, "product", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Optional main-account label', required: false }),
+    (0, mongoose_1.Prop)({ required: false, default: null }),
+    __metadata("design:type", String)
+], Client.prototype, "mainAccount", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Paytm QR ID', required: false }),
     (0, mongoose_1.Prop)({ required: false, default: null }),
@@ -33514,12 +33571,15 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             clientProcessingDelay: 8000,
             maxChannelJoinsPerDay: 25,
             joinsPerMobilePerRound: 4,
+            operationalChannelThreshold: 230,
         };
     }
     isHealthyPromoteClientForCap(doc, now) {
-        const phase = doc.warmupPhase || this.inferWarmupPhaseFromProgress(doc);
+        const phase = doc.warmupPhase;
+        if (!phase)
+            return false;
         if (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-            return true;
+            return (doc.channels || 0) >= (this.config.operationalChannelThreshold ?? 230);
         }
         const failedAttempts = doc.failedUpdateAttempts || 0;
         if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
@@ -33764,6 +33824,10 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 ...(session ? { session } : {}),
                 status,
                 message: promoteClient.message || 'Account is functioning properly',
+                warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
+                warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
+                enrolledAt: new Date(),
+                sessionRotatedAt: null,
             };
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
@@ -33851,7 +33915,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             status: 'active',
             channels: { $lt: this.config.channelTarget },
             mobile: { $nin: Array.from(this.joinChannelMap.keys()) },
-            warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+            ...this.getJoinCapacityEligibilityFilter(),
         };
         if (clientId)
             query.clientId = clientId;
@@ -34101,7 +34165,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     channels: { $lt: this.config.channelTarget },
                     mobile: { $nin: Array.from(preservedMobiles) },
                     status: 'active',
-                    warmupPhase: { $nin: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+                    ...this.getJoinCapacityEligibilityFilter(),
                 })
                     .sort({ channels: -1 })
                     .limit(this.config.maxMapSize);
@@ -34221,6 +34285,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 status: 'active',
                 inUse: { $ne: true },
                 warmupPhase: base_client_service_1.WarmupPhase.READY,
+                ...this.getOperationalChannelEligibilityFilter(),
             })
                 .sort({ lastUpdateAttempt: 1, mobile: 1 })
                 .exec();
@@ -34247,7 +34312,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         const bufferClients = await this.bufferClientService.findAll();
         const clientMap = new Map(clients.map((client) => [client.clientId, client]));
         const now = Date.now();
-        await this.selfHealLegacyOperationalState();
         const clientMainMobiles = clients.map((c) => c.mobile);
         const bufferClientIds = bufferClients.map((c) => c.mobile);
         const assignedPromoteClients = await this.promoteClientModel
@@ -34277,14 +34341,13 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const lastUpdateAttempt = promoteClient.lastUpdateAttempt ? new Date(promoteClient.lastUpdateAttempt).getTime() : 0;
             if (this.isOnCooldown(promoteClient.mobile, promoteClient.lastUpdateAttempt, now))
                 continue;
-            const warmupPhase = promoteClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
-            if (warmupPhase === base_client_service_1.WarmupPhase.READY)
-                continue;
-            const hasBeenUsed = promoteClient.lastUsed && new Date(promoteClient.lastUsed).getTime() > 0;
-            if (hasBeenUsed && warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-                await this.backfillTimestamps(promoteClient.mobile, promoteClient, now);
+            const warmupPhase = promoteClient.warmupPhase;
+            if (!warmupPhase) {
+                this.logger.warn(`Skipping promote client ${promoteClient.mobile}: incomplete lifecycle metadata`);
                 continue;
             }
+            if (warmupPhase === base_client_service_1.WarmupPhase.READY || warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
+                continue;
             const failedAttempts = promoteClient.failedUpdateAttempts || 0;
             const lastAttemptAgeHours = lastUpdateAttempt > 0
                 ? (now - lastUpdateAttempt) / (60 * 60 * 1000)
@@ -34863,15 +34926,15 @@ __decorate([
     __metadata("design:type", Date)
 ], PromoteClient.prototype, "otherAuthsRemovedAt", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({
-        description: 'Current warmup lifecycle phase.',
+    (0, swagger_1.ApiProperty)({
+        description: 'Current warmup lifecycle phase. Every pool document starts enrolled and advances only through lifecycle actions.',
         enum: ['enrolled', 'settling', 'identity', 'growing', 'maturing', 'ready', 'session_rotated']
     }),
     (0, mongoose_1.Prop)({
-        required: false,
+        required: true,
         type: String,
         enum: ['enrolled', 'settling', 'identity', 'growing', 'maturing', 'ready', 'session_rotated'],
-        default: null
+        default: 'enrolled'
     }),
     __metadata("design:type", String)
 ], PromoteClient.prototype, "warmupPhase", void 0);
@@ -34881,8 +34944,8 @@ __decorate([
     __metadata("design:type", Number)
 ], PromoteClient.prototype, "warmupJitter", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp when the account entered warmup enrollment.' }),
-    (0, mongoose_1.Prop)({ required: false, type: Date, default: null }),
+    (0, swagger_1.ApiProperty)({ description: 'Timestamp when the account entered warmup enrollment.' }),
+    (0, mongoose_1.Prop)({ required: true, type: Date, default: Date.now }),
     __metadata("design:type", Date)
 ], PromoteClient.prototype, "enrolledAt", void 0);
 __decorate([
@@ -37817,108 +37880,43 @@ class BaseClientService {
             return false;
         return now - lastAttemptTs < this.getEffectiveCooldownMs(mobile, lastAttemptTs);
     }
-    inferWarmupPhaseFromProgress(doc, useStoredPhase = true) {
-        if (useStoredPhase && doc.warmupPhase)
-            return doc.warmupPhase;
-        if (doc.sessionRotatedAt)
-            return warmup_phases_1.WarmupPhase.SESSION_ROTATED;
-        if (doc.profilePicsUpdatedAt)
-            return warmup_phases_1.WarmupPhase.MATURING;
-        if ((doc.channels || 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING || doc.usernameUpdatedAt)
-            return warmup_phases_1.WarmupPhase.GROWING;
-        if (doc.nameBioUpdatedAt || doc.profilePicsDeletedAt)
-            return warmup_phases_1.WarmupPhase.IDENTITY;
-        if (doc.otherAuthsRemovedAt || doc.twoFASetAt || doc.privacyUpdatedAt)
-            return warmup_phases_1.WarmupPhase.SETTLING;
-        return warmup_phases_1.WarmupPhase.ENROLLED;
-    }
-    getWarmupPhaseRank(phase) {
-        const order = {
-            [warmup_phases_1.WarmupPhase.ENROLLED]: 0,
-            [warmup_phases_1.WarmupPhase.SETTLING]: 1,
-            [warmup_phases_1.WarmupPhase.IDENTITY]: 2,
-            [warmup_phases_1.WarmupPhase.GROWING]: 3,
-            [warmup_phases_1.WarmupPhase.MATURING]: 4,
-            [warmup_phases_1.WarmupPhase.READY]: 5,
-            [warmup_phases_1.WarmupPhase.SESSION_ROTATED]: 6,
+    getJoinCapacityEligibilityFilter() {
+        return {
+            $or: [
+                {
+                    warmupPhase: {
+                        $in: [
+                            warmup_phases_1.WarmupPhase.ENROLLED,
+                            warmup_phases_1.WarmupPhase.SETTLING,
+                            warmup_phases_1.WarmupPhase.IDENTITY,
+                            warmup_phases_1.WarmupPhase.GROWING,
+                            warmup_phases_1.WarmupPhase.MATURING,
+                        ],
+                    },
+                },
+                {
+                    warmupPhase: { $in: [warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
+                    channels: { $lt: this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
+                },
+            ],
         };
-        if (!phase)
-            return -1;
-        return order[phase] ?? -1;
     }
-    getMissingPrerequisitePhase(doc) {
-        const currentRank = this.getWarmupPhaseRank(doc.warmupPhase);
-        if (currentRank < this.getWarmupPhaseRank(warmup_phases_1.WarmupPhase.IDENTITY)) {
-            return null;
-        }
-        const privacyDone = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.privacyUpdatedAt) > 0;
-        const twoFADone = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.twoFASetAt) > 0;
-        const authsRemoved = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.otherAuthsRemovedAt) > 0;
-        const missingSecurity = [];
-        if (!privacyDone)
-            missingSecurity.push('privacyUpdatedAt');
-        if (!twoFADone)
-            missingSecurity.push('twoFASetAt');
-        if (!authsRemoved)
-            missingSecurity.push('otherAuthsRemovedAt');
-        if (missingSecurity.length > 0) {
-            return { phase: warmup_phases_1.WarmupPhase.SETTLING, missing: missingSecurity };
-        }
-        if (currentRank >= this.getWarmupPhaseRank(warmup_phases_1.WarmupPhase.GROWING)) {
-            const identityMissing = [];
-            if (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.profilePicsDeletedAt) <= 0)
-                identityMissing.push('profilePicsDeletedAt');
-            if (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.nameBioUpdatedAt) <= 0)
-                identityMissing.push('nameBioUpdatedAt');
-            if (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.usernameUpdatedAt) <= 0)
-                identityMissing.push('usernameUpdatedAt');
-            if (identityMissing.length > 0) {
-                return { phase: warmup_phases_1.WarmupPhase.IDENTITY, missing: identityMissing };
-            }
-        }
-        if (currentRank >= this.getWarmupPhaseRank(warmup_phases_1.WarmupPhase.READY) &&
-            client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.profilePicsUpdatedAt) <= 0) {
-            return { phase: warmup_phases_1.WarmupPhase.MATURING, missing: ['profilePicsUpdatedAt'] };
-        }
-        return null;
-    }
-    getRecoveryEnrolledAt(phase, jitter, now) {
-        const recoveryDaysByPhase = {
-            [warmup_phases_1.WarmupPhase.ENROLLED]: Math.max(1, warmup_phases_1.WARMUP_PHASE_THRESHOLDS.settling + jitter),
-            [warmup_phases_1.WarmupPhase.SETTLING]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.identity + jitter,
-            [warmup_phases_1.WarmupPhase.IDENTITY]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.growing + jitter,
-            [warmup_phases_1.WarmupPhase.GROWING]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.maturing + jitter,
-            [warmup_phases_1.WarmupPhase.MATURING]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.ready + jitter,
-            [warmup_phases_1.WarmupPhase.READY]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.ready + jitter + 1,
-            [warmup_phases_1.WarmupPhase.SESSION_ROTATED]: warmup_phases_1.WARMUP_PHASE_THRESHOLDS.ready + jitter + 2,
+    getOperationalChannelEligibilityFilter() {
+        return {
+            channels: { $gte: this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
         };
-        const recoveryDays = recoveryDaysByPhase[phase] ?? (warmup_phases_1.WARMUP_PHASE_THRESHOLDS.ready + jitter + 1);
-        return new Date(now - recoveryDays * this.ONE_DAY_MS);
     }
-    async repairWarmupMetadata(doc, now) {
-        const updateData = {};
-        const inferredPhase = this.inferWarmupPhaseFromProgress(doc, false);
-        const currentPhaseRank = this.getWarmupPhaseRank(doc.warmupPhase);
-        const inferredPhaseRank = this.getWarmupPhaseRank(inferredPhase);
-        const missingPrerequisite = this.getMissingPrerequisitePhase(doc);
-        if (!doc.warmupPhase || inferredPhaseRank > currentPhaseRank) {
-            updateData.warmupPhase = inferredPhase;
-        }
-        if (missingPrerequisite && this.getWarmupPhaseRank(missingPrerequisite.phase) < currentPhaseRank) {
-            updateData.warmupPhase = missingPrerequisite.phase;
-            this.logger.warn(`Correcting warmup phase for ${doc.mobile}: ${doc.warmupPhase} → ${missingPrerequisite.phase}; missing prerequisites: ${missingPrerequisite.missing.join(', ')}`);
-        }
-        if (!doc.enrolledAt) {
-            updateData.enrolledAt = doc.createdAt
-                ? new Date(doc.createdAt)
-                : this.getRecoveryEnrolledAt(inferredPhase, doc.warmupJitter || 0, now);
-        }
-        if (Object.keys(updateData).length === 0) {
-            return doc;
-        }
-        const repairedDoc = await this.update(doc.mobile, updateData);
-        this.logger.warn(`Recovered warmup metadata for ${doc.mobile}`, updateData);
-        return (repairedDoc?.mobile ? repairedDoc : Object.assign(doc, updateData));
+    getMissingReadyRotationPrerequisites(doc) {
+        const requiredTimestamps = [
+            'privacyUpdatedAt',
+            'twoFASetAt',
+            'otherAuthsRemovedAt',
+            'profilePicsDeletedAt',
+            'nameBioUpdatedAt',
+            'usernameUpdatedAt',
+            'profilePicsUpdatedAt',
+        ];
+        return requiredTimestamps.filter((field) => client_helper_utils_1.ClientHelperUtils.getTimestamp(doc[field]) <= 0);
     }
     async retireIfStuck(doc, now) {
         const enrolledTs = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
@@ -37932,68 +37930,6 @@ class BaseClientService {
         const deactivated = await this.deactivateClient(doc.mobile, `Stuck: ${Math.round(daysSinceEnrolled)}d in ${phase}`);
         this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>STUCK</b> ${this.clientType} ${doc.mobile} — ${phase} ${Math.round(daysSinceEnrolled)}d — ${deactivated ? 'inactivated' : 'inactivate FAILED'}`, { parseMode: 'HTML' });
         return true;
-    }
-    async reactivateOwnStuckAccounts(clientId, limit = 100) {
-        const query = {
-            status: exports.ClientStatus.INACTIVE,
-            message: { $regex: '^Stuck: \\d+d in ', $options: 'i' },
-            clientId: { $exists: true, $nin: [null, ''] },
-        };
-        if (clientId)
-            query.clientId = clientId;
-        const docs = await this.model.find(query).limit(limit).exec();
-        if (!docs.length)
-            return 0;
-        const now = Date.now();
-        let healed = 0;
-        for (const doc of docs) {
-            const message = doc.message || '';
-            if (!BaseClientService.OWN_STUCK_REASON.test(message))
-                continue;
-            if (!doc.clientId || !String(doc.clientId).trim())
-                continue;
-            let session = doc.session && String(doc.session).trim() ? String(doc.session).trim() : '';
-            let backfilledSession = false;
-            if (!session) {
-                try {
-                    const users = await this.usersService.findByMobileAnyStatus(doc.mobile);
-                    const userSession = users?.[0]?.session && String(users[0].session).trim() ? String(users[0].session).trim() : '';
-                    if (userSession) {
-                        session = userSession;
-                        backfilledSession = true;
-                    }
-                }
-                catch (err) {
-                    this.logger.warn(`Session backfill lookup failed for stuck account ${doc.mobile}:`, err);
-                }
-            }
-            if (!session)
-                continue;
-            const targetPhase = this.inferWarmupPhaseFromProgress(doc, false);
-            const enrolledAt = this.getRecoveryEnrolledAt(targetPhase, doc.warmupJitter || 0, now);
-            try {
-                const update = {
-                    status: exports.ClientStatus.ACTIVE,
-                    warmupPhase: targetPhase,
-                    failedUpdateAttempts: 0,
-                    lastUpdateFailure: null,
-                    lastUpdateAttempt: null,
-                    enrolledAt,
-                    message: `Self-healed: reactivated into warmup at ${targetPhase} (was "${message.slice(0, 80)}")`,
-                };
-                if (backfilledSession)
-                    update.session = session;
-                await this.update(doc.mobile, update);
-                healed++;
-            }
-            catch (err) {
-                this.logger.warn(`Failed to self-heal stuck account ${doc.mobile}:`, err);
-            }
-        }
-        if (healed > 0) {
-            this.logger.log(`Self-healed ${healed} step-stuck ${this.clientType} accounts back into warmup${clientId ? ` for ${clientId}` : ''}`);
-        }
-        return healed;
     }
     constructor(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, loggerName) {
         this.telegramService = telegramService;
@@ -38247,13 +38183,13 @@ class BaseClientService {
             return false;
         if (channel.canSendMsgs !== true)
             return false;
-        if (channel.restricted === true)
-            return false;
         if (channel.banned === true)
             return false;
         if (channel.forbidden === true)
             return false;
         if (channel.private === true)
+            return false;
+        if (channel.broadcast === true)
             return false;
         return true;
     }
@@ -38691,15 +38627,17 @@ class BaseClientService {
             return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
         }
         const now = Date.now();
-        try {
-            doc = await this.repairWarmupMetadata(doc, now);
-        }
-        catch (error) {
-            this.logger.warn(`READY rotation metadata repair failed for ${doc.mobile}:`, error);
-            return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
-        }
         if (doc.warmupPhase !== warmup_phases_1.WarmupPhase.READY) {
             this.logger.warn(`READY rotation deferred for ${doc.mobile}: metadata now resolves to ${doc.warmupPhase || 'unset'}`);
+            return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
+        }
+        const missingPrerequisites = this.getMissingReadyRotationPrerequisites(doc);
+        if (missingPrerequisites.length > 0) {
+            this.logger.warn(`READY rotation deferred for ${doc.mobile}: missing prerequisites ${missingPrerequisites.join(', ')}`);
+            return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
+        }
+        if (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.sessionRotatedAt) > 0) {
+            this.logger.warn(`READY rotation deferred for ${doc.mobile}: sessionRotatedAt is already recorded`);
             return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
         }
         if (this.isOnCooldown(doc.mobile, doc.lastUpdateAttempt, now)) {
@@ -38709,15 +38647,6 @@ class BaseClientService {
         if (warmupAction.action !== 'rotate_session') {
             this.logger.warn(`READY rotation deferred for ${doc.mobile}: resolved action is ${warmupAction.action}`);
             return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
-        }
-        if (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUsed) > 0) {
-            await this.backfillTimestamps(doc.mobile, doc, now);
-            await this.update(doc.mobile, {
-                warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
-                ...(!doc.sessionRotatedAt ? { sessionRotatedAt: new Date(now) } : {}),
-            });
-            this.logger.log(`Recovered already-used READY ${this.clientType} client ${doc.mobile} without a Telegram session rotation`);
-            return { updateCount: 1, updateSummary: 'mark_session_rotated_from_last_used' };
         }
         await this.update(doc.mobile, { lastUpdateAttempt: new Date(now) });
         const failedAttempts = doc.failedUpdateAttempts || 0;
@@ -38792,11 +38721,9 @@ class BaseClientService {
         }
         const now = Date.now();
         let updateCount = 0;
-        try {
-            doc = await this.repairWarmupMetadata(doc, now);
-        }
-        catch (err) {
-            this.logger.warn(`repairWarmupMetadata failed for ${doc.mobile}:`, err);
+        if (!doc.warmupPhase || !doc.enrolledAt) {
+            this.logger.warn(`Skipping ${this.clientType} client ${doc.mobile}: incomplete lifecycle metadata`);
+            return { updateCount: 0, updateSummary: 'incomplete_lifecycle_metadata' };
         }
         const failedAttempts = doc.failedUpdateAttempts || 0;
         const lastFailureTime = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUpdateFailure);
@@ -38825,22 +38752,6 @@ class BaseClientService {
         if (this.isOnCooldown(doc.mobile, doc.lastUpdateAttempt, now)) {
             this.logger.debug(`Client ${doc.mobile} on cooldown`);
             return { updateCount: 0 };
-        }
-        const lastUsed = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUsed);
-        const warmupPhase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
-        if (lastUsed > 0 && (warmupPhase === warmup_phases_1.WarmupPhase.READY || warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED)) {
-            await this.backfillTimestamps(doc.mobile, doc, now);
-            if (warmupPhase === warmup_phases_1.WarmupPhase.READY) {
-                const updateData = {
-                    warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
-                    ...(!doc.sessionRotatedAt ? { sessionRotatedAt: new Date(now) } : {}),
-                };
-                await this.update(doc.mobile, updateData);
-                this.logger.log(`Client ${doc.mobile} has lastUsed in ${warmupPhase}; marking warmup as ${warmup_phases_1.WarmupPhase.SESSION_ROTATED}`);
-                return { updateCount: 1, updateSummary: 'mark_session_rotated_from_last_used' };
-            }
-            this.logger.debug(`Client ${doc.mobile} has been used and is ${warmupPhase}, assuming configured`);
-            return { updateCount: 0, updateSummary: 'backfill_timestamps' };
         }
         const warmupAction = (0, warmup_phases_1.getWarmupPhaseAction)(doc, now);
         this.logger.debug(`Client ${doc.mobile} warmup: storedPhase=${doc.warmupPhase || 'unset'}, resolvedPhase=${warmupAction.phase}, action=${warmupAction.action}`, {
@@ -38958,43 +38869,6 @@ class BaseClientService {
         }
         finally {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
-        }
-    }
-    async backfillTimestamps(mobile, doc, now) {
-        const needsProfileBackfill = !doc.privacyUpdatedAt || !doc.profilePicsDeletedAt ||
-            !doc.nameBioUpdatedAt || !doc.usernameUpdatedAt || !doc.profilePicsUpdatedAt;
-        const needsWarmupBackfill = !doc.warmupPhase || !doc.enrolledAt;
-        if (!needsProfileBackfill && !needsWarmupBackfill)
-            return;
-        this.logger.log(`Backfilling fields for ${mobile}`);
-        const allTimestamps = client_helper_utils_1.ClientHelperUtils.createBackfillTimestamps(now, this.ONE_DAY_MS);
-        const backfillData = {};
-        if (!doc.privacyUpdatedAt)
-            backfillData.privacyUpdatedAt = allTimestamps.privacyUpdatedAt;
-        if (!doc.profilePicsDeletedAt)
-            backfillData.profilePicsDeletedAt = allTimestamps.profilePicsDeletedAt;
-        if (!doc.nameBioUpdatedAt)
-            backfillData.nameBioUpdatedAt = allTimestamps.nameBioUpdatedAt;
-        if (!doc.usernameUpdatedAt)
-            backfillData.usernameUpdatedAt = allTimestamps.usernameUpdatedAt;
-        if (!doc.profilePicsUpdatedAt)
-            backfillData.profilePicsUpdatedAt = allTimestamps.profilePicsUpdatedAt;
-        if (!doc.twoFASetAt || !doc.otherAuthsRemovedAt) {
-            this.logger.warn(`Skipping unverified security timestamp backfill for ${mobile}`, {
-                twoFASetAt: doc.twoFASetAt || null,
-                otherAuthsRemovedAt: doc.otherAuthsRemovedAt || null,
-            });
-        }
-        const hasDistinctBackupSession = await this.hasDistinctUsersBackupSession(mobile, doc.session || null);
-        if (!doc.warmupPhase)
-            backfillData.warmupPhase = hasDistinctBackupSession ? warmup_phases_1.WarmupPhase.SESSION_ROTATED : warmup_phases_1.WarmupPhase.READY;
-        if (!doc.enrolledAt)
-            backfillData.enrolledAt = doc.createdAt || new Date(now - 30 * this.ONE_DAY_MS);
-        if (hasDistinctBackupSession && !doc.sessionRotatedAt)
-            backfillData.sessionRotatedAt = new Date(now - 26 * this.ONE_DAY_MS);
-        if (Object.keys(backfillData).length > 0) {
-            await this.update(mobile, backfillData);
-            this.logger.log(`Backfilled ${Object.keys(backfillData).length} fields for ${mobile}`);
         }
     }
     async joinChannelQueue() {
@@ -39341,71 +39215,6 @@ class BaseClientService {
         }
         this.isLeaveChannelProcessing = false;
     }
-    getMissingWarmupPhaseQuery(clientId) {
-        const filter = {
-            status: 'active',
-            $or: [{ warmupPhase: { $exists: false } }, { warmupPhase: null }],
-        };
-        if (clientId)
-            filter.clientId = clientId;
-        return filter;
-    }
-    async selfHealLegacyUsedAccounts(clientId, limit = 100) {
-        const docs = await this.model
-            .find({
-            ...this.getMissingWarmupPhaseQuery(clientId),
-            lastUsed: { $exists: true, $ne: null },
-        })
-            .sort({ lastUsed: -1, _id: 1 })
-            .limit(limit)
-            .exec();
-        if (!docs.length)
-            return 0;
-        const now = Date.now();
-        let healed = 0;
-        for (const doc of docs) {
-            await this.backfillTimestamps(doc.mobile, doc, now);
-            healed++;
-        }
-        if (healed > 0) {
-            this.logger.log(`Self-healed ${healed} legacy used ${this.clientType} accounts${clientId ? ` for ${clientId}` : ''}`);
-        }
-        return healed;
-    }
-    async selfHealLegacyWarmupAccounts(clientId, limit = 50) {
-        const docs = await this.model
-            .find({
-            $and: [
-                this.getMissingWarmupPhaseQuery(clientId),
-                { $or: [{ lastUsed: { $exists: false } }, { lastUsed: null }] },
-            ],
-        })
-            .sort({ createdAt: 1, _id: 1 })
-            .limit(limit)
-            .exec();
-        if (!docs.length)
-            return 0;
-        const now = Date.now();
-        let healed = 0;
-        for (const doc of docs) {
-            await this.repairWarmupMetadata(doc, now);
-            healed++;
-        }
-        if (healed > 0) {
-            this.logger.log(`Self-healed ${healed} legacy warming ${this.clientType} accounts${clientId ? ` for ${clientId}` : ''}`);
-        }
-        return healed;
-    }
-    async selfHealLegacyOperationalState(clientId) {
-        await this.selfHealLegacyUsedAccounts(clientId);
-        await this.selfHealLegacyWarmupAccounts(clientId);
-        try {
-            await this.reactivateOwnStuckAccounts(clientId);
-        }
-        catch (err) {
-            this.logger.warn(`reactivateOwnStuckAccounts failed${clientId ? ` for ${clientId}` : ''}:`, err);
-        }
-    }
     async getStoredActiveSession(mobile) {
         const doc = await this.model.findOne({ mobile }, { session: 1 }).lean().exec();
         return doc?.session?.trim() || null;
@@ -39524,7 +39333,9 @@ class BaseClientService {
         return validDates.reduce((max, current) => (current > max ? current : max));
     }
     getProjectedReadyDateString(doc) {
-        const phase = doc.warmupPhase || this.inferWarmupPhaseFromProgress(doc);
+        const phase = doc.warmupPhase;
+        if (!phase)
+            return null;
         if (!(0, warmup_phases_1.isAccountWarmingUp)(phase))
             return null;
         const enrolledTimestamp = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
@@ -39536,11 +39347,9 @@ class BaseClientService {
     }
     getOperationalAvailabilityDateString(doc, now) {
         const availableDate = this.normalizeDateString(doc.availableDate);
-        const lastUsedTimestamp = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUsed);
-        if (!doc.warmupPhase && lastUsedTimestamp > 0) {
-            return availableDate || client_helper_utils_1.ClientHelperUtils.toDateString(now);
-        }
-        const phase = doc.warmupPhase || this.inferWarmupPhaseFromProgress(doc);
+        const phase = doc.warmupPhase;
+        if (!phase)
+            return null;
         if ((0, warmup_phases_1.isAccountReady)(phase)) {
             return availableDate || client_helper_utils_1.ClientHelperUtils.toDateString(now);
         }
@@ -39598,14 +39407,20 @@ class BaseClientService {
         }).exec();
         const readyOperationalDates = [];
         const pipelineOperationalDates = [];
+        const operationalChannelThreshold = this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING;
         for (const doc of activeDocs) {
             const operationalDate = this.getOperationalAvailabilityDateString(doc, today.getTime());
             if (!operationalDate)
                 continue;
-            const phase = doc.warmupPhase || this.inferWarmupPhaseFromProgress(doc);
-            const isLegacyOperational = !doc.warmupPhase && client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUsed) > 0;
-            const meetsSwapChannelThreshold = (doc.channels || 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING;
-            if ((isLegacyOperational || (0, warmup_phases_1.isAccountReady)(phase)) && meetsSwapChannelThreshold) {
+            const phase = doc.warmupPhase;
+            if (!phase)
+                continue;
+            const meetsOperationalChannelThreshold = (doc.channels || 0) >= operationalChannelThreshold;
+            const isTerminal = (0, warmup_phases_1.isAccountReady)(phase);
+            if (isTerminal && !meetsOperationalChannelThreshold) {
+                continue;
+            }
+            if (isTerminal) {
                 readyOperationalDates.push(operationalDate);
             }
             else {
@@ -39683,7 +39498,7 @@ class BaseClientService {
             calculationReason = `One-month pipeline needs ${totalNeededForCount} to reach minimum of ${this.config.minTotalClients} (ready=${readyActive}, warming=${warmingPipeline})`;
         }
         else if (hasShortWindowDeficit) {
-            calculationReason = `Short-term windows are below target, but current replenishment focuses on the 3-4 week horizon (ready=${readyActive}, warming=${warmingPipeline})`;
+            calculationReason = `Short-term windows are below target, but the warmup pipeline is sufficient for the 3-4 week horizon (ready=${readyActive}, warming=${warmingPipeline})`;
         }
         else {
             calculationReason = `Short-term and replenishment horizons satisfied (ready=${readyActive}, warming=${warmingPipeline})`;
@@ -39702,7 +39517,6 @@ class BaseClientService {
         };
     }
     async calculateAvailabilityBasedNeeds(clientId) {
-        await this.selfHealLegacyOperationalState(clientId);
         return this.calculateAvailabilityBasedNeedsForCurrentState(clientId);
     }
     async getClientsByStatus(status) {
@@ -39722,7 +39536,6 @@ class BaseClientService {
         }));
     }
     async getLeastRecentlyUsedClients(clientId, limit = 1) {
-        await this.selfHealLegacyOperationalState(clientId);
         const todayInclusive = client_helper_utils_1.ClientHelperUtils.getTodayDateString() + '￿';
         return this.model
             .find({
@@ -39745,7 +39558,6 @@ class BaseClientService {
         return clients.length > 0 ? clients[0] : null;
     }
     async getUnusedClients(hoursAgo = 24, clientId) {
-        await this.selfHealLegacyOperationalState(clientId);
         const cutoffDate = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
         const todayInclusive = client_helper_utils_1.ClientHelperUtils.getTodayDateString() + '￿';
         const filter = {
@@ -39927,6 +39739,30 @@ class BaseClientService {
     async rotateSession(mobile) {
         let activeClient = null;
         try {
+            const lifecycleDoc = await this.findOne(mobile);
+            if (!lifecycleDoc) {
+                this.logger.warn(`Session rotation refused for ${mobile}: pool record not found`);
+                return false;
+            }
+            if (lifecycleDoc.status !== 'active' || lifecycleDoc.inUse === true) {
+                this.logger.warn(`Session rotation refused for ${mobile}: account is inactive or in use`);
+                return false;
+            }
+            if (lifecycleDoc.warmupPhase !== warmup_phases_1.WarmupPhase.READY) {
+                this.logger.warn(`Session rotation refused for ${mobile}: expected READY, found ${lifecycleDoc.warmupPhase || 'unset'}`);
+                return false;
+            }
+            if ((lifecycleDoc.channels || 0) < (this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING)) {
+                this.logger.warn(`Session rotation refused for ${mobile}: ${lifecycleDoc.channels || 0} channels is below the ${this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING} floor`);
+                return false;
+            }
+            const missingPrerequisites = this.getMissingReadyRotationPrerequisites(lifecycleDoc);
+            if (missingPrerequisites.length > 0 || client_helper_utils_1.ClientHelperUtils.getTimestamp(lifecycleDoc.sessionRotatedAt) > 0) {
+                this.logger.warn(`Session rotation refused for ${mobile}: ${missingPrerequisites.length > 0
+                    ? `missing prerequisites ${missingPrerequisites.join(', ')}`
+                    : 'session rotation already recorded'}`);
+                return false;
+            }
             this.logger.log(`Starting session rotation for ${mobile}`);
             const resolvedActive = await this.resolveActiveSessionForRotation(mobile);
             if (!resolvedActive) {
@@ -40088,7 +39924,6 @@ class BaseClientService {
     }
 }
 exports.BaseClientService = BaseClientService;
-BaseClientService.OWN_STUCK_REASON = /^Stuck:\s*\d+d in (enrolled|settling|identity|growing|maturing)/i;
 
 
 /***/ },
@@ -43249,12 +43084,16 @@ __decorate([
     __metadata("design:type", Boolean)
 ], CreateUserDataDto.prototype, "secondShow", void 0);
 __decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Full-show progression count', default: 0 }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "fullShow", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Profile name' }),
     __metadata("design:type", String)
 ], CreateUserDataDto.prototype, "profile", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Pics Sent status' }),
-    __metadata("design:type", Boolean)
+    (0, swagger_1.ApiProperty)({ description: 'Number of demo pictures sent', default: 0 }),
+    __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "picsSent", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'videos' }),
@@ -43381,9 +43220,8 @@ __decorate([
     __metadata("design:type", String)
 ], SearchDto.prototype, "chatId", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Pics Sent status' }),
-    (0, class_transformer_1.Transform)(({ value }) => value === undefined ? undefined : (value === 'true' || value === true)),
-    __metadata("design:type", Object)
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Number of demo pictures sent', type: Number }),
+    __metadata("design:type", Number)
 ], SearchDto.prototype, "picsSent", void 0);
 
 
@@ -43492,55 +43330,55 @@ __decorate([
     __metadata("design:type", String)
 ], UserData.prototype, "chatId", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "totalCount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "picCount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "lastMsgTimeStamp", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "limitTime", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "paidCount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "prfCount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 1 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "canReply", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "payAmount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: false, default: '' }),
     __metadata("design:type", String)
 ], UserData.prototype, "username", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: false, default: '' }),
     __metadata("design:type", String)
 ], UserData.prototype, "accessHash", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: true }),
     __metadata("design:type", Boolean)
 ], UserData.prototype, "paidReply", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: false }),
     __metadata("design:type", Boolean)
 ], UserData.prototype, "demoGiven", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: false }),
     __metadata("design:type", Boolean)
 ], UserData.prototype, "secondShow", void 0);
 __decorate([
@@ -43552,37 +43390,29 @@ __decorate([
     __metadata("design:type", String)
 ], UserData.prototype, "profile", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
-    __metadata("design:type", Boolean)
-], UserData.prototype, "picSent", void 0);
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
+    __metadata("design:type", Number)
+], UserData.prototype, "picsSent", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "highestPayAmount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "cheatCount", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "callTime", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: false, default: [] }),
+    (0, mongoose_1.Prop)({ type: [String], required: true, default: [] }),
     __metadata("design:type", Array)
 ], UserData.prototype, "videos", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ type: [String], required: false, default: undefined }),
-    __metadata("design:type", Array)
-], UserData.prototype, "promotionChannels", void 0);
-__decorate([
-    (0, mongoose_1.Prop)({ required: false, default: undefined }),
-    __metadata("design:type", String)
-], UserData.prototype, "attributionMethod", void 0);
-__decorate([
-    (0, mongoose_1.Prop)({ type: Number, required: false, default: undefined }),
-    __metadata("design:type", Number)
-], UserData.prototype, "attributedAt", void 0);
+    (0, mongoose_1.Prop)({ required: false }),
+    __metadata("design:type", Date)
+], UserData.prototype, "lastActiveTime", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
@@ -43595,6 +43425,7 @@ exports.UserData = UserData = __decorate([
     })
 ], UserData);
 exports.UserDataSchema = mongoose_1.SchemaFactory.createForClass(UserData);
+exports.UserDataSchema.index({ chatId: 1, profile: 1 }, { unique: true, name: 'chatId_Profile' });
 
 
 /***/ },
@@ -43914,11 +43745,12 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return 'All counts cleared.';
     }
     async update(profile, chatId, updateUserDataDto) {
-        delete updateUserDataDto._id;
-        delete updateUserDataDto.profile;
-        delete updateUserDataDto.chatId;
+        const sanitizedDto = { ...updateUserDataDto };
+        delete sanitizedDto._id;
+        delete sanitizedDto.profile;
+        delete sanitizedDto.chatId;
         const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $set: updateUserDataDto }, { new: true, upsert: true })
+            .findOneAndUpdate({ profile, chatId }, { $set: sanitizedDto }, { new: true, upsert: false })
             .lean()
             .exec();
         if (!updatedUser) {
@@ -43927,9 +43759,10 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return updatedUser;
     }
     async updateAll(chatId, updateUserDataDto) {
-        delete updateUserDataDto._id;
+        const sanitizedDto = { ...updateUserDataDto };
+        delete sanitizedDto._id;
         return this.userDataModel
-            .updateMany({ chatId }, { $set: updateUserDataDto })
+            .updateMany({ chatId }, { $set: sanitizedDto })
             .exec();
     }
     async remove(profile, chatId) {
@@ -43944,10 +43777,11 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return deletedUser;
     }
     async search(filter) {
-        if (filter.firstName) {
-            filter.firstName = { $regex: new RegExp(filter.firstName, 'i') };
+        const searchFilter = { ...filter };
+        if (searchFilter.firstName) {
+            searchFilter.firstName = { $regex: new RegExp(String(searchFilter.firstName), 'i') };
         }
-        return this.userDataModel.find(filter).lean().exec();
+        return this.userDataModel.find(searchFilter).lean().exec();
     }
     async executeQuery(query, sort, limit, skip) {
         const startTime = Date.now();
@@ -44018,7 +43852,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
     }
     async bulkUpdateUsers(filter, update) {
         try {
-            return await this.userDataModel.updateMany(filter, update, { upsert: true }).exec();
+            return await this.userDataModel.updateMany(filter, update, { upsert: false }).exec();
         }
         catch (error) {
             throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
@@ -47487,7 +47321,9 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         if (!this.config.enabled('CMS_SCHEDULER'))
             return;
         this.register('cms-buffer-check', '25 2 * * *', () => this.appService.checkBufferClients());
-        this.register('cms-buffer-ready-rotation', '45 * * * *', () => this.runOncePerIstDay('cms-buffer-ready-rotation', () => this.appService.rotateReadyBufferClients()));
+        this.register('cms-buffer-ready-rotation', '45 * * * *', async () => {
+            await this.appService.rotateReadyBufferClients();
+        });
         this.register('cms-buffer-join', '0 */3 * * *', () => this.appService.joinBufferClients());
         this.register('cms-buffer-info-refresh', '25 0 * * *', async () => {
             if (new Date().getUTCDate() % 5 === 0)
@@ -47515,7 +47351,9 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 await this.maintenance.refreshPromoteClientInfo();
             }
         });
-        this.register('maintenance-promote-ready-rotation', '55 * * * *', () => this.runOncePerIstDay('maintenance-promote-ready-rotation', () => this.maintenance.rotateReadyPromoteClients()));
+        this.register('maintenance-promote-ready-rotation', '55 * * * *', async () => {
+            await this.maintenance.rotateReadyPromoteClients();
+        });
         this.afterStartup('ums-promote-initial-join', 4 * 60_000, () => this.maintenance.preparePromoteClientJoin());
         this.register('maintenance-daily-promote-stats-reset', '25 0 * * *', () => this.runDailyPromoteReset());
         this.register('maintenance-daily-promote-stats-reset-recovery', '30,45 0 * * *', () => this.runDailyPromoteReset());
@@ -47533,7 +47371,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             await this.clientService.refreshMap();
             await this.stat1Service.deleteAll();
         });
-        this.register('maintenance-active-channel-word-restrictions', '25 0 * * *', async () => {
+        this.register('maintenance-active-channel-message-deletion-counters', '25 0 * * *', async () => {
             const utcDay = new Date().getUTCDate();
             if (utcDay % 7 === 0) {
                 this.logger.log('UMS-test maintenance branch=day-mod-7');
@@ -47543,9 +47381,9 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             }
             if (utcDay % 9 !== 0)
                 return;
-            this.logger.log('UMS-test maintenance branch=day-mod-9-word-restrictions');
+            this.logger.log('UMS-test maintenance branch=day-mod-9-message-deletion-counters');
             await new Promise((resolve) => setTimeout(resolve, 30_000));
-            await this.activeChannelsService.resetWordRestrictions();
+            await this.activeChannelsService.resetMessageDeletionCounters();
         });
         this.afterStartup('ums-test-initial-user-processing', 120_000, () => this.maintenance.processEligibleUsers(400, 0));
     }
@@ -47624,40 +47462,6 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         }
         catch (error) {
             this.logger.error('Daily promoteStats reset completed, but its notification failed', error instanceof Error ? error.stack : String(error));
-        }
-    }
-    async runOncePerIstDay(name, task) {
-        const db = this.requireDatabase(name);
-        const collection = db.collection('controlPlaneJobRuns');
-        const jobId = `${name}:${this.istDateKey()}`;
-        if (!(await this.claimJob(collection, jobId))) {
-            this.logger.warn(`Daily job already claimed or completed: ${jobId}`);
-            return;
-        }
-        try {
-            const attempted = await task();
-            if (!attempted) {
-                await collection.updateOne({ _id: jobId }, {
-                    $set: { deferredAt: new Date(), leaseExpiresAt: new Date(0) },
-                    $unset: { leaseOwner: '' },
-                });
-                return;
-            }
-            await collection.updateOne({ _id: jobId }, {
-                $set: { completedAt: new Date() },
-                $unset: { leaseOwner: '', leaseExpiresAt: '' },
-            });
-        }
-        catch (error) {
-            await collection.updateOne({ _id: jobId }, {
-                $set: {
-                    completedAt: new Date(),
-                    failedAt: new Date(),
-                    error: error instanceof Error ? error.message : String(error),
-                },
-                $unset: { leaseOwner: '', leaseExpiresAt: '' },
-            });
-            throw error;
         }
     }
     async resetPromoteStatsWithRetries(promoteStats) {
@@ -47758,6 +47562,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const components_1 = __webpack_require__(/*! ../../components */ "./src/components/index.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const channel_live_facts_1 = __webpack_require__(/*! ../../utils/telegram-utils/channel-live-facts */ "./src/utils/telegram-utils/channel-live-facts.ts");
 const channel_eligibility_1 = __webpack_require__(/*! ./channel-eligibility */ "./src/control-plane/maintenance/channel-eligibility.ts");
 let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaintenanceService {
     constructor(usersService, channelsService, activeChannelsService, bufferClientService, promoteClientService) {
@@ -47901,21 +47706,34 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
         }
     }
     async persistDiscoveredChannels(dialogs) {
-        const channels = dialogs
+        const now = Date.now();
+        const discovered = await Promise.all(dialogs
             .filter((dialog) => dialog.isChannel || dialog.isGroup)
-            .map((dialog) => dialog.entity)
-            .filter((channel) => !channel.broadcast &&
-            !channel.defaultBannedRights?.sendMessages &&
-            (channel.participantsCount || 0) > 50 &&
-            (0, channel_eligibility_1.isEligibleDiscoveredChannel)(channel))
-            .map((channel) => ({
-            channelId: channel.id.toString(),
-            participantsCount: channel.participantsCount,
-            title: channel.title,
-            broadcast: channel.broadcast,
-            megagroup: channel.megagroup,
-            username: channel.username,
+            .map(async (dialog) => {
+            const channel = dialog.entity;
+            if (!(0, channel_eligibility_1.isEligibleDiscoveredChannel)(channel))
+                return null;
+            const facts = await (0, channel_live_facts_1.getTelegramChannelLiveFacts)({ getEntity: async () => channel }, { channelId: channel.id, entity: channel });
+            if (!facts || !facts.canSendMsgs || (facts.participantsCount ?? 0) <= 50) {
+                return null;
+            }
+            return {
+                channelId: facts.channelId,
+                canSendMsgs: true,
+                private: false,
+                lastHydrationStatus: 'success',
+                lastHydrationReason: 'live_sendable',
+                lastHydratedAt: now,
+                lastLiveCheckedAt: now,
+                participantsCount: facts.participantsCount,
+                accessHash: channel.accessHash?.toString(),
+                title: facts.title ?? '',
+                broadcast: facts.broadcast,
+                megagroup: facts.megagroup,
+                username: facts.username ?? '',
+            };
         }));
+        const channels = discovered.filter((channel) => channel !== null);
         if (!channels.length)
             return;
         await this.channelsService.createMultiple(channels);
@@ -51201,6 +51019,59 @@ function expandChatIdVariants(id) {
 }
 function isChannelOrGroupEntity(entity) {
     return entity instanceof telegram_1.Api.Channel || entity instanceof telegram_1.Api.Chat;
+}
+
+
+/***/ },
+
+/***/ "./src/utils/telegram-utils/durable-channel-upsert.ts"
+/*!************************************************************!*\
+  !*** ./src/utils/telegram-utils/durable-channel-upsert.ts ***!
+  \************************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.buildDurableChannelUpsertPipeline = buildDurableChannelUpsertPipeline;
+const literal = (value) => ({ $literal: value });
+function buildDurableChannelUpsertPipeline(setFields, defaults, incoming) {
+    const hasSetField = (field) => Object.prototype.hasOwnProperty.call(setFields, field);
+    const currentOrDefault = (field) => {
+        if (hasSetField(field))
+            return literal(setFields[field]);
+        return { $ifNull: [`$${field}`, literal(defaults[field])] };
+    };
+    const fields = {};
+    for (const field of new Set([...Object.keys(defaults), ...Object.keys(setFields)])) {
+        fields[field] = currentOrDefault(field);
+    }
+    const persistedBanned = { $eq: [{ $ifNull: ['$banned', false] }, true] };
+    const persistedForbidden = { $eq: [{ $ifNull: ['$forbidden', false] }, true] };
+    const effectivePrivate = { $eq: [currentOrDefault('private'), true] };
+    const effectiveBroadcast = { $eq: [currentOrDefault('broadcast'), true] };
+    fields.banned = incoming.banned === true
+        ? literal(true)
+        : { $ifNull: ['$banned', literal(defaults.banned ?? false)] };
+    fields.forbidden = incoming.forbidden === true
+        ? literal(true)
+        : { $ifNull: ['$forbidden', literal(defaults.forbidden ?? false)] };
+    fields.canSendMsgs = {
+        $cond: [
+            {
+                $or: [
+                    persistedBanned,
+                    persistedForbidden,
+                    incoming.banned === true,
+                    incoming.forbidden === true,
+                    effectivePrivate,
+                    effectiveBroadcast,
+                ],
+            },
+            false,
+            currentOrDefault('canSendMsgs'),
+        ],
+    };
+    return [{ $set: fields }];
 }
 
 
