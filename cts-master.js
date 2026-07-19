@@ -691,6 +691,14 @@ let AppController = AppController_1 = class AppController {
         this.appService.exitSecondary();
         return '2';
     }
+    async exitPromotePrimary() {
+        this.appService.exitPromotePrimary();
+        return '1';
+    }
+    async exitPromoteSecondary() {
+        this.appService.exitPromoteSecondary();
+        return '2';
+    }
     async getVidData(profile, clientId, chatId) {
         return await this.appService.getUserData(profile, clientId, chatId);
     }
@@ -968,6 +976,22 @@ __decorate([
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)
 ], AppController.prototype, "exitSecondary", null);
+__decorate([
+    (0, common_1.Get)('exitPromotePrimary'),
+    (0, swagger_1.ApiOperation)({ summary: 'Exit primary promote clients' }),
+    (0, swagger_1.ApiResponse)({ description: 'Returns confirmation of exiting primary promote clients' }),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], AppController.prototype, "exitPromotePrimary", null);
+__decorate([
+    (0, common_1.Get)('exitPromoteSecondary'),
+    (0, swagger_1.ApiOperation)({ summary: 'Exit secondary promote clients' }),
+    (0, swagger_1.ApiResponse)({ description: 'Returns confirmation of exiting secondary promote clients' }),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], AppController.prototype, "exitPromoteSecondary", null);
 __decorate([
     (0, common_1.Get)('/getviddata'),
     (0, swagger_1.ApiOperation)({ summary: 'Get video data' }),
@@ -1437,6 +1461,26 @@ let AppService = AppService_1 = class AppService {
                 await (0, Helpers_1.sleep)(40000);
             }
         }
+    }
+    async exitPromoteClients(clientIdMarker) {
+        const clients = await this.clientService.findAll();
+        for (const client of clients) {
+            if (!client.clientId?.toLowerCase().includes(clientIdMarker))
+                continue;
+            const promoteRepl = client.promoteRepl?.trim();
+            if (!promoteRepl) {
+                this.logger.warn(`Skipping promote exit for ${client.clientId}: promoteRepl is missing`);
+                continue;
+            }
+            await (0, utils_1.fetchWithTimeout)(`${promoteRepl.replace(/\/+$/, '')}/exit`);
+            await (0, Helpers_1.sleep)(40000);
+        }
+    }
+    async exitPromotePrimary() {
+        await this.exitPromoteClients('1');
+    }
+    async exitPromoteSecondary() {
+        await this.exitPromoteClients('2');
     }
     async refreshPrimary() {
         const clients = await this.clientService.findAll();
