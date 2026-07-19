@@ -10,19 +10,17 @@
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ConversionAttributionService: () => (/* binding */ ConversionAttributionService)
+/* harmony export */   ConversionAttributionService: () => (/* binding */ ConversionAttributionService),
+/* harmony export */   normalizeAttributionChannelIds: () => (/* binding */ normalizeAttributionChannelIds)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /**
- * Conversion Attribution Service — mobile-based ROI via common chats.
+ * Conversion Attribution Service — common-chat based ROI.
  *
  * When tg-aut gets a new user DM, this service attributes the conversion
- * to source channels using:
- * 1. Common chats between buffer account and new user
- * 2. Redis-based promotion history (which mobile last promoted to each channel)
- *
- * Credit is split equally across the common channels that were promoted
- * within the tracker window.
+ * to every valid common channel. Redis is used only for the short-lived,
+ * per-channel conversion claims; a channel does not need a recent promotion
+ * send record to receive attribution credit.
  */
 
 class ConversionAttributionService {
@@ -61,82 +59,50 @@ class ConversionAttributionService {
      * keeping this service pure attribution logic.
      *
      * @param commonChatIds - Channel IDs from GetCommonChats
-     * @param conversionId - Stable Telegram chat ID for exactly-once crediting
+     * @param conversionId - Stable profile + Telegram chat ID for exactly-once crediting
      */
     async attributeDMConversion(commonChatIds, conversionId) {
-        const uniqueChatIds = normalizeCommonChatIds(commonChatIds);
-        if (uniqueChatIds.length === 0)
-            return { attributedChannels: [] };
+        const uniqueChatIds = normalizeAttributionChannelIds(commonChatIds);
+        if (uniqueChatIds.length === 0) {
+            return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
+        }
         try {
-            // For each common chat, check if a promote mobile sent there recently
-            const candidates = [];
-            const seenCandidateChannelIds = new Set();
-            const TWO_HOURS = 2 * 3600000;
-            const now = Date.now();
-            for (const channelId of uniqueChatIds) {
-                const candidate = await findLastPromoterCandidate(this.tracker, channelId);
-                const ageMs = candidate ? now - candidate.timestamp : Number.NaN;
-                if (candidate
-                    && ageMs >= 0
-                    && ageMs < TWO_HOURS
-                    && !seenCandidateChannelIds.has(candidate.channelId)) {
-                    seenCandidateChannelIds.add(candidate.channelId);
-                    candidates.push(candidate);
-                }
-            }
-            if (candidates.length === 0)
-                return { attributedChannels: [] };
-            if (!await this.tracker.claimConversion(conversionId)) {
-                return { attributedChannels: [] };
-            }
-            const equalWeight = 1 / candidates.length;
+            // One DM always contributes exactly one unit of conversion evidence. Every
+            // common channel receives an equal share, so users with many common chats
+            // do not inflate the aggregate conversion total.
+            const equalWeight = 1 / uniqueChatIds.length;
             if (!Number.isFinite(equalWeight) || equalWeight <= 0) {
-                return { attributedChannels: [] };
+                return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
             }
             const attributions = [];
-            let persistedCount = 0;
-            for (const candidate of candidates) {
-                attributions.push({
-                    channelId: candidate.channelId,
-                    mobile: candidate.mobile,
-                    weight: equalWeight,
-                });
+            const failedChannelIds = [];
+            for (const channelId of uniqueChatIds) {
+                const channelClaimId = `${conversionId}:${channelId}`;
                 try {
-                    await this.intelligenceService.recordDMConversion(candidate.channelId, equalWeight);
-                    persistedCount += 1;
+                    if (!await this.tracker.claimConversion(channelClaimId))
+                        continue;
+                    await this.intelligenceService.recordDMConversion(channelId, equalWeight);
+                    attributions.push({ channelId, weight: equalWeight });
                 }
                 catch {
-                    // Attribution discovery still returns so userData records the source channels.
+                    failedChannelIds.push(channelId);
+                    try {
+                        await this.tracker.releaseConversion(channelClaimId);
+                    }
+                    catch {
+                        // The claim TTL bounds a failed release. Keep the channel in the
+                        // failure result so the caller can retain its own retry state.
+                    }
                 }
             }
-            if (persistedCount === 0) {
-                try {
-                    await this.tracker.releaseConversion(conversionId);
-                }
-                catch {
-                    // Keep the attribution result. The claim TTL still bounds a Redis
-                    // release failure, while avoiding a duplicate write in this call.
-                }
-            }
-            return { attributedChannels: attributions };
+            return { discoveredChannelIds: uniqueChatIds, attributedChannels: attributions, failedChannelIds };
         }
         catch {
-            return { attributedChannels: [] };
+            return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
         }
     }
 }
-function normalizeLastPromoter(value) {
-    if (!isRecord(value))
-        return null;
-    const mobile = normalizeLabel(value['mobile']);
-    const clientId = normalizeLabel(value['clientId']);
-    const timestamp = value['timestamp'];
-    if (!mobile || !clientId || typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) {
-        return null;
-    }
-    return { mobile, clientId, timestamp };
-}
-function normalizeCommonChatIds(value) {
+function normalizeAttributionChannelIds(value) {
     if (!Array.isArray(value))
         return [];
     const ids = value
@@ -154,50 +120,6 @@ function normalizeCommonChatId(value) {
         return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value.toString()) ?? '';
     return '';
 }
-async function findLastPromoterCandidate(tracker, channelId) {
-    let best = null;
-    for (const lookupId of getCommonChatLookupIds(channelId)) {
-        try {
-            const lastPromoter = normalizeLastPromoter(await tracker.getLastPromoter(lookupId));
-            if (!lastPromoter)
-                continue;
-            const canonicalChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(lookupId);
-            if (!canonicalChannelId)
-                continue;
-            const candidate = { channelId: canonicalChannelId, ...lastPromoter };
-            if (!best || candidate.timestamp > best.timestamp) {
-                best = candidate;
-            }
-        }
-        catch {
-            continue;
-        }
-    }
-    return best;
-}
-function getCommonChatLookupIds(channelId) {
-    const normalized = channelId.trim();
-    if (!normalized)
-        return [];
-    const variants = [normalized];
-    if (normalized.startsWith('-100')) {
-        variants.push(normalized.slice(4));
-    }
-    else if (normalized.startsWith('-')) {
-        const unsigned = normalized.slice(1);
-        variants.push(unsigned, `-100${unsigned}`);
-    }
-    else if (/^\d+$/.test(normalized)) {
-        variants.push(`-100${normalized}`);
-    }
-    return Array.from(new Set(variants.filter((value) => value.length > 0)));
-}
-function normalizeLabel(value) {
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
-}
 function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -206,7 +128,6 @@ function isIntelligenceServiceLike(value) {
 }
 function isTrackerLike(value) {
     return isRecord(value)
-        && typeof value['getLastPromoter'] === 'function'
         && typeof value['claimConversion'] === 'function'
         && typeof value['releaseConversion'] === 'function';
 }
@@ -226,7 +147,8 @@ function shouldReplace(options) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _conversion_attribution__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService)
+/* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _conversion_attribution__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService),
+/* harmony export */   normalizeAttributionChannelIds: () => (/* reexport safe */ _conversion_attribution__WEBPACK_IMPORTED_MODULE_0__.normalizeAttributionChannelIds)
 /* harmony export */ });
 /* harmony import */ var _conversion_attribution__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./conversion-attribution */ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts");
 
@@ -1295,6 +1217,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionMessageQueue: () => (/* reexport safe */ _orchestrator__WEBPACK_IMPORTED_MODULE_4__.PromotionMessageQueue),
 /* harmony export */   PromotionRunnerSupervisor: () => (/* reexport safe */ _orchestrator__WEBPACK_IMPORTED_MODULE_4__.PromotionRunnerSupervisor),
 /* harmony export */   PromotionRuntime: () => (/* reexport safe */ _runtime__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime),
+/* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountChannelBlock),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountSendCap),
@@ -1331,6 +1254,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolMessageIndex),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.messageIndexToStrategy),
+/* harmony export */   normalizeAttributionChannelIds: () => (/* reexport safe */ _attribution__WEBPACK_IMPORTED_MODULE_0__.normalizeAttributionChannelIds),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
@@ -1683,14 +1607,16 @@ class PromotionFlowRunner {
                 intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence) : [];
             }
             catch (error) {
-                this.log('warn', `Promotion intelligence docs batch load failed; selecting with cold-start docs error=${this.normalizeError(error)}`);
+                this.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${this.normalizeError(error)}`);
+                return;
             }
             let blockedChannelIds = new Set();
             try {
                 blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
             }
             catch (error) {
-                this.log('warn', `Promotion per-mobile block lookup failed; proceeding without block filter; error=${this.normalizeError(error)}`);
+                this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
+                return;
             }
             const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_2__.selectPromotionChannels)({
                 channels,
@@ -4962,7 +4888,8 @@ function rawScore(counters, lastValidatedAtMs, nowMs) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   BasePromotionEngine: () => (/* binding */ BasePromotionEngine)
+/* harmony export */   BasePromotionEngine: () => (/* binding */ BasePromotionEngine),
+/* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* binding */ PROMOTION_MESSAGE_CHECK_DELAY_MS)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -4978,7 +4905,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var ___WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
 /* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 
 
 
@@ -4991,7 +4919,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_11__.PromoLogger("intelligence");
+
+/** Shared post-send liveness window used by both tg-aut and promote-clients. */
+const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
+const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_12__.PromoLogger("intelligence");
 /**
  * Shared, app-agnostic core of the promotion engine. Holds all infrastructure that
  * is identical (verified) between apps/tg-aut and apps/promote-clients:
@@ -5049,7 +4980,7 @@ class BasePromotionEngine {
             deletedCount: 0,
         };
         // Configuration (identical defaults across apps)
-        this.MESSAGE_CHECK_DELAY = 15000; // 15 seconds
+        this.MESSAGE_CHECK_DELAY = PROMOTION_MESSAGE_CHECK_DELAY_MS;
         this.MAX_QUEUE_SIZE = 200;
         this.MAX_CHANNELS_CACHE = 300;
         this.CLEANUP_INTERVAL = 5 * 60 * 1000;
@@ -5064,6 +4995,40 @@ class BasePromotionEngine {
         this.clientId = clientId;
         this.mobile = mobile;
         this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
+    }
+    /**
+     * Build the bounded hydration working set through the same shared priority
+     * policy in both applications. This replaces app-local random/participant
+     * trimming while keeping Telegram hydration volume capped.
+     */
+    async selectHydrationCandidates(channels, limit = this.MAX_CHANNELS_CACHE) {
+        if (!Array.isArray(channels) || channels.length === 0 || limit <= 0)
+            return [];
+        let intelligenceDocs = [];
+        try {
+            intelligenceDocs = await this.getIntelligenceDocsForRunner(channels.map((channel) => channel.channelId));
+        }
+        catch (error) {
+            // Do not hydrate a large Telegram working set when its safety state
+            // is unavailable. The next cycle can retry after Mongo recovers.
+            this.logRunnerMessage('warn', `Hydration priority intelligence load failed; pausing this cycle safely: ${error}`);
+            return [];
+        }
+        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_11__.selectPromotionChannels)({
+            channels,
+            intelligenceDocs,
+            batchTarget: Math.min(Math.floor(limit), channels.length),
+        });
+        this.logRunnerMessage('info', [
+            'Hydration candidates selected by shared conversion+safety policy',
+            `source=${channels.length}`,
+            `selected=${result.selected.length}`,
+            `provenPool=${result.proven.length}`,
+            `explorePool=${result.untested.length}`,
+            `selectedExplore=${Math.round(result.selected.length * result.explorePercent)}`,
+            `explorePct=${result.explorePercent.toFixed(2)}`,
+        ].join('; '));
+        return result.selected;
     }
     /**
      * Shared delay normalization for the helper channel loop sleep (identical for both apps).
@@ -6461,6 +6426,7 @@ class DelayCalculator {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_2__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _redis_account_channel_block__WEBPACK_IMPORTED_MODULE_3__.RedisAccountChannelBlock),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _redis_account_health_store__WEBPACK_IMPORTED_MODULE_1__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _redis_account_send_cap__WEBPACK_IMPORTED_MODULE_0__.RedisAccountSendCap),
@@ -7004,14 +6970,16 @@ function isRecord(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* binding */ ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisPromotionTracker: () => (/* binding */ RedisPromotionTracker)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /**
- * Mobile-based promotion history for ROI attribution.
+ * Redis state for promotion history and conversion coordination.
  *
- * Tracks which mobile number sent to which channel, enabling
- * accurate conversion attribution via common chats.
+ * Promotion-send history remains useful for diagnostics. Common-chat conversion
+ * attribution no longer requires a matching recent send; this store supplies
+ * per-channel exactly-once claims.
  *
  * Key design: mobile-keyed (not client-keyed) because mobiles
  * swap between clients but we need to know which mobile was active
@@ -7021,6 +6989,7 @@ __webpack_require__.r(__webpack_exports__);
 const MOBILE_HISTORY_TTL = 7200; // 2 hours
 const CHANNEL_LAST_MOBILE_TTL = 7200; // 2 hours, aligned with attribution window
 const CONVERSION_CLAIM_TTL = 3 * 3600; // Covers the attribution window plus retry overlap.
+const ROUTE_PENDING_TTL_SECONDS = 20 * 60;
 const MAX_HISTORY_SIZE = 50;
 class RedisPromotionTracker {
     constructor(redis) {
@@ -7107,6 +7076,34 @@ class RedisPromotionTracker {
             return null;
         const parsed = parseJson(data);
         return normalizeLastPromoter(parsed);
+    }
+    /**
+     * Mark a chat as routed by promote-clients before the CTA is sent. tg-aut
+     * checks this shared marker before using its own account for common-chat
+     * attribution, which preserves source-account ownership for routed DMs.
+     */
+    async markRoutePending(conversionId) {
+        const safeConversionId = normalizeKeyPart(conversionId);
+        if (!safeConversionId)
+            return false;
+        const result = await this.redis.set(`promote:route-pending:${safeConversionId}`, 'pending', 'EX', ROUTE_PENDING_TTL_SECONDS);
+        return result === 'OK' || result === 1 || result === true;
+    }
+    async isRoutePending(conversionId) {
+        const safeConversionId = normalizeKeyPart(conversionId);
+        if (!safeConversionId)
+            return false;
+        return (await this.redis.get(`promote:route-pending:${safeConversionId}`)) !== null;
+    }
+    /** Clear a pre-send marker when the route CTA was not delivered. */
+    async clearRoutePending(conversionId) {
+        const safeConversionId = normalizeKeyPart(conversionId);
+        if (!safeConversionId)
+            return;
+        if (typeof this.redis.del !== 'function') {
+            throw new Error('RedisPromotionTracker redis DEL is required to clear a pending route');
+        }
+        await this.redis.del(`promote:route-pending:${safeConversionId}`);
     }
     /**
      * Atomically reserve one DM conversion for attribution. A repeated Telegram
@@ -7601,23 +7598,14 @@ function isRecord(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTION_EXPLORATION_SHARE: () => (/* binding */ PROMOTION_EXPLORATION_SHARE),
 /* harmony export */   selectPromotionChannels: () => (/* binding */ selectPromotionChannels)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/index.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 
 
-function shuffle(items, random) {
-    for (let i = items.length - 1; i > 0; i--) {
-        const j = Math.floor(safeUnitRandom(random) * (i + 1));
-        const current = items[i];
-        const replacement = items[j];
-        if (current === undefined || replacement === undefined)
-            continue;
-        items[i] = replacement;
-        items[j] = current;
-    }
-}
+const PROMOTION_EXPLORATION_SHARE = 0.20;
 function selectPromotionChannels(options) {
     const safeOptions = isRecord(options) ? options : {};
     const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, } = safeOptions;
@@ -7640,6 +7628,12 @@ function selectPromotionChannels(options) {
     }
     const rankScores = new Map();
     const tieBreakScores = new Map();
+    const provenLastPromotedAt = new Map();
+    const provenTieBreak = new Map();
+    const explorationErrors = new Map();
+    const explorationAttempts = new Map();
+    const explorationLastPromotedAt = new Map();
+    const explorationTieBreak = new Map();
     const proven = [];
     const untested = [];
     const skipped = [];
@@ -7676,6 +7670,10 @@ function selectPromotionChannels(options) {
         }
         const doc = intelligenceByChannel.get(channelId);
         if (!doc) {
+            explorationErrors.set(channelId, 0);
+            explorationAttempts.set(channelId, 0);
+            explorationLastPromotedAt.set(channelId, 0);
+            explorationTieBreak.set(channelId, safeUnitRandom(random));
             untested.push(channel);
         }
         else if (doc.safety.status === 'blocked') {
@@ -7683,33 +7681,67 @@ function selectPromotionChannels(options) {
             skipped.push(channel);
         }
         else if (isExploreCandidate(doc)) {
+            explorationErrors.set(channelId, safeNonNegative(doc.safety.consecutiveErrors));
+            explorationAttempts.set(channelId, safeNonNegative(doc.outcomes.attempted));
+            explorationLastPromotedAt.set(channelId, safeNonNegative(doc.timestamps.lastPromotionAtMs));
+            explorationTieBreak.set(channelId, safeUnitRandom(random));
             untested.push(channel);
         }
         else {
-            rankScores.set(channelId, poolEvidenceScore(doc));
+            rankScores.set(channelId, conversionSafetyPriorityScore(doc));
             tieBreakScores.set(channelId, evidenceTieBreakScore(doc));
+            provenLastPromotedAt.set(channelId, safeNonNegative(doc.timestamps.lastPromotionAtMs));
+            provenTieBreak.set(channelId, safeUnitRandom(random));
             proven.push(channel);
         }
     }
-    // Order proven channels only by bounded-pool outcome evidence.
+    // One shared exploitation order for both applications: conversion quality is
+    // multiplied by safety quality so a channel must be both productive and safe
+    // to lead the batch. Blocked channels were already excluded above.
     proven.sort((a, b) => {
         const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(a.channelId);
         const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(b.channelId);
         const scoreDiff = (rankScores.get(bChannelId ?? '') || 0) - (rankScores.get(aChannelId ?? '') || 0);
         if (scoreDiff !== 0)
             return scoreDiff;
-        return (tieBreakScores.get(bChannelId ?? '') || 0) - (tieBreakScores.get(aChannelId ?? '') || 0);
+        const evidenceDiff = (tieBreakScores.get(bChannelId ?? '') || 0) - (tieBreakScores.get(aChannelId ?? '') || 0);
+        if (evidenceDiff !== 0)
+            return evidenceDiff;
+        // Equal performers rotate by oldest use, then by a per-cycle random tie.
+        // This prevents the stable Telegram dialog order from permanently trimming
+        // equally-scored evaluated channels outside the bounded working set.
+        const ageDiff = (provenLastPromotedAt.get(aChannelId ?? '') ?? 0) - (provenLastPromotedAt.get(bChannelId ?? '') ?? 0);
+        if (ageDiff !== 0)
+            return ageDiff;
+        return (provenTieBreak.get(aChannelId ?? '') ?? 0) - (provenTieBreak.get(bChannelId ?? '') ?? 0);
     });
-    // Shuffle unexplored so the backfill gives every new channel a fair chance over time, rather than
-    // always filling slots with the same doc-order-first channels.
-    shuffle(untested, random);
+    // Least-explored and oldest-tested channels lead the exploration lane. A
+    // random tie-break rotates true cold starts instead of repeatedly selecting
+    // the same Mongo/dialog-order prefix.
+    untested.sort((a, b) => {
+        const aChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(a.channelId) ?? '';
+        const bChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(b.channelId) ?? '';
+        // A channel-side error is evidence even when Telegram never accepted the
+        // send (attempted remains zero). Prefer clean cold starts so erroring
+        // channels do not repeatedly lead the exploration lane before blocking.
+        const errorDiff = (explorationErrors.get(aChannelId) ?? 0) - (explorationErrors.get(bChannelId) ?? 0);
+        if (errorDiff !== 0)
+            return errorDiff;
+        const attemptDiff = (explorationAttempts.get(aChannelId) ?? 0) - (explorationAttempts.get(bChannelId) ?? 0);
+        if (attemptDiff !== 0)
+            return attemptDiff;
+        const ageDiff = (explorationLastPromotedAt.get(aChannelId) ?? 0) - (explorationLastPromotedAt.get(bChannelId) ?? 0);
+        if (ageDiff !== 0)
+            return ageDiff;
+        return (explorationTieBreak.get(aChannelId) ?? 0) - (explorationTieBreak.get(bChannelId) ?? 0);
+    });
     // Cap against sendable channels (proven plus untested), not the raw pre-filter count, so a mobile
     // with many blocked channels still gets a full batch of postable ones.
     const batchTarget = Math.min(safeBatchTarget, proven.length + untested.length);
-    // Assemble the batch from pool evidence, with untested channels filling unused capacity:
-    //   proven channels ranked by survival evidence take priority; unexplored fill unused capacity up to
-    //   batchTarget. e.g. 60 proven -> 60 proven + 40 unexplored; 30 proven -> 30 + 70; 150 proven ->
-    //   100 proven + 0 unexplored. The cap is applied LAST, on the already-filtered + ranked set.
+    // Reserve 20% of normal-sized batches for exploration. This preserves the
+    // high-conversion/high-safety majority while ensuring cold channels are not
+    // permanently trimmed before they can collect evidence. Tiny batches (<5)
+    // stay exploitation-first; unused capacity is always backfilled.
     const selected = [];
     const selectedIds = new Set();
     const provenIds = new Set();
@@ -7724,6 +7756,34 @@ function selectPromotionChannels(options) {
             provenIds.add(channelId);
         selected.push(channel);
     };
+    const explorationTarget = batchTarget >= 5 && untested.length > 0
+        ? Math.max(1, Math.floor(batchTarget * PROMOTION_EXPLORATION_SHARE))
+        : 0;
+    const provenTarget = Math.max(0, batchTarget - explorationTarget);
+    const plannedProven = proven.slice(0, provenTarget);
+    const plannedExploration = untested.slice(0, explorationTarget);
+    if (plannedExploration.length > 0) {
+        // Interleave the reserved lane instead of appending it at the tail. A paced
+        // cycle can stop early when its daily budget is exhausted; 4:1 ordering
+        // makes the intended 80/20 mix effective even in a partially-run cycle.
+        const exploitationStride = Math.max(1, Math.round((1 - PROMOTION_EXPLORATION_SHARE) / PROMOTION_EXPLORATION_SHARE));
+        let provenIndex = 0;
+        let explorationIndex = 0;
+        while (provenIndex < plannedProven.length || explorationIndex < plannedExploration.length) {
+            for (let index = 0; index < exploitationStride && provenIndex < plannedProven.length; index += 1) {
+                pushUnique(plannedProven[provenIndex++], true);
+            }
+            if (explorationIndex < plannedExploration.length) {
+                pushUnique(plannedExploration[explorationIndex++], false);
+            }
+        }
+    }
+    else {
+        for (const channel of plannedProven)
+            pushUnique(channel, true);
+    }
+    // If either lane has fewer candidates than its reservation, use the other
+    // lane rather than returning a short batch.
     for (const channel of proven)
         pushUnique(channel, true);
     for (const channel of untested)
@@ -7751,7 +7811,7 @@ function normalizeChannel(value) {
     };
 }
 function isExploreCandidate(doc) {
-    return safeNonNegative(doc.outcomes.survived) <= 0;
+    return safeNonNegative(doc.outcomes.attempted) <= 0;
 }
 function normalizeSelectionIntelligence(value) {
     return (0,_channel_intelligence__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(value) ? value : null;
@@ -7762,6 +7822,18 @@ function poolEvidenceScore(doc) {
     const deleted = safeNonNegative(doc.outcomes.deleted);
     const resolved = Math.min(attempted, survived + deleted);
     return (survived + 1) / (resolved + 2);
+}
+function conversionSafetyPriorityScore(doc) {
+    const attempted = safeNonNegative(doc.outcomes.attempted);
+    const credited = safeNonNegative(doc.DMs.credited);
+    // A small denominator prior prevents a single fractional DM from dominating
+    // channels with substantial, safer evidence.
+    const conversionQuality = Math.min(1, (credited + 1) / (attempted + 10));
+    const safetyQuality = poolEvidenceScore(doc)
+        / (1 + safeNonNegative(doc.safety.consecutiveErrors));
+    // Square safety so deletion-heavy or repeatedly failing behavior is strongly
+    // discounted before conversion evidence is compared.
+    return conversionQuality * safetyQuality * safetyQuality;
 }
 function evidenceTieBreakScore(doc) {
     return safeNonNegative(doc.outcomes.survived) * 1000
@@ -8471,6 +8543,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MESSAGE_SOURCES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SOURCES),
 /* harmony export */   POOL: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.POOL),
 /* harmony export */   PROMOTION_LIMITS: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.PROMOTION_LIMITS),
+/* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.PROMOTION_MESSAGE_CHECK_DELAY_MS),
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_MESSAGE_STRATEGIES),
 /* harmony export */   PROMO_LOG_DEBUG: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMO_LOG_DEBUG),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PercentileEngine),
@@ -8480,6 +8553,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionMessageQueue: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionMessageQueue),
 /* harmony export */   PromotionRunnerSupervisor: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionRunnerSupervisor),
 /* harmony export */   PromotionRuntime: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionRuntime),
+/* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountChannelBlock),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountSendCap),
@@ -8533,6 +8607,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolMessageIndex),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeHydratedChannelFacts),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy),
+/* harmony export */   normalizeAttributionChannelIds: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizeAttributionChannelIds),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
@@ -20755,6 +20830,7 @@ class ReactionRateLimiter {
             totalReactions: 0,
             totalFloods: 0,
             totalFailed: 0,
+            totalRestricted: 0,
             floodHistory: [],
             lastFloodTime: 0,
             lastReactionTime: 0,
@@ -20917,6 +20993,10 @@ class ReactionRateLimiter {
         this.stats.totalFailed++;
         await this.persistIfNeeded();
     }
+    async recordRestricted() {
+        this.stats.totalRestricted++;
+        await this.persistIfNeeded();
+    }
     /**
      * Record a FLOOD_WAIT error with wider buffer (1.5-2.0x).
      */
@@ -20977,6 +21057,7 @@ class ReactionRateLimiter {
             totalReactions: this.stats.totalReactions,
             totalFloods: this.stats.totalFloods,
             totalFailed: this.stats.totalFailed,
+            totalRestricted: this.stats.totalRestricted,
             floodHistoryCount: this.stats.floodHistory.length,
             lastFloodTime: this.stats.lastFloodTime,
             lastReactionTime: this.stats.lastReactionTime,
@@ -20999,6 +21080,7 @@ class ReactionRateLimiter {
         return [
             `Reactions: ${total}`,
             `Failed: ${this.stats.totalFailed}`,
+            `Restricted: ${this.stats.totalRestricted}`,
             `Floods: ${this.stats.totalFloods} (${floodRate}%)`,
             `Hourly: ${hourlyCount}/${this.config.HOURLY_REACTION_LIMIT}`,
             `Consecutive: ${this.stats.consecutiveSuccesses}`,
@@ -21017,11 +21099,13 @@ class ReactionRateLimiter {
                 reactions: this.stats.totalReactions,
                 floods: this.stats.totalFloods,
                 failed: this.stats.totalFailed,
+                restricted: this.stats.totalRestricted,
                 consecutive: this.stats.consecutiveSuccesses
             };
             this.stats.totalReactions = 0;
             this.stats.totalFloods = 0;
             this.stats.totalFailed = 0;
+            this.stats.totalRestricted = 0;
             this.stats.consecutiveSuccesses = 0;
             this.lastStatsReset = resetTimestamp;
             this.stats.lastStatsReset = resetTimestamp;
@@ -21082,6 +21166,7 @@ class ReactionRateLimiter {
                 totalReactions: loaded.totalReactions ?? 0,
                 totalFloods: loaded.totalFloods ?? 0,
                 totalFailed: loaded.totalFailed ?? 0,
+                totalRestricted: loaded.totalRestricted ?? 0,
                 floodHistory: Array.isArray(loaded.floodHistory) ? loaded.floodHistory : [],
                 lastFloodTime: loaded.lastFloodTime ?? 0,
                 lastReactionTime: loaded.lastReactionTime ?? 0,
@@ -21238,8 +21323,18 @@ class ReactionService {
         this.runtimeRestrictedChannelIds = new Set();
         this.isRunning = false;
         this.isStopped = true;
+        this.isDisposed = false;
         this.startupTimer = null;
+        this.loopPromise = null;
+        this.restartPromise = null;
+        this.interruptSleep = null;
         this.lastSuccessfulReactionTimestamp = 0;
+        this.runtimeOutcomes = {
+            success: 0,
+            failed: 0,
+            restricted: 0,
+            flood: 0,
+        };
         this.lastChannelUpdate = 0;
         this.lastHealthCheck = 0;
         // Round-robin channel index for even distribution
@@ -21254,6 +21349,7 @@ class ReactionService {
         this.HEALTH_CHECK_INTERVAL = 3 * 60 * 1000;
         // Channel refresh sleep
         this.CHANNEL_REFRESH_SLEEP_MS = 30 * 1000;
+        this.LOOP_STOP_TIMEOUT_MS = 10 * 1000;
         // Max restricted IDs
         this.MAX_RESTRICTED_IDS = 5000;
         this.client = client;
@@ -21268,9 +21364,8 @@ class ReactionService {
         const existing = ReactionService.activeInstances.get(this.instanceId);
         if (existing) {
             logger.warn(`[${this.instanceId}] ReactionService instance already exists, disposing old one`);
-            existing.stop();
-            existing.rateLimiter.dispose().catch(err => {
-                logger.error(`[${this.instanceId}] Error disposing old rate limiter: ${err}`);
+            void existing.dispose().catch(err => {
+                logger.error(`[${this.instanceId}] Error disposing old reaction service: ${err}`);
             });
         }
         // Register this instance (replaces old entry)
@@ -21295,7 +21390,7 @@ class ReactionService {
             this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_12__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
             this.instanceId);
             logger.info(`[${this.instanceId}] Reaction service initialized`);
-            if (!this.autoStart) {
+            if (!this.autoStart || this.isDisposed) {
                 return;
             }
             // Variable startup delay (30-120s) for human-like behavior
@@ -21314,6 +21409,10 @@ class ReactionService {
     }
     // ==================== Public API ====================
     start() {
+        if (this.isDisposed) {
+            logger.warn(`[${this.instanceId}] Cannot start disposed reaction service`);
+            return;
+        }
         if (this.isRunning) {
             logger.warn(`[${this.instanceId}] Already running`);
             return;
@@ -21321,7 +21420,7 @@ class ReactionService {
         this.isStopped = false;
         this.isRunning = true;
         logger.info(`[${this.instanceId}] Starting reaction loop`);
-        this.mainLoop().catch(err => {
+        const loopPromise = this.mainLoop().catch(err => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(err, '[Reactions] Loop crashed (unexpected)');
             this.isRunning = false;
             if (!this.isStopped) {
@@ -21332,7 +21431,12 @@ class ReactionService {
                     }
                 }, this.config.ERROR_RECOVERY_DELAY_MS);
             }
+        }).finally(() => {
+            if (this.loopPromise === loopPromise) {
+                this.loopPromise = null;
+            }
         });
+        this.loopPromise = loopPromise;
     }
     waitUntilReady() {
         return this.initialization;
@@ -21344,34 +21448,65 @@ class ReactionService {
         }
         logger.info(`[${this.instanceId}] Stopping reaction loop`);
         this.isStopped = true;
+        this.interruptSleep?.();
     }
     isInFloodWait() {
         return this.rateLimiter.isInFloodWait();
     }
-    restart() {
+    async restart() {
+        if (this.isDisposed) {
+            logger.debug(`[${this.instanceId}] Skipping restart - service is disposed`);
+            return;
+        }
         if (this.isInFloodWait()) {
             logger.info(`[${this.instanceId}] Skipping restart - active flood wait`);
             return;
         }
-        this.stop();
-        setTimeout(() => {
-            if (!this.isRunning) {
+        if (this.restartPromise) {
+            return this.restartPromise;
+        }
+        const restartPromise = (async () => {
+            this.stop();
+            const activeLoop = this.loopPromise;
+            if (activeLoop && !await this.waitForLoopExit(activeLoop, "restart")) {
+                return;
+            }
+            if (!this.isDisposed && !this.isRunning) {
                 this.start();
             }
-        }, 1000);
+        })();
+        this.restartPromise = restartPromise;
+        try {
+            await restartPromise;
+        }
+        finally {
+            if (this.restartPromise === restartPromise) {
+                this.restartPromise = null;
+            }
+        }
     }
     async dispose() {
+        if (this.isDisposed) {
+            return;
+        }
+        this.isDisposed = true;
         this.stop();
         if (this.startupTimer) {
             clearTimeout(this.startupTimer);
             this.startupTimer = null;
+        }
+        const activeLoop = this.loopPromise;
+        if (activeLoop) {
+            await this.waitForLoopExit(activeLoop, "dispose");
         }
         await this.rateLimiter.dispose();
         this.channels.length = 0;
         this.restrictedChannelIds.clear();
         this.dbRestrictedChannelIds.clear();
         this.runtimeRestrictedChannelIds.clear();
-        ReactionService.activeInstances.delete(this.instanceId);
+        if (ReactionService.activeInstances.get(this.instanceId) === this) {
+            ReactionService.activeInstances.delete(this.instanceId);
+        }
         logger.info(`[${this.instanceId}] Disposed`);
     }
     static getOrCreate(client, dialogManager, config) {
@@ -21394,13 +21529,15 @@ class ReactionService {
             lastReactionTime: stats.lastReactionTime,
             channels: this.channels.length,
             restrictedChannels: this.restrictedChannelIds.size,
+            restrictedFailures: stats.totalRestricted,
             isRunning: this.isRunning,
             isStopped: this.isStopped,
             totalFloods: stats.totalFloods,
             lastFloodTime: stats.lastFloodTime,
             consecutiveSuccesses: stats.consecutiveSuccesses,
             optimalDelayMs: stats.optimalDelayMs,
-            isInFloodWait: this.rateLimiter.isInFloodWait()
+            isInFloodWait: this.rateLimiter.isInFloodWait(),
+            runtimeOutcomes: { ...this.runtimeOutcomes },
         };
     }
     clearRestrictedChannels() {
@@ -21426,7 +21563,7 @@ class ReactionService {
                 const channelsUpdated = await this.updateChannelsIfNeeded();
                 if (channelsUpdated) {
                     logger.info(`[${this.instanceId}] Channels refreshed, sleeping ${(this.CHANNEL_REFRESH_SLEEP_MS / 1000 / 60).toFixed(1)} minutes for randomization`);
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(this.CHANNEL_REFRESH_SLEEP_MS);
+                    await this.interruptibleSleep(this.CHANNEL_REFRESH_SLEEP_MS);
                 }
                 await this.healthCheckIfNeeded();
                 // Proactive limit checks BEFORE attempting reaction
@@ -21434,7 +21571,7 @@ class ReactionService {
                 if (!canReact.allowed) {
                     logger.info(`[${this.instanceId}] Rate limited: ${canReact.reason}`);
                     // Wait longer when limits are hit
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(60000 + Math.random() * 60000); // 1-2 min
+                    await this.interruptibleSleep(60000 + Math.random() * 60000); // 1-2 min
                     continue;
                 }
                 // Check flood wait
@@ -21445,14 +21582,14 @@ class ReactionService {
                 // Ensure we have channels
                 if (this.channels.length === 0) {
                     logger.warn(`[${this.instanceId}] No channels available`);
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(this.config.NO_CHANNELS_DELAY_MS);
+                    await this.interruptibleSleep(this.config.NO_CHANNELS_DELAY_MS);
                     continue;
                 }
                 // Random skip: 12% chance to "browse" without reacting (human-like)
                 if (Math.random() < this.config.SKIP_REACTION_PROBABILITY) {
                     logger.debug(`[${this.instanceId}] Skipping reaction (browse-only)`);
                     const browseDelay = 3000 + Math.random() * 8000; // 3-11s browse
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(browseDelay);
+                    await this.interruptibleSleep(browseDelay);
                     continue;
                 }
                 // Perform reaction
@@ -21460,17 +21597,17 @@ class ReactionService {
                 if (reactionResult === 'success') {
                     // Full multi-modal delay after successful reaction
                     const delay = this.rateLimiter.getRecommendedDelay();
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(delay);
+                    await this.interruptibleSleep(delay);
                 }
                 else {
                     // Short retry delay when no reaction
                     const retryDelay = 1000 + Math.random() * 1000;
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(retryDelay);
+                    await this.interruptibleSleep(retryDelay);
                 }
             }
             catch (error) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Loop error');
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(this.config.ERROR_RECOVERY_DELAY_MS);
+                await this.interruptibleSleep(this.config.ERROR_RECOVERY_DELAY_MS);
             }
         }
         this.isRunning = false;
@@ -21509,7 +21646,7 @@ class ReactionService {
             const msgLen = message.message?.length ?? 0;
             const readDelay = this.config.READ_SIM_MIN_MS +
                 Math.min(msgLen / 200, 1) * (this.config.READ_SIM_MAX_MS - this.config.READ_SIM_MIN_MS);
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(readDelay);
+            await this.interruptibleSleep(readDelay);
             const reactionSent = await this.sendReaction(message);
             if (!reactionSent) {
                 return 'skipped';
@@ -21522,7 +21659,7 @@ class ReactionService {
                 const secondMessage = await this.fetchReactableMessage(channel);
                 if (secondMessage && secondMessage.id !== message.id) {
                     const extraDelay = 2000 + Math.random() * 4000; // 2-6s
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(extraDelay);
+                    await this.interruptibleSleep(extraDelay);
                     try {
                         const secondReactionSent = await this.sendReaction(secondMessage);
                         // if (secondReactionSent) {
@@ -21701,6 +21838,7 @@ class ReactionService {
     }
     /** Best-effort per-reaction analytics hook; never throws into the loop. */
     emitReactionOutcome(outcome) {
+        this.runtimeOutcomes[outcome]++;
         if (!this.onReactionOutcome)
             return;
         try {
@@ -21768,7 +21906,7 @@ class ReactionService {
                     }
                     break;
                 case 'CHANNEL_RESTRICTED':
-                    await this.rateLimiter.recordFailure();
+                    await this.rateLimiter.recordRestricted();
                     // Reaction CHANNEL_RESTRICTED outcomes (banned, write_forbidden, private, invalid)
                     // are account/send-side conditions, NOT a channel-wide reactions property. Keep them
                     // in-memory only (persistToDb=false) so one account's ban can't poison the shared
@@ -22208,7 +22346,47 @@ class ReactionService {
     async waitForFloodRelease() {
         const remaining = this.rateLimiter.getFloodWaitRemaining();
         logger.info(`[${this.instanceId}] Flood wait: ${Math.round(remaining / 1000)}s`);
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(remaining);
+        await this.interruptibleSleep(remaining);
+    }
+    async interruptibleSleep(durationMs) {
+        if (this.isStopped) {
+            return;
+        }
+        let release = null;
+        const interrupted = new Promise((resolve) => {
+            release = resolve;
+        });
+        this.interruptSleep = release;
+        try {
+            await Promise.race([(0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(durationMs), interrupted]);
+        }
+        finally {
+            if (this.interruptSleep === release) {
+                this.interruptSleep = null;
+            }
+        }
+    }
+    async waitForLoopExit(loopPromise, operation) {
+        let timeout = null;
+        const timedOut = new Promise((resolve) => {
+            timeout = setTimeout(() => resolve(false), this.LOOP_STOP_TIMEOUT_MS);
+            timeout.unref?.();
+        });
+        try {
+            const stopped = await Promise.race([
+                loopPromise.then(() => true),
+                timedOut,
+            ]);
+            if (!stopped) {
+                logger.warn(`[${this.instanceId}] Reaction loop did not stop within ${this.LOOP_STOP_TIMEOUT_MS}ms during ${operation}; leaving it stopped without starting an overlapping loop`);
+            }
+            return stopped;
+        }
+        finally {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+        }
     }
 }
 // MEMORY FIX: Track active instances to prevent duplicates
@@ -25030,7 +25208,9 @@ const user = Object.freeze({
     highestPayAmount: 'highestPayAmount',
     cheatCount: "cheatCount",
     fullShow: "fullShow",
-    callTime: "callTime"
+    callTime: "callTime",
+    attributionChannelIds: "attributionChannelIds",
+    attributionUpdatedAt: "attributionUpdatedAt",
 });
 const USER_DEFAULTS = {
     fullShow: 0,
@@ -25039,6 +25219,8 @@ const USER_DEFAULTS = {
     highestPayAmount: 0,
     videos: [],
     picsSent: 0,
+    attributionChannelIds: [],
+    attributionUpdatedAt: 0,
     picCount: 0,
     limitTime: 0,
     paidCount: 0,
@@ -25540,6 +25722,28 @@ class UserDataDtoCrud {
         }
         else {
             return undefined;
+        }
+    }
+    /** Merge common-chat evidence into an existing conversation row; never create one here. */
+    async recordAttributionChannelIds(chatId, channelIds) {
+        try {
+            const normalizedChatId = String(chatId || '').trim();
+            const profile = process.env.dbcoll?.trim();
+            if (!normalizedChatId || !profile)
+                return false;
+            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.normalizeAttributionChannelIds)(channelIds);
+            const update = normalizedChannelIds.length > 0
+                ? {
+                    $set: { attributionUpdatedAt: Date.now() },
+                    $addToSet: { attributionChannelIds: { $each: normalizedChannelIds } },
+                }
+                : { $set: { attributionUpdatedAt: Date.now() } };
+            const result = await this.db.updateOne({ chatId: normalizedChatId, profile }, update, { upsert: false });
+            return result.acknowledged && result.matchedCount === 1;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
+            return false;
         }
     }
     async getAChannel() {
@@ -28371,7 +28575,7 @@ class JobManager {
                 else {
                     const reason = check?.issues.join('; ') || check?.summary || 'service health requested recovery';
                     this.log('warn', `Reactor unhealthy (${reason}) - restarting 🔄`);
-                    reactor.restart();
+                    await reactor.restart();
                 }
                 return true;
             }
@@ -33016,19 +33220,57 @@ function normalizeSenderId(senderId) {
         return null;
     if (typeof senderId === 'string') {
         const normalized = senderId.trim();
-        if (!/^-?\d+$/.test(normalized))
-            return null;
-        return big_integer__WEBPACK_IMPORTED_MODULE_0___default()(normalized);
+        return /^-?\d+$/.test(normalized) ? big_integer__WEBPACK_IMPORTED_MODULE_0___default()(normalized) : null;
     }
     if (typeof senderId === 'number')
-        return Number.isFinite(senderId) ? senderId : null;
+        return Number.isSafeInteger(senderId) ? senderId : null;
     if (typeof senderId === 'object' && typeof senderId.toString === 'function') {
         const normalized = senderId.toString().trim();
-        if (!/^-?\d+$/.test(normalized))
-            return null;
-        return big_integer__WEBPACK_IMPORTED_MODULE_0___default()(normalized);
+        return /^-?\d+$/.test(normalized) ? big_integer__WEBPACK_IMPORTED_MODULE_0___default()(normalized) : null;
     }
     return null;
+}
+function getAttributionConversionId(chatId) {
+    const profile = process.env.dbcoll?.trim() || 'default_profile';
+    return `${profile}:${String(chatId).trim()}`;
+}
+async function attributeDirectTgAutDM(event, chatId) {
+    const senderId = normalizeSenderId(event.message.senderId);
+    if (!senderId) {
+        logger.debug(`[DirectAttribution] ${chatId} skipped: senderId unavailable`);
+        return;
+    }
+    try {
+        const runtime = _tg_channel_state__WEBPACK_IMPORTED_MODULE_1__.PromotionRuntime.getInstance();
+        if (!runtime.attribution || !runtime.tracker) {
+            logger.debug(`[DirectAttribution] ${chatId} skipped: promotion attribution runtime unavailable`);
+            return;
+        }
+        const conversionId = getAttributionConversionId(chatId);
+        if (await runtime.tracker.isRoutePending(conversionId)) {
+            logger.info(`[DirectAttribution] ${chatId} deferred: promote-clients owns this routed DM`);
+            return;
+        }
+        const commonChatIds = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_1__.getTelegramCommonChatIds)(_core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getClient(), {
+            userId: senderId,
+            maxId: big_integer__WEBPACK_IMPORTED_MODULE_0___default()(0),
+            limit: 100,
+        });
+        const result = await runtime.attribution.attributeDMConversion(commonChatIds, conversionId);
+        if (result.failedChannelIds.length > 0) {
+            logger.warn(`[DirectAttribution] ${chatId} has ${result.failedChannelIds.length} retryable channel write failure(s)`);
+            return;
+        }
+        const persisted = await _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance().recordAttributionChannelIds(chatId, commonChatIds);
+        if (!persisted) {
+            logger.warn(`[DirectAttribution] ${chatId} channel evidence was scored but userData persistence failed`);
+            return;
+        }
+        logger.info(`[DirectAttribution] ${chatId} completed with ${result.discoveredChannelIds.length} common channel(s)`);
+    }
+    catch (error) {
+        logger.warn(`[DirectAttribution] ${chatId} failed without blocking conversation handling`, error);
+    }
 }
 /**
  * Handle new user message
@@ -33042,47 +33284,10 @@ async function handleNewUserMessage(event, chatId, firstName) {
     logger.log(`[SPECIAL CASE] New user created - chatId: ${chatId}, firstName: ${firstName}`);
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
     await db.recordNewUserContact(chatId, firstName);
-    const senderId = normalizeSenderId(event.message.senderId);
-    if (senderId) {
-        (async () => {
-            try {
-                logger.debug(`Attribution lookup starting for ${chatId}`);
-                let attributionService;
-                try {
-                    attributionService = _tg_channel_state__WEBPACK_IMPORTED_MODULE_1__.PromotionRuntime.getInstance().attribution;
-                }
-                catch (runtimeError) {
-                    logger.debug(`Attribution skipped for ${chatId}: promotion runtime unavailable: ${runtimeError}`);
-                    return;
-                }
-                if (!attributionService) {
-                    logger.debug(`Attribution skipped for ${chatId}: promotion runtime attribution is not initialized`);
-                    return;
-                }
-                const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getClient();
-                const commonChatIds = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_1__.getTelegramCommonChatIds)(client, {
-                    userId: senderId,
-                    maxId: big_integer__WEBPACK_IMPORTED_MODULE_0___default()(0),
-                    limit: 100,
-                });
-                logger.debug(`Attribution common chat lookup for ${chatId}: commonChats=${commonChatIds.length}`);
-                const attribution = await attributionService.attributeDMConversion(commonChatIds, chatId);
-                const attributedChannels = attribution.attributedChannels;
-                if (attributedChannels.length > 0) {
-                    logger.log(`Attribution for ${chatId}: ${attributedChannels.map(a => `ch=${a.channelId} mobile=${a.mobile} w=${(a.weight * 100).toFixed(0)}%`).join(', ')}`);
-                }
-                else {
-                    logger.debug(`Attribution completed for ${chatId}: no promoted channels matched`);
-                }
-            }
-            catch (err) {
-                logger.debug(`Attribution error for ${chatId}: ${err}`);
-            }
-        })();
-    }
-    else {
-        logger.debug(`Attribution skipped for ${chatId}: senderId unavailable`);
-    }
+    // Keep attribution off the response-critical path. A shared pre-send route
+    // marker decides whether tg-aut owns this direct DM or must defer it to the
+    // promote account that owns the source channel memberships.
+    void attributeDirectTgAutDM(event, chatId);
 }
 
 
@@ -34629,7 +34834,8 @@ function routeHealthFailureAction(error, fallback) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   buildTgAutHealthSnapshot: () => (/* binding */ buildTgAutHealthSnapshot)
+/* harmony export */   buildTgAutHealthSnapshot: () => (/* binding */ buildTgAutHealthSnapshot),
+/* harmony export */   tgAutReadinessHttpStatus: () => (/* binding */ tgAutReadinessHttpStatus)
 /* harmony export */ });
 /* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
@@ -34651,6 +34857,14 @@ const REACTION_STALE_MS = 10 * 60 * 1000;
 const REACTION_STOPPED_MS = 30 * 60 * 1000;
 const PROMOTION_STALE_MS = 10 * 60 * 1000;
 const PROMOTION_STOPPED_MS = 30 * 60 * 1000;
+const TG_AUT_READINESS_COMPONENTS = new Set([
+    "telegram.connection",
+    "database.mongo",
+    "redis.connection",
+    "telegram.replier",
+    "leader.election",
+    "connection.retry",
+]);
 async function buildTgAutHealthSnapshot(requestId) {
     const [telegramHealth, cloudinaryHealth, databaseHealth, redisHealth, leaderHealth, connectionRetryHealth, promotionHealthChecks, reactionHealth, replierHealth,] = await Promise.all([
         collectTelegramHealth(),
@@ -34683,6 +34897,16 @@ async function buildTgAutHealthSnapshot(requestId) {
             mobile: process.env.mobile ?? "unknown",
         },
     });
+}
+/** Readiness includes only components required to serve the account's user-facing work. */
+function tgAutReadinessHttpStatus(snapshot) {
+    const criticalChecks = snapshot.checks.filter((check) => TG_AUT_READINESS_COMPONENTS.has(check.component));
+    const observedComponents = new Set(criticalChecks.map((check) => check.component));
+    const hasEveryCriticalCheck = [...TG_AUT_READINESS_COMPONENTS]
+        .every((component) => observedComponents.has(component));
+    const allCriticalReady = criticalChecks
+        .every((check) => check.status === "healthy" || check.status === "recovering");
+    return hasEveryCriticalCheck && allCriticalReady ? 200 : 503;
 }
 async function collectRedisHealth() {
     try {
@@ -49728,15 +49952,8 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.Ba
             else if (daysLeft < 1) {
                 logger.debug("promoteRepl is not configured, proceeding without banned channel filter");
             }
-            const shuffledChannels = [...filteredChannels];
-            // Fisher-Yates shuffle
-            for (let i = shuffledChannels.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [shuffledChannels[i], shuffledChannels[j]] = [shuffledChannels[j], shuffledChannels[i]];
-            }
-            const maxChannels = Math.min(this.MAX_CHANNELS_CACHE, shuffledChannels.length);
-            const topChannels = shuffledChannels.slice(0, maxChannels);
-            logger.log(`🎯 PROMO hydrate candidates | selected ${topChannels.length} | max ${this.MAX_CHANNELS_CACHE} | source ${shuffledChannels.length}`);
+            const topChannels = await this.selectHydrationCandidates(filteredChannels, this.MAX_CHANNELS_CACHE);
+            logger.log(`🎯 PROMO hydrate candidates | selected ${topChannels.length} | max ${this.MAX_CHANNELS_CACHE} | source ${filteredChannels.length} | policy conversion+safety+20%explore`);
             return topChannels;
         }
         catch (error) {
@@ -56469,12 +56686,12 @@ const leaderService = _services_LeaderElectionService__WEBPACK_IMPORTED_MODULE_1
  * @swagger
  * /:
  *   get:
- *     summary: Service health snapshot
- *     description: Returns the read-only service health snapshot for root health probe compatibility.
+ *     summary: Process liveness
+ *     description: Lightweight process and event-loop liveness response. Use GET /health for readiness and GET /health/details for the informational full snapshot.
  *     tags: [Health]
  *     responses:
  *       200:
- *         description: Service health snapshot
+ *         description: Process is alive
  *         content:
  *           application/json:
  *             schema:
@@ -56484,15 +56701,11 @@ const leaderService = _services_LeaderElectionService__WEBPACK_IMPORTED_MODULE_1
  *                   type: string
  *                 status:
  *                   type: string
- *                   enum: [healthy, recovering, degraded, unhealthy, unknown]
- *                 readOnly:
- *                   type: boolean
- *       500:
- *         description: Error creating service health snapshot
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Error'
+ *                   enum: [alive]
+ *                 uptime:
+ *                   type: number
+ *                 ts:
+ *                   type: number
  */
 router.get("/", (req, res) => {
     // Lightweight LIVENESS probe: proves the process is up and the event loop is responsive.
@@ -56500,13 +56713,10 @@ router.get("/", (req, res) => {
     // deep READINESS snapshot at GET /health. Keeping `/` cheap + always-200-when-alive stops
     // a single degraded subsystem from making the root probe return 503, and avoids running a
     // full parallel health sweep on every uptime/load-balancer ping.
-    res.status(200).json({
-        service: "tg-aut",
-        status: "alive",
-        clientId: process.env.clientId,
-        uptime: Math.round(process.uptime()),
-        ts: Date.now(),
-    });
+    sendTgAutLiveness(res);
+});
+router.get("/health/live", (_req, res) => {
+    sendTgAutLiveness(res);
 });
 /**
  * @swagger
@@ -56536,6 +56746,9 @@ router.get("/", (req, res) => {
 router.get("/health", async (req, res) => {
     await sendServiceHealthSnapshot(req, res, "health snapshot");
 });
+router.get("/health/ready", async (req, res) => {
+    await sendServiceHealthSnapshot(req, res, "readiness snapshot");
+});
 /**
  * @swagger
  * /health/full:
@@ -56544,7 +56757,13 @@ router.get("/health", async (req, res) => {
  *     description: Complete health snapshot including non-critical background checks (reaction/promotion). Always returns 200 with the snapshot body so monitoring can read every check's status; use GET /health for readiness gating.
  *     tags: [Health]
  */
+router.get("/health/details", async (req, res) => {
+    await sendFullHealthSnapshot(req, res);
+});
 router.get("/health/full", async (req, res) => {
+    await sendFullHealthSnapshot(req, res);
+});
+async function sendFullHealthSnapshot(req, res) {
     try {
         const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
         res.status(200).json(health); // informational: always 200, body carries every check's real status
@@ -56561,7 +56780,7 @@ router.get("/health/full", async (req, res) => {
         });
         res.status(evidence.statusCode).json(evidence.health);
     }
-});
+}
 /**
  * @swagger
  * /getprocessid:
@@ -56821,34 +57040,20 @@ router.get("/database-health", async (req, res) => {
 router.get("/health-check", async (req, res) => {
     await sendServiceHealthSnapshot(req, res, "comprehensive health check");
 });
-// Components whose failure means the account genuinely CANNOT serve users — these gate the
-// readiness HTTP status. Background activities (reaction.service, promotion.engine) are NOT
-// here on purpose: they can be idle/degraded while the account is fully usable (connected,
-// replying, taking payments), so they must NOT make the readiness probe 503. They still appear
-// in the snapshot body as warnings, and the full snapshot is available at /health/full.
-const CRITICAL_HEALTH_COMPONENTS = new Set([
-    "telegram.connection",
-    "database.mongo",
-    "redis.connection",
-    "telegram.replier",
-    "leader.election",
-    "connection.retry",
-]);
-/**
- * Readiness status derived from CRITICAL components only. 503 iff a critical check is not
- * healthy/recovering. Non-critical (reaction/promotion) degradation is surfaced in the body
- * but does not fail readiness.
- */
-function criticalReadinessHttpStatus(snapshot) {
-    const criticalChecks = (snapshot.checks ?? []).filter((c) => CRITICAL_HEALTH_COMPONENTS.has(c.component));
-    const allCriticalOk = criticalChecks.every((c) => c.status === "healthy" || c.status === "recovering");
-    return allCriticalOk ? 200 : 503;
+function sendTgAutLiveness(res) {
+    res.status(200).json({
+        service: "tg-aut",
+        status: "alive",
+        clientId: process.env.clientId,
+        uptime: Math.round(process.uptime()),
+        ts: Date.now(),
+    });
 }
 async function sendServiceHealthSnapshot(req, res, operation) {
     try {
         const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
         // Readiness gates on critical subsystems only (not reaction/promotion background activity).
-        res.status(criticalReadinessHttpStatus(health)).json(health);
+        res.status((0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.tgAutReadinessHttpStatus)(health)).json(health);
     }
     catch (error) {
         logger.error(`Error in ${operation}:`, error);
@@ -58794,7 +58999,7 @@ router.post("/reactions/restart", _middlewares_leader_middleware__WEBPACK_IMPORT
                 return;
             }
         }
-        reactor.restart();
+        await reactor.restart();
         const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
         const afterCheck = requiredHealthCheck(afterHealth, "reaction.service");
         const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
