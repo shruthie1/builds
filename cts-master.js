@@ -41191,6 +41191,10 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Profile' }),
     __metadata("design:type", String)
 ], CreateStatDto.prototype, "profile", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Paid channel-attribution credit timestamp', required: false }),
+    __metadata("design:type", Number)
+], CreateStatDto.prototype, "paymentAttributionCreditedAt", void 0);
 
 
 /***/ },
@@ -41437,6 +41441,11 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
 ], Stat2.prototype, "profile", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Paid channel-attribution credit timestamp', required: false }),
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], Stat2.prototype, "paymentAttributionCreditedAt", void 0);
 exports.Stat2 = Stat2 = __decorate([
     (0, mongoose_1.Schema)()
 ], Stat2);
