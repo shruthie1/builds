@@ -29183,6 +29183,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   deleteMessage: () => (/* binding */ deleteMessage),
 /* harmony export */   deleteMessagesBeforeId: () => (/* binding */ deleteMessagesBeforeId),
 /* harmony export */   downloadProfilePic: () => (/* binding */ downloadProfilePic),
+/* harmony export */   evaluatePlaybackCompletion: () => (/* binding */ evaluatePlaybackCompletion),
 /* harmony export */   executehs: () => (/* binding */ executehs),
 /* harmony export */   executehsl: () => (/* binding */ executehsl),
 /* harmony export */   extractNumberFromString: () => (/* binding */ extractNumberFromString),
@@ -30099,7 +30100,37 @@ function extractNumberFromString(str) {
     const match = str.match(/-?\d+(\.\d+)?/);
     return match ? parseFloat(match[0]) : -1;
 }
+/**
+ * Validate modern VC completion telemetry before advancing paid-service state.
+ * Requests without completion telemetry retain compatibility with older callers.
+ */
+function evaluatePlaybackCompletion(data) {
+    const hasCompletionTelemetry = data.percentage !== undefined || data.endCall !== undefined;
+    if (!hasCompletionTelemetry) {
+        return { recorded: true, reason: 'legacy-no-telemetry' };
+    }
+    const percentage = Number(data.percentage);
+    const normalizedPercentage = Number.isFinite(percentage) ? percentage : 0;
+    const count = Number(data.count);
+    const normalizedCount = Number.isFinite(count) ? count : 0;
+    const endCall = String(data.endCall ?? '').trim().toLowerCase();
+    if (endCall === 'call ended before starting') {
+        return { recorded: false, reason: 'incomplete' };
+    }
+    if (normalizedCount > 2 || normalizedPercentage > 90 || endCall === 'videoend') {
+        return { recorded: true, reason: 'completed' };
+    }
+    if (endCall === 'manual end' && normalizedPercentage > 65) {
+        return { recorded: true, reason: 'completed' };
+    }
+    return { recorded: false, reason: 'incomplete' };
+}
 async function executehs(client, chatId, data) {
+    const playback = evaluatePlaybackCompletion(data);
+    if (!playback.recorded) {
+        logger.warn(`Skipping incomplete demo playback for ${chatId}: video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} endCall=${String(data.endCall ?? '')}`);
+        return playback;
+    }
     await setAudioRecord(chatId);
     scheduleCoreUtilsTask(async () => {
         try {
@@ -30133,7 +30164,8 @@ async function executehs(client, chatId, data) {
         limitTime: Date.now(),
         totalCount: 10,
         demoGiven: true,
-        payAmount: 50
+        // A completed demo leaves at most the demo-tier amount active.
+        payAmount: Math.min(50, Number(userDetails.payAmount) || 0)
     };
     userDetails = await db.update(chatId, updatedData); // Reset states after demo given
     (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_18__.resetStatesOnDemoGiven)(chatId, userDetails);
@@ -30144,8 +30176,14 @@ async function executehs(client, chatId, data) {
     await (0,_index__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithButton)(msg, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
     await setTyping(chatId);
     (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_21__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    return playback;
 }
 async function executehsl(client, chatId, data) {
+    const playback = evaluatePlaybackCompletion(data);
+    if (!playback.recorded) {
+        logger.warn(`Skipping incomplete full-show playback for ${chatId}: video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} endCall=${String(data.endCall ?? '')}`);
+        return playback;
+    }
     await setAudioRecord(chatId);
     const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     let userDetails = await db.read(chatId);
@@ -30233,6 +30271,7 @@ async function executehsl(client, chatId, data) {
     }
     await setTyping(chatId);
     (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_21__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    return playback;
 }
 const defaultMessages = [
     "1", "2", "3", "4", "5", "6", "7", "8",
@@ -59080,16 +59119,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../index */ "./src/index.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_20___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_20__);
-/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_21___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_21__);
+/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
 
 
 
@@ -59115,7 +59155,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("tg-aut:telegram-routes");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("tg-aut:telegram-routes");
 const router = (0,express__WEBPACK_IMPORTED_MODULE_0__.Router)();
 function scheduleTelegramRouteTask(callback, delayMs, context) {
     return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_12__.scheduleUnrefTimeout)(() => {
@@ -59138,8 +59179,8 @@ function peerIdText(peer) {
     if (!peer) {
         return null;
     }
-    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.PeerChannel) {
-        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_16__.getPeerDialogId)(peer) ?? null;
+    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.PeerChannel) {
+        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_17__.getPeerDialogId)(peer) ?? null;
     }
     if (typeof peer === "object" && "id" in peer) {
         const id = peer.id;
@@ -59161,7 +59202,7 @@ function getCachedSenderInfo(messageFromId) {
     if (!senderId) {
         return null;
     }
-    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(senderId);
+    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance().get(senderId);
     if (senderEntity?.className === "User") {
         return {
             id: senderEntity.id?.toString() ?? senderId,
@@ -59180,8 +59221,8 @@ function getCachedSenderInfo(messageFromId) {
     };
 }
 async function sendTelegramUnavailable(req, res, operation, readOnly = true, errorText = "TelegramManager instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
@@ -59208,13 +59249,13 @@ function sendTelegramOperationFailure(req, res, operation, error, errorText, _su
         success: false,
         sent: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
         requestId: req.requestId,
     });
 }
 async function sendDatabaseUnavailable(req, res, operation, readOnly = true, errorText = "MongoDB instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
@@ -59223,7 +59264,7 @@ async function sendDatabaseUnavailable(req, res, operation, readOnly = true, err
     });
 }
 function sendDatabaseOperationFailure(req, res, operation, error, errorText, summary, readOnly = true) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -59231,11 +59272,11 @@ function sendDatabaseOperationFailure(req, res, operation, error, errorText, sum
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
@@ -59270,13 +59311,54 @@ async function getTelegramManagerForOperation(req, res, operation, readOnly = fa
     return _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance();
 }
 function buildTelegramRouteData(req) {
-    return {
-        duration: req.query.duration || 0,
-        video: req.query.video || 0,
-        count: req.query.count || 0,
-        endCall: req.query.endCall || false,
-        retryCount: req.query.retryCount || 0,
-    };
+    const data = {};
+    const body = req.body && typeof req.body === 'object'
+        ? req.body
+        : {};
+    for (const key of ['duration', 'video', 'count', 'endCall', 'percentage', 'retryCount']) {
+        if (body[key] !== undefined)
+            data[key] = body[key];
+        else if (req.query[key] !== undefined)
+            data[key] = req.query[key];
+    }
+    return data;
+}
+async function resetRecentUserAfterService(chatId) {
+    try {
+        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_13__.fetchWithTimeout)(`https://ums.paidgirls.site/resetRecentUser?chatId=${encodeURIComponent(chatId)}`, { timeout: 5000 }, 1);
+        if (!response) {
+            logger.warn(`Completed service for ${chatId}, but resetRecentUser did not return a response`);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `resetRecentUserAfterService.${chatId}`, false);
+    }
+}
+async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
+    const operation = longShow ? "execute-long-handshake" : "execute-handshake";
+    try {
+        const chatId = req.params.chatId;
+        const tg = await getTelegramClientForOperation(req, res, operation);
+        if (!tg)
+            return;
+        const data = buildTelegramRouteData(req);
+        const playback = longShow
+            ? await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.executehsl)(tg, chatId, data)
+            : await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.executehs)(tg, chatId, data);
+        if (resetRecentUser && playback.recorded) {
+            await resetRecentUserAfterService(chatId);
+        }
+        sendTelegramOperationSuccess(req, res, operation, longShow ? "Long handshake execution completed" : "Handshake execution completed", {
+            chatId,
+            data,
+            serviceRecorded: playback.recorded,
+            playbackReason: playback.reason,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, longShow ? "Error in /executehsl endpoint" : "Error in /executehs endpoint");
+        sendTelegramOperationFailure(req, res, operation, error, longShow ? "Failed to execute long handshake" : "Failed to execute handshake", longShow ? "Telegram long handshake execution failed" : "Telegram handshake execution failed", false);
+    }
 }
 /**
  * @swagger
@@ -59307,7 +59389,7 @@ function buildTelegramRouteData(req) {
  *             schema:
  *               type: boolean
  */
-router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "request-call";
     const chatId = req.params.chatId?.trim();
     const force = req.query.force === "true";
@@ -59386,13 +59468,13 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               items:
  *                 type: object
  */
-router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "chat-history";
     try {
         const chatId = req.params.chatId;
         const requestId = req.requestId || "unknown";
         if (!chatId || chatId.trim() === "") {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_22__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
             return;
         }
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
@@ -59402,7 +59484,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
         // Validate parameters
         if (offset === null || minId === null || limit === null || maxId === null || limit < 1) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_22__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
             return;
         }
         // Validate limit to prevent abuse
@@ -59484,7 +59566,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *             schema:
  *               type: boolean
  */
-router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-call-request";
     const chatId = req.params.chatId?.trim();
     if (!chatId) {
@@ -59524,6 +59606,26 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
 /**
  * @swagger
  * /executehs/{chatId}:
+ *   post:
+ *     summary: Record a completed demo from VCUI
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               duration: { type: number }
+ *               video: { type: integer }
+ *               count: { type: integer }
+ *               endCall: { type: string }
+ *               percentage: { type: number }
+ *     responses:
+ *       200:
+ *         description: Demo completion processed
  *   get:
  *     summary: Execute handshake
  *     description: Executes a handshake operation for a specific chat
@@ -59562,6 +59664,11 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
  *         schema:
  *           type: integer
  *         description: Retry count
+ *       - in: query
+ *         name: percentage
+ *         schema:
+ *           type: number
+ *         description: Percentage of the selected video that was played
  *     responses:
  *       200:
  *         description: Handshake executed successfully
@@ -59571,25 +59678,33 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
  *               type: object
  *               example: { operation: "execute-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "execute-handshake";
-    try {
-        const chatId = req.params.chatId;
-        const tg = await getTelegramClientForOperation(req, res, operation);
-        if (!tg)
-            return;
-        const data = buildTelegramRouteData(req);
-        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.executehs)(tg, chatId, data);
-        sendTelegramOperationSuccess(req, res, operation, "Handshake execution completed", { chatId, data });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /executehs endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to execute handshake", "Telegram handshake execution failed", false);
-    }
-});
+router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, false));
+// The VCUI uses POST + keepalive so this completion can finish after its
+// five-second call-ended screen redirects. GET remains unchanged for callers.
+router.post("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, true));
 /**
  * @swagger
  * /executehsl/{chatId}:
+ *   post:
+ *     summary: Record a completed second/full show from VCUI
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               duration: { type: number }
+ *               video: { type: integer }
+ *               count: { type: integer }
+ *               endCall: { type: string }
+ *               percentage: { type: number }
+ *     responses:
+ *       200:
+ *         description: Show completion processed
  *   get:
  *     summary: Execute handshake (long)
  *     description: Executes a long handshake operation for a specific chat
@@ -59628,6 +59743,11 @@ router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *         schema:
  *           type: integer
  *         description: Retry count
+ *       - in: query
+ *         name: percentage
+ *         schema:
+ *           type: number
+ *         description: Percentage of the selected video that was played
  *     responses:
  *       200:
  *         description: Handshake executed successfully
@@ -59637,22 +59757,8 @@ router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *               type: object
  *               example: { operation: "execute-long-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "execute-long-handshake";
-    try {
-        const chatId = req.params.chatId;
-        const tg = await getTelegramClientForOperation(req, res, operation);
-        if (!tg)
-            return;
-        const data = buildTelegramRouteData(req);
-        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.executehsl)(tg, chatId, data);
-        sendTelegramOperationSuccess(req, res, operation, "Long handshake execution completed", { chatId, data });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /executehsl endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to execute long handshake", "Telegram long handshake execution failed", false);
-    }
-});
+router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, false));
+router.post("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, true));
 /**
  * @swagger
  * /senddmp/{chatId}:
@@ -59678,7 +59784,7 @@ router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "send-demo-media-package", success: true, chatId: "12345" }
  */
-router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-demo-media-package";
     try {
         const chatId = req.params.chatId;
@@ -59722,7 +59828,7 @@ router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_
  *               type: object
  *               example: { operation: "delete-chat", success: true, chatId: "12345" }
  */
-router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-chat";
     try {
         const chatId = req.params.chatId;
@@ -59764,7 +59870,7 @@ router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "block-user", success: true, chatId: "12345" }
  */
-router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "block-user";
     try {
         const chatId = req.params.chatId;
@@ -59806,7 +59912,7 @@ router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *               type: object
  *               example: { operation: "unblock-user", success: true, chatId: "12345" }
  */
-router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "unblock-user";
     try {
         const chatId = req.params.chatId;
@@ -59858,7 +59964,7 @@ router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *             schema:
  *               type: object
  */
-router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-external-message";
     const chatId = req.params.chatId?.trim();
     const rawMessage = typeof req.query.msg === "string" ? req.query.msg : "";
@@ -60020,7 +60126,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               type: object
  *               example: { operation: "send-video-call-link", success: true, chatId: "12345" }
  */
-router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-video-call-link";
     try {
         const chatId = req.params.chatId;
@@ -60066,12 +60172,12 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *                 username:
  *                   type: string
  */
-router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_18__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.findHealthCheck)(snapshot, "telegram.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_19__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_15__.findHealthCheck)(snapshot, "telegram.connection");
         if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "telegram.connection",
                 owner: "telegram",
@@ -60092,26 +60198,26 @@ router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
             });
             return;
         }
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.healthCheckHttpStatus)(check)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_15__.healthCheckHttpStatus)(check)).json({
             status: toLegacyTelegramHealthStatus(check),
             username: process.env.username,
             readOnly: true,
             health: snapshot,
             healthStatus: check.status,
             check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_14__.createHealthRecoveryPlan)(snapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_15__.createHealthRecoveryPlan)(snapshot),
             requestId: req.requestId,
         });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /checkHealth endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
             summary: "Error checking Telegram connection",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_19__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_20__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -60156,7 +60262,7 @@ function toLegacyTelegramHealthStatus(check) {
  *             schema:
  *               type: object
  */
-router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "telegram-get-me");
@@ -60284,7 +60390,7 @@ router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15_
  *                   description:
  *                     type: string
  */
-router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "list-dialogs";
     try {
         const requestId = req.requestId || "unknown";
@@ -60315,7 +60421,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
         const requestedLimit = parseOptionalNonNegativeInteger(req.query.limit, 100);
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
         if (requestedLimit === null || offset === null) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_21__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_22__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
             return;
         }
         // MEMORY FIX: Enforce maximum limit to prevent excessive memory usage
@@ -60369,30 +60475,30 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             try {
                                 // Keep this list endpoint cache-only. Live entity lookups can outlive
                                 // request timeouts and keep logging after the response has been sent.
-                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(dialog.id);
+                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance().get(dialog.id);
                                 if (entity) {
                                     // Extract comprehensive entity information
-                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.User) {
+                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.User) {
                                         const user = entity;
                                         const userStatus = user.status;
                                         let wasOnline = null;
                                         // Extract wasOnline from different status types
-                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusOffline) {
+                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.UserStatusOffline) {
                                             wasOnline = userStatus.wasOnline || null;
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusRecently) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.UserStatusRecently) {
                                             wasOnline = null; // Recently doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusLastWeek) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.UserStatusLastWeek) {
                                             wasOnline = null; // LastWeek doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusLastMonth) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.UserStatusLastMonth) {
                                             wasOnline = null; // LastMonth doesn't have wasOnline
                                         }
                                         enhancedInfo = {
                                             username: user.username || null,
                                             phone: user.phone || null,
-                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.UserStatusOnline,
+                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.UserStatusOnline,
                                             lastSeen: wasOnline,
                                             isBot: user.bot || false,
                                             isVerified: user.verified || false,
@@ -60406,7 +60512,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             isFake: user.fake || false
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Chat) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.Chat) {
                                         const chat = entity;
                                         enhancedInfo = {
                                             participantsCount: chat.participantsCount || null,
@@ -60415,7 +60521,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             migratedTo: chat.migratedTo ? String(chat.migratedTo) : null
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Channel) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.Channel) {
                                         const channel = entity;
                                         enhancedInfo = {
                                             username: channel.username || null,
@@ -60464,7 +60570,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             // MEMORY FIX: Limit entity fetches to prevent memory leaks
                             let senderInfo = null;
                             // Check if message is Api.Message (has fromId property)
-                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Message;
+                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.Message;
                             const messageFromId = isApiMessage ? message.fromId : null;
                             if (messageFromId && totalProcessed < MAX_ENTITY_FETCHES) {
                                 senderInfo = getCachedSenderInfo(messageFromId);
@@ -60520,7 +60626,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                         logger.warn(`Error enhancing dialog:`, error instanceof Error ? error.message : String(error));
                         // Return basic dialog info on error
                         const errorMessage = dialog.message;
-                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_20__.Api.Message;
+                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_21__.Api.Message;
                         const errorMessageText = isApiMessage ? errorMessage.message || "" : "";
                         const errorMessageOut = isApiMessage ? errorMessage.out || false : false;
                         return {
@@ -60610,7 +60716,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
  *             schema:
  *               type: object
  */
-router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "dialog-info";
     try {
         const chatId = req.params.chatId;
@@ -60629,14 +60735,14 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
             return;
         try {
             // Get entity info — check cache first, then network
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().get(chatId);
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance().get(chatId);
             const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => client.getEntity(chatId), {
                 timeout: 10000,
                 errorMessage: `GetEntity timeout for chatId: ${chatId}`,
                 throwErr: true,
             });
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance().put(chatId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance().put(chatId, entity);
             }
             // Type guards and safe property access
             const isUser = entity.className === "User";
@@ -60712,7 +60818,7 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
  *                 success:
  *                   type: boolean
  */
-router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_15__.leaderOnlyMiddleware, async (req, res) => {
+router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_16__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "mark-dialog-read";
     try {
         const chatId = req.params.chatId;
