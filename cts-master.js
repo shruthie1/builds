@@ -47456,6 +47456,11 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             await new Promise((resolve) => setTimeout(resolve, 30_000));
             await this.activeChannelsService.resetMessageDeletionCounters();
         });
+        this.register('maintenance-daily-user-stats-reset', '25 0 * * *', () => this.runDailyUserStatsReset());
+        this.register('maintenance-daily-user-stats-reset-recovery', '30,45 0 * * *', () => this.runDailyUserStatsReset());
+        if (this.isDailyResetRecoveryWindow()) {
+            this.afterStartup('ums-test-daily-user-stats-reset-recovery', 15_000, () => this.runDailyUserStatsReset());
+        }
         this.afterStartup('ums-test-initial-user-processing', 120_000, () => this.maintenance.processEligibleUsers(400, 0));
     }
     afterStartup(name, delayMs, task) {
@@ -47535,6 +47540,37 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             this.logger.error('Daily promoteStats reset completed, but its notification failed', error instanceof Error ? error.stack : String(error));
         }
     }
+    async runDailyUserStatsReset() {
+        const db = this.requireDatabase('daily user stats reset');
+        const jobId = `daily-user-stats-reset:${this.istDateKey()}`;
+        if (!(await this.claimJob(db.collection('controlPlaneJobRuns'), jobId))) {
+            this.logger.warn(`Daily user stats reset already claimed or completed: ${jobId}`);
+            return;
+        }
+        try {
+            const result = await this.resetUserStatsWithRetries(db.collection('stats2'), db.collection('userData'));
+            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
+                $set: {
+                    completedAt: new Date(),
+                    stats2DeletedCount: result.stats2DeletedCount,
+                    paidUsersMatchedCount: result.paidUsersMatchedCount,
+                    paidUsersModifiedCount: result.paidUsersModifiedCount,
+                },
+                $unset: { leaseOwner: '', leaseExpiresAt: '' },
+            });
+        }
+        catch (error) {
+            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
+                $set: {
+                    failedAt: new Date(),
+                    error: error instanceof Error ? error.message : String(error),
+                    leaseExpiresAt: new Date(0),
+                },
+                $unset: { leaseOwner: '' },
+            });
+            throw error;
+        }
+    }
     async resetPromoteStatsWithRetries(promoteStats) {
         let lastError;
         for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -47553,6 +47589,36 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             catch (error) {
                 lastError = error;
                 this.logger.warn(`Daily promoteStats reset attempt ${attempt}/3 failed`);
+                if (attempt < 3)
+                    await new Promise((resolve) => setTimeout(resolve, 30_000));
+            }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+    async resetUserStatsWithRetries(stats2, userData) {
+        let lastError;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+                const now = Date.now();
+                const [stats2Result, paidUsersResult] = await Promise.all([
+                    stats2.deleteMany({}),
+                    userData.updateMany({ payAmount: { $gt: 10 }, totalCount: { $gt: 30 } }, {
+                        $set: {
+                            totalCount: 10,
+                            limitTime: now,
+                            paidReply: true,
+                        },
+                    }),
+                ]);
+                return {
+                    stats2DeletedCount: stats2Result.deletedCount ?? 0,
+                    paidUsersMatchedCount: paidUsersResult.matchedCount ?? 0,
+                    paidUsersModifiedCount: paidUsersResult.modifiedCount ?? 0,
+                };
+            }
+            catch (error) {
+                lastError = error;
+                this.logger.warn(`Daily user stats reset attempt ${attempt}/3 failed`);
                 if (attempt < 3)
                     await new Promise((resolve) => setTimeout(resolve, 30_000));
             }
