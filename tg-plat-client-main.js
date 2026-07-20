@@ -62,16 +62,24 @@ class ConversionAttributionService {
      * @param conversionId - Stable profile + Telegram chat ID for exactly-once crediting
      */
     async attributeDMConversion(commonChatIds, conversionId) {
+        return this.attributeConversion(commonChatIds, conversionId, 1);
+    }
+    /**
+     * Add paid-conversion evidence to every previously attributed channel.
+     * A new payer contributes 1.00 per channel; a returning payer contributes
+     * 0.50 per channel. Credit is intentionally not divided between channels.
+     */
+    async attributePaymentConversion(channelIds, conversionId, returningUser) {
+        return this.attributeConversion(channelIds, `payment:${conversionId}`, returningUser ? 0.5 : 1);
+    }
+    async attributeConversion(commonChatIds, conversionId, weightPerChannel) {
         const uniqueChatIds = normalizeAttributionChannelIds(commonChatIds);
         if (uniqueChatIds.length === 0) {
             return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
         }
         try {
-            // One DM always contributes exactly one unit of conversion evidence. Every
-            // common channel receives an equal share, so users with many common chats
-            // do not inflate the aggregate conversion total.
-            const equalWeight = 1 / uniqueChatIds.length;
-            if (!Number.isFinite(equalWeight) || equalWeight <= 0) {
+            const normalizedWeight = normalizeWeight(weightPerChannel);
+            if (normalizedWeight === null) {
                 return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
             }
             const attributions = [];
@@ -81,8 +89,8 @@ class ConversionAttributionService {
                 try {
                     if (!await this.tracker.claimConversion(channelClaimId))
                         continue;
-                    await this.intelligenceService.recordDMConversion(channelId, equalWeight);
-                    attributions.push({ channelId, weight: equalWeight });
+                    await this.intelligenceService.recordDMConversion(channelId, normalizedWeight);
+                    attributions.push({ channelId, weight: normalizedWeight });
                 }
                 catch {
                     failedChannelIds.push(channelId);
@@ -101,6 +109,11 @@ class ConversionAttributionService {
             return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
         }
     }
+}
+function normalizeWeight(value) {
+    if (!Number.isFinite(value) || value <= 0)
+        return null;
+    return Math.round(Math.min(1, value) * 100) / 100;
 }
 function normalizeAttributionChannelIds(value) {
     if (!Array.isArray(value))
@@ -652,7 +665,6 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.attempted': 1 },
             $set: {
                 'timestamps.lastPromotionAtMs': now,
                 'timestamps.updatedAtMs': now,
@@ -668,7 +680,10 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.survived': 1 },
+            // `attempted` is deliberately the resolved total. Increment it only
+            // when the same validation records one terminal outcome, keeping the
+            // durable invariant attempted === survived + deleted.
+            $inc: { 'outcomes.attempted': 1, 'outcomes.survived': 1 },
             $set: { 'timestamps.updatedAtMs': now },
         });
     }
@@ -679,7 +694,7 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.deleted': 1 },
+            $inc: { 'outcomes.attempted': 1, 'outcomes.deleted': 1 },
             $set: { 'timestamps.updatedAtMs': now },
         });
         await this.collection.updateOne({
@@ -752,7 +767,7 @@ class ChannelIntelligenceService {
     normalizeFractionalWeight(value) {
         if (!Number.isFinite(value) || value <= 0)
             return null;
-        return Math.min(1, value);
+        return Math.round(Math.min(1, value) * 100) / 100;
     }
     // --- Index creation ---
     async ensureIndexes() {
@@ -25746,6 +25761,101 @@ class UserDataDtoCrud {
             return false;
         }
     }
+    /**
+     * Persist a confirmed paid conversion into today's stats window and try to
+     * credit every stored attribution channel immediately. Empty attribution is
+     * left pending for the five-minute reconciler rather than marked complete.
+     */
+    async recordPaymentAttribution(chatId, confirmedAmount) {
+        const normalizedChatId = String(chatId || '').trim();
+        const amount = Number(confirmedAmount);
+        const profile = process.env.dbcoll?.trim();
+        const clientId = process.env.clientId?.trim();
+        if (!normalizedChatId || !profile || !clientId || !Number.isFinite(amount) || amount < 15)
+            return;
+        await this.statsDb2.updateOne({ chatId: normalizedChatId, profile, client: clientId }, { $max: { payAmount: Math.round(amount * 100) / 100 } }, { upsert: false });
+        await this.processPendingPaymentAttributions(normalizedChatId);
+    }
+    /**
+     * Reconcile paid users whose common-channel lookup completed after payment.
+     * `stats2` is the daily idempotency window: new users award 1.00 per unique
+     * channel and returning users award 0.50 per unique channel.
+     */
+    async processPendingPaymentAttributions(chatId) {
+        const profile = process.env.dbcoll?.trim();
+        const clientId = process.env.clientId?.trim();
+        const summary = { scanned: 0, credited: 0, awaitingChannels: 0, failed: 0 };
+        if (!profile || !clientId)
+            return summary;
+        const normalizedChatId = chatId == null ? '' : String(chatId).trim();
+        const query = {
+            profile,
+            client: clientId,
+            payAmount: { $gte: 15 },
+            $or: [
+                { paymentAttributionCreditedAt: { $exists: false } },
+                { paymentAttributionCreditedAt: null },
+            ],
+        };
+        if (normalizedChatId)
+            query.chatId = normalizedChatId;
+        const candidates = await this.statsDb2.find(query, {
+            projection: { chatId: 1, newUser: 1 },
+        }).toArray();
+        summary.scanned = candidates.length;
+        if (candidates.length === 0)
+            return summary;
+        let attribution;
+        try {
+            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.PromotionRuntime.getInstance().attribution;
+            if (!runtimeAttribution)
+                throw new Error('conversion attribution is disabled');
+            attribution = runtimeAttribution;
+        }
+        catch (error) {
+            summary.failed = candidates.length;
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Payment attribution runtime unavailable', false);
+            return summary;
+        }
+        const dayKey = formatAttributionDayKey(Date.now());
+        for (const candidate of candidates) {
+            const candidateChatId = String(candidate.chatId || '').trim();
+            if (!candidateChatId) {
+                summary.failed += 1;
+                continue;
+            }
+            try {
+                const userData = await this.db.findOne({ chatId: candidateChatId, profile }, { projection: { attributionChannelIds: 1 } });
+                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_6__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
+                if (channelIds.length === 0) {
+                    summary.awaitingChannels += 1;
+                    continue;
+                }
+                const result = await attribution.attributePaymentConversion(channelIds, `${profile}:${candidateChatId}:${dayKey}`, candidate.newUser !== true);
+                if (result.failedChannelIds.length > 0) {
+                    summary.failed += 1;
+                    continue;
+                }
+                const marker = await this.statsDb2.updateOne({
+                    chatId: candidateChatId,
+                    profile,
+                    client: clientId,
+                    $or: [
+                        { paymentAttributionCreditedAt: { $exists: false } },
+                        { paymentAttributionCreditedAt: null },
+                    ],
+                }, { $set: { paymentAttributionCreditedAt: Date.now() } });
+                if (marker.modifiedCount > 0)
+                    summary.credited += 1;
+            }
+            catch (error) {
+                summary.failed += 1;
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
+            }
+        }
+        logger.log(`Payment attribution reconcile | scanned=${summary.scanned} credited=${summary.credited} awaitingChannels=${summary.awaitingChannels} failed=${summary.failed}`);
+        return summary;
+    }
     async getAChannel() {
         await this.ensurePromoteStatsInitialized();
         const result = await this.promoteStatsDb.findOne({ client: process.env.clientId });
@@ -27215,6 +27325,15 @@ class UserDataDtoCrud {
 UserDataDtoCrud.DAILY_ANALYTICS_NAMESPACE = 'tg-aut';
 UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS = 14;
 UserDataDtoCrud.DAILY_COLLECTIONS = ['promoteStatsDaily', 'reactionStatsDaily', 'userStatsDaily'];
+function formatAttributionDayKey(nowMs) {
+    const safeNow = Number.isFinite(nowMs) && nowMs > 0 ? nowMs : Date.now();
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(new Date(safeNow));
+}
 function getRecentProfiles(data, time, expectedCount) {
     const currentTime = Date.now();
     const oldTime = currentTime - time;
@@ -28074,6 +28193,7 @@ class JobManager {
                     await this.logMcpAnalyticsSnapshot();
                     // Non-sending tasks can run in parallel
                     const tasks = [];
+                    tasks.push(_dbservice__WEBPACK_IMPORTED_MODULE_5__.UserDataDtoCrud.getInstance().processPendingPaymentAttributions().then(() => undefined));
                     if (checkCount % 2 === 1) {
                         tasks.push(this.checkPromotionHealth());
                     }
@@ -38684,6 +38804,13 @@ async function processImage(event) {
                                         }
                                         else if (currentUserDetails.payAmount >= amount && amount > 0) {
                                             logger.log(`[ProcessImage] Skipping centralized update: payAmount already at ${currentUserDetails.payAmount} (amount: ${amount})`);
+                                        }
+                                        try {
+                                            await db.recordPaymentAttribution(chatId, amount);
+                                        }
+                                        catch (error) {
+                                            // Payment service must not be withheld because analytics is unavailable.
+                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
                                         }
                                     }
                                     else {
