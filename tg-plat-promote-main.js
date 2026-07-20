@@ -22696,14 +22696,13 @@ class TelegramManager {
         this.ROUTE_STAGE_COOLDOWN_MS = 20 * 1000;
         // Reply routing state
         this.routeStateMap = new Map();
-        // chatId -> time we routed them. Checked once per sweep: those that reached the main account are
-        // credited; any entry older than the TTL is dropped (their ~10-min conversion window passed).
-        // Only these chatIds are ever checked — never the whole userData history.
+        // chatId -> last confirmed route time for this promote mobile. This is intentionally ephemeral:
+        // a process restart drops the backlog. While alive, unreached users remain eligible for one day.
         this.pendingRouteChats = new Map();
         this.routeConversionInterval = null;
         this.routeConversionReconcileInFlight = false;
-        this.ROUTE_CONVERSION_RECONCILE_MS = 10 * 60 * 1000; // sweep every 10 min
-        this.PENDING_ROUTE_TTL_MS = 10 * 60 * 1000; // entry lives ~10 min then expires
+        this.ROUTE_CONVERSION_RECONCILE_MS = 10 * 60 * 1000;
+        this.PENDING_ROUTE_TTL_MS = 24 * 60 * 60 * 1000;
         this.ROUTE_ATTRIBUTION_PACE_MIN_MS = 750;
         this.ROUTE_ATTRIBUTION_PACE_JITTER_MS = 750;
         this.passwordResetTimeout = null;
@@ -22794,7 +22793,7 @@ class TelegramManager {
         void this.refreshRouteUsername();
         this.startRouteConversionReconciler();
     }
-    /** Sweep pending routed users every 10 min; reused after a Telegram reconnect. */
+    /** Recheck this mobile's in-memory routed users every 10 minutes. */
     startRouteConversionReconciler() {
         if (this.routeConversionInterval)
             return;
@@ -23460,8 +23459,7 @@ class TelegramManager {
             }
             throw error;
         }
-        // Only a confirmed Telegram send enters the conversion reconciler. Register this before
-        // ancillary stats writes so a stats failure cannot discard a route that was delivered.
+        // Only a confirmed Telegram send enters this mobile's in-memory conversion backlog.
         this.pendingRouteChats.set(chatId, Date.now());
         const appService = _app_service__WEBPACK_IMPORTED_MODULE_9__.AppService.getInstance();
         await appService.updateMsgCount(this.clientDetails.clientId);
@@ -23497,8 +23495,8 @@ class TelegramManager {
                 return false;
             }
             // Stamp userData only after every newly claimed channel write has
-            // succeeded. This timestamp is also tg-aut's durable signal that a
-            // deferred promote-owned attribution completed.
+            // succeeded. This timestamp also tells later retries that a deferred
+            // promote-owned attribution already completed.
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
             const persisted = await db.recordAttributionChannelIds(chatId, commonChatIds);
             if (!persisted) {
@@ -23519,56 +23517,81 @@ class TelegramManager {
         }
     }
     /**
-     * STAGE-2 routed-user sweep (every 10 min). A routed user rarely re-messages the promote account,
-     * so we can't count the routed-user inline. We keep a small map of chatIds THIS client routed
-     * (pendingRouteChats) and each sweep: (1) credit any that reached the main account (userData with
-     * totalCount > 0) into routedUserCount, (2) drop every entry older than the TTL — their ~10-min
-     * window passed. Each user is counted at most once. Only these chatIds are checked, never the whole history.
+     * STAGE-2 routed-user sweep. Users that have not reached tg-aut remain in this mobile's map for
+     * up to 24 hours. Their Redis route marker is renewed on every sweep so tg-aut continues to defer
+     * common-chat ownership to this promote account. No Telegram API call is made for unreached users.
      */
     async reconcileRoutedUsers() {
-        if (this.routeConversionReconcileInFlight || this.pendingRouteChats.size === 0)
+        if (this.routeConversionReconcileInFlight || this.isDestroyed || !this.client?.connected || this.pendingRouteChats.size === 0)
             return;
         this.routeConversionReconcileInFlight = true;
         try {
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
+            const now = Date.now();
+            const cutoff = now - this.PENDING_ROUTE_TTL_MS;
+            for (const [chatId, routedAt] of this.pendingRouteChats) {
+                if (routedAt >= cutoff)
+                    continue;
+                this.pendingRouteChats.delete(chatId);
+                try {
+                    await _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.PromotionRuntime.getInstance().tracker?.clearRoutePending(this.getAttributionConversionId(chatId));
+                }
+                catch (error) {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: failed to clear expired route marker for ${chatId}`, false);
+                }
+            }
+            if (this.pendingRouteChats.size === 0)
+                return;
             const chatIds = Array.from(this.pendingRouteChats.keys());
-            const converted = await db.countReachedMainAccountChatIds(chatIds);
-            if (converted === null) {
-                logger.warn(`[RoutedUser] ${this.clientDetails.mobile} conversion lookup failed; retaining ${this.pendingRouteChats.size} pending route(s)`);
+            const tracker = _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.PromotionRuntime.getInstance().tracker;
+            let markerRefreshFailures = 0;
+            // Redis operations are cheap but still bounded in groups so a large backlog does not
+            // create one unbounded burst. This renews ownership before the Mongo lookup/retry work.
+            for (let offset = 0; offset < chatIds.length; offset += 50) {
+                const batch = chatIds.slice(offset, offset + 50);
+                const results = await Promise.allSettled(batch.map((chatId) => tracker?.markRoutePending(this.getAttributionConversionId(chatId))));
+                markerRefreshFailures += results.filter((result) => result.status === 'rejected' || (result.status === 'fulfilled' && result.value !== true)).length;
+            }
+            if (markerRefreshFailures > 0) {
+                logger.warn(`[RoutedUser] ${this.clientDetails.mobile} failed to renew ${markerRefreshFailures}/${chatIds.length} route marker(s); backlog retained`);
+            }
+            const reached = await db.getReachedMainAccountRecords(chatIds);
+            if (reached === null) {
+                logger.warn(`[RoutedUser] ${this.clientDetails.mobile} reached-user lookup failed; retaining ${this.pendingRouteChats.size} pending route(s)`);
                 return;
             }
-            if (converted.length > 0) {
-                const attributed = [];
-                for (let index = 0; index < converted.length; index += 1) {
-                    const chatId = converted[index];
+            const completed = [];
+            let telegramLookupAttempts = 0;
+            for (const reachedUser of reached) {
+                if (!reachedUser.attributionCompleted) {
                     // Keep GetCommonChats strictly sequential and lightly paced. A
                     // reconciliation burst must not look like an API flood from one account.
-                    if (index > 0) {
+                    if (telegramLookupAttempts > 0) {
                         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__.sleep)(this.ROUTE_ATTRIBUTION_PACE_MIN_MS + Math.random() * this.ROUTE_ATTRIBUTION_PACE_JITTER_MS);
                     }
-                    if (await this.attributeRoutedUser(chatId))
-                        attributed.push(chatId);
+                    telegramLookupAttempts += 1;
+                    if (!(await this.attributeRoutedUser(reachedUser.chatId)))
+                        continue;
                 }
-                if (attributed.length > 0) {
-                    const update = await db.incrementRoutedUserCountBy(attributed.length);
-                    if (!update?.acknowledged) {
-                        throw new Error(`Routed-user counter update was not acknowledged for ${attributed.length} conversion(s)`);
-                    }
-                    // Delete only after Mongo has durably acknowledged the increment. A transient DB
-                    // failure leaves candidates pending for the next reconciliation instead of losing
-                    // their count.
-                    for (const chatId of attributed)
-                        this.pendingRouteChats.delete(chatId);
-                    if (this.promoterInstance)
-                        this.promoterInstance.converted += attributed.length;
-                    logger.info(`[RoutedUser] ${this.clientDetails.mobile} credited ${attributed.length} routed user(s) after attribution; ${this.pendingRouteChats.size} still pending`);
-                }
+                completed.push(reachedUser.chatId);
             }
-            // Expire entries whose ~10-min conversion window has passed.
-            const cutoff = Date.now() - this.PENDING_ROUTE_TTL_MS;
-            for (const [chatId, routedAt] of this.pendingRouteChats) {
-                if (routedAt < cutoff)
+            if (completed.length > 0) {
+                const update = await db.incrementRoutedUserCountBy(completed.length);
+                if (!update?.acknowledged) {
+                    throw new Error(`Routed-user counter update was not acknowledged for ${completed.length} conversion(s)`);
+                }
+                for (const chatId of completed) {
                     this.pendingRouteChats.delete(chatId);
+                    try {
+                        await tracker?.clearRoutePending(this.getAttributionConversionId(chatId));
+                    }
+                    catch (error) {
+                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: failed to clear completed route marker for ${chatId}`, false);
+                    }
+                }
+                if (this.promoterInstance)
+                    this.promoterInstance.converted += completed.length;
+                logger.info(`[RoutedUser] ${this.clientDetails.mobile} completed ${completed.length} routed user(s); ${this.pendingRouteChats.size} still pending in memory`);
             }
         }
         catch (error) {
@@ -25540,7 +25563,7 @@ class UserDataDtoCrud {
      * Returns null when the lookup could not run. Callers must keep pending routes in that case:
      * an unavailable MongoDB is not evidence that no user converted.
      */
-    async countReachedMainAccountChatIds(chatIds) {
+    async getReachedMainAccountRecords(chatIds) {
         try {
             const profile = process.env.dbcoll;
             if (!profile) {
@@ -25551,9 +25574,14 @@ class UserDataDtoCrud {
                 return [];
             const userDataCollection = this.client.db("tgclients").collection('userData');
             const docs = await userDataCollection
-                .find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1 } })
+                .find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } })
                 .toArray();
-            return docs.map((d) => String(d.chatId ?? '')).filter(Boolean);
+            return docs
+                .map((doc) => ({
+                chatId: String(doc.chatId ?? ''),
+                attributionCompleted: Number(doc.attributionUpdatedAt) > 0,
+            }))
+                .filter((doc) => Boolean(doc.chatId));
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error counting reached-main-account users");
