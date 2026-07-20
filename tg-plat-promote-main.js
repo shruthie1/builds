@@ -62,16 +62,24 @@ class ConversionAttributionService {
      * @param conversionId - Stable profile + Telegram chat ID for exactly-once crediting
      */
     async attributeDMConversion(commonChatIds, conversionId) {
+        return this.attributeConversion(commonChatIds, conversionId, 1);
+    }
+    /**
+     * Add paid-conversion evidence to every previously attributed channel.
+     * A new payer contributes 1.00 per channel; a returning payer contributes
+     * 0.50 per channel. Credit is intentionally not divided between channels.
+     */
+    async attributePaymentConversion(channelIds, conversionId, returningUser) {
+        return this.attributeConversion(channelIds, `payment:${conversionId}`, returningUser ? 0.5 : 1);
+    }
+    async attributeConversion(commonChatIds, conversionId, weightPerChannel) {
         const uniqueChatIds = normalizeAttributionChannelIds(commonChatIds);
         if (uniqueChatIds.length === 0) {
             return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
         }
         try {
-            // One DM always contributes exactly one unit of conversion evidence. Every
-            // common channel receives an equal share, so users with many common chats
-            // do not inflate the aggregate conversion total.
-            const equalWeight = 1 / uniqueChatIds.length;
-            if (!Number.isFinite(equalWeight) || equalWeight <= 0) {
+            const normalizedWeight = normalizeWeight(weightPerChannel);
+            if (normalizedWeight === null) {
                 return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
             }
             const attributions = [];
@@ -81,8 +89,8 @@ class ConversionAttributionService {
                 try {
                     if (!await this.tracker.claimConversion(channelClaimId))
                         continue;
-                    await this.intelligenceService.recordDMConversion(channelId, equalWeight);
-                    attributions.push({ channelId, weight: equalWeight });
+                    await this.intelligenceService.recordDMConversion(channelId, normalizedWeight);
+                    attributions.push({ channelId, weight: normalizedWeight });
                 }
                 catch {
                     failedChannelIds.push(channelId);
@@ -101,6 +109,11 @@ class ConversionAttributionService {
             return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
         }
     }
+}
+function normalizeWeight(value) {
+    if (!Number.isFinite(value) || value <= 0)
+        return null;
+    return Math.round(Math.min(1, value) * 100) / 100;
 }
 function normalizeAttributionChannelIds(value) {
     if (!Array.isArray(value))
@@ -648,7 +661,6 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.attempted': 1 },
             $set: {
                 'timestamps.lastPromotionAtMs': now,
                 'timestamps.updatedAtMs': now,
@@ -664,7 +676,10 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.survived': 1 },
+            // `attempted` is deliberately the resolved total. Increment it only
+            // when the same validation records one terminal outcome, keeping the
+            // durable invariant attempted === survived + deleted.
+            $inc: { 'outcomes.attempted': 1, 'outcomes.survived': 1 },
             $set: { 'timestamps.updatedAtMs': now },
         });
     }
@@ -675,7 +690,7 @@ class ChannelIntelligenceService {
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
-            $inc: { 'outcomes.deleted': 1 },
+            $inc: { 'outcomes.attempted': 1, 'outcomes.deleted': 1 },
             $set: { 'timestamps.updatedAtMs': now },
         });
         await this.collection.updateOne({
@@ -748,7 +763,7 @@ class ChannelIntelligenceService {
     normalizeFractionalWeight(value) {
         if (!Number.isFinite(value) || value <= 0)
             return null;
-        return Math.min(1, value);
+        return Math.round(Math.min(1, value) * 100) / 100;
     }
     // --- Index creation ---
     async ensureIndexes() {
