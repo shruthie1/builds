@@ -23401,23 +23401,45 @@ class TelegramManager {
         const target = handle
             ? (useUrl ? `https://t.me/${handle}` : `@${handle}`)
             : "my main account";
+        /* Previous route copy retained for quick rollback/reference.
         const stageOne = [
             `Heyy Dear...!!\n\nYahan slow hoon... **Msg me** on Main acc!\n${target} 💕`,
             `Hii baby...!!\n\n**Msg me at** ${target}\n\nspe fast reply dungi ❤️`,
             `Hey...!\n\nCome to **My Main acc**\n\n${target}`,
             `Jaanu...\n\nYahan active nahi...\n\n**Msg me** on ${target} 🔥`,
         ];
+
         const stageTwo = [
             `Baby **aa ja** na... 🙈\n\n${target} pe \n**wait** kar rahi hoon 💕`,
             `**Msg me fast** jaan... 😊\n\n${target}\n\nWahan baat karte hain ❤️`,
             `Ab mat ruk... 🥺\n\n**Come** on ${target} 🔥`,
             `Arre jaanu... 😍\n\n**Msg me** ${target}\npe... proper baat karenge 💖`,
         ];
+
         const stageThree = [
             `Last time bol rahi hoon... 🙏\n\n**Msg me** on ${target} abhi! 💕`,
             `Yahan nahi baat karungi... 😤\n\n**Aa ja** ${target} pe warna mat aa 🔥`,
             `Ab bohot ho gaya... 😠\n\n**Msg me** ${target} right now!`,
             `Block kar dungi... 😒\n\n**Msg me** on ${target} **abhi**\nya mat karna kabhi 💕`,
+        ];
+        */
+        const stageOne = [
+            `Heyy Dear...!! 😊\n\n**Msg me here** na\n${target}`,
+            `Hii Baby...!! 🙈\n\nI'm **active here**\n${target}`,
+            `Hey Dear... 😊\n\n**Come here** na...!!\n${target}`,
+            `Baby...!!\n\nText me on my **main acc**\n${target}`,
+        ];
+        const stageTwo = [
+            `Still here Dear...? 😅\n\n**Msg me there** na...!!\n${target}`,
+            `Come na Baby...!! 🙈\n\nI'll **reply there**\n${target}`,
+            `Hii Dear...!! 😊\n\nDid u **msg me here**?\n${target}`,
+            `Baby... 🙈\n\nI'm **online here**\n${target}`,
+        ];
+        const stageThree = [
+            `Hey Baby...!! 😊\n\n**Msg me there** when free\n${target}`,
+            `Dear...!! 🙈\n\nCome there na...\nI'll **reply**\n${target}`,
+            `Hii Baby...!!\n\nText me on my **main acc**\n${target}`,
+            `Hey Dear... 😊\n\nI'm **active there**\n${target}`,
         ];
         if (stage === 1) {
             return {
