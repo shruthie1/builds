@@ -23387,40 +23387,43 @@ class TelegramManager {
         }
         return newUserName;
     }
-    getPromoteRouteMessage(stage) {
-        // Mix two renderings of the SAME live account handle ~50/50:
+    getPromoteRouteMessage(stage, useUrlOverride) {
+        // Mix two renderings of the SAME live account handle:
         //  - t.me link  -> Telegram shows a rich profile card (expressive, better pull), preview ON
         //  - @username  -> plain mention, preview OFF
-        // Using a mix (not always the URL) keeps the messages from looking templated.
+        // Stage 1 keeps the existing 70% URL choice. Route state then forces
+        // stage 2 to use the opposite rendering and stage 3 to switch back,
+        // preventing random streaks for the same user.
         const handle = this.clientDetails.username?.trim();
         const website = process.env.link?.trim();
-        const useUrl = Boolean(handle) && Math.random() < 0.5;
+        const useUrl = Boolean(handle)
+            && (typeof useUrlOverride === 'boolean' ? useUrlOverride : Math.random() < 0.7);
         const target = handle
             ? (useUrl ? `https://t.me/${handle}` : `@${handle}`)
             : "my main account";
         const stageOne = [
-            `Heyy baby....! 🙈\n\nI am lil **slow** here....\n\n**Msg me** on ${target}! 💕`,
-            `Hii jaan! 😘\n\nTxt me here ${target}....\n\nI **reply fast** there! ❤️`,
-            `Arre cutie....! 🥰\n\n**Come** here na!\n\n${target} 💖`,
-            `Hey dear! 😊\n\nIm nt active here....\n\n**Come** on ${target}! 🔥`,
-            `Baby, do one thng....! 😏\n\nJust **come** ${target}!\n\nWe **talk there** only! 💋`,
+            `Heyy Dear...!!\n\nYahan slow hoon... **Msg me** on Main acc!\n${target} 💕`,
+            `Hii baby...!!\n\n**Msg me at** ${target}\n\nspe fast reply dungi ❤️`,
+            `Hey...!\n\nCome to **My Main acc**\n\n${target}`,
+            `Jaanu...\n\nYahan active nahi...\n\n**Msg me** on ${target} 🔥`,
         ];
         const stageTwo = [
-            `Arre baby, **come** na....! 🙈\n\nIm **waitin** on ${target}!\n\nOpen this too once na! 💕`,
-            `**Msg me fast** na jaan! 😘\n\n${target}\n\nN see the website also! ❤️`,
-            `Dnt stay here na....! 🥺\n\n**Come** on ${target}!\n\nOpen this one too! 🔥`,
-            `Arre baby, listn....! 😍\n\n**Come** ${target}!\n\nProper baat there na! 💖`,
+            `Baby **aa ja** na... 🙈\n\n${target} pe \n**wait** kar rahi hoon 💕`,
+            `**Msg me fast** jaan... 😊\n\n${target}\n\nWahan baat karte hain ❤️`,
+            `Ab mat ruk... 🥺\n\n**Come** on ${target} 🔥`,
+            `Arre jaanu... 😍\n\n**Msg me** ${target}\npe... proper baat karenge 💖`,
         ];
         const stageThree = [
-            `Arre acha, listn na baby....! 🙏\n\nIf u want proper reply....\n\n**Msg me now** on ${target}! 💕`,
-            `Arre heyy jaan! 😘\n\nIm **more active** there....\n\n${target} 💋`,
-            `Arre baby, **come** na yaar....! 🥰\n\n${target}\n\nI'll **tlk there** only! ❤️`,
-            `Arre, last time bolrahi cutie....! 😏\n\n**Msg me** on ${target}!\n\nIm busy here na! 🔥`,
+            `Last time bol rahi hoon... 🙏\n\n**Msg me** on ${target} abhi! 💕`,
+            `Yahan nahi baat karungi... 😤\n\n**Aa ja** ${target} pe warna mat aa 🔥`,
+            `Ab bohot ho gaya... 😠\n\n**Msg me** ${target} right now!`,
+            `Block kar dungi... 😒\n\n**Msg me** on ${target} **abhi**\nya mat karna kabhi 💕`,
         ];
         if (stage === 1) {
             return {
                 message: stageOne[Math.floor(Math.random() * stageOne.length)],
                 linkPreview: useUrl,
+                useUrl,
             };
         }
         if (stage === 2) {
@@ -23429,15 +23432,17 @@ class TelegramManager {
                 message: website ? `${message}\n\n${website}` : message,
                 // Preview on if either the t.me handle OR the website link is present.
                 linkPreview: useUrl || Boolean(website),
+                useUrl,
             };
         }
         return {
             message: stageThree[Math.floor(Math.random() * stageThree.length)],
             linkPreview: useUrl,
+            useUrl,
         };
     }
-    async sendPromoteRouteStageMessage(chatId, stage) {
-        const payload = this.getPromoteRouteMessage(stage);
+    async sendPromoteRouteStageMessage(chatId, stage, useUrlOverride) {
+        const payload = this.getPromoteRouteMessage(stage, useUrlOverride);
         const conversionId = this.getAttributionConversionId(chatId);
         let routeMarkerCreated = false;
         let routeMarkerAlreadyPending = false;
@@ -23481,6 +23486,7 @@ class TelegramManager {
         if (this.promoterInstance) {
             this.promoterInstance.messageCount++;
         }
+        return payload.useUrl;
     }
     getAttributionConversionId(chatId) {
         const profile = process.env.dbcoll?.trim() || 'default_profile';
@@ -23648,16 +23654,17 @@ class TelegramManager {
             // recordDailyUser had no caller, so all newUsers showed under tg-aut only). active:1 is already
             // recorded per-inbound in handleEvents, so only newUsers here. Best-effort.
             void db.recordDailyUser(this.clientDetails.mobile, { newUsers: 1 });
-            await this.sendPromoteRouteStageMessage(chatId, 1);
+            const firstStageUseUrl = await this.sendPromoteRouteStageMessage(chatId, 1);
             this.routeStateMap.set(chatId, {
                 stage: 1,
                 lastSentAt: Date.now(),
                 callAttempts: 0,
+                firstStageUseUrl,
             });
             return;
         }
         if (existingState.stage === 1) {
-            await this.sendPromoteRouteStageMessage(chatId, 2);
+            await this.sendPromoteRouteStageMessage(chatId, 2, !existingState.firstStageUseUrl);
             let callAttempts = existingState.callAttempts;
             if (callAttempts < 1) {
                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__.sleep)(2500);
@@ -23668,10 +23675,11 @@ class TelegramManager {
                 stage: 2,
                 lastSentAt: Date.now(),
                 callAttempts,
+                firstStageUseUrl: existingState.firstStageUseUrl,
             });
             return;
         }
-        await this.sendPromoteRouteStageMessage(chatId, 3);
+        await this.sendPromoteRouteStageMessage(chatId, 3, existingState.firstStageUseUrl);
         let callAttempts = existingState.callAttempts;
         if (callAttempts < 2) {
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__.sleep)(2500);
@@ -23682,6 +23690,7 @@ class TelegramManager {
             stage: 3,
             lastSentAt: Date.now(),
             callAttempts,
+            firstStageUseUrl: existingState.firstStageUseUrl,
         });
     }
     async handleEvents(event) {
