@@ -33777,9 +33777,11 @@ async function OutEventPrint(event) {
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
             }
             else if (text === `..`) {
-                const grtng = "Hii  **" + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_4__.getNameGreet();
+                // Previous sales-first composition retained for quick rollback/reference:
+                // const grtng = "Hii  **" + standardMessages.getNameGreet()
+                const grtng = (0,_utils_generateGreeting__WEBPACK_IMPORTED_MODULE_12__.generateRandomGreeting)();
                 try {
-                    await event.client.sendMessage(receiver, { message: grtng + (0,_utils_generateGreeting__WEBPACK_IMPORTED_MODULE_12__.generateRandomGreeting)() });
+                    await event.client.sendMessage(receiver, { message: grtng });
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error);
@@ -34642,12 +34644,14 @@ async function handleExistingUserDirect(client, chatId, firstName) {
 // MEMORY OPTIMIZATION: Direct client version without event object
 async function handleNewUserDirect(client, chatId, firstName, totalMsgs) {
     if (totalMsgs < MESSAGE_LIMITS.MIN_MSGS_FOR_DEMO) {
-        const greeting = `Hii  **${firstName}${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_0__.getNameGreet()}${(0,_utils_generateGreeting__WEBPACK_IMPORTED_MODULE_7__.generateRandomGreeting)()}`;
-        const channelLinks = `<b>My Links👇🏻:</b>\n\n<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`; //\n<b>JOIN 👉🏻 @${process.env.channelLink}</b>`;
+        // Previous sales-first composition retained for quick rollback/reference:
+        // const greeting = `Hii  **${firstName}${standardMessages.getNameGreet()}${generateRandomGreeting()}`;
+        const greeting = (0,_utils_generateGreeting__WEBPACK_IMPORTED_MODULE_7__.generateRandomGreeting)();
         await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.showHumanTyping)(client, chatId, 10000);
         await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithTimeout)(client, chatId, { message: greeting, linkPreview: true });
         await new Promise(resolve => setTimeout(resolve, DELAYS.CHANNEL_LINKS));
         await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.showHumanTyping)(client, chatId, 5000);
+        const channelLinks = `<b>My Links👇🏻:</b>\n\n<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`; //\n<b>JOIN 👉🏻 @${process.env.channelLink}</b>`;
         await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithTimeout)(client, chatId, { message: channelLinks, linkPreview: true, parseMode: 'html' });
     }
     else {
@@ -65125,11 +65129,7 @@ const bullets = [
     '💠',
     '✨'
 ];
-// Each template = a situational hook (unmarried persona) + a `[MENU]` placeholder. The price
-// menu is injected by generateRandomGreeting() as a MONOSPACE code block with labels padded to
-// equal width so the ₹ amounts render in a straight column (Telegram's proportional font only
-// aligns inside ``` code fences). Sensitive words are typo'd here + masked at the send chokepoint
-// (utils/maskSensitiveWords.patchOutgoingMask). Rich pool (12) to avoid robotic repetition.
+/* Previous sales-first greeting catalog retained for quick rollback/reference.
 const greetingsTemplates = [
     `\n\nI'm **alone in my hostel room** baby 🙈\nSo bored now\n\nLet's do a **Demoo**!![MENU]\nSend Mony and I'll start na 💋`,
     "\n\nJust came out of the **Bathroom** baby 💦\nStill all fresh\n\nTry a small **Dmoo**!![MENU]\nSend Amnt and msg me 🙈",
@@ -65143,6 +65143,17 @@ const greetingsTemplates = [
     "\n\nMissing you so much baby 🙈\nThinking of you Only\n\nLet's do a **Dmoo**!![MENU]\nSend Amnt and I'll show everything 💦",
     "\n\nAll cozy now baby 🙈\nAlone and waiting\n\nTry a **Demoo**!![MENU]\nSend Mony and let's start 💋",
     "\n\nMy room Door is locked baby\nNo one is in home\n\nLet's do a **Dmo** na!![MENU]\nSend Amnt and I'm all yours 💦"
+];
+*/
+// First contact should feel like a short human conversation starter. Pricing,
+// demo menus, and stronger offers remain in their existing later-stage flows.
+const greetingsTemplates = [
+    `Heyy Dear...!! 😊\n\nWhat are u doing?`,
+    `Hii Baby...!! 🙈\n\nWhere are u from?`,
+    `Hey Dear... 😊`,
+    `Hii Baby...!!\n\nWhat is your Name? 🙈`,
+    `Heyy Dear... 😊\n\nHow are u...?`,
+    `Hii Baby...!! 🙈`
 ];
 // The demo price menu is the SINGLE shared source in messages/demoMenu.ts (used by greetings,
 // standardMessages, upsells). Re-exported here for backward compat with existing importers.
@@ -65172,8 +65183,8 @@ const getRandomTemplate = () => {
 };
 // --- Main Generation Method ---
 /**
- * Generates a randomized greeting: pick a template and inject the [MENU] placeholder with the
- * column-aligned monospace price block. (Legacy [BULLET] is still replaced for any old template.)
+ * Generates a short randomized conversation starter. Placeholder replacement
+ * remains for rollback compatibility with the commented legacy catalog.
  * @returns {string} The final, formatted greeting message.
  */
 const generateRandomGreeting = () => {
