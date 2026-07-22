@@ -1624,53 +1624,83 @@ class PromotionFlowRunner {
                 includeJitter: true,
             });
             const batchTarget = safeBatchTarget(this.options.batchTarget, batchPolicy.limit);
-            let intelligenceDocs = [];
-            try {
-                const loadedDocs = await this.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
-                intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence) : [];
+            let selectedChannels;
+            if (this.options.channelSelectionMode === 'source_order') {
+                // The adapter has already applied its bounded membership policy (promote-clients uses
+                // participant-count descending plus a Fisher-Yates shuffle). Preserve that source order;
+                // only the mobile-specific Telegram block remains a preflight exclusion here.
+                let blockedChannelIds = new Set();
+                try {
+                    blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
+                }
+                catch (error) {
+                    this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
+                    return;
+                }
+                selectedChannels = channels
+                    .filter((channel) => !blockedChannelIds.has(channel.channelId))
+                    .slice(0, batchTarget);
+                this.log('info', [
+                    'Promotion selection ready',
+                    'mode=source_order',
+                    `loaded=${channels.length}`,
+                    `batchTarget=${batchTarget}`,
+                    `selected=${selectedChannels.length}`,
+                    `blocked=${blockedChannelIds.size}`,
+                    `stats=${this.formatStats(stats)}`,
+                ].join('; '));
             }
-            catch (error) {
-                this.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                return;
-            }
-            let blockedChannelIds = new Set();
-            try {
-                blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
-            }
-            catch (error) {
-                this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                return;
-            }
-            const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_2__.selectPromotionChannels)({
-                channels,
-                intelligenceDocs,
-                batchTarget,
-                blockedChannelIds,
-            });
-            const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
-            this.log('info', [
-                'Promotion selection ready',
-                `loaded=${channels.length}`,
-                `intelDocs=${intelligenceDocs.length}`,
-                `batchTarget=${batchTarget}`,
-                `policyLimit=${batchPolicy.limit}`,
-                `selected=${selection.selected.length}`,
-                `proven=${selection.proven.length}`,
-                `untested=${selection.untested.length}`,
-                `skipped=${selection.skipped.length}`,
-                `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
-                `explorePct=${selection.explorePercent.toFixed(2)}`,
-                `blocked=${blockedChannelIds.size}`,
-                `stats=${this.formatStats(stats)}`,
-            ].join('; '));
-            if (selectionDiagnostics.selectedSample !== 'none') {
-                this.log('debug', `Promotion selected channel sample; ${selectionDiagnostics.selectedSample}`);
-            }
-            if (selectionDiagnostics.skippedSample !== 'none') {
-                this.log('debug', `Promotion skipped channel sample; ${selectionDiagnostics.skippedSample}`);
+            else {
+                let intelligenceDocs = [];
+                try {
+                    const loadedDocs = await this.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
+                    intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence) : [];
+                }
+                catch (error) {
+                    this.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${this.normalizeError(error)}`);
+                    return;
+                }
+                let blockedChannelIds = new Set();
+                try {
+                    blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
+                }
+                catch (error) {
+                    this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
+                    return;
+                }
+                const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_2__.selectPromotionChannels)({
+                    channels,
+                    intelligenceDocs,
+                    batchTarget,
+                    blockedChannelIds,
+                });
+                const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
+                selectedChannels = selection.selected;
+                this.log('info', [
+                    'Promotion selection ready',
+                    'mode=ranked',
+                    `loaded=${channels.length}`,
+                    `intelDocs=${intelligenceDocs.length}`,
+                    `batchTarget=${batchTarget}`,
+                    `policyLimit=${batchPolicy.limit}`,
+                    `selected=${selection.selected.length}`,
+                    `proven=${selection.proven.length}`,
+                    `untested=${selection.untested.length}`,
+                    `skipped=${selection.skipped.length}`,
+                    `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
+                    `explorePct=${selection.explorePercent.toFixed(2)}`,
+                    `blocked=${blockedChannelIds.size}`,
+                    `stats=${this.formatStats(stats)}`,
+                ].join('; '));
+                if (selectionDiagnostics.selectedSample !== 'none') {
+                    this.log('debug', `Promotion selected channel sample; ${selectionDiagnostics.selectedSample}`);
+                }
+                if (selectionDiagnostics.skippedSample !== 'none') {
+                    this.log('debug', `Promotion skipped channel sample; ${selectionDiagnostics.skippedSample}`);
+                }
             }
             const cycleTally = { sent: 0, not_sent: 0, skipped: 0, budget: 0, chans: 0 };
-            for (const channel of selection.selected) {
+            for (const channel of selectedChannels) {
                 if (this.startedByStart && !this.running) {
                     this.log('debug', `Promotion cycle interrupted before channel; ${this.formatChannel(channel)}`);
                     break;
@@ -5215,6 +5245,14 @@ class BasePromotionEngine {
         ].join('; '));
         return result.selected;
     }
+    /**
+     * Channel ordering is an application policy. tg-aut keeps intelligence-ranked
+     * selection; promote-clients deliberately preserves its participant-count
+     * source order after its own shortlist/shuffle.
+     */
+    getChannelSelectionMode() {
+        return 'ranked';
+    }
     // Protected hooks with default no-op base impl that subclasses MAY override.
     onConstructorComplete() { }
     async performAppCleanup() { }
@@ -5547,6 +5585,7 @@ class BasePromotionEngine {
             account,
             scoringEnabled: extras.runnerOptions.scoringEnabled,
             attributionEnabled,
+            channelSelectionMode: this.getChannelSelectionMode(),
             batchTarget: this.MAX_CHANNELS_CACHE,
             messageCheckDelayMs: this.MESSAGE_CHECK_DELAY,
             // Dedicated follow-up base delay (default 1hr, env PROMO_FOLLOWUP_DELAY_MS), decoupled from
