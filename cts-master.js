@@ -16192,6 +16192,16 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             throw this.handleError(error, 'Failed to fetch channel');
         }
     }
+    async findExistingChannelIds(channelIds) {
+        const ids = [...new Set(channelIds.filter((channelId) => typeof channelId === 'string' && channelId.trim()))];
+        if (!ids.length)
+            return [];
+        const rows = await this.activeChannelModel
+            .find({ channelId: { $in: ids } }, { channelId: 1, _id: 0 })
+            .lean()
+            .exec();
+        return rows.map((row) => row.channelId).filter((channelId) => Boolean(channelId));
+    }
     async update(channelId, updateActiveChannelDto) {
         try {
             delete updateActiveChannelDto["_id"];
@@ -23390,8 +23400,6 @@ let ChannelsService = class ChannelsService {
                 'broadcast',
                 'canSendMsgs',
                 'reactRestricted',
-                'starred',
-                'score',
             ]);
             if (typeof dto.private === 'boolean')
                 setFields.private = dto.private;
@@ -23430,6 +23438,16 @@ let ChannelsService = class ChannelsService {
     async findOne(channelId) {
         const channel = (await this.ChannelModel.findOne({ channelId }).exec())?.toJSON();
         return channel;
+    }
+    async findExistingChannelIds(channelIds) {
+        const ids = [...new Set(channelIds.filter((channelId) => typeof channelId === 'string' && channelId.trim()))];
+        if (!ids.length)
+            return [];
+        const rows = await this.ChannelModel
+            .find({ channelId: { $in: ids } }, { channelId: 1, _id: 0 })
+            .lean()
+            .exec();
+        return rows.map((row) => row.channelId).filter((channelId) => Boolean(channelId));
     }
     async update(channelId, updateChannelDto) {
         const existing = await this.ChannelModel.findOne({ channelId }).lean().exec();
@@ -23625,8 +23643,6 @@ class CreateChannelDto {
         this.reactRestricted = false;
         this.banned = false;
         this.bannedAt = null;
-        this.starred = false;
-        this.score = 0;
     }
 }
 exports.CreateChannelDto = CreateChannelDto;
@@ -23712,14 +23728,6 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Timestamp when the channel was marked banned', type: Number, required: false, nullable: true, default: null }),
     __metadata("design:type", Number)
 ], CreateChannelDto.prototype, "bannedAt", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Starred status', default: false, required: false }),
-    __metadata("design:type", Boolean)
-], CreateChannelDto.prototype, "starred", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Channel score', default: 0, required: false }),
-    __metadata("design:type", Number)
-], CreateChannelDto.prototype, "score", void 0);
 
 
 /***/ },
@@ -23999,16 +24007,6 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, default: null }),
     __metadata("design:type", Number)
 ], Channel.prototype, "bannedAt", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ default: false }),
-    (0, mongoose_1.Prop)({ default: false }),
-    __metadata("design:type", Boolean)
-], Channel.prototype, "starred", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], Channel.prototype, "score", void 0);
 exports.Channel = Channel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'channels', versionKey: false, autoIndex: true, timestamps: true,
@@ -24802,22 +24800,43 @@ let ClientService = ClientService_1 = class ClientService {
         const existingClientMobile = existingClient.mobile;
         this.logger.log('setupClientQueryDto:', setupClientQueryDto);
         const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-        const query = {
+        const permanentReplacement = this.isPermanentReplacementReason(setupClientQueryDto.reason);
+        const baseCandidateQuery = {
             clientId,
             mobile: setupClientQueryDto.mobile || { $ne: existingClientMobile },
             createdAt: { $lte: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
-            availableDate: { $lte: today },
             channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
             status: 'active',
             inUse: { $ne: true },
             warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
         };
-        const candidateBufferClients = await this.bufferClientService.executeQuery(query, { availableDate: 1, createdAt: 1 }, 10);
-        this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: existingClientMobile, candidateCount: candidateBufferClients.length, query });
-        const newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session);
+        const dueCandidateQuery = {
+            ...baseCandidateQuery,
+            availableDate: { $lte: today },
+        };
+        const candidateBufferClients = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+        this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: existingClientMobile, candidateCount: candidateBufferClients.length, query: dueCandidateQuery });
+        let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session);
+        let usedFutureAvailableFallback = false;
+        if (!newBufferClient && permanentReplacement) {
+            const futureCandidateQuery = {
+                ...baseCandidateQuery,
+                availableDate: { $gt: today },
+            };
+            const futureCandidateBufferClients = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session);
+            usedFutureAvailableFallback = !!newBufferClient;
+            this.logger.warn(`[${clientId}] Permanent replacement fallback scan completed`, {
+                existingMobile: existingClientMobile,
+                reason: setupClientQueryDto.reason,
+                candidateCount: futureCandidateBufferClients.length,
+                selected: newBufferClient?.mobile,
+                query: futureCandidateQuery,
+            });
+        }
         if (!newBufferClient) {
             let existingRetired = false;
-            if (this.isPermanentReplacementReason(setupClientQueryDto.reason)) {
+            if (permanentReplacement) {
                 this.logger.warn(`[${clientId}] No replacement buffer available, but setup reason is permanent; marking existing mobile inactive`, {
                     existingMobile: existingClientMobile,
                     reason: setupClientQueryDto.reason,
@@ -24838,7 +24857,11 @@ let ClientService = ClientService_1 = class ClientService {
         }
         this.setupCooldownMap.set(clientId, Date.now());
         try {
-            this.logger.info(`[${clientId}] Selected replacement buffer client`, { existingMobile: existingClientMobile, newMobile: newBufferClient.mobile });
+            this.logger.info(`[${clientId}] Selected replacement buffer client`, {
+                existingMobile: existingClientMobile,
+                newMobile: newBufferClient.mobile,
+                usedFutureAvailableFallback,
+            });
             await this.notify(`Swap started ${clientId}: ${existingClient.mobile} (@${existingClient.username}) → ${newBufferClient.mobile}`);
             this.telegramService.setActiveClientSetup({
                 ...setupClientQueryDto,
@@ -24860,6 +24883,7 @@ let ClientService = ClientService_1 = class ClientService {
                 clientId,
                 existingMobile: existingClientMobile,
                 newMobile: newBufferClient.mobile,
+                usedFutureAvailableFallback,
                 message: 'Client swap completed',
             };
         }
@@ -47860,15 +47884,16 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
             if (!(0, channel_eligibility_1.isEligibleDiscoveredChannel)(channel))
                 return null;
             const facts = await (0, channel_live_facts_1.getTelegramChannelLiveFacts)({ getEntity: async () => channel }, { channelId: channel.id, entity: channel });
-            if (!facts || !facts.canSendMsgs || (facts.participantsCount ?? 0) <= 50) {
+            if (!facts) {
                 return null;
             }
             return {
                 channelId: facts.channelId,
-                canSendMsgs: true,
-                private: false,
+                canSendMsgs: facts.canSendMsgs,
+                private: facts.private,
+                forbidden: facts.forbidden,
                 lastHydrationStatus: 'success',
-                lastHydrationReason: 'live_sendable',
+                lastHydrationReason: facts.canSendMsgs ? 'live_sendable' : 'live_unsendable',
                 lastHydratedAt: now,
                 lastLiveCheckedAt: now,
                 participantsCount: facts.participantsCount,
@@ -47879,11 +47904,25 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 username: facts.username ?? '',
             };
         }));
-        const channels = discovered.filter((channel) => channel !== null);
-        if (!channels.length)
+        const observedChannels = discovered.filter((channel) => channel !== null);
+        if (!observedChannels.length)
             return;
-        await this.channelsService.createMultiple(channels);
-        await this.activeChannelsService.createMultiple(channels);
+        const observedIds = observedChannels.map((channel) => channel.channelId);
+        const [knownActiveIds, knownChannelIds] = await Promise.all([
+            this.activeChannelsService.findExistingChannelIds(observedIds),
+            this.channelsService.findExistingChannelIds(observedIds),
+        ]);
+        const knownActiveIdSet = new Set(knownActiveIds);
+        const knownChannelIdSet = new Set(knownChannelIds);
+        const isNewSendableChannel = (channel) => channel.canSendMsgs && (channel.participantsCount ?? 0) > 50;
+        const activeChannelUpdates = observedChannels.filter((channel) => isNewSendableChannel(channel) || knownActiveIdSet.has(channel.channelId));
+        const channelUpdates = observedChannels.filter((channel) => isNewSendableChannel(channel) || knownChannelIdSet.has(channel.channelId));
+        if (!activeChannelUpdates.length && !channelUpdates.length)
+            return;
+        await Promise.all([
+            channelUpdates.length ? this.channelsService.createMultiple(channelUpdates) : Promise.resolve(),
+            activeChannelUpdates.length ? this.activeChannelsService.createMultiple(activeChannelUpdates) : Promise.resolve(),
+        ]);
     }
 };
 exports.AccountMaintenanceService = AccountMaintenanceService;
