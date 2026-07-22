@@ -17861,8 +17861,6 @@ let BotsService = BotsService_1 = class BotsService {
         this.maxBotCreationsPerRun = 1;
         this.maxPendingAdminRepairsPerRun = 1;
         this.maxPendingAdminRepairAttempts = 3;
-        this.healthLeaseMs = 30 * 60 * 1000;
-        this.healthLeaseId = `${process.pid}:${Math.random().toString(36).slice(2)}`;
         this.healthCheckJob = null;
         this.flushTimer = null;
         this.destroyed = false;
@@ -17877,19 +17875,25 @@ let BotsService = BotsService_1 = class BotsService {
         return this.moduleRef.get(users_service_1.UsersService, { strict: false });
     }
     async onModuleInit() {
+        try {
+            await this.migrateLegacyLifecycle();
+        }
+        catch (err) {
+            console.error('[BotHealth] lifecycle migration deferred; Mongo unavailable at startup', err?.message || err);
+        }
         await this.initializeCache();
         this.startPeriodicFlush();
-        if (this.isBotHealthJobEnabled()) {
-            console.log('[BotHealth] BOT_HEALTH_JOB_ENABLED is set on this pod — scheduling daily job');
+        if (this.isCmsSchedulerEnabled()) {
+            console.log('[BotHealth] ENABLE_CMS_SCHEDULER is set on CMS — scheduling daily job');
             this.scheduleBotHealthCheck();
         }
         else {
-            console.log('[BotHealth] daily job disabled on this pod (set BOT_HEALTH_JOB_ENABLED=true on ONE pod to enable)');
+            console.log('[BotHealth] daily job disabled on CMS (set ENABLE_CMS_SCHEDULER=true to enable)');
         }
     }
-    isBotHealthJobEnabled() {
-        const v = (process.env.BOT_HEALTH_JOB_ENABLED || '').trim().toLowerCase();
-        return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+    isCmsSchedulerEnabled() {
+        const value = (process.env.ENABLE_CMS_SCHEDULER || '').trim().toLowerCase();
+        return value === 'true' || value === '1' || value === 'yes' || value === 'on';
     }
     scheduleBotHealthCheck() {
         this.healthCheckJob = schedule.scheduleJob(BotsService_1.HEALTH_JOB_NAME, BotsService_1.HEALTH_JOB_CRON, BotsService_1.HEALTH_JOB_TZ, async () => {
@@ -17915,6 +17919,19 @@ let BotsService = BotsService_1 = class BotsService {
             clearInterval(this.flushTimer);
             this.flushTimer = null;
         }
+    }
+    async migrateLegacyLifecycle() {
+        const legacyBots = await this.botModel.find({ lifecycle: { $exists: false } }).lean().exec();
+        if (legacyBots.length === 0)
+            return;
+        const now = new Date();
+        await this.botModel.bulkWrite(legacyBots.map(bot => ({
+            updateOne: {
+                filter: { _id: bot._id, lifecycle: { $exists: false } },
+                update: { $set: this.legacyLifecycleUpdate(bot, now) },
+            },
+        })));
+        console.log(`[BotHealth] migrated lifecycle metadata for ${legacyBots.length} legacy bot record(s)`);
     }
     legacyLifecycleUpdate(bot, now = new Date()) {
         const reason = bot.deadReason || '';
@@ -17955,27 +17972,6 @@ let BotsService = BotsService_1 = class BotsService {
         if (cached)
             this.cache.set(categoryKey, cached.filter(item => item._id.toString() !== id));
         this.cache.del('all-bots');
-    }
-    async acquireHealthLease() {
-        const now = new Date();
-        try {
-            const res = await this.botModel.db.collection('botHealthLeases').findOneAndUpdate({ _id: 'bot-health', $or: [{ expiresAt: { $lte: now } }, { holderId: this.healthLeaseId }] }, { $set: { holderId: this.healthLeaseId, acquiredAt: now, expiresAt: new Date(now.getTime() + this.healthLeaseMs) } }, { upsert: true, returnDocument: 'after' });
-            return res?.holderId === this.healthLeaseId;
-        }
-        catch (err) {
-            if (err?.code === 11000)
-                return false;
-            console.error('[BotHealth] unable to acquire distributed lease; skipping run', err?.message || err);
-            return false;
-        }
-    }
-    async releaseHealthLease() {
-        try {
-            await this.botModel.db.collection('botHealthLeases').deleteOne({ _id: 'bot-health', holderId: this.healthLeaseId });
-        }
-        catch (err) {
-            console.warn('[BotHealth] unable to release distributed lease; it will expire', err?.message || err);
-        }
     }
     async initializeCache() {
         try {
@@ -18608,10 +18604,6 @@ let BotsService = BotsService_1 = class BotsService {
             console.warn('[BotHealth] validateAndReplaceBots already running on this pod — skipping');
             return empty('already running (this pod)');
         }
-        if (!(await this.acquireHealthLease())) {
-            console.warn('[BotHealth] validateAndReplaceBots lease held by another CMS process — skipping');
-            return empty('already running (distributed lease)');
-        }
         this.replaceInProgress = true;
         const failures = [];
         const proposedActions = [];
@@ -18620,6 +18612,8 @@ let BotsService = BotsService_1 = class BotsService {
         let creationBudget = this.maxBotCreationsPerRun;
         let stopPrivilegedWork = false;
         try {
+            if (!options.dryRun)
+                await this.migrateLegacyLifecycle();
             const bots = await this.botModel.find().lean().exec();
             for (const bot of bots) {
                 const check = await this.checkBotToken(bot.token);
@@ -18716,7 +18710,6 @@ let BotsService = BotsService_1 = class BotsService {
         }
         finally {
             this.replaceInProgress = false;
-            await this.releaseHealthLease();
         }
     }
     async reconcilePendingAdminBots(options) {
