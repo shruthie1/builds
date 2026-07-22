@@ -31473,19 +31473,19 @@ __webpack_require__.r(__webpack_exports__);
  * Connection Retry Service
  *
  * Health model:
- *   - "Healthy" = recentInboundActivity is true (messages flowing through the process)
- *   - recentInboundActivity is set to true by handleEvents() on each incoming TG message
- *   - Each tick resets recentInboundActivity to false — if no message arrives before the
- *     next tick, messages stopped flowing → unhealthy
+ *   - Telegram transport health is determined by the manager and GramJS client connection state.
+ *   - recentInboundActivity is an observability signal set by handleEvents() on each incoming
+ *     Telegram message. A quiet account is normal and is never, by itself, a reconnect reason.
+ *   - Each tick resets recentInboundActivity after observing it so health output can report recent
+ *     traffic, but retry/shutdown budgets are consumed only while the Telegram transport is absent
+ *     or disconnected.
  *
  * Tick loop (every TICK_MS after INITIAL_DELAY_MS):
- *   1. If recentInboundActivity is true → healthy, ping uptime bot, reset failures
- *   2. If recentInboundActivity is false and never received a message → startup, wait
- *   3. If recentInboundActivity is false and previously received messages → unhealthy:
- *      - Increment consecutiveFailures
- *      - Try reconnect (disconnect + connect)
- *      - Check process validity
- *      - After MAX_FAILURES → shutdown
+ *   1. Record whether inbound activity occurred for observability.
+ *   2. If Telegram transport is present and connected, clear any retry budget and leave it alone.
+ *   3. If the manager/client is absent or disconnected, attempt a reconnect without touching an
+ *      already-connected client. Only this path consumes the bounded retry budget.
+ *   4. After MAX_FAILURES genuine transport failures, notify the coordinator and shut down.
  */
 
 
@@ -31635,42 +31635,21 @@ class ConnectionRetryService {
     async tick() {
         try {
             const state = readConnectionState();
-            if (this.recentInboundActivity) {
-                // Messages arrived since last tick — healthy
-                if (this.consecutiveFailures > 0) {
-                    logger.log(`[HEALTH] Recovered after ${this.consecutiveFailures} failures`);
-                    await this.notify(`Recovered after ${this.consecutiveFailures} failures`);
+            const sawInboundActivity = this.recentInboundActivity;
+            this.recentInboundActivity = false;
+            if (state.instanceExists && state.clientConnected) {
+                // Inbound silence is normal for a quiet account. Never disconnect a healthy Telegram
+                // transport just because no user happened to message during this two-minute window.
+                if (sawInboundActivity && this.consecutiveFailures > 0) {
+                    logger.log(`[HEALTH] Recovered after ${this.consecutiveFailures} transport failures`);
+                    await this.notify(`Recovered after ${this.consecutiveFailures} transport failures`);
                 }
-                this.resetRetryBudgets("healthy tick");
-                this.recentInboundActivity = false;
+                this.resetRetryBudgets(sawInboundActivity ? "inbound activity observed" : "Telegram transport is connected");
                 await this.pingUptime();
             }
-            else if (!this.hasEverObservedInboundActivity) {
-                // Startup phase — haven't received first message yet
-                this.startupAttempts++;
-                logger.warn(`[HEALTH] Waiting for first message (${this.startupAttempts}/${MAX_FAILURES}) — ${fmtState(state, false)}`);
-                // Notify uptime bot via tgclientoff so it triggers /trytoconnect
-                if (!state.clientConnected) {
-                    try {
-                        await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`${process.env.uptimebot}/tgclientoff/${_app__WEBPACK_IMPORTED_MODULE_5__.prcessID}?clientId=${process.env.clientId}`);
-                        logger.debug(`[HEALTH] Notified tgclientoff for startup connection`);
-                    }
-                    catch (error) {
-                        logger.warn(`[HEALTH] tgclientoff startup notification failed:`, error);
-                    }
-                }
-                // Exit if TG client never connected after MAX_FAILURES attempts
-                if (this.startupAttempts >= MAX_FAILURES) {
-                    logger.error(`[HEALTH] TG client never connected after ${MAX_FAILURES} startup attempts — shutting down`);
-                    await this.notify(`Startup failed — TG client never connected after ${MAX_FAILURES} attempts. Shutting down.`);
-                    this.cleanup();
-                    await this.requestShutdown("Startup timeout: TG client never connected");
-                    return;
-                }
-            }
             else {
-                // Unhealthy: was receiving messages but they stopped
-                await this.onUnhealthy(state);
+                if (await this.onTransportUnavailable(state))
+                    return;
             }
             await this.checkLeader();
         }
@@ -31682,28 +31661,24 @@ class ConnectionRetryService {
             await this.requestShutdown(`Health tick crash: ${msg}`);
         }
     }
-    // ── Unhealthy: no messages this tick ───────────────────────────────────────
-    async onUnhealthy(state) {
-        this.consecutiveFailures++;
-        logger.warn(`[HEALTH] Unhealthy (${this.consecutiveFailures}/${MAX_FAILURES}) — ${fmtState(state, false)}`);
-        // Try reconnect if TG instance exists
+    // ── Unhealthy: Telegram manager/client is absent or disconnected ───────────
+    async onTransportUnavailable(state) {
+        const startup = !this.hasEverObservedInboundActivity;
+        const failures = startup
+            ? ++this.startupAttempts
+            : ++this.consecutiveFailures;
+        logger.warn(`[HEALTH] Telegram transport unavailable (${failures}/${MAX_FAILURES}) — ${fmtState(state, false)}`);
+        // Try reconnect only when the transport is actually absent/disconnected. Deliberately do not
+        // disconnect first: a client that reports connected is handled by the healthy branch above.
         if (state.instanceExists) {
             try {
-                const inst = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance();
-                // Force fresh connection: disconnect first if "connected" (zombie state)
-                if (state.clientConnected) {
-                    try {
-                        await inst.client?.disconnect();
-                    }
-                    catch { /* best effort */ }
-                }
                 const reconnected = await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.ensureConnected();
                 if (reconnected) {
-                    logger.log(`[HEALTH] Reconnect succeeded — waiting for messages`);
-                    await this.notify(`Reconnected (attempt ${this.consecutiveFailures}/${MAX_FAILURES})`);
-                    // Don't reset failures — only actual inbound activity proves recovery
+                    logger.log(`[HEALTH] Telegram transport restored`);
+                    this.resetRetryBudgets("Telegram reconnect succeeded");
+                    await this.notify("Telegram transport restored");
                     await this.pingUptime();
-                    return;
+                    return false;
                 }
                 logger.warn(`[HEALTH] Reconnect failed`);
             }
@@ -31715,23 +31690,25 @@ class ConnectionRetryService {
         if (!state.clientConnected) {
             const replaced = await this.checkProcessValidity();
             if (replaced)
-                return; // shutdown already called
+                return true; // shutdown already called
         }
-        // Notify on every failure
-        await this.notify(`Unhealthy (${this.consecutiveFailures}/${MAX_FAILURES})`);
-        // Give up after MAX_FAILURES
-        if (this.consecutiveFailures >= MAX_FAILURES) {
-            logger.error(`[HEALTH] ${MAX_FAILURES} consecutive failures — shutting down`);
-            await this.notify(`Shutting down after ${MAX_FAILURES} failures — no messages flowing`);
+        // Notify on every genuine transport failure.
+        await this.notify(`Telegram transport unavailable (${failures}/${MAX_FAILURES})`);
+        // Give up after MAX_FAILURES genuine transport failures. A successful reconnect returned
+        // above after resetting the budget, so the counter can never exceed its documented bound.
+        if (failures >= MAX_FAILURES) {
+            logger.error(`[HEALTH] ${MAX_FAILURES} Telegram transport failures — shutting down`);
+            await this.notify(`Shutting down after ${MAX_FAILURES} Telegram transport failures`);
             try {
                 await _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().closeConnection();
             }
             catch { /* best effort */ }
             this.cleanup();
-            await this.requestShutdown("Health check: max failures exceeded — no messages flowing");
-            return;
+            await this.requestShutdown("Health check: max Telegram transport failures exceeded");
+            return true;
         }
         await this.pingUptime();
+        return false;
     }
     // ── Coordinator notification ─────────────────────────────────────────────
     async checkProcessValidity() {
