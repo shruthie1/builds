@@ -29789,6 +29789,8 @@ async function requestClientSetup(url, request, expectedClientId) {
         && Number.isFinite(data.cooldownRemainingMs)
         && data.cooldownRemainingMs >= 0);
     const retirementIsValid = data?.existingRetired === undefined || typeof data.existingRetired === 'boolean';
+    const futureFallbackIsValid = data?.usedFutureAvailableFallback === undefined
+        || typeof data.usedFutureAvailableFallback === 'boolean';
     if (!data ||
         typeof data !== 'object' ||
         typeof data.status !== 'string' ||
@@ -29799,7 +29801,8 @@ async function requestClientSetup(url, request, expectedClientId) {
         !messageIsValid ||
         !swappedMobilesAreValid ||
         !cooldownIsValid ||
-        !retirementIsValid) {
+        !retirementIsValid ||
+        !futureFallbackIsValid) {
         throw new Error('setupClient returned an invalid response contract');
     }
     return data;
