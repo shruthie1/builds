@@ -24560,7 +24560,10 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:core-config');
 function getRuntimeConfigBaseOrNull() {
-    const base = (process.env.RUNTIME_CONFIG_BASE || process.env.tgmanager || process.env.tgcms || '').trim().replace(/\/$/, '');
+    // RUNTIME_CONFIG_BASE is an explicit deployment override. Otherwise use CMS directly:
+    // the legacy tgmanager /forward relay does not preserve authentication headers for
+    // lifecycle endpoints such as /setupClient.
+    const base = (process.env.RUNTIME_CONFIG_BASE || process.env.tgcms || process.env.tgmanager || '').trim().replace(/\/$/, '');
     return base || null;
 }
 function getRuntimeConfigBase() {
