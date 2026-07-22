@@ -29658,6 +29658,7 @@ async function startNewUserProcess(error, context = 'runtime') {
             errorMessage,
             mobile: process.env.mobile,
             clientId: process.env.clientId,
+            permanentReplacement: true,
             fingerprint,
         });
         await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
@@ -29692,7 +29693,12 @@ async function startNewUserProcess(error, context = 'runtime') {
             return;
         }
         const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=false&formalities=false&reason=${encodeURIComponent(errorMessage)}`;
-        logger.info(`[PermanentFailure] ${context}: calling setupClient`, { url, clientId: process.env.clientId });
+        logger.info(`[PermanentFailure] ${context}: calling setupClient`, {
+            url,
+            clientId: process.env.clientId,
+            reason: errorMessage,
+            permanentReplacement: true,
+        });
         const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId);
         if (!setupResult.swapped) {
             throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
