@@ -16001,11 +16001,14 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ActiveChannelsModule = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const active_channels_service_1 = __webpack_require__(/*! ./active-channels.service */ "./src/components/active-channels/active-channels.service.ts");
 const active_channels_controller_1 = __webpack_require__(/*! ./active-channels.controller */ "./src/components/active-channels/active-channels.controller.ts");
 const active_channel_schema_1 = __webpack_require__(/*! ./schemas/active-channel.schema */ "./src/components/active-channels/schemas/active-channel.schema.ts");
 const init_module_1 = __webpack_require__(/*! ../ConfigurationInit/init.module */ "./src/components/ConfigurationInit/init.module.ts");
 const promote_msgs_module_1 = __webpack_require__(/*! ../promote-msgs/promote-msgs.module */ "./src/components/promote-msgs/promote-msgs.module.ts");
+const channel_intelligence_read_service_1 = __webpack_require__(/*! ./channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
+const ChannelIntelligenceSchema = new mongoose_2.Schema({}, { strict: false, collection: 'channelIntelligence' });
 let ActiveChannelsModule = class ActiveChannelsModule {
 };
 exports.ActiveChannelsModule = ActiveChannelsModule;
@@ -16013,12 +16016,15 @@ exports.ActiveChannelsModule = ActiveChannelsModule = __decorate([
     (0, common_1.Module)({
         imports: [
             init_module_1.InitModule,
-            mongoose_1.MongooseModule.forFeature([{ name: active_channel_schema_1.ActiveChannel.name, schema: active_channel_schema_1.ActiveChannelSchema }]),
+            mongoose_1.MongooseModule.forFeature([
+                { name: active_channel_schema_1.ActiveChannel.name, schema: active_channel_schema_1.ActiveChannelSchema },
+                { name: 'channelIntelligence', schema: ChannelIntelligenceSchema },
+            ]),
             promote_msgs_module_1.PromoteMsgModule
         ],
         controllers: [active_channels_controller_1.ActiveChannelsController],
-        providers: [active_channels_service_1.ActiveChannelsService],
-        exports: [active_channels_service_1.ActiveChannelsService]
+        providers: [active_channels_service_1.ActiveChannelsService, channel_intelligence_read_service_1.ChannelIntelligenceReadService],
+        exports: [active_channels_service_1.ActiveChannelsService, channel_intelligence_read_service_1.ChannelIntelligenceReadService]
     })
 ], ActiveChannelsModule);
 
@@ -16058,10 +16064,12 @@ const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/lo
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
+const channel_intelligence_read_service_1 = __webpack_require__(/*! ./channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
 let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsService {
-    constructor(activeChannelModel, promoteMsgsService) {
+    constructor(activeChannelModel, promoteMsgsService, channelIntelligenceReadService) {
         this.activeChannelModel = activeChannelModel;
         this.promoteMsgsService = promoteMsgsService;
+        this.channelIntelligenceReadService = channelIntelligenceReadService;
         this.DEFAULT_LIMIT = 50;
         this.DEFAULT_SKIP = 0;
         this.MIN_PARTICIPANTS_COUNT = 600;
@@ -16071,10 +16079,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             'canSendMsgs', 'megagroup', 'availableMsgs', 'banned', 'bannedAt',
             'forbidden', 'private', 'reactRestricted', 'reactRestrictedAt',
             'clientsJoined', 'lastHydrationReason', 'lastHydrationStatus',
-            'lastHydratedAt', 'lastLiveCheckedAt', 'lastMessageTime', 'messageIndex',
-            'messageId', 'deletedCount', 'successMsgCount', 'failureMsgCount',
-            'followupMsgSuccessCount', 'followupMsgFailureCount',
-            'freeformDeletedCount', 'followUpDeletedCount', 'message',
+            'lastHydratedAt', 'lastLiveCheckedAt',
         ]);
         this.REACT_RESTRICTED_HEAL_MS = 3 * 24 * 60 * 60 * 1000;
     }
@@ -16141,8 +16146,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     canSendMsgs: false,
                     participantsCount: 0,
                     reactRestricted: false,
-                    freeformDeletedCount: 0,
-                    followUpDeletedCount: 0,
                     availableMsgs: [],
                     banned: dto.banned === true,
                     bannedAt: dto.banned === true ? (dto.bannedAt ?? Date.now()) : null,
@@ -16345,19 +16348,24 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     },
                 ],
             };
+            const schemaCleanupEnabled = process.env.SCHEMA_CLEANUP === 'true';
             const pipeline = [
                 { $match: query },
-                {
-                    $match: {
-                        $or: [
-                            { $expr: { $lt: [{ $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }] }, 5] } },
-                            { $expr: { $lte: [
-                                        { $divide: [{ $ifNull: ['$deletedCount', 0] }, { $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }, 0.01] }] },
-                                        0.15
-                                    ] } },
-                        ],
-                    },
-                },
+                ...(!schemaCleanupEnabled
+                    ? [
+                        {
+                            $match: {
+                                $or: [
+                                    { $expr: { $lt: [{ $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }] }, 5] } },
+                                    { $expr: { $lte: [
+                                                { $divide: [{ $ifNull: ['$deletedCount', 0] }, { $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }, 0.01] }] },
+                                                0.15
+                                            ] } },
+                                ],
+                            },
+                        },
+                    ]
+                    : []),
                 {
                     $addFields: {
                         sortScore: {
@@ -16374,7 +16382,23 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 { $limit: limit },
                 { $project: { sortScore: 0 } },
             ];
-            return await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            const results = await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            if (schemaCleanupEnabled && results.length) {
+                const candidateIds = results
+                    .map((channel) => channel.channelId)
+                    .filter((channelId) => Boolean(channelId));
+                let excludedIds = new Set();
+                try {
+                    excludedIds = await this.channelIntelligenceReadService.getExcludedChannelIds(candidateIds);
+                }
+                catch (excludeError) {
+                    this.logger.warn(`getExcludedChannelIds failed, skipping exclusion (fail-open): ${excludeError instanceof Error ? excludeError.message : excludeError}`);
+                }
+                if (excludedIds.size) {
+                    return results.filter((channel) => !excludedIds.has(String(channel.channelId)));
+                }
+            }
+            return results;
         }
         catch (error) {
             throw this.handleError(error, 'Failed to fetch active channels');
@@ -16418,23 +16442,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                             },
                         },
                     ],
-                    messageStats: [
-                        {
-                            $group: {
-                                _id: null,
-                                totalSent: { $sum: { $ifNull: ['$successMsgCount', 0] } },
-                                totalFailed: { $sum: { $ifNull: ['$failureMsgCount', 0] } },
-                                totalDeleted: { $sum: { $ifNull: ['$deletedCount', 0] } },
-                                followupSent: { $sum: { $ifNull: ['$followupMsgSuccessCount', 0] } },
-                                followupFailed: { $sum: { $ifNull: ['$followupMsgFailureCount', 0] } },
-                                channelsWithSends: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$successMsgCount', 0] }, 0] }, 1, 0] } },
-                                channelsWithFailures: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$failureMsgCount', 0] }, 0] }, 1, 0] } },
-                                channelsWithDeleted: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$deletedCount', 0] }, 0] }, 1, 0] } },
-                                avgSent: { $avg: { $ifNull: ['$successMsgCount', 0] } },
-                                avgFailed: { $avg: { $ifNull: ['$failureMsgCount', 0] } },
-                            },
-                        },
-                    ],
                     participantStats: [
                         {
                             $group: {
@@ -16445,17 +16452,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                                 above10k: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$participantsCount', 0] }, 10000] }, 1, 0] } },
                                 above1k: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$participantsCount', 0] }, 1000] }, 1, 0] } },
                                 below600: { $sum: { $cond: [{ $lt: [{ $ifNull: ['$participantsCount', 0] }, 600] }, 1, 0] } },
-                            },
-                        },
-                    ],
-                    restrictionStats: [
-                        {
-                            $group: {
-                                _id: null,
-                                freeformDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$freeformDeletedCount', 0] }, 0] }, 1, 0] } },
-                                followUpDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$followUpDeletedCount', 0] }, 0] }, 1, 0] } },
-                                totalFreeformDeletions: { $sum: { $ifNull: ['$freeformDeletedCount', 0] } },
-                                totalFollowUpDeletions: { $sum: { $ifNull: ['$followUpDeletedCount', 0] } },
                             },
                         },
                     ],
@@ -16470,65 +16466,18 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                             },
                         },
                     ],
-                    successRateDist: [
-                        {
-                            $match: {
-                                $expr: {
-                                    $gt: [{ $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$failureMsgCount', 0] }] }, 0],
-                                },
-                            },
-                        },
-                        {
-                            $addFields: {
-                                _rate: {
-                                    $multiply: [
-                                        { $divide: [{ $ifNull: ['$successMsgCount', 0] }, { $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$failureMsgCount', 0] }] }] },
-                                        100,
-                                    ],
-                                },
-                            },
-                        },
-                        {
-                            $bucket: {
-                                groupBy: '$_rate',
-                                boundaries: [0, 20, 40, 60, 80, 101],
-                                default: 'other',
-                                output: { count: { $sum: 1 } },
-                            },
-                        },
-                    ],
-                    topBySuccess: [
-                        { $match: { successMsgCount: { $gt: 0 } } },
-                        { $sort: { successMsgCount: -1 } },
-                        { $limit: 10 },
-                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, successMsgCount: 1, failureMsgCount: 1, deletedCount: 1 } },
-                    ],
-                    topByFailure: [
-                        { $match: { failureMsgCount: { $gt: 0 } } },
-                        { $sort: { failureMsgCount: -1 } },
-                        { $limit: 10 },
-                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, successMsgCount: 1, failureMsgCount: 1 } },
-                    ],
-                    topByDeleted: [
-                        { $match: { deletedCount: { $gt: 0 } } },
-                        { $sort: { deletedCount: -1 } },
-                        { $limit: 10 },
-                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, deletedCount: 1, successMsgCount: 1 } },
-                    ],
                     topByParticipants: [
                         { $sort: { participantsCount: -1 } },
                         { $limit: 10 },
-                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, successMsgCount: 1, canSendMsgs: 1, banned: 1 } },
+                        { $project: { channelId: 1, title: 1, username: 1, participantsCount: 1, canSendMsgs: 1, banned: 1 } },
                     ],
                 },
             },
         ]).allowDiskUse(true).exec();
         const overview = result.overview[0] || {};
-        const msgStats = result.messageStats[0] || {};
         const partStats = result.participantStats[0] || {};
-        const restrictStats = result.restrictionStats[0] || {};
         const promoCov = result.promoCoverage[0] || {};
-        const totalAttempts = (msgStats.totalSent || 0) + (msgStats.totalFailed || 0);
+        const outcomeAnalytics = await this.channelIntelligenceReadService.getOutcomeAnalytics();
         return {
             overview: {
                 total: overview.total || 0,
@@ -16542,19 +16491,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 megagroup: overview.megagroup || 0,
                 withUsername: overview.withUsername || 0,
             },
-            messages: {
-                totalSent: msgStats.totalSent || 0,
-                totalFailed: msgStats.totalFailed || 0,
-                totalDeleted: msgStats.totalDeleted || 0,
-                followupSent: msgStats.followupSent || 0,
-                followupFailed: msgStats.followupFailed || 0,
-                successRate: totalAttempts > 0 ? Math.round(((msgStats.totalSent || 0) / totalAttempts) * 100) : 0,
-                channelsWithSends: msgStats.channelsWithSends || 0,
-                channelsWithFailures: msgStats.channelsWithFailures || 0,
-                channelsWithDeleted: msgStats.channelsWithDeleted || 0,
-                avgSent: Math.round(msgStats.avgSent || 0),
-                avgFailed: Math.round(msgStats.avgFailed || 0),
-            },
+            messages: outcomeAnalytics.messageStats,
             participants: {
                 total: partStats.totalParticipants || 0,
                 average: Math.round(partStats.avgParticipants || 0),
@@ -16563,30 +16500,22 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 above1k: partStats.above1k || 0,
                 below600: partStats.below600 || 0,
             },
-            restrictions: {
-                freeformDeletionChannels: restrictStats.freeformDeletionChannels || 0,
-                followUpDeletionChannels: restrictStats.followUpDeletionChannels || 0,
-                totalFreeformDeletions: restrictStats.totalFreeformDeletions || 0,
-                totalFollowUpDeletions: restrictStats.totalFollowUpDeletions || 0,
-            },
+            restrictions: outcomeAnalytics.restrictionStats,
             promos: {
                 withPromos: promoCov.withPromos || 0,
                 exhausted: promoCov.exhausted || 0,
                 avgPromoCount: Math.round((promoCov.avgPromoCount || 0) * 10) / 10,
                 totalPromos: promoCov.totalPromos || 0,
             },
-            successRateDistribution: (result.successRateDist || []).map((b) => ({
-                range: b._id === 'other' ? 'other' : `${b._id}-${b._id + 20}%`,
-                count: b.count,
-            })),
-            topBySuccess: result.topBySuccess || [],
-            topByFailure: result.topByFailure || [],
-            topByDeleted: result.topByDeleted || [],
+            successRateDistribution: outcomeAnalytics.successRateDistribution,
+            topBySuccess: outcomeAnalytics.topBySuccess,
+            topByFailure: outcomeAnalytics.topByFailure,
+            topByDeleted: outcomeAnalytics.topByDeleted,
             topByParticipants: result.topByParticipants || [],
         };
     }
     async paginated(options) {
-        const { page = 1, limit = 50, sortBy = 'successMsgCount', sortOrder = 'desc', search, filter = 'all', } = options;
+        const { page = 1, limit = 50, sortBy = 'participantsCount', sortOrder = 'desc', search, filter = 'all', } = options;
         const pageNum = Math.max(1, Math.floor(page));
         const limitNum = Math.min(Math.max(1, Math.floor(limit)), 200);
         const skip = (pageNum - 1) * limitNum;
@@ -16610,9 +16539,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
         }
         else if (filter === 'exhausted') {
             query.$expr = { $eq: [{ $size: { $ifNull: ['$availableMsgs', []] } }, 0] };
-        }
-        else if (filter === 'high_deleted') {
-            query.deletedCount = { $gt: 30 };
         }
         if (search?.trim()) {
             const q = search.trim();
@@ -16669,7 +16595,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     async resetMessageDeletionCounters() {
         try {
             await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: reset message deletion counters`)}`);
-            await this.activeChannelModel.updateMany({ banned: false }, { $set: { freeformDeletedCount: 0, followUpDeletedCount: 0, updatedAt: new Date() } });
+            await this.activeChannelModel.updateMany({ banned: false }, { $set: { updatedAt: new Date() } });
         }
         catch (error) {
             throw this.handleError(error, 'Failed to reset message deletion counters');
@@ -16685,8 +16611,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 },
             }, {
                 $set: {
-                    freeformDeletedCount: 0,
-                    followUpDeletedCount: 0,
                     availableMsgs,
                     updatedAt: new Date(),
                 },
@@ -16701,8 +16625,6 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: update banned channels`)}`);
             await this.activeChannelModel.updateMany({ $or: [{ banned: true }, { private: true }] }, {
                 $set: {
-                    freeformDeletedCount: 0,
-                    followUpDeletedCount: 0,
                     updatedAt: new Date(),
                 },
             });
@@ -16737,8 +16659,254 @@ exports.ActiveChannelsService = ActiveChannelsService = ActiveChannelsService_1 
     __param(0, (0, mongoose_1.InjectModel)(active_channel_schema_1.ActiveChannel.name)),
     __param(1, (0, common_1.Inject)((0, common_1.forwardRef)(() => promote_msgs_service_1.PromoteMsgsService))),
     __metadata("design:paramtypes", [mongoose_2.Model,
-        promote_msgs_service_1.PromoteMsgsService])
+        promote_msgs_service_1.PromoteMsgsService,
+        channel_intelligence_read_service_1.ChannelIntelligenceReadService])
 ], ActiveChannelsService);
+
+
+/***/ },
+
+/***/ "./src/components/active-channels/channel-intelligence-read.service.ts"
+/*!*****************************************************************************!*\
+  !*** ./src/components/active-channels/channel-intelligence-read.service.ts ***!
+  \*****************************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+var ChannelIntelligenceReadService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ChannelIntelligenceReadService = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const EMPTY_OUTCOME_ANALYTICS = {
+    messageStats: {
+        totalSent: 0,
+        totalFailed: 0,
+        totalDeleted: 0,
+        successRate: 0,
+        channelsWithSends: 0,
+        channelsWithFailures: 0,
+        channelsWithDeleted: 0,
+        avgSent: 0,
+        avgFailed: 0,
+    },
+    restrictionStats: {
+        freeformDeletionChannels: 0,
+        followUpDeletionChannels: 0,
+        totalFreeformDeletions: 0,
+        totalFollowUpDeletions: 0,
+    },
+    successRateDistribution: [],
+    topBySuccess: [],
+    topByFailure: [],
+    topByDeleted: [],
+};
+let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class ChannelIntelligenceReadService {
+    constructor(model) {
+        this.model = model;
+        this.logger = new common_1.Logger(ChannelIntelligenceReadService_1.name);
+    }
+    async getExcludedChannelIds(candidateIds) {
+        const excluded = new Set();
+        if (!candidateIds?.length)
+            return excluded;
+        const docs = await this.model
+            .find({ channelId: { $in: candidateIds } }, {
+            channelId: 1,
+            'safety.status': 1,
+            'safety.consecutiveErrors': 1,
+            'outcomes.attempted': 1,
+            'outcomes.deleted': 1,
+        })
+            .lean()
+            .exec();
+        for (const doc of docs) {
+            if (this.shouldExclude(doc)) {
+                excluded.add(String(doc.channelId));
+            }
+        }
+        return excluded;
+    }
+    shouldExclude(doc) {
+        if (!doc)
+            return false;
+        if (doc.safety?.status === 'blocked')
+            return true;
+        const consecutiveErrors = doc.safety?.consecutiveErrors;
+        if (typeof consecutiveErrors === 'number' && consecutiveErrors >= 3)
+            return true;
+        const attempted = doc.outcomes?.attempted ?? 0;
+        const deleted = doc.outcomes?.deleted ?? 0;
+        if (attempted >= 10 && deleted / attempted > 0.5)
+            return true;
+        return false;
+    }
+    async getOutcomeAnalytics() {
+        try {
+            const pipeline = [
+                {
+                    $addFields: {
+                        _channelSideFailed: {
+                            $reduce: {
+                                input: { $ifNull: ['$messagePool', []] },
+                                initialValue: 0,
+                                in: { $add: ['$$value', { $ifNull: ['$$this.channelSideFailed', 0] }] },
+                            },
+                        },
+                    },
+                },
+                {
+                    $facet: {
+                        messageStats: [
+                            {
+                                $group: {
+                                    _id: null,
+                                    totalSent: { $sum: { $ifNull: ['$outcomes.survived', 0] } },
+                                    totalFailed: { $sum: '$_channelSideFailed' },
+                                    totalDeleted: { $sum: { $ifNull: ['$outcomes.deleted', 0] } },
+                                    channelsWithSends: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$outcomes.survived', 0] }, 0] }, 1, 0] } },
+                                    channelsWithFailures: { $sum: { $cond: [{ $gt: ['$_channelSideFailed', 0] }, 1, 0] } },
+                                    channelsWithDeleted: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$outcomes.deleted', 0] }, 0] }, 1, 0] } },
+                                    avgSent: { $avg: { $ifNull: ['$outcomes.survived', 0] } },
+                                    avgFailed: { $avg: '$_channelSideFailed' },
+                                },
+                            },
+                        ],
+                        restrictionStats: [
+                            {
+                                $group: {
+                                    _id: null,
+                                    freeformDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$outcomes.freeformDeleted', 0] }, 0] }, 1, 0] } },
+                                    followUpDeletionChannels: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$outcomes.followUpDeleted', 0] }, 0] }, 1, 0] } },
+                                    totalFreeformDeletions: { $sum: { $ifNull: ['$outcomes.freeformDeleted', 0] } },
+                                    totalFollowUpDeletions: { $sum: { $ifNull: ['$outcomes.followUpDeleted', 0] } },
+                                },
+                            },
+                        ],
+                        successRateDist: [
+                            {
+                                $match: {
+                                    $expr: { $gt: [{ $ifNull: ['$outcomes.attempted', 0] }, 0] },
+                                },
+                            },
+                            {
+                                $addFields: {
+                                    _rate: {
+                                        $multiply: [
+                                            { $divide: [{ $ifNull: ['$outcomes.survived', 0] }, '$outcomes.attempted'] },
+                                            100,
+                                        ],
+                                    },
+                                },
+                            },
+                            {
+                                $bucket: {
+                                    groupBy: '$_rate',
+                                    boundaries: [0, 20, 40, 60, 80, 101],
+                                    default: 'other',
+                                    output: { count: { $sum: 1 } },
+                                },
+                            },
+                        ],
+                        topBySuccess: [
+                            { $match: { 'outcomes.survived': { $gt: 0 } } },
+                            { $sort: { 'outcomes.survived': -1 } },
+                            { $limit: 10 },
+                            {
+                                $project: {
+                                    _id: 0,
+                                    channelId: 1,
+                                    survived: '$outcomes.survived',
+                                    deleted: '$outcomes.deleted',
+                                    channelSideFailed: '$_channelSideFailed',
+                                },
+                            },
+                        ],
+                        topByFailure: [
+                            { $match: { _channelSideFailed: { $gt: 0 } } },
+                            { $sort: { _channelSideFailed: -1 } },
+                            { $limit: 10 },
+                            {
+                                $project: {
+                                    _id: 0,
+                                    channelId: 1,
+                                    survived: '$outcomes.survived',
+                                    channelSideFailed: '$_channelSideFailed',
+                                },
+                            },
+                        ],
+                        topByDeleted: [
+                            { $match: { 'outcomes.deleted': { $gt: 0 } } },
+                            { $sort: { 'outcomes.deleted': -1 } },
+                            { $limit: 10 },
+                            {
+                                $project: {
+                                    _id: 0,
+                                    channelId: 1,
+                                    deleted: '$outcomes.deleted',
+                                    survived: '$outcomes.survived',
+                                },
+                            },
+                        ],
+                    },
+                },
+            ];
+            const [result] = await this.model.aggregate(pipeline).allowDiskUse(true).exec();
+            const msgStats = result?.messageStats?.[0] || {};
+            const restrictStats = result?.restrictionStats?.[0] || {};
+            const totalAttempts = (msgStats.totalSent || 0) + (msgStats.totalFailed || 0);
+            return {
+                messageStats: {
+                    totalSent: msgStats.totalSent || 0,
+                    totalFailed: msgStats.totalFailed || 0,
+                    totalDeleted: msgStats.totalDeleted || 0,
+                    successRate: totalAttempts > 0 ? Math.round(((msgStats.totalSent || 0) / totalAttempts) * 100) : 0,
+                    channelsWithSends: msgStats.channelsWithSends || 0,
+                    channelsWithFailures: msgStats.channelsWithFailures || 0,
+                    channelsWithDeleted: msgStats.channelsWithDeleted || 0,
+                    avgSent: Math.round(msgStats.avgSent || 0),
+                    avgFailed: Math.round(msgStats.avgFailed || 0),
+                },
+                restrictionStats: {
+                    freeformDeletionChannels: restrictStats.freeformDeletionChannels || 0,
+                    followUpDeletionChannels: restrictStats.followUpDeletionChannels || 0,
+                    totalFreeformDeletions: restrictStats.totalFreeformDeletions || 0,
+                    totalFollowUpDeletions: restrictStats.totalFollowUpDeletions || 0,
+                },
+                successRateDistribution: (result?.successRateDist || []).map((b) => ({
+                    range: b._id === 'other' ? 'other' : `${b._id}-${b._id + 20}%`,
+                    count: b.count,
+                })),
+                topBySuccess: result?.topBySuccess || [],
+                topByFailure: result?.topByFailure || [],
+                topByDeleted: result?.topByDeleted || [],
+            };
+        }
+        catch (error) {
+            this.logger.warn(`getOutcomeAnalytics failed, returning empty stats (fail-open): ${error instanceof Error ? error.message : error}`);
+            return EMPTY_OUTCOME_ANALYTICS;
+        }
+    }
+};
+exports.ChannelIntelligenceReadService = ChannelIntelligenceReadService;
+exports.ChannelIntelligenceReadService = ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, mongoose_1.InjectModel)('channelIntelligence')),
+    __metadata("design:paramtypes", [mongoose_2.Model])
+], ChannelIntelligenceReadService);
 
 
 /***/ },
@@ -16846,50 +17014,6 @@ __decorate([
     (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
     __metadata("design:type", Number)
 ], CreateActiveChannelDto.prototype, "lastLiveCheckedAt", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "successMsgCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "failureMsgCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "followupMsgSuccessCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "followupMsgFailureCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "deletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "freeformDeletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "followUpDeletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "lastMessageTime", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: String, default: null }),
-    __metadata("design:type", String)
-], CreateActiveChannelDto.prototype, "messageIndex", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: Number, default: null }),
-    __metadata("design:type", Number)
-], CreateActiveChannelDto.prototype, "messageId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ required: false, type: String }),
-    __metadata("design:type", String)
-], CreateActiveChannelDto.prototype, "message", void 0);
 
 
 /***/ },
@@ -17099,61 +17223,6 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, default: null }),
     __metadata("design:type", Number)
 ], ActiveChannel.prototype, "lastLiveCheckedAt", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: null }),
-    (0, mongoose_1.Prop)({ type: Number, default: null }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "lastMessageTime", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: String, default: null }),
-    (0, mongoose_1.Prop)({ type: String, default: null }),
-    __metadata("design:type", String)
-], ActiveChannel.prototype, "messageIndex", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: null }),
-    (0, mongoose_1.Prop)({ type: Number, default: null }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "messageId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "deletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "successMsgCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "failureMsgCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "followupMsgSuccessCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, default: 0 }),
-    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "followupMsgFailureCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, required: false }),
-    (0, mongoose_1.Prop)({ type: Number }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "freeformDeletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: Number, required: false }),
-    (0, mongoose_1.Prop)({ type: Number }),
-    __metadata("design:type", Number)
-], ActiveChannel.prototype, "followUpDeletedCount", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: String, required: false }),
-    (0, mongoose_1.Prop)({ type: String }),
-    __metadata("design:type", String)
-], ActiveChannel.prototype, "message", void 0);
 exports.ActiveChannel = ActiveChannel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'activeChannels',
@@ -23318,10 +23387,13 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ChannelsModule = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const channels_service_1 = __webpack_require__(/*! ./channels.service */ "./src/components/channels/channels.service.ts");
 const channels_controller_1 = __webpack_require__(/*! ./channels.controller */ "./src/components/channels/channels.controller.ts");
 const channel_schema_1 = __webpack_require__(/*! ./schemas/channel.schema */ "./src/components/channels/schemas/channel.schema.ts");
 const init_module_1 = __webpack_require__(/*! ../ConfigurationInit/init.module */ "./src/components/ConfigurationInit/init.module.ts");
+const channel_intelligence_read_service_1 = __webpack_require__(/*! ../active-channels/channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
+const ChannelIntelligenceSchema = new mongoose_2.Schema({}, { strict: false, collection: 'channelIntelligence' });
 let ChannelsModule = class ChannelsModule {
 };
 exports.ChannelsModule = ChannelsModule;
@@ -23329,10 +23401,13 @@ exports.ChannelsModule = ChannelsModule = __decorate([
     (0, common_1.Module)({
         imports: [
             init_module_1.InitModule,
-            mongoose_1.MongooseModule.forFeature([{ name: channel_schema_1.Channel.name, schema: channel_schema_1.ChannelSchema }]),
+            mongoose_1.MongooseModule.forFeature([
+                { name: channel_schema_1.Channel.name, schema: channel_schema_1.ChannelSchema },
+                { name: 'channelIntelligence', schema: ChannelIntelligenceSchema },
+            ]),
         ],
         controllers: [channels_controller_1.ChannelsController],
-        providers: [channels_service_1.ChannelsService],
+        providers: [channels_service_1.ChannelsService, channel_intelligence_read_service_1.ChannelIntelligenceReadService],
         exports: [channels_service_1.ChannelsService]
     })
 ], ChannelsModule);
@@ -23368,9 +23443,11 @@ const channel_schema_1 = __webpack_require__(/*! ./schemas/channel.schema */ "./
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
+const channel_intelligence_read_service_1 = __webpack_require__(/*! ../active-channels/channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
 let ChannelsService = class ChannelsService {
-    constructor(ChannelModel) {
+    constructor(ChannelModel, channelIntelligenceReadService) {
         this.ChannelModel = ChannelModel;
+        this.channelIntelligenceReadService = channelIntelligenceReadService;
     }
     async create(createChannelDto) {
         const createdChannel = new this.ChannelModel(createChannelDto);
@@ -23585,6 +23662,21 @@ let ChannelsService = class ChannelsService {
                 { $project: { sortScore: 0 } }
             ];
             const result = await this.ChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            if (process.env.SCHEMA_CLEANUP === 'true' && result.length) {
+                const candidateIds = result
+                    .map((channel) => channel.channelId)
+                    .filter((channelId) => Boolean(channelId));
+                let excludedIds = new Set();
+                try {
+                    excludedIds = await this.channelIntelligenceReadService.getExcludedChannelIds(candidateIds);
+                }
+                catch (excludeError) {
+                    console.warn(`getExcludedChannelIds failed, skipping exclusion (fail-open): ${excludeError instanceof Error ? excludeError.message : excludeError}`);
+                }
+                if (excludedIds.size) {
+                    return result.filter((channel) => !excludedIds.has(String(channel.channelId)));
+                }
+            }
             return result;
         }
         catch (error) {
@@ -23604,7 +23696,8 @@ exports.ChannelsService = ChannelsService;
 exports.ChannelsService = ChannelsService = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(channel_schema_1.Channel.name)),
-    __metadata("design:paramtypes", [mongoose_2.Model])
+    __metadata("design:paramtypes", [mongoose_2.Model,
+        channel_intelligence_read_service_1.ChannelIntelligenceReadService])
 ], ChannelsService);
 
 
