@@ -16348,24 +16348,8 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     },
                 ],
             };
-            const schemaCleanupEnabled = process.env.SCHEMA_CLEANUP === 'true';
             const pipeline = [
                 { $match: query },
-                ...(!schemaCleanupEnabled
-                    ? [
-                        {
-                            $match: {
-                                $or: [
-                                    { $expr: { $lt: [{ $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }] }, 5] } },
-                                    { $expr: { $lte: [
-                                                { $divide: [{ $ifNull: ['$deletedCount', 0] }, { $add: [{ $ifNull: ['$successMsgCount', 0] }, { $ifNull: ['$deletedCount', 0] }, 0.01] }] },
-                                                0.15
-                                            ] } },
-                                ],
-                            },
-                        },
-                    ]
-                    : []),
                 {
                     $addFields: {
                         sortScore: {
@@ -16383,7 +16367,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 { $project: { sortScore: 0 } },
             ];
             const results = await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
-            if (schemaCleanupEnabled && results.length) {
+            if (results.length) {
                 const candidateIds = results
                     .map((channel) => channel.channelId)
                     .filter((channelId) => Boolean(channelId));
@@ -23662,7 +23646,7 @@ let ChannelsService = class ChannelsService {
                 { $project: { sortScore: 0 } }
             ];
             const result = await this.ChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
-            if (process.env.SCHEMA_CLEANUP === 'true' && result.length) {
+            if (result.length) {
                 const candidateIds = result
                     .map((channel) => channel.channelId)
                     .filter((channelId) => Boolean(channelId));
