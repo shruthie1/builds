@@ -898,16 +898,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__.ChannelIntelligenceService),
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_3__.PROMOTION_MESSAGE_STRATEGIES),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine),
-/* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_4__.isChannelIntelligence),
-/* harmony export */   schemaCleanupEnabled: () => (/* reexport safe */ _proven_channel__WEBPACK_IMPORTED_MODULE_5__.schemaCleanupEnabled)
+/* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_4__.isChannelIntelligence)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-intelligence-service */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-service.ts");
 /* harmony import */ var _percentile_engine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./percentile-engine */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/percentile-engine.ts");
 /* harmony import */ var _channel_intelligence_indexes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./channel-intelligence-indexes */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-indexes.ts");
 /* harmony import */ var _channel_intelligence_types__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
 /* harmony import */ var _channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
-/* harmony import */ var _proven_channel__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./proven-channel */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/proven-channel.ts");
-
 
 
 
@@ -1153,27 +1150,6 @@ function isRedisLike(value) {
 
 /***/ },
 
-/***/ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/proven-channel.ts"
-/*!*************************************************************************************************************!*\
-  !*** ../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/proven-channel.ts ***!
-  \*************************************************************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   schemaCleanupEnabled: () => (/* binding */ schemaCleanupEnabled)
-/* harmony export */ });
-// NOTE: despite the filename (kept to avoid import-path churn), this file no
-// longer contains any "proven channel" logic — isProvenChannel/
-// isFollowUpProvenChannel were removed as dead code. It now only holds the
-// SCHEMA_CLEANUP feature-flag helper used across channel-intelligence.
-function schemaCleanupEnabled() {
-    return process.env.SCHEMA_CLEANUP === 'true';
-}
-
-
-/***/ },
-
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/config/feature-flags.ts"
 /*!**********************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/config/feature-flags.ts ***!
@@ -1299,7 +1275,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   rawScore: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.resolveAccountDailyCap),
-/* harmony export */   schemaCleanupEnabled: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.schemaCleanupEnabled),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.selectPromotionChannels),
 /* harmony export */   selectPromotionMessageCandidates: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.selectPromotionMessageCandidates),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.shouldRetainPoolCandidate),
@@ -4994,8 +4969,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _channel_intelligence_proven_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channel-intelligence/proven-channel */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/proven-channel.ts");
-
 
 const MESSAGE_SOURCES = ['ai', 'custom', 'legacy'];
 function isMessageSource(value) {
@@ -5008,14 +4981,11 @@ function isMessageSource(value) {
  * survivor and inflate the pool. Lowercasing + Unicode-normalizing + stripping punctuation while
  * retaining Unicode letters/numbers collapses obfuscation variants of the same base message to one
  * key without collapsing non-Latin messages to an empty string. The SHA-256 digest of that
- * normalized text is effectively collision-free; the key is flag-conditional — bare digest when
- * `schemaCleanupEnabled()` is true, `v2:`-prefixed otherwise — so future normalization changes can
- * still be migrated deliberately rather than silently mixing identity schemes.
+ * normalized text is effectively collision-free, so the key is the bare digest.
  */
 function poolEntryKey(text) {
     const normalized = normalizePoolMessageText(text);
-    const digest = (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(normalized, 'utf8').digest('hex');
-    return (0,_channel_intelligence_proven_channel__WEBPACK_IMPORTED_MODULE_1__.schemaCleanupEnabled)() ? digest : `v2:${digest}`;
+    return (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(normalized, 'utf8').digest('hex');
 }
 function normalizePoolMessageText(text) {
     return (text ?? '')
@@ -8293,13 +8263,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   resolvePromotionFailureAction: () => (/* binding */ resolvePromotionFailureAction),
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* binding */ shouldHydrateBeforeFinalReject)
 /* harmony export */ });
-/* harmony import */ var _channel_message_promotions_channel_intelligence_proven_channel__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-message-promotions/channel-intelligence/proven-channel */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/proven-channel.ts");
-// NOTE on import direction: this pulls in only the flag helper (no channel-state.ts import back out
-// of channel-message-promotions), so it does not create a cycle. proven-channel.ts now contains only
-// schemaCleanupEnabled() with no imports of its own (the isProvenChannel/isFollowUpProvenChannel
-// functions and their import chain were removed as dead code), so there is nothing to re-import
-// channel-state.ts here.
-
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS = 30;
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_MS = DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
 const DEFAULT_CHANNEL_HEALTH_THRESHOLD = 20;
@@ -8483,39 +8446,23 @@ function evaluateChannelPromotionHealth(input, options = {}) {
         && channel.forbidden !== true
         && channel.broadcast !== true;
     const banned = channel.banned === true;
-    const freeformDeletedCount = safeNonNegativeNumber(channel.freeformDeletedCount);
-    const followUpDeletedCount = safeNonNegativeNumber(channel.followUpDeletedCount);
     const participantsCount = safeNonNegativeNumber(channel.participantsCount);
     const contentHealth = classifyContentHealth(channel.messagePool, channel.hasEverExplored);
-    // Source of survivingMessages/deletedCount for the deletion-rate signal below. Pre-cleanup (flag
-    // OFF), this is the exact legacy formula: successMsgCount + followupMsgSuccessCount survivors vs.
-    // the raw deletedCount counter (freeformDeletedCount/followUpDeletedCount are NOT summed in here —
-    // they only feed moderationPenalty() separately, further down). Post-cleanup (flag ON),
-    // channelIntelligence outcomes.* REPLACES those legacy counters as the sole source; legacy fields
-    // are not read at all in that path so Task 6 can drop them once this is the only remaining consumer.
-    const { survivingMessages, deletedCount } = (0,_channel_message_promotions_channel_intelligence_proven_channel__WEBPACK_IMPORTED_MODULE_0__.schemaCleanupEnabled)()
-        ? {
-            survivingMessages: safeNonNegativeNumber(channel.outcomes?.survived),
-            deletedCount: safeNonNegativeNumber(channel.outcomes?.deleted),
-        }
-        : {
-            survivingMessages: safeNonNegativeNumber(channel.successMsgCount) + safeNonNegativeNumber(channel.followupMsgSuccessCount),
-            deletedCount: safeNonNegativeNumber(channel.deletedCount),
-        };
+    // Source of survivingMessages/deletedCount for the deletion-rate signal below. channelIntelligence
+    // outcomes.* is the sole source; legacy activeChannels counters
+    // (successMsgCount/followupMsgSuccessCount/deletedCount) are no longer read.
+    const survivingMessages = safeNonNegativeNumber(channel.outcomes?.survived);
+    const deletedCount = safeNonNegativeNumber(channel.outcomes?.deleted);
     const deletionRate = classifyDeletionRate(deletedCount, survivingMessages, {
         minSamples: deleteRateMinSamples,
         moderateRate: deleteRateModerate,
         severeRate: deleteRateSevere,
     });
     const channelActivity = classifyChannelActivity({ participantsCount });
-    // Source of the moderationPenalty() input below. Pre-cleanup (flag OFF), this is the exact legacy
-    // formula: freeformDeletedCount + followUpDeletedCount straight off the activeChannels doc.
-    // Post-cleanup (flag ON), channelIntelligence outcomes.freeformDeleted/followUpDeleted REPLACES
-    // those legacy counters as the sole source; legacy fields are not read at all in that path so
-    // Task 6 can drop them once this is the only remaining consumer.
-    const restrictionCount = (0,_channel_message_promotions_channel_intelligence_proven_channel__WEBPACK_IMPORTED_MODULE_0__.schemaCleanupEnabled)()
-        ? safeNonNegativeNumber(channel.outcomes?.freeformDeleted) + safeNonNegativeNumber(channel.outcomes?.followUpDeleted)
-        : freeformDeletedCount + followUpDeletedCount;
+    // Source of the moderationPenalty() input below. channelIntelligence outcomes.freeformDeleted/
+    // followUpDeleted is the sole source; legacy activeChannels freeformDeletedCount/
+    // followUpDeletedCount are no longer read.
+    const restrictionCount = safeNonNegativeNumber(channel.outcomes?.freeformDeleted) + safeNonNegativeNumber(channel.outcomes?.followUpDeleted);
     const signals = {
         sendability: sendabilityPass ? 'pass' : 'fail',
         banned,
@@ -8979,7 +8926,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.resolvePromotionFailureAction),
-/* harmony export */   schemaCleanupEnabled: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.schemaCleanupEnabled),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionChannels),
 /* harmony export */   selectPromotionMessageCandidates: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionMessageCandidates),
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.shouldHydrateBeforeFinalReject),
@@ -31308,24 +31254,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     //  HOOKS: SUCCESS / FAILURE / EXISTING / DELETED
     // =================================================================
     async handleSuccessfulMessage(channelInfo, sentMessage, randomIndex, isFollowUp) {
-        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
         if (isFollowUp) {
             this.stats.lastFollowUpMessageTime = Date.now();
-            try {
-                await db.updateFollowupSuccessCount({ channelId: channelInfo.channelId });
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed follow-up success count for ${channelInfo.channelId}`, false);
-            }
         }
         else {
             this.stats.lastMainMessageTime = Date.now();
-            try {
-                await db.updateSuccessMsgCount({ channelId: channelInfo.channelId });
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed success count for ${channelInfo.channelId}`, false);
-            }
         }
         this.stats.successCount++;
         this.stats.failStreak = 0;
@@ -31346,7 +31279,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         // from ordinary send failures (mirrors tg-aut). errorMsg is in scope here.
         const isBanned = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(errorMsg, ['USER_BANNED_IN_CHANNEL']);
         _core_app_service__WEBPACK_IMPORTED_MODULE_4__.AppService.getInstance().updateFailedCount(this.clientId, this.mobile, isBanned);
-        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
         const channelId = channelInfo.channelId;
         const cleanErrorMessage = errorMsg || 'Unknown error';
         try {
@@ -31354,24 +31286,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to persist promotion failure state for ${channelId}`, false);
-        }
-        if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(cleanErrorMessage, ['USER_BANNED_IN_CHANNEL'])) {
-            if (isFollowUp) {
-                try {
-                    await db.updateFollowupFailureCount({ channelId }, cleanErrorMessage);
-                }
-                catch (error) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed follow-up failure count for ${channelId}`, false);
-                }
-            }
-            else {
-                try {
-                    await db.updateFailureMsgCount({ channelId }, cleanErrorMessage);
-                }
-                catch (error) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed failure count for ${channelId}`, false);
-                }
-            }
         }
         logger.warn(`[${this.mobile}] ❌ PROMO ${isFollowUp ? 'follow-up failed' : 'failed'} | ${channelId} | @${channelInfo.username} | failed ${this.stats.totalFailed} | streak ${this.stats.failStreak} | ${cleanErrorMessage}`);
     }
@@ -31418,37 +31332,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
                 return;
             }
             const availableMsgs = Array.isArray(channelInfo.availableMsgs) ? channelInfo.availableMsgs : [..._core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages];
-            try {
-                await db.updateDeletedMessageCount({ channelId });
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed deleted count for ${channelId}`, false);
-            }
             // channelIntelligence.recordDeletion() (shared runner) is the source of truth for the
-            // deletion outcome once schemaCleanupEnabled() is on; no activeChannels
-            // successMsgCount/followupMsgSuccessCount decrement upkeep needed in that case. Pre-cleanup,
-            // keep the legacy activeChannels survival counters consistent with tg-aut.
-            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.schemaCleanupEnabled)()) {
-                const legacyChannelInfo = channelInfo;
-                if (messageItem.isFollowUp) {
-                    if (this.nonNegativeCounter(legacyChannelInfo.followupMsgSuccessCount) > 0) {
-                        try {
-                            await db.updateFollowupSuccessCount({ channelId }, -1);
-                        }
-                        catch (error) {
-                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to decrement follow-up success count after deletion for ${channelId}`, false);
-                        }
-                    }
-                }
-                else if (this.nonNegativeCounter(legacyChannelInfo.successMsgCount) > 0) {
-                    try {
-                        await db.updateSuccessMsgCount({ channelId }, -1);
-                    }
-                    catch (error) {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to decrement success count after deletion for ${channelId}`, false);
-                    }
-                }
-            }
+            // deletion outcome; no legacy activeChannels deletedCount/successMsgCount/
+            // followupMsgSuccessCount write-back is needed here.
             this.stats.deletedCount++;
             await this.sendPromotionLog({
                 title: "Promote message deleted",
@@ -31490,31 +31376,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
             }
             // freeformDeletedCount/followUpDeletedCount are dropped from IChannel — channelIntelligence's
             // recordDeletion() (called unconditionally above via the shared runner) already tracks this
-            // freeform/follow-up breakdown in outcomes, so this legacy activeChannels write is only
-            // needed pre-cleanup, mirroring the successMsgCount/followupMsgSuccessCount guard above.
-            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.schemaCleanupEnabled)()) {
-                const legacyChannelInfo = channelInfo;
-                if (finalActions.includes('increment_DM_restriction')) {
-                    try {
-                        await db.updateActiveChannel({ channelId }, {
-                            followUpDeletedCount: (this.nonNegativeCounter(legacyChannelInfo.followUpDeletedCount)) + 1,
-                        });
-                    }
-                    catch (error) {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to increment followUpDeleted count for ${channelId}`, false);
-                    }
-                }
-                if (finalActions.includes('increment_word_restriction')) {
-                    try {
-                        await db.updateActiveChannel({ channelId }, {
-                            freeformDeletedCount: (this.nonNegativeCounter(legacyChannelInfo.freeformDeletedCount)) + 1,
-                        });
-                    }
-                    catch (error) {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to increment freeformDeleted count for ${channelId}`, false);
-                    }
-                }
-            }
+            // freeform/follow-up breakdown in outcomes; no legacy activeChannels write needed here.
             if (finalActions.includes('remove_message_index')) {
                 try {
                     await db.removeFromAvailableMsgs({ channelId }, messageIndex);
@@ -31736,10 +31598,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Error getting channel info for ${channelId}`, false);
             return null;
         }
-    }
-    nonNegativeCounter(value) {
-        const parsed = typeof value === 'number' ? value : Number(value);
-        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
     }
     // =================================================================
     //  CLEANUP
