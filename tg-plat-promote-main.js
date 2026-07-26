@@ -26436,7 +26436,6 @@ class UserDataDtoCrud {
                     successCount: 0,
                     failedCount: 0,
                     messageCount: 0,
-                    daysLeft: 0,
                     lastStarted: (0,_utils__WEBPACK_IMPORTED_MODULE_2__.formatDateTime)(new Date()),
                     reactCount: 0,
                     routedUserCount: 0
@@ -31056,11 +31055,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../utils/naturalizeText */ "./src/utils/naturalizeText.ts");
 /* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
 /* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 
 
 
@@ -31078,7 +31078,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("PromotionEngine");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("PromotionEngine");
 /**
  * Promote-flavored promotion engine.
  *
@@ -31087,7 +31088,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("P
  * the private-channel send fallback. One instance PER MOBILE
  * (promote runs N telegram clients per process); all state is per-instance.
  */
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.BasePromotionEngine {
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || dialogManager.instanceName || process.env.clientId || "defaultClient", options.instanceId || dialogManager.instanceId || process.env.mobile || "defaultMobile");
         // --- Public mutable fields preserved from the old Promotion API ---
@@ -31136,9 +31137,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.generateCustomMessage)(_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateCustomMessage)(_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateFollowupMsg)(),
         };
     }
     errorMessageIndicatesMissingEntity(errorMessage) {
@@ -31237,11 +31238,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
                 logger.warn(`[${this.mobile}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeoutOrThrow)(this.client, entity, { message: validatedOutgoing });
+            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, entity, { message: validatedOutgoing });
             return { message: sentMessage, checkableByChannelId: true };
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, channelInfo.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__.parseTelegramError)(error, channelInfo.channelId);
             switch (parsed.type) {
                 case 'CHANNEL_RESTRICTED':
                     if (parsed.reason === 'banned') {
@@ -31283,7 +31284,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
             logger.log(`[${this.mobile}] Retrying private channel via @${username}`);
             const finalText = (0,_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
             const validatedFinalText = this.assertSendablePromotionText(finalText);
-            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
+            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
             // A verified username send is fresh evidence that this channel is
             // reachable. Repair the stale private flag, but never let a
             // best-effort persistence failure turn a completed Telegram send
@@ -31375,7 +31376,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
         logger.warn(`[${this.mobile}] ❌ PROMO ${isFollowUp ? 'follow-up failed' : 'failed'} | ${channelId} | @${channelInfo.username} | failed ${this.stats.totalFailed} | streak ${this.stats.failStreak} | ${cleanErrorMessage}`);
     }
     async applyPromotionFailureState(channelId, errorMsg) {
-        const action = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
+        const action = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
         if (action.skipPersist || !action.channelUpdate) {
             logger.debug(`[${this.mobile}] PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason}`);
             return;
@@ -31397,7 +31398,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
             // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
             // remaining consumer) — this used to stamp a message cursor on activeChannels that
             // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.isPoolMessageIndex)(messageIndex)) {
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.isPoolMessageIndex)(messageIndex)) {
                 await db.addToAvailableMsgs({ channelId: messageItem.channelId }, messageIndex);
             }
         }
@@ -31427,7 +31428,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
             // deletion outcome once schemaCleanupEnabled() is on; no activeChannels
             // successMsgCount/followupMsgSuccessCount decrement upkeep needed in that case. Pre-cleanup,
             // keep the legacy activeChannels survival counters consistent with tg-aut.
-            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.schemaCleanupEnabled)()) {
+            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.schemaCleanupEnabled)()) {
                 const legacyChannelInfo = channelInfo;
                 if (messageItem.isFollowUp) {
                     if (this.nonNegativeCounter(legacyChannelInfo.followupMsgSuccessCount) > 0) {
@@ -31451,7 +31452,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
             this.stats.deletedCount++;
             await this.sendPromotionLog({
                 title: "Promote message deleted",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.WARNING,
                 summary: `Deleted promotion message observed in @${channelInfo.username}.`,
                 fields: [
                     { label: "Message Index", value: messageIndex },
@@ -31460,7 +31461,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
                 tags: ["promote", "deleted-message"],
             }, `Failed to send deleted-message notification for ${channelId}`);
             // Deletion policy from shared engine, combined with promote's local policy.
-            const localDeletionPolicy = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.evaluateDeletionPolicy)(messageIndex, availableMsgs.length);
+            const localDeletionPolicy = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.evaluateDeletionPolicy)(messageIndex, availableMsgs.length);
             const localDeletionActions = messageIndex === 'ai'
                 ? [
                     ...localDeletionPolicy.actions.filter((action) => action !== 'remove_message_index'),
@@ -31491,7 +31492,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
             // recordDeletion() (called unconditionally above via the shared runner) already tracks this
             // freeform/follow-up breakdown in outcomes, so this legacy activeChannels write is only
             // needed pre-cleanup, mirroring the successMsgCount/followupMsgSuccessCount guard above.
-            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.schemaCleanupEnabled)()) {
+            if (!(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.schemaCleanupEnabled)()) {
                 const legacyChannelInfo = channelInfo;
                 if (finalActions.includes('increment_DM_restriction')) {
                     try {
@@ -31523,7 +31524,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
                 }
                 void this.sendPromotionLog({
                     title: "Promote message index removed",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.WARNING,
                     summary: `Removed message index ${messageIndex} from @${channelInfo.username}.`,
                     tags: ["promote", "message-index", "cleanup"],
                 }, `Failed to send removed-message notification for ${channelId}`);
@@ -31535,7 +31536,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
     }
     async sendPromotionLog(notification, context) {
         try {
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.PROM_LOGS1, notification);
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.PROM_LOGS1, notification);
             if (sent === false) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(new Error("Promotion log notification returned false"), `[${this.mobile}] ${context}`, false);
             }
@@ -31655,7 +31656,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
         return shortlist;
     }
     mergeLiveChannelInfo(existing, liveChannelInfo) {
-        const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.mergeHydratedChannelFacts)(existing, liveChannelInfo);
+        const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.mergeHydratedChannelFacts)(existing, liveChannelInfo);
         // NOTE: messageId/messageIndex/freeformDeletedCount/followUpDeletedCount/deletedCount/
         // lastMessageTime are dropped from IChannel (channelIntelligence.outcomes is now the source
         // of truth for the outcome counters; the rest were dead-on-read). Carry legacy values through
@@ -31698,7 +31699,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
         }
         try {
             let channelInfo = await db.getActiveChannel({ channelId: normalizedChannelId });
-            const needsHydration = !channelInfo || (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.shouldHydrateBeforeFinalReject)(channelInfo);
+            const needsHydration = !channelInfo || (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.shouldHydrateBeforeFinalReject)(channelInfo);
             if (liveChannelInfo) {
                 channelInfo = this.mergeLiveChannelInfo(channelInfo, liveChannelInfo);
                 await db.updateActiveChannel({ channelId: normalizedChannelId }, channelInfo);
@@ -31707,7 +31708,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
                 if (!this.claimChannelHydrationAttempt(normalizedChannelId) && channelInfo) {
                     return null;
                 }
-                const channelInfoFromTg = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.getChannelFromTg)(this.client, normalizedChannelId);
+                const channelInfoFromTg = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.getChannelFromTg)(this.client, normalizedChannelId);
                 if (!channelInfoFromTg) {
                     return null;
                 }
@@ -31819,10 +31820,26 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_11__.Ba
     setDaysLeft(daysLeft) {
         this.daysLeft = daysLeft;
         (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(this.mobile, daysLeft);
-        const availableDate = new Date(Date.now() + daysLeft * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
-            .updatePromoteClient({ mobile: this.mobile }, { availableDate })
+        const now = Date.now();
+        // Healthy (-1) or released-today (0): available now. Only a real positive limit dates forward.
+        // (Previously `Date.now() + daysLeft * 86400000` dated -1 to YESTERDAY, mis-flagging healthy
+        // accounts as already-overdue-available — harmless but wrong; this pins today for both cases.)
+        const availableDate = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_11__.isSpamLimited)(daysLeft) && daysLeft > 0
+            ? new Date(now + daysLeft * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+            : new Date(now).toISOString().split('T')[0];
+        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
+        db
+            .updatePromoteClient({ mobile: this.mobile }, { availableDate, daysLeft })
             .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to update promote client availability`, false));
+        // Per-CLIENT view (promoteClientStats, keyed by clientId): this is the only LIVE write site
+        // for the client-level daysLeft — it fires on every @spambot release/health event, exactly
+        // when the signal changes. (AppService.updatePromoteClient(clientId, clientData) is a dead
+        // path with no caller; do not rely on it.) A clientId can run multiple mobiles that each
+        // call setDaysLeft independently, so this is intentionally last-writer-wins across mobiles —
+        // acceptable for a v1 "is this client limited" status field.
+        db
+            .updatePromoteClientStat({ clientId: this.clientId }, { daysLeft })
+            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to update promote client stat daysLeft`, false));
     }
 }
 
@@ -34005,6 +34022,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   checktghealth: () => (/* binding */ checktghealth),
 /* harmony export */   clearDaysLeftMap: () => (/* binding */ clearDaysLeftMap),
+/* harmony export */   getDaysLeftForTest: () => (/* binding */ getDaysLeftForTest),
 /* harmony export */   removeDaysLeft: () => (/* binding */ removeDaysLeft),
 /* harmony export */   setDaysLeft: () => (/* binding */ setDaysLeft)
 /* harmony export */ });
@@ -34039,6 +34057,12 @@ const daysLeftStore = {
     removeDaysLeft: (mobile) => { daysLeftMap.delete(mobile); },
     clear: () => { daysLeftMap.clear(); },
 };
+// TEST-OBSERVABILITY ONLY — read-only window onto the collapse adapter above so tests can
+// pin its contract (present => 0 => skip, absent => -1 => probe eligible). Does NOT change
+// any collapse logic; do not use this from application code.
+function getDaysLeftForTest(mobile) {
+    return daysLeftStore.getDaysLeft(mobile);
+}
 const persistentThrottle = {
     async shouldCheck(mobile, force) {
         const safeMobile = normalizeMobile(mobile);
