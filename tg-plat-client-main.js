@@ -25940,6 +25940,24 @@ class UserDataDtoCrud {
         }
         return true;
     }
+    /**
+     * Persist the live spam-limit daysLeft signal to a per-client stat row so it is observable
+     * outside the in-memory globalState module (previously nowhere-persisted for tg-aut). Mirrors
+     * promote-clients' updatePromoteClientStat: raw driver, upsert, keyed by process.env.clientId.
+     * Fire-and-forget from callers — errors are parsed/logged here, never thrown.
+     */
+    async updateTgautClientStat(daysLeft) {
+        try {
+            const clientId = process.env.clientId;
+            await this.client
+                .db("tgclients")
+                .collection('tgautClientStats')
+                .updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error updating tgaut client stat daysLeft");
+        }
+    }
     getActiveChannelCollection() {
         return this.activeChannelDb;
     }
@@ -32757,6 +32775,16 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("t
 const SPAMBOT_CHAT_ID = "178220800";
 const TELEGRAM_SYSTEM_CHAT_ID = "777000";
 const RESET_COMMAND = "rstll";
+/**
+ * Persist the live daysLeft value to the per-client tgautClientStats row so the spam-limit
+ * signal is observable outside the in-memory globalState module. Fire-and-forget — never
+ * blocks/throws into the SystemMessageHandler call sites that set daysLeft.
+ */
+function persistTgautDaysLeft(daysLeft) {
+    _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
+        .updateTgautClientStat(daysLeft)
+        .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
+}
 const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
 const PASSWORD_RESET_SLEEP_MS = 2000; // 2 seconds
 const MIN_DAYS_FOR_SETUP = 8;
@@ -32829,6 +32857,7 @@ async function handleSpamBotMessage(event) {
             return;
         case "harsh-warning":
             (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
+            persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
             if (shouldNotify) {
                 await notifySystemMessage("harsh-warning", "SpamBot harsh-limit warning", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
             }
@@ -32849,7 +32878,9 @@ async function handleAutomaticallyReleased(event, shouldNotify) {
         const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
         if (!date) {
             logger.warn("SpamBot release notice did not contain a parseable release date");
-            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)((0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1));
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
+            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            persistTgautDaysLeft(sanitized);
             return false;
         }
         const days = (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getdaysLeft)(date);
@@ -32859,6 +32890,7 @@ async function handleAutomaticallyReleased(event, shouldNotify) {
         // a value that is unambiguously limited (>= 1). Only an explicit "good news" writes -1.
         const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
         (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
+        persistTgautDaysLeft(storedDaysLeft);
         logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
         if (shouldNotify) {
             await notifySystemMessage("automatically-released", "Restriction days left", "", [
@@ -32927,6 +32959,7 @@ async function handleGoodNews() {
         }
     }
     (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(-1);
+    persistTgautDaysLeft(-1);
     logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
 }
 /**
