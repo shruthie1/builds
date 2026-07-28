@@ -16949,7 +16949,16 @@ class DialogManager {
     }
     isExpectedMissingEntityError(error) {
         const message = error instanceof Error ? error.message : String(error);
-        return message.includes('Could not find the input entity');
+        // A dead/inaccessible channel is expected during dialog resolution — treat it as a
+        // benign miss (debug) rather than an error. CHAT_ID_INVALID / CHANNEL_INVALID /
+        // PEER_ID_INVALID are the Telegram-side equivalents of "entity not found": the channel
+        // was deleted, the account left it, or it never existed. Previously only the GramJS
+        // "Could not find the input entity" string was classified as expected, so these codes
+        // spammed error logs (~120 fleet-wide, same dead channels retried each sync cycle).
+        return (message.includes('Could not find the input entity') ||
+            message.includes('CHAT_ID_INVALID') ||
+            message.includes('CHANNEL_INVALID') ||
+            message.includes('PEER_ID_INVALID'));
     }
     /**
      * Execute callback if provided, with error handling
@@ -20546,6 +20555,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+
 
 
 
@@ -20581,7 +20592,7 @@ async function adoptTtlIfMissing(redis, key) {
         }
     }
     catch (error) {
-        logger.error('Error adopting reaction cache TTL:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error adopting reaction cache TTL', false);
     }
 }
 /**
@@ -20657,7 +20668,7 @@ async function fetchAndStoreReactions(client, chatId) {
         return { emoticons: [], reactionsDisabled: true, reactionType: 'none' };
     }
     catch (error) {
-        logger.error('Error in fetchAndStoreReactions:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error in fetchAndStoreReactions', false);
         try {
             await redis.multi()
                 .del(key)
@@ -20666,7 +20677,7 @@ async function fetchAndStoreReactions(client, chatId) {
                 .exec();
         }
         catch (redisError) {
-            logger.error('Error storing disabled reaction marker:', redisError);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(redisError, '[ReactionCache] Error storing disabled reaction marker', false);
         }
         return { emoticons: [], reactionsDisabled: true, reactionType: 'none', fetchFailed: true };
     }
@@ -20714,7 +20725,7 @@ async function getRandomReaction(client, chatId) {
         return undefined;
     }
     catch (error) {
-        logger.error('Error in getAReaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error in getAReaction', false);
         return undefined;
     }
 }
@@ -20739,7 +20750,7 @@ async function removeInvalidReaction(chatId, emoticon) {
         return count > 0;
     }
     catch (error) {
-        logger.error('Error removing invalid reaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error removing invalid reaction', false);
         return false;
     }
 }
@@ -20765,7 +20776,7 @@ async function cacheValidReaction(chatId, emoticon) {
         return true;
     }
     catch (error) {
-        logger.error('Error caching valid reaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error caching valid reaction', false);
         return false;
     }
 }
@@ -20776,7 +20787,7 @@ async function clearReactionCache(chatId) {
         return (await redis.del(key)) > 0;
     }
     catch (error) {
-        logger.error('Error clearing reaction cache:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error clearing reaction cache', false);
         return false;
     }
 }
@@ -22943,23 +22954,24 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _promotion_PromotionEngine__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../promotion/PromotionEngine */ "./src/promotion/PromotionEngine.ts");
 /* harmony import */ var _dbservice__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./dbservice */ "./src/core/dbservice.ts");
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_16___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_16__);
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_17___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__);
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _modules_calls_CallManager__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../modules/calls/CallManager */ "./src/modules/calls/CallManager.ts");
-/* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
-/* harmony import */ var _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../utils/sendMessageQueue */ "./src/utils/sendMessageQueue.ts");
-/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_17___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_17__);
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_18___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__);
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _modules_calls_CallManager__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../modules/calls/CallManager */ "./src/modules/calls/CallManager.ts");
+/* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
+/* harmony import */ var _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../utils/sendMessageQueue */ "./src/utils/sendMessageQueue.ts");
+/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
+/* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 var _a;
 
 
@@ -22992,15 +23004,16 @@ var _a;
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_30__.Logger("TelegramManager");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_31__.Logger("TelegramManager");
 function scheduleTelegramManagerTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_29__.scheduleUnrefTimeout)(() => callback().catch((error) => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_30__.scheduleUnrefTimeout)(() => callback().catch((error) => {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, context);
     }), delayMs);
 }
 async function sendTelegramManagerNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.BotConfig.getInstance().sendMessage(category, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendMessage(category, notification);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error("TelegramManager notification returned false"), context, false);
             return false;
@@ -23067,7 +23080,7 @@ async function triggerPromoteProfilePhotoRefresh(client, mobile, clientId, profi
         logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: assigned profile pic URLs are missing or too small`);
         return;
     }
-    const profilePicTimestampDetails = (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_23__.describePersonaTimestamp)(profilePicsUpdatedAt);
+    const profilePicTimestampDetails = (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_24__.describePersonaTimestamp)(profilePicsUpdatedAt);
     logger.debug(`[Persona] Evaluated profile photo refresh gate for ${mobile}`, {
         ...profilePicTimestampDetails,
         note: "profilePicsUpdatedAt is informational only; photo refresh depends on assigned photos and current Telegram photo count",
@@ -23312,7 +23325,7 @@ class TelegramManager {
                 this.stringSession = new telegram_sessions__WEBPACK_IMPORTED_MODULE_3__.StringSession(this.sessionString);
             }
             // Single source of truth: credentials + client params from one cached config
-            const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_19__.generateTGConfig)(this.clientDetails.mobile);
+            const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_20__.generateTGConfig)(this.clientDetails.mobile);
             this.apiId = config.apiId;
             this.apiHash = config.apiHash;
             // Create new client with reused session
@@ -23335,7 +23348,7 @@ class TelegramManager {
             }
             logger.info("Connected : ", this.clientDetails.mobile);
             // Use getOrCreate to prevent duplicate DialogManager instances
-            this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_21__.DialogManager.getOrCreate(this.client, {
+            this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_22__.DialogManager.getOrCreate(this.client, {
                 instanceName: this.clientDetails.clientId,
                 instanceId: this.clientDetails.mobile,
                 callbacks: {
@@ -23343,7 +23356,7 @@ class TelegramManager {
                     onPermanentFailure: (error) => (0,_utils__WEBPACK_IMPORTED_MODULE_11__.handlePermanentTelegramFailure)(error, this.clientDetails.mobile, false, 'DialogManager'),
                 },
             });
-            this.callManager = _modules_calls_CallManager__WEBPACK_IMPORTED_MODULE_24__.CallManager.getOrCreate(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
+            this.callManager = _modules_calls_CallManager__WEBPACK_IMPORTED_MODULE_25__.CallManager.getOrCreate(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
             await this.dialogManager.initialize();
             logger.info("Adding event Handler");
             if (handler && this.client) {
@@ -23371,7 +23384,7 @@ class TelegramManager {
             if (!this.ensureReactionService()) {
                 throw new Error(`[${this.clientDetails.mobile}] Failed to initialize ReactionService`);
             }
-            this.messageQueue = new _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_26__.MessageQueue(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
+            this.messageQueue = new _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_27__.MessageQueue(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
             await this.joinChannel(`mypromcls${(0,_utils__WEBPACK_IMPORTED_MODULE_11__.fetchNumbersFromString)(process.env.clientId)}`);
             // this.promoterInstance.PromoteToGrp()
             const me = await this.client.getMe();
@@ -23394,11 +23407,11 @@ class TelegramManager {
                                 hasAssignedLastName: !!promoteDoc.assignedLastName,
                                 hasAssignedBio: !!promoteDoc.assignedBio,
                                 assignedPhotoCount: promoteDoc.assignedProfilePics?.length || 0,
-                                nameBioTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_23__.describePersonaTimestamp)(promoteDoc.nameBioUpdatedAt),
-                                privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_23__.describePersonaTimestamp)(promoteDoc.privacyUpdatedAt),
-                                profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_23__.describePersonaTimestamp)(promoteDoc.profilePicsUpdatedAt),
+                                nameBioTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_24__.describePersonaTimestamp)(promoteDoc.nameBioUpdatedAt),
+                                privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_24__.describePersonaTimestamp)(promoteDoc.privacyUpdatedAt),
+                                profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_24__.describePersonaTimestamp)(promoteDoc.profilePicsUpdatedAt),
                             });
-                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_22__.verifyAndCorrectPersona)(this.client, this.clientDetails.mobile, pool, {
+                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_23__.verifyAndCorrectPersona)(this.client, this.clientDetails.mobile, pool, {
                                 mobile: promoteDoc.mobile,
                                 assignedFirstName: promoteDoc.assignedFirstName || null,
                                 assignedLastName: promoteDoc.assignedLastName || null,
@@ -23417,7 +23430,7 @@ class TelegramManager {
                             if (verifyResult.workingName) {
                                 this.clientDetails.name = verifyResult.workingName;
                                 process.env.name = verifyResult.workingName;
-                                (0,_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_28__.refreshRuntimeMessages)();
+                                (0,_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_29__.refreshRuntimeMessages)();
                             }
                             logger.info(`[Persona] Verification completed for ${this.clientDetails.mobile}`, {
                                 workingName: verifyResult.workingName || null,
@@ -23515,7 +23528,7 @@ class TelegramManager {
             this.routeStateMap.clear();
             const resumePromotion = await this.detachClientBoundServices();
             await this.cleanupClient();
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(RECONNECTION_DELAY);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(RECONNECTION_DELAY);
             const newClient = await this.createClient();
             if (!newClient) {
                 logger.error(`${this.clientDetails.mobile}: Reconnection failed - createClient returned null`);
@@ -23608,7 +23621,7 @@ class TelegramManager {
         if (this.dialogManager) {
             try {
                 const instanceId = this.dialogManager.instanceId;
-                if (_tg_dialogs__WEBPACK_IMPORTED_MODULE_21__.DialogManager.getInstance(instanceId)) {
+                if (_tg_dialogs__WEBPACK_IMPORTED_MODULE_22__.DialogManager.getInstance(instanceId)) {
                     this.dialogManager.cleanup();
                 }
             }
@@ -23679,7 +23692,7 @@ class TelegramManager {
                         logger.warn(`Failed to dispose MessageQueue:`, disposeError);
                         // Ensure static map cleanup even if dispose throws
                         if (mqMobile) {
-                            _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_26__.MessageQueue.activeInstances.delete(mqMobile);
+                            _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_27__.MessageQueue.activeInstances.delete(mqMobile);
                         }
                     }
                     this.messageQueue = null;
@@ -23692,7 +23705,7 @@ class TelegramManager {
             try {
                 await this.client?.destroy();
                 this.client._eventBuilders = [];
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
                 logger.info("Client Destroyed: ", this.clientDetails?.mobile);
             }
             catch (error) {
@@ -23713,7 +23726,7 @@ class TelegramManager {
             this.routeStateMap.clear();
             // Note: We keep this.stringSession, this.sessionString, this.apiId, this.apiHash
             // for reuse on reconnection to prevent creating duplicate StringSession instances
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails?.mobile}: Error during client cleanup`);
@@ -23821,7 +23834,7 @@ class TelegramManager {
             this.apiHash = null;
             // Remove from daysLeftMap to prevent unbounded growth
             if (mobile) {
-                (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_27__.removeDaysLeft)(mobile);
+                (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_28__.removeDaysLeft)(mobile);
             }
             // Remove from static instances map
             if (mobile) {
@@ -23865,7 +23878,7 @@ class TelegramManager {
                     else {
                         username = baseUsername + increment;
                         increment++;
-                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
                     }
                 }
                 catch (error) {
@@ -23877,7 +23890,7 @@ class TelegramManager {
                     }
                     username = baseUsername + increment;
                     increment++;
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
                 }
             }
         }
@@ -23975,9 +23988,9 @@ class TelegramManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: failed to register route attribution marker for ${chatId}`, false);
         }
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(1200);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(1200);
         await this.setVideoRecording(chatId);
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(1200);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(1200);
         try {
             await this.messageQueue.enqueue(chatId, {
                 message: payload.message,
@@ -24022,9 +24035,22 @@ class TelegramManager {
                 logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} runtime attribution unavailable; retaining route for retry`);
                 return false;
             }
+            // Re-resolve the peer before GetCommonChats. The entity was cached when we sent the
+            // route message, but the 500-entry _entityCache cap often EVICTS it before this sweep
+            // runs — leaving GetCommonChats(bare userId) unable to build the InputPeerUser
+            // ("Could not find the input entity"), which then retries every cycle for 24h.
+            // getEntity() re-fetches on miss, re-populating the access_hash so GetCommonChats
+            // resolves. A null result means the peer is genuinely unresolvable (deleted, etc.) —
+            // skip this cycle cleanly instead of making a doomed GetCommonChats call (route is
+            // retained and bounded by PENDING_ROUTE_TTL_MS).
+            const resolvedEntity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance().getEntity(chatId, this.client);
+            if (!resolvedEntity) {
+                logger.debug(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} peer entity unresolvable this cycle; retaining route for retry`);
+                return false;
+            }
             const commonChatIds = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.getTelegramCommonChatIds)(this.client, {
-                userId: big_integer__WEBPACK_IMPORTED_MODULE_16___default()(chatId),
-                maxId: big_integer__WEBPACK_IMPORTED_MODULE_16___default()(0),
+                userId: big_integer__WEBPACK_IMPORTED_MODULE_17___default()(chatId),
+                maxId: big_integer__WEBPACK_IMPORTED_MODULE_17___default()(0),
                 limit: 100,
             });
             const conversionId = this.getAttributionConversionId(chatId);
@@ -24106,7 +24132,7 @@ class TelegramManager {
                     // Keep GetCommonChats strictly sequential and lightly paced. A
                     // reconciliation burst must not look like an API flood from one account.
                     if (telegramLookupAttempts > 0) {
-                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(this.ROUTE_ATTRIBUTION_PACE_MIN_MS + Math.random() * this.ROUTE_ATTRIBUTION_PACE_JITTER_MS);
+                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(this.ROUTE_ATTRIBUTION_PACE_MIN_MS + Math.random() * this.ROUTE_ATTRIBUTION_PACE_JITTER_MS);
                     }
                     telegramLookupAttempts += 1;
                     if (!(await this.attributeRoutedUser(reachedUser.chatId)))
@@ -24185,7 +24211,7 @@ class TelegramManager {
             await this.sendPromoteRouteStageMessage(chatId, 2, !existingState.firstStageUseUrl);
             let callAttempts = existingState.callAttempts;
             if (callAttempts < 1) {
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2500);
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2500);
                 await this.callManager.requestCall(chatId);
                 callAttempts += 1;
             }
@@ -24200,7 +24226,7 @@ class TelegramManager {
         await this.sendPromoteRouteStageMessage(chatId, 3, existingState.firstStageUseUrl);
         let callAttempts = existingState.callAttempts;
         if (callAttempts < 2) {
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2500);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2500);
             await this.callManager.requestCall(chatId);
             callAttempts += 1;
         }
@@ -24259,9 +24285,9 @@ class TelegramManager {
                                 // healthy sentinel. Replaces the ad-hoc `days + 1`; now identical to tg-aut.
                                 this.promoterInstance.setDaysLeft((0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_7__.sanitizeLimitedDaysLeft)(days));
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Promote account limited",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
                                         summary: `SpamBot release notice updated days left to ${this.promoterInstance.daysLeft}.`,
                                         fields: [
                                             { label: "Mobile", value: this.clientDetails.mobile },
@@ -24277,9 +24303,9 @@ class TelegramManager {
                             else if (spamBotKind === 'healthy') {
                                 this.promoterInstance.setDaysLeft(-1);
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Promote account healthy",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.SUCCESS,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.SUCCESS,
                                         summary: "SpamBot reported good news for a promote account.",
                                         fields: [
                                             { label: "Mobile", value: this.clientDetails.mobile },
@@ -24293,9 +24319,9 @@ class TelegramManager {
                                 // this.promoterInstance.setChannels(openChannels)
                                 // this.promoterInstance.setDaysLeft(99);
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Promote harsh-limit warning",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
                                         summary: "SpamBot warned that current behavior can trigger a harsh limit.",
                                         fields: [
                                             { label: "Mobile", value: this.clientDetails.mobile },
@@ -24312,7 +24338,7 @@ class TelegramManager {
                             if (this.promoterInstance.daysLeft > 3 && (this.lastResetTime < Date.now() - 30 * 60 * 1000)) {
                                 this.lastResetTime = Date.now();
                                 try {
-                                    await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_25__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`);
+                                    await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_26__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`);
                                 }
                                 catch (error) {
                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error Handling Message Event");
@@ -24321,11 +24347,11 @@ class TelegramManager {
                             }
                         }
                         if (event.message.chatId.toString() == "777000") {
-                            await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_LOGINS, {
+                            await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_LOGINS, {
                                 title: "Promote Telegram service message",
                                 severity: event.message.text.toLowerCase().includes('login code')
-                                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING
-                                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.INFO,
+                                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING
+                                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.INFO,
                                 summary: "Telegram service message received for a promote client.",
                                 fields: [
                                     { label: "Mobile", value: this.clientDetails.mobile },
@@ -24349,7 +24375,7 @@ class TelegramManager {
                                 }, 5 * 60 * 1000, `TelegramManager.delayedDeclinePasswordReset.${this.clientDetails.mobile}`);
                             }
                             if (event.message.text.toLowerCase().includes('request to reset account')) {
-                                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+                                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
                                 try {
                                     if (this.client?.connected) {
                                         await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.DeclinePasswordReset());
@@ -24373,9 +24399,9 @@ class TelegramManager {
         }
     }
     async notifySpamBotMessage(text) {
-        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
             title: 'SpamBot message',
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
             summary: 'SpamBot sent an account-status message.',
             fields: [
                 { label: 'Mobile', value: this.clientDetails.mobile },
@@ -24389,9 +24415,9 @@ class TelegramManager {
             return;
         }
         this.checkingAuths = true;
-        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_LOGINS, {
+        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_LOGINS, {
             title: "Promote auth cleanup started",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.INFO,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.INFO,
             summary: "Telegram authorization cleanup started for a promote client.",
             fields: [
                 { label: "Mobile", value: this.clientDetails.mobile },
@@ -24417,9 +24443,9 @@ class TelegramManager {
                     }
                 }
                 if (firstRemovedAuth) {
-                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.ACCOUNT_LOGINS, {
+                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.ACCOUNT_LOGINS, {
                         title: "Promote auth removed",
-                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
                         summary: `Removed ${removedCount} other authorization${removedCount === 1 ? "" : "s"} from a promote client.`,
                         fields: [
                             { label: "Mobile", value: this.clientDetails.mobile },
@@ -24429,7 +24455,7 @@ class TelegramManager {
                     }, `TelegramManager.authRemovedNotification.${this.clientDetails.mobile}`);
                     return firstRemovedAuth;
                 }
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(3500);
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(3500);
             }
         }
         catch (error) {
@@ -24553,7 +24579,7 @@ class TelegramManager {
                 data.firstName = firstName;
             if (about !== undefined)
                 data.about = about;
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(3000 + Math.random() * 5000);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(3000 + Math.random() * 5000);
             const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.UpdateProfile(data));
             if (result) {
                 logger.info(`${this.clientDetails.mobile}: Updated profile name:`, firstName);
@@ -24570,7 +24596,7 @@ class TelegramManager {
                 peer: chatId,
                 action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageTypingAction(),
             }));
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Cannot set Typing');
@@ -24583,7 +24609,7 @@ class TelegramManager {
                 peer: chatId,
                 action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageRecordVideoAction(),
             }));
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Cannot set Video Recording');
@@ -24596,7 +24622,7 @@ class TelegramManager {
                 peer: chatId,
                 action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageRecordAudioAction(),
             }));
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_17__.sleep)(2000);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(2000);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Cannot set Audio Recording');
@@ -24640,7 +24666,7 @@ class TelegramManager {
         }
     }
     isAuthMine(auth) {
-        return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_20__.isAuthFingerprintMatch)(this.clientDetails.mobile, auth);
+        return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_21__.isAuthFingerprintMatch)(this.clientDetails.mobile, auth);
     }
     getRandomEmoji() {
         const emojiCategories = {
@@ -24662,7 +24688,7 @@ TelegramManager.activeInstances = new Map();
 // Wire up proxy rotation callbacks so affected instances are logged and
 // app resources are cleaned before the proxy restart exit.
 TelegramManager._proxyCallbackRegistered = (() => {
-    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_19__.setProxyRotatedCallback)((mobile, oldProxy, newProxy, source) => {
+    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_20__.setProxyRotatedCallback)((mobile, oldProxy, newProxy, source) => {
         const instance = _a.activeInstances.get(mobile);
         if (instance) {
             logger.info(`Proxy rotated for ${mobile}: ${oldProxy.ip}:${oldProxy.port} → ${newProxy.ip}:${newProxy.port} (${source})`);
@@ -24671,7 +24697,7 @@ TelegramManager._proxyCallbackRegistered = (() => {
     return true;
 })();
 TelegramManager._proxyRestartCleanupRegistered = (() => {
-    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_19__.setBeforeProxyRestartCallback)(async (event) => {
+    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_20__.setBeforeProxyRestartCallback)(async (event) => {
         const reason = `Proxy ${event.deadProxy.ip}:${event.deadProxy.port} restart requested for ${event.affectedMobiles.join(", ")}`;
         try {
             await _app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance().gracefulShutdown(reason);
