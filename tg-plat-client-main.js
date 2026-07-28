@@ -17055,7 +17055,16 @@ class DialogManager {
     }
     isExpectedMissingEntityError(error) {
         const message = error instanceof Error ? error.message : String(error);
-        return message.includes('Could not find the input entity');
+        // A dead/inaccessible channel is expected during dialog resolution — treat it as a
+        // benign miss (debug) rather than an error. CHAT_ID_INVALID / CHANNEL_INVALID /
+        // PEER_ID_INVALID are the Telegram-side equivalents of "entity not found": the channel
+        // was deleted, the account left it, or it never existed. Previously only the GramJS
+        // "Could not find the input entity" string was classified as expected, so these codes
+        // spammed error logs (~120 fleet-wide, same dead channels retried each sync cycle).
+        return (message.includes('Could not find the input entity') ||
+            message.includes('CHAT_ID_INVALID') ||
+            message.includes('CHANNEL_INVALID') ||
+            message.includes('PEER_ID_INVALID'));
     }
     /**
      * Execute callback if provided, with error handling
@@ -21066,6 +21075,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+
 
 
 
@@ -21101,7 +21112,7 @@ async function adoptTtlIfMissing(redis, key) {
         }
     }
     catch (error) {
-        logger.error('Error adopting reaction cache TTL:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error adopting reaction cache TTL', false);
     }
 }
 /**
@@ -21177,7 +21188,7 @@ async function fetchAndStoreReactions(client, chatId) {
         return { emoticons: [], reactionsDisabled: true, reactionType: 'none' };
     }
     catch (error) {
-        logger.error('Error in fetchAndStoreReactions:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error in fetchAndStoreReactions', false);
         try {
             await redis.multi()
                 .del(key)
@@ -21186,7 +21197,7 @@ async function fetchAndStoreReactions(client, chatId) {
                 .exec();
         }
         catch (redisError) {
-            logger.error('Error storing disabled reaction marker:', redisError);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(redisError, '[ReactionCache] Error storing disabled reaction marker', false);
         }
         return { emoticons: [], reactionsDisabled: true, reactionType: 'none', fetchFailed: true };
     }
@@ -21234,7 +21245,7 @@ async function getRandomReaction(client, chatId) {
         return undefined;
     }
     catch (error) {
-        logger.error('Error in getAReaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error in getAReaction', false);
         return undefined;
     }
 }
@@ -21259,7 +21270,7 @@ async function removeInvalidReaction(chatId, emoticon) {
         return count > 0;
     }
     catch (error) {
-        logger.error('Error removing invalid reaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error removing invalid reaction', false);
         return false;
     }
 }
@@ -21285,7 +21296,7 @@ async function cacheValidReaction(chatId, emoticon) {
         return true;
     }
     catch (error) {
-        logger.error('Error caching valid reaction:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error caching valid reaction', false);
         return false;
     }
 }
@@ -21296,7 +21307,7 @@ async function clearReactionCache(chatId) {
         return (await redis.del(key)) > 0;
     }
     catch (error) {
-        logger.error('Error clearing reaction cache:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, '[ReactionCache] Error clearing reaction cache', false);
         return false;
     }
 }
