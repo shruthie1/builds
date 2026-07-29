@@ -39799,11 +39799,11 @@ const awayMessages = [
     "My **Parents** are home na\n\nI will only **Call** you in some time!!",
     "Sorry for the delay jaan\n\nLying **Naked on Bed**\n\nI will **Call** when free!!",
     "Please **wait a while** baby\n\nIn Mood, My room **Door is Locked**\n\nI will **Call** after **1 hour**!!",
-    "Reyy I just **showered Wet**\n\nSo hot now\n\nI will **Call** u when free baby!!",
+    "Heyy I just **showered Wet**\n\nSo hot now\n\nI will **Call** u when free baby!!",
     "My **Boyfriend** is here baby\n\nMind is on you na\n\nI will **Call** after sometime!!",
     "My **Family** is around reyy\n\nHiding my **Boobs** under sheet\n\nMessage you **after sometime**!!",
     "Oye baby **wait karo na**\n\n**Pressing my Boobs** for you\n\nI will **Call** in **2 minutes** jaan!!",
-    "Reyy I am **little busy** now\n\nBut so **Wet** baby\n\nI will **Call you back** soon!!",
+    "Hey I am **little busy** now\n\nBut so **Wet** baby\n\nI will **Call you back** soon!!",
     "Ayyo my **Family** is here yaar\n\nSneaking away just for you\n\nMessage you **after sometime**!!",
     "Babu **jaldi nahi karo na**\n\nJust out of **Bathroom Naked**\n\nGive me a moment, I will **Call**!!"
 ];
@@ -39814,7 +39814,7 @@ const demoFeedback = [
     `Liked the **Demo?** 🙈 `,
     `Loved the **Demo?**\n\n**Be honest!** 🙈`,
     `Demo **kaisa laga** baby? ❤️🙈`,
-    `Reyy, did you like the **Demo na?** 😏`,
+    `Heyy, did you like the **Demo na?** 😏`,
     `Oye, **Demo achha tha na?** 👀🙈`,
     `Babu, how was the **Demo?**\n\n**Sach bolo!** 🙈`
 ];
@@ -39828,7 +39828,7 @@ const feedbackQuestions = [
     `Satisfied? **Tell me!** 🙌`,
     `Loved it? **Be honest!** 😍`,
     `Kaisa laga? **Batao na!** 🙈`,
-    `Reyy, did you **like it?** 😏`,
+    `Heyy, did you **like it?** 😏`,
     `Oye, **mazaa aaya na?** 👀`,
     `Babu, **achha tha na?** 💕`
 ];
@@ -39846,7 +39846,7 @@ const uthereMsgs = [
     "Waiting for you baby\n\nSo in Mood 💕",
     "Hey you Busy?\n\nMy **Family** went outside 🙈",
     "Oye, kahan ho baby?\n\nJust showered **Wet** 💦",
-    "Reyy you there?\n\nMy **Boobs** are out for you 🙈",
+    "Oye you there?\n\nMy **Boobs** are out for you 🙈",
     "Babu come back na\n\nI am **Naked on Bed** 💕",
     "Hello na, you Online?\n\n**Parents** are sleeping 😚"
 ];
@@ -40049,7 +40049,7 @@ const privacyMsgs = [
     `**No Screenshot, No recording** allowed reyy! ⛔\n\nI'm freshly showered and Wet, just Enjoy the moment!!`,
     `Tension mat lo baby, **Bilkul safe hai**! 🔒\n\nI'm Pressing my Boobs for you, no one will know, **Trust me!!**`,
     `Ayyo don't worry babu, **I'm all Alone** here! 🙈\n\nMy Door is Locked, **Pakka private** hai, just Enjoy!!`,
-    `Reyy **No Screenshot bhi** hota okay! ⛔\n\nI'm Fingering and so In Mood, fully secure!, **Tension chhodo!!** 🔒`,
+    `Hey **No Screenshot bhi** hota okay! ⛔\n\nI'm Fingering and so In Mood, fully secure!, **Tension chhodo!!** 🔒`,
     `**Koi tension nahi** baby, I'm Naked and Wet for you! 💦\n\n**100% private** between us!, **Bas chill karo!!**`
 ];
 const urgencyMsgs = [
