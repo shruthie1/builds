@@ -26089,17 +26089,81 @@ class UserDataDtoCrud {
         }
         return resp;
     }
-    getClientFirstNames() {
-        const names = new Set();
-        const currentDbCollection = process.env.dbcoll?.toLowerCase() || '';
-        for (const client in this.clients) {
-            if (client.toLowerCase() !== currentDbCollection) {
-                const clt = this.clients[client];
-                if (clt?.dbcoll)
-                    names.add(clt.dbcoll.toLowerCase());
-                if (clt?.product)
-                    names.add(clt.product.toLowerCase());
+    /**
+     * Collect the DISTINCTIVE persona given-names a client currently uses, from live client docs:
+     *   - firstNames[]           (e.g. "Shruthi","Shruti","Sruthi") — the names shown on payments
+     *   - first token of `name`  (e.g. "Shruthie Naidu" -> "Shruthie")
+     * Deliberately EXCLUDES:
+     *   - dbcoll (internal id, not a persona name) and product (booklet codes like "booklet_10")
+     *   - last names / promote-names ("Rao","Reddy","Gowda","Sri","Cutie") — these are SHARED
+     *     across many clients, so matching on them would false-reject a genuine payer whose real
+     *     payee happens to end in a common surname. Given-names are far more distinctive.
+     * Short tokens (<3 chars) are dropped to avoid accidental substring hits.
+     */
+    clientGivenNames(clt) {
+        if (!clt)
+            return [];
+        const out = new Set();
+        const add = (v) => {
+            if (typeof v === 'string') {
+                const t = v.trim().toLowerCase();
+                if (t.length >= 3)
+                    out.add(t);
             }
+        };
+        if (Array.isArray(clt.firstNames))
+            clt.firstNames.forEach(add);
+        if (typeof clt.name === 'string')
+            add(clt.name.split(/\s+/)[0]); // given-name only
+        return Array.from(out);
+    }
+    /**
+     * Distinctive given-names of OTHER clients — used to detect "paid to someone else, not me".
+     * Any name that ALSO belongs to the current (own) client is removed, so an overlapping name
+     * can never be treated as an "other-client" signal that rejects a genuine own-client payment.
+     */
+    getClientFirstNames() {
+        const currentDbCollection = process.env.dbcoll?.toLowerCase() || '';
+        const ownNames = new Set(this.getOwnClientNames());
+        const others = new Set();
+        for (const client in this.clients) {
+            if (client.toLowerCase() === currentDbCollection)
+                continue;
+            for (const n of this.clientGivenNames(this.clients[client])) {
+                if (!ownNames.has(n))
+                    others.add(n);
+            }
+        }
+        return Array.from(others);
+    }
+    /**
+     * Distinctive names of the CURRENT (own) client — firstNames + first token of `name` +
+     * dbcoll/product for backward-compat. Used by the payment-ownership check so a genuine
+     * payment showing the account's REAL persona name (not just the internal dbcoll) is
+     * recognized as "mine" and accepted — reducing genuine-payer false-rejects.
+     */
+    getOwnClientNames() {
+        const currentDbCollection = process.env.dbcoll?.toLowerCase() || '';
+        const own = this.clients[currentDbCollection];
+        const names = new Set(this.clientGivenNames(own));
+        // CRITICAL for consistency: process.env.name is the LIVE persona name (workingName =
+        // the buffer account's assignedFirstName) and is EXACTLY what the QR encodes as the
+        // payee (pn=). It can differ from clients.firstNames if the assigned persona isn't in
+        // that pool. Include its given-name so a genuine payment showing the QR's actual name is
+        // always recognized as mine — this closes the QR↔ownership-check loop and is the single
+        // most important guard against false-rejecting a genuine payer.
+        if (typeof process.env.name === 'string' && process.env.name.trim()) {
+            const liveGiven = process.env.name.trim().split(/\s+/)[0].toLowerCase();
+            if (liveGiven.length >= 3)
+                names.add(liveGiven);
+            const liveFull = process.env.name.trim().toLowerCase();
+            if (liveFull.length >= 3)
+                names.add(liveFull);
+        }
+        // keep the legacy identifiers too (harmless additions, preserve prior matches)
+        for (const v of [process.env.dbcoll, process.env.product, own?.username]) {
+            if (typeof v === 'string' && v.trim().length >= 3)
+                names.add(v.trim().toLowerCase());
         }
         return Array.from(names);
     }
@@ -26196,12 +26260,18 @@ class UserDataDtoCrud {
     }
     async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) {
         // Daily funnel analytics (best-effort, bounded via TTL). active on every stat write;
-        // newUsers on first contact; paid + revenue when a payment is confirmed this call.
+        // newUsers on first contact.
+        //
+        // paid + revenue are DELIBERATELY NOT counted here. didPay=true is passed by several
+        // funnel events for the same payer and re-fires on every repeat message / full-show /
+        // call (recordFullShow, recordCallInitiated, recordExistingUserActivity), so an
+        // unconditional $inc double-counted a single payer 1.6x-3.1x and re-added their whole
+        // payAmount to revenue each time. paid/revenue are now incremented exactly ONCE per
+        // payer per day, at payment confirmation in recordPaymentAttribution (guarded by the
+        // per-day dailyPaidCountedAt marker), NOT per funnel event.
         void this.recordDailyUser({
             active: 1,
             newUsers: newUser ? 1 : 0,
-            paid: didPay ? 1 : 0,
-            revenue: didPay && Number.isFinite(payAmount) && payAmount > 0 ? Math.floor(payAmount) : 0,
         });
         try {
             const filter = { chatId, client: process.env.clientId, profile: process.env.dbcoll };
@@ -26336,7 +26406,69 @@ class UserDataDtoCrud {
         const clientId = process.env.clientId?.trim();
         if (!normalizedChatId || !profile || !clientId || !Number.isFinite(amount) || amount < 15)
             return;
-        await this.statsDb2.updateOne({ chatId: normalizedChatId, profile, client: clientId }, { $max: { payAmount: Math.round(amount * 100) / 100 } }, { upsert: false });
+        const roundedAmount = Math.round(amount * 100) / 100;
+        const floorAmount = Math.max(0, Math.floor(roundedAmount));
+        // Daily paid/revenue counting — exactly ONCE per payer per day, driven here at payment
+        // confirmation and INDEPENDENT of channel attribution (attribution often never resolves;
+        // ~46% of paid docs have no common channel yet are real payers, so gating counting on
+        // attribution would undercount). Idempotent across repeat screenshots / full-shows /
+        // calls that previously each re-incremented paid+revenue (the 1.6x-3.1x inflation).
+        //
+        // A SINGLE atomic findOneAndUpdate (aggregation-pipeline update) both bumps $max payAmount
+        // and stamps today's per-day counting marker, returning the PRE-image. Atomicity is what
+        // makes it correct under concurrency: two overlapping calls for the same payer are
+        // serialized by Mongo, so only the first sees a pre-image without today's marker.
+        // Branching happens off the pre-image, never off a separate read:
+        //   - no matching doc (pre === null) -> first payment today  -> paid:1 + revenue:floor
+        //   - marker != today               -> first payment today  -> paid:1 + revenue:floor
+        //   - marker == today, prev < floor  -> same-day upgrade      -> revenue: delta only
+        //   - marker == today, prev >= floor -> already fully counted -> nothing
+        //
+        // upsert is deliberately FALSE: an upsert would create a bare stats2 doc, which would make
+        // the later createOrUpdateStats() take its update branch and skip the first-contact insert
+        // side-effects (texted-client limit, paidReply seeding). The funnel doc is created on the
+        // user's first inbound message (recordNewUserContact / recordExistingUserActivity), and a
+        // payment screenshot IS an inbound message, so the doc effectively always exists here. If
+        // it genuinely doesn't yet (pre === null), there is by definition no prior same-day count,
+        // so counting paid:1 is correct and cannot double-count. The marker keys on
+        // (chatId, profile, client, dayKey) — same day identity as the userStatsDaily bucket.
+        try {
+            const dayKey = this.todayKey();
+            const pre = await this.statsDb2.findOneAndUpdate({ chatId: normalizedChatId, profile, client: clientId }, [
+                {
+                    $set: {
+                        payAmount: { $max: [{ $ifNull: ['$payAmount', 0] }, roundedAmount] },
+                        dailyPaidCountedAt: dayKey,
+                        dailyRevenueCounted: {
+                            // First count today -> floorAmount; same-day upgrade -> max(prev, floor).
+                            $cond: [
+                                { $eq: ['$dailyPaidCountedAt', dayKey] },
+                                { $max: [{ $ifNull: ['$dailyRevenueCounted', 0] }, floorAmount] },
+                                floorAmount,
+                            ],
+                        },
+                    },
+                },
+            ], {
+                upsert: false,
+                returnDocument: 'before',
+                projection: { dailyPaidCountedAt: 1, dailyRevenueCounted: 1 },
+            });
+            const countedToday = pre?.dailyPaidCountedAt === dayKey;
+            if (!countedToday) {
+                void this.recordDailyUser({ paid: 1, revenue: floorAmount });
+            }
+            else {
+                const prevCounted = Number(pre?.dailyRevenueCounted);
+                const prev = Number.isFinite(prevCounted) ? prevCounted : 0;
+                if (floorAmount > prev)
+                    void this.recordDailyUser({ revenue: floorAmount - prev });
+            }
+        }
+        catch (error) {
+            // Analytics counting must never block payment service.
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
+        }
         await this.processPendingPaymentAttributions(normalizedChatId);
     }
     /**
@@ -37352,9 +37484,16 @@ async function getImageDetails(photoBuffer) {
                 description: typeof details.description === 'string' ? details.description : '',
                 isInappropriate: !!details.isInappropriate,
                 error: !!details.error,
-                confidence: typeof details.confidence === 'number' ? details.confidence : 0
+                confidence: typeof details.confidence === 'number' ? details.confidence : 0,
+                // Carry the non-credit outcome signals through (from the service envelope OR the
+                // details object) so the conversation flow can pick the right reply. These never
+                // grant credit — the credit gate still requires isSuccess && amount — they only
+                // change the MESSAGE (resend / not-successful / suspected-fake).
+                noVerifiableAmount: !!(body.noVerifiableAmount || details.noVerifiableAmount),
+                suspectedFake: !!(body.suspectedFake || details.suspectedFake),
+                paymentNotSuccessful: !!(body.paymentNotSuccessful || details.paymentNotSuccessful),
             };
-            logger.log(`[IMAGE-ANALYSIS] Mapped response - isPayment: ${mapped.isPayment}, amount: ${mapped.amount}, confidence: ${mapped.confidence}`);
+            logger.log(`[IMAGE-ANALYSIS] Mapped response - isPayment: ${mapped.isPayment}, amount: ${mapped.amount}, isSuccess: ${mapped.isSuccess}, confidence: ${mapped.confidence}, noVerifiableAmount: ${mapped.noVerifiableAmount}, suspectedFake: ${mapped.suspectedFake}, paymentNotSuccessful: ${mapped.paymentNotSuccessful}`);
             return mapped;
         }
         logger.debug('[IMAGE-ANALYSIS] API returned non-success or unexpected format, falling back to local processing', {
@@ -37640,7 +37779,7 @@ const getupiKeys = () => {
     }
 };
 function isPaymentMine(imageData) {
-    const keywordsToCheck = [...getupiKeys(), 'lakshmi', 'lk pvt', 'shetty', 'setti', 'ravva', 'reddy g', 'ddy girl', process.env.name?.split(' ')[0].toLowerCase(), "paidgirl", "redgir", "137045557", "8000073302", '210249262', "bharatpemerchant", "bharatpe merchant", "shetty", "community", "0851610820", 'girls', 'community'];
+    const keywordsToCheck = [...getupiKeys(), 'lakshmi', 'lk pvt', 'shetty', 'setti', 'ravva', 'reddy g', 'ddy girl', "paidgirl", "redgir", "137045557", "8000073302", '210249262', "bharatpemerchant", "shetty", "community", "0851610820", 'girls', 'community'];
     return imageData.wordCount >= 2 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(`${imageData.payeeName} ${imageData.payerName} ${imageData.text}`, keywordsToCheck);
 }
 function isFailedPayment(imageData) {
@@ -38413,9 +38552,11 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     const text = `${imageDetails.payeeName} ${imageDetails.payerName} ${imageDetails.text}`.toLowerCase();
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     const otherclients = db.getClientFirstNames();
-    const ownClientNames = [process.env.dbcoll, process.env.product]
-        .filter((value) => typeof value === "string" && value.trim().length > 0)
-        .map((value) => value.toLowerCase());
+    // Own-client match now uses the CURRENT persona names (firstNames + `name` given-name +
+    // dbcoll/product/username) from the live clients DB — not just the internal dbcoll/product
+    // env strings. A genuine payment shows the account's real persona name (e.g. "Shruthie"),
+    // which the old check missed → false-reject. This recognizes it as mine and accepts.
+    const ownClientNames = db.getOwnClientNames();
     const myNameExists = ownClientNames.some((name) => text.includes(name));
     const othersNameExists = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, otherclients);
     const videoCount = Array.isArray(userDetails.videos) ? userDetails.videos.length : 0;
