@@ -26644,6 +26644,12 @@ class UserDataDtoCrud {
         }
     }
     async updateTimestamps() {
+        // Runs on a periodic timer; if it fires before the Mongo client connects or after a
+        // disconnect, this.client is undefined -> ".db() of undefined" threw every tick. Skip
+        // quietly until the connection is (re)established rather than error-spamming.
+        if (!this.isConnected || !this.client) {
+            return null;
+        }
         try {
             const collection = this.client.db("tgclients").collection('timestamps');
             return await collection.updateOne({}, { $set: { [`${process.env.clientId}_prom`]: Date.now() } }, { upsert: true });
