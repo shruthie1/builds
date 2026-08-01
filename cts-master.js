@@ -16348,25 +16348,25 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     },
                 ],
             };
-            const pipeline = [
+            const prior = await this.channelIntelligenceReadService.getFleetPrior();
+            const buildPipeline = (sortStages) => [
                 { $match: query },
-                {
-                    $addFields: {
-                        sortScore: {
-                            $multiply: [
-                                { $rand: {} },
-                                { $cond: [{ $eq: ['$reactRestricted', true] }, 0.3, 1] },
-                                { $divide: [1, { $add: [{ $ifNull: ['$clientsJoined', 0] }, 1] }] },
-                            ],
-                        },
-                    },
-                },
+                ...sortStages,
                 { $sort: { sortScore: -1 } },
                 { $skip: skip },
                 { $limit: limit },
                 { $project: { sortScore: 0 } },
             ];
-            const results = await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            let results;
+            try {
+                const pipeline = buildPipeline(this.channelIntelligenceReadService.buildConversionAwareSortStages(prior));
+                results = await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            }
+            catch (sortError) {
+                this.logger.error(`Conversion-aware sort failed — falling back to RANDOM-ONLY selection (conversion tilt disabled this query): ${sortError instanceof Error ? sortError.message : sortError}`);
+                const fallbackPipeline = buildPipeline(this.channelIntelligenceReadService.buildRandomOnlySortStages());
+                results = await this.activeChannelModel.aggregate(fallbackPipeline, { allowDiskUse: true }).exec();
+            }
             if (results.length) {
                 const candidateIds = results
                     .map((channel) => channel.channelId)
@@ -16671,10 +16671,19 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ChannelIntelligenceReadService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChannelIntelligenceReadService = void 0;
+exports.ChannelIntelligenceReadService = exports.SQ_PRIOR_RATE_FALLBACK = exports.PRIOR_RATE_FALLBACK = exports.PRIOR_TTL_MS = exports.SQ_MAX = exports.SQ_MIN = exports.SQ_PRIOR_STRENGTH = exports.WEIGHT_MAX = exports.WEIGHT_MIN = exports.PRIOR_STRENGTH = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+exports.PRIOR_STRENGTH = 20;
+exports.WEIGHT_MIN = 0.2;
+exports.WEIGHT_MAX = 1.3;
+exports.SQ_PRIOR_STRENGTH = 20;
+exports.SQ_MIN = 0.5;
+exports.SQ_MAX = 1.1;
+exports.PRIOR_TTL_MS = 15 * 60 * 1000;
+exports.PRIOR_RATE_FALLBACK = 0.03;
+exports.SQ_PRIOR_RATE_FALLBACK = 0.82;
 const EMPTY_OUTCOME_ANALYTICS = {
     messageStats: {
         totalSent: 0,
@@ -16702,6 +16711,39 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
     constructor(model) {
         this.model = model;
         this.logger = new common_1.Logger(ChannelIntelligenceReadService_1.name);
+        this._priorCache = null;
+    }
+    async getFleetPrior(ttlMs = exports.PRIOR_TTL_MS) {
+        const now = Date.now();
+        if (ttlMs > 0 && this._priorCache && now - this._priorCache.at < ttlMs) {
+            return this._priorCache.value;
+        }
+        try {
+            const [row] = await this.model
+                .aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        totalCredited: { $sum: this.numFromCi('$DMs.credited') },
+                        totalAttempted: { $sum: this.numFromCi('$outcomes.attempted') },
+                        totalSurvived: { $sum: this.numFromCi('$outcomes.survived') },
+                    },
+                },
+            ])
+                .exec();
+            const totalAttempted = row?.totalAttempted ?? 0;
+            const value = {
+                PRIOR_RATE: totalAttempted > 0 ? (row.totalCredited ?? 0) / totalAttempted : exports.PRIOR_RATE_FALLBACK,
+                SQ_PRIOR_RATE: totalAttempted > 0 ? (row.totalSurvived ?? 0) / totalAttempted : exports.SQ_PRIOR_RATE_FALLBACK,
+            };
+            this._priorCache = { value, at: now };
+            this.logger.log(`Live fleet prior computed: PRIOR_RATE=${value.PRIOR_RATE.toFixed(5)} SQ_PRIOR_RATE=${value.SQ_PRIOR_RATE.toFixed(5)} (Σattempted=${totalAttempted})`);
+            return value;
+        }
+        catch (error) {
+            this.logger.warn(`getFleetPrior failed, using ${this._priorCache ? 'cached' : 'fallback'} prior: ${error instanceof Error ? error.message : error}`);
+            return this._priorCache?.value ?? { PRIOR_RATE: exports.PRIOR_RATE_FALLBACK, SQ_PRIOR_RATE: exports.SQ_PRIOR_RATE_FALLBACK };
+        }
     }
     async getExcludedChannelIds(candidateIds) {
         const excluded = new Set();
@@ -16883,6 +16925,78 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
             this.logger.warn(`getOutcomeAnalytics failed, returning empty stats (fail-open): ${error instanceof Error ? error.message : error}`);
             return EMPTY_OUTCOME_ANALYTICS;
         }
+    }
+    numFromCi(fieldRef) {
+        return { $convert: { input: fieldRef, to: 'double', onError: 0, onNull: 0 } };
+    }
+    buildConversionAwareSortStages(prior) {
+        const priorRate = prior?.PRIOR_RATE > 0 ? prior.PRIOR_RATE : exports.PRIOR_RATE_FALLBACK;
+        const sqPriorRate = prior?.SQ_PRIOR_RATE > 0 ? prior.SQ_PRIOR_RATE : exports.SQ_PRIOR_RATE_FALLBACK;
+        return [
+            {
+                $lookup: {
+                    from: 'channelIntelligence',
+                    localField: 'channelId',
+                    foreignField: 'channelId',
+                    as: '_ci',
+                },
+            },
+            {
+                $addFields: {
+                    sortScore: {
+                        $let: {
+                            vars: {
+                                ci: { $ifNull: [{ $arrayElemAt: ['$_ci', 0] }, {}] },
+                            },
+                            in: {
+                                $let: {
+                                    vars: {
+                                        attempted: this.numFromCi('$$ci.outcomes.attempted'),
+                                        credited: this.numFromCi('$$ci.DMs.credited'),
+                                        survived: this.numFromCi('$$ci.outcomes.survived'),
+                                    },
+                                    in: {
+                                        $let: {
+                                            vars: {
+                                                conversionWeight: {
+                                                    $min: [exports.WEIGHT_MAX, { $max: [exports.WEIGHT_MIN, {
+                                                                    $divide: [
+                                                                        { $divide: [
+                                                                                { $add: [{ $multiply: [priorRate, exports.PRIOR_STRENGTH] }, '$$credited'] },
+                                                                                { $add: [exports.PRIOR_STRENGTH, '$$attempted'] },
+                                                                            ] },
+                                                                        priorRate,
+                                                                    ],
+                                                                }] }],
+                                                },
+                                                sendQualityWeight: {
+                                                    $min: [exports.SQ_MAX, { $max: [exports.SQ_MIN, {
+                                                                    $divide: [
+                                                                        { $divide: [
+                                                                                { $add: [{ $multiply: [sqPriorRate, exports.SQ_PRIOR_STRENGTH] }, '$$survived'] },
+                                                                                { $add: [exports.SQ_PRIOR_STRENGTH, '$$attempted'] },
+                                                                            ] },
+                                                                        sqPriorRate,
+                                                                    ],
+                                                                }] }],
+                                                },
+                                            },
+                                            in: { $multiply: [{ $rand: {} }, '$$conversionWeight', '$$sendQualityWeight'] },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            { $project: { _ci: 0 } },
+        ];
+    }
+    buildRandomOnlySortStages() {
+        return [
+            { $addFields: { sortScore: { $rand: {} } } },
+        ];
     }
 };
 exports.ChannelIntelligenceReadService = ChannelIntelligenceReadService;
@@ -20856,7 +20970,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             ? executable.exec()
             : Promise.resolve(query);
     }
-    isHealthyBufferClientForCap(doc, now) {
+    isHealthyBufferClientForCap(doc, _now) {
         const phase = doc.warmupPhase;
         if (!phase)
             return false;
@@ -20866,13 +20980,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         const failedAttempts = doc.failedUpdateAttempts || 0;
         if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
             return false;
-        }
-        const enrolledAtMs = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
-        if (enrolledAtMs > 0) {
-            const daysSinceEnrolled = (now - enrolledAtMs) / this.ONE_DAY_MS;
-            if (daysSinceEnrolled > this.STUCK_WARMUP_DAYS) {
-                return false;
-            }
         }
         return true;
     }
@@ -21633,14 +21740,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const failedAttempts = bc.failedUpdateAttempts || 0;
             const lastFailureTime = client_helper_utils_1.ClientHelperUtils.getTimestamp(bc.lastUpdateFailure);
             let processSkipReason = null;
-            if (failedAttempts > 0 && (lastFailureTime <= 0 || now - lastFailureTime > this.FAILURE_RESET_DAYS * this.ONE_DAY_MS)) {
-                const enrolledTs = client_helper_utils_1.ClientHelperUtils.getTimestamp(bc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(bc.createdAt);
-                const daysSinceEnrolled = enrolledTs > 0 ? (now - enrolledTs) / this.ONE_DAY_MS : 0;
-                if (daysSinceEnrolled > this.STUCK_WARMUP_DAYS && warmupPhase !== base_client_service_1.WarmupPhase.SESSION_ROTATED && warmupPhase !== base_client_service_1.WarmupPhase.READY) {
-                    processSkipReason = `stuck_${Math.round(daysSinceEnrolled)}d`;
-                }
-            }
-            else if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
+            if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
                 const retryBackoffMs = this.FAILURE_RETRY_BACKOFF_HOURS * 60 * 60 * 1000;
                 if (lastFailureTime > 0 && now - lastFailureTime < retryBackoffMs) {
                     processSkipReason = `failed_${failedAttempts}_backoff`;
@@ -21688,11 +21788,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             wouldProcess.push(entry);
         }
         wouldProcess.sort((a, b) => b.priority - a.priority);
+        const simEffectiveCap = this.getEffectiveUpdatesCap(wouldProcess.length);
         let simUpdates = 0;
         const simProcessed = [];
         const simSkipped = [];
         for (const entry of wouldProcess) {
-            if (simUpdates >= this.MAX_UPDATES_PER_CYCLE) {
+            if (simUpdates >= simEffectiveCap) {
                 simSkipped.push({ mobile: entry.mobile, action: entry.action, priority: entry.priority, reason: 'slot_limit_reached' });
                 continue;
             }
@@ -21723,9 +21824,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             actionCounts,
             skippedReasons,
             maxUpdatesPerCycle: this.MAX_UPDATES_PER_CYCLE,
+            effectiveUpdatesCap: simEffectiveCap,
+            capMin: this.MIN_UPDATES_PER_CYCLE,
+            targetDrainDays: this.WARMUP_TARGET_DRAIN_DAYS,
+            runsPerDay: this.WARMUP_RUNS_PER_DAY,
             eligibleToProcess: wouldProcess.length,
             simulation: {
-                totalMutationSlots: this.MAX_UPDATES_PER_CYCLE,
+                totalMutationSlots: simEffectiveCap,
                 mutationsUsed: simUpdates,
                 totalProcessed: simProcessed.length,
                 totalSkippedAfterSlotLimit: simSkipped.filter(s => s.reason === 'slot_limit_reached').length,
@@ -21893,8 +21998,11 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority });
         }
         bufferClientsToProcess.sort((a, b) => b.priority - a.priority);
+        const effectiveCap = this.getEffectiveUpdatesCap(bufferClientsToProcess.length);
+        let sensitiveUpdates = 0;
+        this.logger.log(`Buffer warmup run: ${bufferClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}`);
         for (const { bufferClient, client } of bufferClientsToProcess) {
-            if (totalUpdates >= this.MAX_UPDATES_PER_CYCLE)
+            if (totalUpdates >= effectiveCap)
                 break;
             const warmupPhase = bufferClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
             if (warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
@@ -21903,9 +22011,15 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 if (!healthCheck.passed)
                     continue;
             }
+            const nextAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now).action;
+            if (this.isSensitiveWarmupAction(nextAction) && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                continue;
+            }
             const processResult = await this.processClient(bufferClient, client);
             if (processResult.updateCount > 0) {
                 totalUpdates += processResult.updateCount;
+                if (this.isSensitiveWarmupAction(processResult.updateSummary))
+                    sensitiveUpdates++;
                 updatedEntries.push(`${client.clientId} | ${bufferClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
             }
         }
@@ -23627,25 +23741,25 @@ let ChannelsService = class ChannelsService {
             ]
         };
         try {
-            const pipeline = [
+            const prior = await this.channelIntelligenceReadService.getFleetPrior();
+            const buildPipeline = (sortStages) => [
                 { $match: query },
-                {
-                    $addFields: {
-                        sortScore: {
-                            $multiply: [
-                                { $rand: {} },
-                                { $cond: [{ $eq: ['$reactRestricted', true] }, 0.3, 1] },
-                                { $divide: [1, { $add: [{ $ifNull: ['$clientsJoined', 0] }, 1] }] },
-                            ],
-                        },
-                    },
-                },
+                ...sortStages,
                 { $sort: { sortScore: -1 } },
                 { $skip: skip },
                 { $limit: limit },
                 { $project: { sortScore: 0 } }
             ];
-            const result = await this.ChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            let result;
+            try {
+                const pipeline = buildPipeline(this.channelIntelligenceReadService.buildConversionAwareSortStages(prior));
+                result = await this.ChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
+            }
+            catch (sortError) {
+                console.error(`Conversion-aware sort failed — falling back to RANDOM-ONLY selection (conversion tilt disabled this query): ${sortError instanceof Error ? sortError.message : sortError}`);
+                const fallbackPipeline = buildPipeline(this.channelIntelligenceReadService.buildRandomOnlySortStages());
+                result = await this.ChannelModel.aggregate(fallbackPipeline, { allowDiskUse: true }).exec();
+            }
             if (result.length) {
                 const candidateIds = result
                     .map((channel) => channel.channelId)
@@ -33713,7 +33827,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             operationalChannelThreshold: 230,
         };
     }
-    isHealthyPromoteClientForCap(doc, now) {
+    isHealthyPromoteClientForCap(doc, _now) {
         const phase = doc.warmupPhase;
         if (!phase)
             return false;
@@ -33723,13 +33837,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         const failedAttempts = doc.failedUpdateAttempts || 0;
         if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
             return false;
-        }
-        const enrolledAtMs = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
-        if (enrolledAtMs > 0) {
-            const daysSinceEnrolled = (now - enrolledAtMs) / this.ONE_DAY_MS;
-            if (daysSinceEnrolled > this.STUCK_WARMUP_DAYS) {
-                return false;
-            }
         }
         return true;
     }
@@ -34516,8 +34623,11 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority });
         }
         promoteClientsToProcess.sort((a, b) => b.priority - a.priority);
+        const effectiveCap = this.getEffectiveUpdatesCap(promoteClientsToProcess.length);
+        let sensitiveUpdates = 0;
+        this.logger.log(`Promote warmup run: ${promoteClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}`);
         for (const { promoteClient, client } of promoteClientsToProcess) {
-            if (totalUpdates >= this.MAX_UPDATES_PER_CYCLE)
+            if (totalUpdates >= effectiveCap)
                 break;
             const warmupPhase = promoteClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
             if (warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
@@ -34526,8 +34636,14 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 if (!healthCheck.passed)
                     continue;
             }
+            const nextAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now).action;
+            if (this.isSensitiveWarmupAction(nextAction) && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                continue;
+            }
             const processResult = await this.processClient(promoteClient, client);
             if (processResult.updateCount > 0) {
+                if (this.isSensitiveWarmupAction(processResult.updateSummary))
+                    sensitiveUpdates++;
                 totalUpdates += processResult.updateCount;
                 updatedEntries.push(`${client.clientId} | ${promoteClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
             }
@@ -37980,6 +38096,14 @@ function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 class BaseClientService {
+    getEffectiveUpdatesCap(pendingMutationCount) {
+        const pending = Math.max(0, Math.floor(pendingMutationCount || 0));
+        const perRunToHitSla = Math.ceil(pending / (this.WARMUP_TARGET_DRAIN_DAYS * this.WARMUP_RUNS_PER_DAY));
+        return Math.max(this.MIN_UPDATES_PER_CYCLE, Math.min(this.MAX_UPDATES_PER_CYCLE, perRunToHitSla));
+    }
+    isSensitiveWarmupAction(action) {
+        return !!action && BaseClientService.SENSITIVE_WARMUP_ACTIONS.has(action);
+    }
     resetDailyJoinCountersIfNeeded() {
         const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
         if (today !== this.dailyJoinDate) {
@@ -38059,18 +38183,15 @@ class BaseClientService {
         ];
         return requiredTimestamps.filter((field) => client_helper_utils_1.ClientHelperUtils.getTimestamp(doc[field]) <= 0);
     }
-    async retireIfStuck(doc, now) {
+    logIfLongWarming(doc, now) {
         const enrolledTs = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
         const daysSinceEnrolled = enrolledTs > 0 ? (now - enrolledTs) / this.ONE_DAY_MS : 0;
         const phase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
-        if (daysSinceEnrolled <= this.STUCK_WARMUP_DAYS || phase === warmup_phases_1.WarmupPhase.READY || phase === warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
-            return false;
+        if (daysSinceEnrolled > this.LONG_WARMING_ALERT_DAYS &&
+            phase !== warmup_phases_1.WarmupPhase.READY &&
+            phase !== warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
+            this.logger.warn(`Long-warming ${this.clientType} ${doc.mobile}: ${Math.round(daysSinceEnrolled)}d in ${phase} — still progressing (age never inactivates; only permanent TG failures do)`);
         }
-        const failedAttempts = doc.failedUpdateAttempts || 0;
-        this.logger.error(`Stuck account detected: ${doc.mobile} has been warming for ${Math.round(daysSinceEnrolled)}d in phase ${phase} — marking inactive`);
-        const deactivated = await this.deactivateClient(doc.mobile, `Stuck: ${Math.round(daysSinceEnrolled)}d in ${phase}`);
-        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>STUCK</b> ${this.clientType} ${doc.mobile} — ${phase} ${Math.round(daysSinceEnrolled)}d — ${deactivated ? 'inactivated' : 'inactivate FAILED'}`, { parseMode: 'HTML' });
-        return true;
     }
     constructor(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, loggerName) {
         this.telegramService = telegramService;
@@ -38100,11 +38221,15 @@ class BaseClientService {
         this.FAILURE_RESET_DAYS = 7;
         this.FAILURE_RETRY_BACKOFF_HOURS = 24;
         this.MAX_UPDATES_PER_CYCLE = 20;
+        this.MIN_UPDATES_PER_CYCLE = 8;
+        this.WARMUP_TARGET_DRAIN_DAYS = 8;
+        this.WARMUP_RUNS_PER_DAY = 4;
+        this.MAX_SENSITIVE_ACTIONS_PER_CYCLE = 5;
         this.MAX_READY_ROTATIONS_PER_SWEEP = 1;
         this.MAX_MAINTENANCE_DURATION_MS = 10 * 60 * 1000;
         this.MAINTENANCE_LOCK_TTL_MS = 30 * 60 * 1000;
         this.activeMaintenanceRun = null;
-        this.STUCK_WARMUP_DAYS = 45;
+        this.LONG_WARMING_ALERT_DAYS = 60;
         this.dailyJoinCounts = new Map();
         this.dailyJoinDate = '';
         this.joinFailureCounts = new Map();
@@ -38185,8 +38310,6 @@ class BaseClientService {
         let tag;
         if ((0, isPermanentError_1.default)({ message: text }))
             tag = 'DEAD';
-        else if (/^Stuck:/i.test(text))
-            tag = 'STUCK';
         else if (permanent)
             tag = 'UNSAFE';
         else
@@ -38868,9 +38991,7 @@ class BaseClientService {
         }
         const failedAttempts = doc.failedUpdateAttempts || 0;
         const lastFailureTime = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUpdateFailure);
-        if (await this.retireIfStuck(doc, now)) {
-            return { updateCount: 0 };
-        }
+        this.logIfLongWarming(doc, now);
         if (failedAttempts > 0 && (lastFailureTime <= 0 || now - lastFailureTime > this.FAILURE_RESET_DAYS * this.ONE_DAY_MS)) {
             this.logger.log(`Resetting failure count for ${doc.mobile}`);
             const resetFields = { failedUpdateAttempts: 0, lastUpdateFailure: null };
@@ -39121,9 +39242,6 @@ class BaseClientService {
                     await this.telegramService.tryJoiningChannel(mobile, currentChannel);
                     joinCount++;
                     this.incrementDailyJoinCount(mobile);
-                    if (currentChannel.channelId) {
-                        this.activeChannelsService.incrementClientsJoined(currentChannel.channelId).catch(() => { });
-                    }
                     if (joinCount > 0 && joinCount % (2 + Math.floor(Math.random() * 2)) === 0) {
                         try {
                             const client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
@@ -40065,6 +40183,9 @@ class BaseClientService {
     }
 }
 exports.BaseClientService = BaseClientService;
+BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
+    'set_2fa', 'remove_other_auths', 'update_username',
+]);
 
 
 /***/ },
@@ -40593,7 +40714,7 @@ async function performFullActivity(client) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MIN_CHANNELS_FOR_MATURING = exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS = exports.WARMUP_PHASE_THRESHOLDS = exports.WarmupPhase = void 0;
+exports.GROWING_ADVANCE_DEADLINE_DAYS = exports.MIN_CHANNELS_FOR_MATURING = exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS = exports.WARMUP_PHASE_THRESHOLDS = exports.WarmupPhase = void 0;
 exports.getWarmupPhaseAction = getWarmupPhaseAction;
 exports.isAccountReady = isAccountReady;
 exports.isAccountWarmingUp = isAccountWarmingUp;
@@ -40619,6 +40740,7 @@ exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = 3;
 exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = 3;
 exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = 2;
 exports.MIN_CHANNELS_FOR_MATURING = 200;
+exports.GROWING_ADVANCE_DEADLINE_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 function getWarmupPhaseAction(doc, now) {
     const jitter = doc.warmupJitter || 0;
@@ -40736,11 +40858,11 @@ function getWarmupPhaseAction(doc, now) {
             return identityCatchup;
         const channels = doc.channels || 0;
         const growingDuration = daysSinceEnrolled - (exports.WARMUP_PHASE_THRESHOLDS.growing + jitter);
-        const expectedGrowingDays = exports.WARMUP_PHASE_THRESHOLDS.maturing - exports.WARMUP_PHASE_THRESHOLDS.growing;
-        const isGrowingStalled = growingDuration > expectedGrowingDays * 2;
-        const effectiveChannelTarget = isGrowingStalled
-            ? Math.floor(exports.MIN_CHANNELS_FOR_MATURING / 2)
-            : exports.MIN_CHANNELS_FOR_MATURING;
+        const stalledLong = growingDuration > (exports.WARMUP_PHASE_THRESHOLDS.maturing - exports.WARMUP_PHASE_THRESHOLDS.growing) * 2;
+        const pastAdvanceDeadline = growingDuration > exports.GROWING_ADVANCE_DEADLINE_DAYS;
+        const effectiveChannelTarget = pastAdvanceDeadline
+            ? 0
+            : (stalledLong ? Math.floor(exports.MIN_CHANNELS_FOR_MATURING / 2) : exports.MIN_CHANNELS_FOR_MATURING);
         if (channels < effectiveChannelTarget) {
             return { phase: exports.WarmupPhase.GROWING, action: 'join_channels', organicIntensity: 'light' };
         }
@@ -47494,7 +47616,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     registerCmsJobs() {
         if (!this.config.enabled('CMS_SCHEDULER'))
             return;
-        this.register('cms-buffer-check', '25 2 * * *', () => this.appService.checkBufferClients());
+        this.register('cms-buffer-check', '17 1,7,13,19 * * *', () => this.appService.checkBufferClients());
         this.register('cms-buffer-ready-rotation', '45 * * * *', async () => {
             await this.appService.rotateReadyBufferClients();
         });
@@ -47510,7 +47632,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     registerUmsJobs() {
         if (!this.config.enabled('UMS_SCHEDULER'))
             return;
-        this.register('maintenance-promote-client-check', '35 16 * * *', () => this.maintenance.checkPromoteClients());
+        this.register('maintenance-promote-client-check', '43 4,10,16,22 * * *', () => this.maintenance.checkPromoteClients());
         this.register('maintenance-promote-client-join', '20 */3 * * *', async () => {
             await this.maintenance.preparePromoteClientJoin();
         });
