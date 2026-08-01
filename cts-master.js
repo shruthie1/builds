@@ -1712,7 +1712,8 @@ let AppService = AppService_1 = class AppService {
                 await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Channel SendTrue :: ${document.clientId}: ${resp.data.canSendTrueCount}`);
                 if (resp?.data?.canSendTrueCount &&
                     resp?.data?.canSendTrueCount < 350) {
-                    const result = await this.activeChannelsService.getActiveChannels(150, 0, resp.data?.ids);
+                    const excludedIds = this.getJoinedChannelIdsFromInfo(resp.data);
+                    const result = await this.activeChannelsService.getActiveChannels(25, 0, excludedIds);
                     await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Started Joining Channels for ${document.clientId}: ${result.length}`);
                     this.joinChannelMap.set(document.repl, result);
                 }
@@ -1742,9 +1743,14 @@ let AppService = AppService_1 = class AppService {
                             const channel = channels.shift();
                             console.log(url, ' Pending Channels :', channels.length);
                             this.joinChannelMap.set(url, channels);
+                            const joinUrl = this.buildJoinChannelUrl(url, channel);
+                            if (!joinUrl) {
+                                this.logger.warn(`Skipping channel join without usable target for ${url}`);
+                                return;
+                            }
                             try {
-                                await (0, utils_1.fetchWithTimeout)(`${url}/joinchannel?username=${channel.username}`);
-                                console.log(url, ' Trying to join :', channel.username);
+                                await (0, utils_1.fetchWithTimeout)(joinUrl);
+                                console.log(url, ' Trying to join :', this.describeJoinableChannel(channel));
                             }
                             catch (error) {
                                 (0, utils_1.parseError)(error, 'Outer Err: ');
@@ -1764,6 +1770,36 @@ let AppService = AppService_1 = class AppService {
                 this.joinChannelQueueRunning = false;
             }
         }, 3 * 60 * 1000);
+    }
+    getJoinedChannelIdsFromInfo(channels) {
+        return [...new Set([...(channels?.ids ?? []), ...(channels?.canSendFalseChats ?? [])].map(String).filter(Boolean))];
+    }
+    normalizeTelegramUsername(value) {
+        if (typeof value !== 'string')
+            return null;
+        const username = value.trim().replace(/^@+/, '');
+        if (!username || username === 'undefined' || username === 'null')
+            return null;
+        return /^[A-Za-z0-9_]{5,32}$/.test(username) ? username : null;
+    }
+    normalizeChannelId(value) {
+        const channelId = String(value ?? '').trim().replace(/^-100/, '');
+        return /^[1-9]\d*$/.test(channelId) ? channelId : null;
+    }
+    buildJoinChannelUrl(baseUrl, channel) {
+        if (!channel)
+            return null;
+        const username = this.normalizeTelegramUsername(channel.username);
+        if (!username)
+            return null;
+        const url = new URL('/joinchannel', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
+        url.searchParams.set('username', username);
+        return url.toString();
+    }
+    describeJoinableChannel(channel) {
+        return this.normalizeTelegramUsername(channel.username)
+            ?? this.normalizeChannelId(channel.channelId)
+            ?? '<missing-target>';
     }
     clearJoinChannelInterval() {
         if (this.joinChannelIntervalId) {
@@ -16309,6 +16345,9 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async getActiveChannels(limit = this.DEFAULT_LIMIT, skip = this.DEFAULT_SKIP, notIds = []) {
         try {
+            if (limit <= 0)
+                return [];
+            const queryLimit = Math.min(Math.max(limit * 3, limit), 100);
             const negativeKeywords = [
                 'online', 'realestat', 'propert', 'freefire', 'bgmi', 'promo', 'agent', 'board', 'design',
                 'realt', 'clas', 'PROFIT', 'wholesale', 'retail', 'topper', 'exam', 'motivat', 'medico',
@@ -16328,18 +16367,22 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 $and: [
                     {
                         title: {
+                            $exists: true,
+                            $type: 'string',
                             $not: { $regex: negativePattern, $options: 'i' },
                         },
                     },
                     {
                         username: {
+                            $exists: true,
+                            $type: 'string',
+                            $ne: '',
                             $not: { $regex: negativePattern, $options: 'i' },
                         },
                     },
                     {
                         channelId: { $nin: notIds },
                         participantsCount: { $gt: this.MIN_PARTICIPANTS_COUNT },
-                        username: { $ne: null },
                         canSendMsgs: true,
                         banned: { $ne: true },
                         forbidden: { $ne: true },
@@ -16354,10 +16397,11 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 ...sortStages,
                 { $sort: { sortScore: -1 } },
                 { $skip: skip },
-                { $limit: limit },
+                { $limit: queryLimit },
                 { $project: { sortScore: 0 } },
             ];
             let results;
+            let usedRandomFallback = false;
             try {
                 const pipeline = buildPipeline(this.channelIntelligenceReadService.buildConversionAwareSortStages(prior));
                 results = await this.activeChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
@@ -16366,8 +16410,9 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 this.logger.error(`Conversion-aware sort failed — falling back to RANDOM-ONLY selection (conversion tilt disabled this query): ${sortError instanceof Error ? sortError.message : sortError}`);
                 const fallbackPipeline = buildPipeline(this.channelIntelligenceReadService.buildRandomOnlySortStages());
                 results = await this.activeChannelModel.aggregate(fallbackPipeline, { allowDiskUse: true }).exec();
+                usedRandomFallback = true;
             }
-            if (results.length) {
+            if (usedRandomFallback && results.length) {
                 const candidateIds = results
                     .map((channel) => channel.channelId)
                     .filter((channelId) => Boolean(channelId));
@@ -16379,10 +16424,12 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     this.logger.warn(`getExcludedChannelIds failed, skipping exclusion (fail-open): ${excludeError instanceof Error ? excludeError.message : excludeError}`);
                 }
                 if (excludedIds.size) {
-                    return results.filter((channel) => !excludedIds.has(String(channel.channelId)));
+                    return results
+                        .filter((channel) => !excludedIds.has(String(channel.channelId)))
+                        .slice(0, limit);
                 }
             }
-            return results;
+            return results.slice(0, limit);
         }
         catch (error) {
             throw this.handleError(error, 'Failed to fetch active channels');
@@ -16929,6 +16976,47 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
     numFromCi(fieldRef) {
         return { $convert: { input: fieldRef, to: 'double', onError: 0, onNull: 0 } };
     }
+    buildChannelIntelligenceExclusionFlag() {
+        return {
+            $let: {
+                vars: {
+                    ci: { $ifNull: [{ $arrayElemAt: ['$_ci', 0] }, {}] },
+                },
+                in: {
+                    $let: {
+                        vars: {
+                            attempted: this.numFromCi('$$ci.outcomes.attempted'),
+                            deleted: this.numFromCi('$$ci.outcomes.deleted'),
+                            consecutiveErrors: this.numFromCi('$$ci.safety.consecutiveErrors'),
+                        },
+                        in: {
+                            $or: [
+                                { $eq: ['$$ci.safety.status', 'blocked'] },
+                                { $gte: ['$$consecutiveErrors', 3] },
+                                {
+                                    $and: [
+                                        { $gte: ['$$attempted', 10] },
+                                        {
+                                            $gt: [
+                                                {
+                                                    $cond: [
+                                                        { $gt: ['$$attempted', 0] },
+                                                        { $divide: ['$$deleted', '$$attempted'] },
+                                                        0,
+                                                    ],
+                                                },
+                                                0.5,
+                                            ],
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    },
+                },
+            },
+        };
+    }
     buildConversionAwareSortStages(prior) {
         const priorRate = prior?.PRIOR_RATE > 0 ? prior.PRIOR_RATE : exports.PRIOR_RATE_FALLBACK;
         const sqPriorRate = prior?.SQ_PRIOR_RATE > 0 ? prior.SQ_PRIOR_RATE : exports.SQ_PRIOR_RATE_FALLBACK;
@@ -16941,6 +17029,12 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                     as: '_ci',
                 },
             },
+            {
+                $addFields: {
+                    _ciExcluded: this.buildChannelIntelligenceExclusionFlag(),
+                },
+            },
+            { $match: { _ciExcluded: { $ne: true } } },
             {
                 $addFields: {
                     sortScore: {
@@ -16990,7 +17084,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                     },
                 },
             },
-            { $project: { _ci: 0 } },
+            { $project: { _ci: 0, _ciExcluded: 0 } },
         ];
     }
     buildRandomOnlySortStages() {
@@ -21491,7 +21585,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, channels.ids);
+                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
                     if (channelsToJoin.length === 0)
                         continue;
                     if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
@@ -21522,11 +21616,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.createTimeout(() => this.leaveChannelQueue(), client_helper_utils_1.ClientHelperUtils.gaussianRandom(6500, 1000, 5000, 8000));
         }
         return added;
-    }
-    isTerminalOperationalAfterRefresh(doc, channels) {
-        const phase = doc.warmupPhase;
-        return (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
-            && channels >= (this.config.operationalChannelThreshold ?? 200);
     }
     async fetchJoinableChannels(currentChannels, limit, excludedIds) {
         const capped = Math.min(limit, 25);
@@ -22150,7 +22239,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                         continue;
                     }
                     if (channels.canSendFalseCount < 10) {
-                        const excludedIds = channels.ids;
+                        const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
                         const result = channels.ids.length < 220
                             ? await this.activeChannelsService.getActiveChannels(25, 0, excludedIds)
                             : await this.channelsService.getActiveChannels(25, 0, excludedIds);
@@ -23719,6 +23808,9 @@ let ChannelsService = class ChannelsService {
         }
     }
     async getActiveChannels(limit = 50, skip = 0, notIds = []) {
+        if (limit <= 0)
+            return [];
+        const queryLimit = Math.min(Math.max(limit * 3, limit), 100);
         const query = {
             '$and': [
                 {
@@ -23727,6 +23819,7 @@ let ChannelsService = class ChannelsService {
                             title: {
                                 $exists: true,
                                 $type: "string",
+                                $ne: '',
                                 '$not': { '$regex': /online|realestat|propert|freefire|bgmi|promo|agent|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i }
                             }
                         },
@@ -23734,6 +23827,7 @@ let ChannelsService = class ChannelsService {
                             username: {
                                 $exists: true,
                                 $type: "string",
+                                $ne: '',
                                 '$not': { '$regex': /online|freefire|bgmi|promo|agent|realestat|propert|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i }
                             }
                         },
@@ -23742,7 +23836,6 @@ let ChannelsService = class ChannelsService {
                 {
                     channelId: { '$nin': notIds },
                     participantsCount: { $gt: 1000 },
-                    username: { $ne: null },
                     canSendMsgs: true,
                     banned: { $ne: true },
                     forbidden: { $ne: true },
@@ -23758,10 +23851,11 @@ let ChannelsService = class ChannelsService {
                 ...sortStages,
                 { $sort: { sortScore: -1 } },
                 { $skip: skip },
-                { $limit: limit },
+                { $limit: queryLimit },
                 { $project: { sortScore: 0 } }
             ];
             let result;
+            let usedRandomFallback = false;
             try {
                 const pipeline = buildPipeline(this.channelIntelligenceReadService.buildConversionAwareSortStages(prior));
                 result = await this.ChannelModel.aggregate(pipeline, { allowDiskUse: true }).exec();
@@ -23770,8 +23864,9 @@ let ChannelsService = class ChannelsService {
                 console.error(`Conversion-aware sort failed — falling back to RANDOM-ONLY selection (conversion tilt disabled this query): ${sortError instanceof Error ? sortError.message : sortError}`);
                 const fallbackPipeline = buildPipeline(this.channelIntelligenceReadService.buildRandomOnlySortStages());
                 result = await this.ChannelModel.aggregate(fallbackPipeline, { allowDiskUse: true }).exec();
+                usedRandomFallback = true;
             }
-            if (result.length) {
+            if (usedRandomFallback && result.length) {
                 const candidateIds = result
                     .map((channel) => channel.channelId)
                     .filter((channelId) => Boolean(channelId));
@@ -23783,10 +23878,12 @@ let ChannelsService = class ChannelsService {
                     console.warn(`getExcludedChannelIds failed, skipping exclusion (fail-open): ${excludeError instanceof Error ? excludeError.message : excludeError}`);
                 }
                 if (excludedIds.size) {
-                    return result.filter((channel) => !excludedIds.has(String(channel.channelId)));
+                    return result
+                        .filter((channel) => !excludedIds.has(String(channel.channelId)))
+                        .slice(0, limit);
                 }
             }
-            return result;
+            return result.slice(0, limit);
         }
         catch (error) {
             console.error('🔴 Aggregation Error:', error);
@@ -34194,7 +34291,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, channels.ids);
+                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
                     if (channelsToJoin.length === 0)
                         continue;
                     if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
@@ -34225,11 +34322,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.createTimeout(() => this.leaveChannelQueue(), 5000 + Math.random() * 3000);
         }
         return added;
-    }
-    isTerminalOperationalAfterRefresh(doc, channels) {
-        const phase = doc.warmupPhase;
-        return (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
-            && channels >= (this.config.operationalChannelThreshold ?? 230);
     }
     async fetchJoinableChannels(currentChannels, limit, excludedIds) {
         const capped = Math.min(limit, 25);
@@ -34450,7 +34542,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                             continue;
                         }
                         if (channels.canSendFalseCount < 10) {
-                            const excludedIds = channels.ids;
+                            const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
                             await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
                             const isBelowThreshold = channels.ids.length < 220;
                             const result = isBelowThreshold
@@ -38188,6 +38280,14 @@ class BaseClientService {
             ],
         };
     }
+    isTerminalOperationalAfterRefresh(doc, channels) {
+        const phase = doc.warmupPhase;
+        return (phase === warmup_phases_1.WarmupPhase.READY || phase === warmup_phases_1.WarmupPhase.SESSION_ROTATED)
+            && channels >= (this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING);
+    }
+    getJoinedChannelIdsFromInfo(channels) {
+        return [...new Set([...(channels?.ids ?? []), ...(channels?.canSendFalseChats ?? [])].map(String).filter(Boolean))];
+    }
     getOperationalChannelEligibilityFilter() {
         return {
             channels: { $gte: this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
@@ -38484,8 +38584,19 @@ class BaseClientService {
             this.logger.warn(`Leave channel map size limit reached (${this.config.maxMapSize}), cannot add ${mobile}`);
             return false;
         }
-        this.leaveChannelMap.set(mobile, channels);
+        const normalizedChannels = this.normalizeLeaveChannelIds(channels);
+        if (normalizedChannels.length === 0) {
+            this.logger.debug(`${mobile} has no valid channel ids to leave`);
+            this.removeFromLeaveMap(mobile);
+            return false;
+        }
+        this.leaveChannelMap.set(mobile, normalizedChannels);
         return true;
+    }
+    normalizeLeaveChannelIds(channels) {
+        return [...new Set((channels ?? [])
+                .map((channel) => String(channel ?? '').trim().replace(/^-100/, ''))
+                .filter((channel) => channel && channel !== 'undefined' && channel !== 'null' && channel !== '0'))];
     }
     removeFromJoinMap(key) {
         this.joinChannelMap.delete(key);
