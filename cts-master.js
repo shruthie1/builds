@@ -21487,6 +21487,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 const client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
                 const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                 await this.update(doc.mobile, { channels: channels.ids.length });
+                if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
+                    continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
                     const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, channels.ids);
@@ -21520,6 +21522,11 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.createTimeout(() => this.leaveChannelQueue(), client_helper_utils_1.ClientHelperUtils.gaussianRandom(6500, 1000, 5000, 8000));
         }
         return added;
+    }
+    isTerminalOperationalAfterRefresh(doc, channels) {
+        const phase = doc.warmupPhase;
+        return (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
+            && channels >= (this.config.operationalChannelThreshold ?? 200);
     }
     async fetchJoinableChannels(currentChannels, limit, excludedIds) {
         const capped = Math.min(limit, 25);
@@ -22138,6 +22145,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     const client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
                     const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                     await this.update(mobile, { channels: channels.ids.length });
+                    if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
+                        successCount++;
+                        continue;
+                    }
                     if (channels.canSendFalseCount < 10) {
                         const excludedIds = channels.ids;
                         const result = channels.ids.length < 220
@@ -34179,6 +34190,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 const client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
                 const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                 await this.update(doc.mobile, { channels: channels.ids.length });
+                if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
+                    continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
                     const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, channels.ids);
@@ -34212,6 +34225,11 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.createTimeout(() => this.leaveChannelQueue(), 5000 + Math.random() * 3000);
         }
         return added;
+    }
+    isTerminalOperationalAfterRefresh(doc, channels) {
+        const phase = doc.warmupPhase;
+        return (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
+            && channels >= (this.config.operationalChannelThreshold ?? 230);
     }
     async fetchJoinableChannels(currentChannels, limit, excludedIds) {
         const capped = Math.min(limit, 25);
@@ -34427,6 +34445,10 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                         await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
                         await this.update(mobile, { channels: channels.ids.length });
+                        if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
+                            successCount++;
+                            continue;
+                        }
                         if (channels.canSendFalseCount < 10) {
                             const excludedIds = channels.ids;
                             await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
