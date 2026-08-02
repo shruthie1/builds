@@ -53706,7 +53706,9 @@ function readQueryString(value) {
 }
 function parseChannelUsername(value) {
     const username = readQueryString(value)?.trim().replace(/^@+/, "");
-    return username ? username : undefined;
+    if (!username || username === "undefined" || username === "null")
+        return undefined;
+    return /^[A-Za-z0-9_]{5,32}$/.test(username) ? username : undefined;
 }
 function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
