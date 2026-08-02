@@ -54519,8 +54519,11 @@ router.get("/leavechannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MO
             return;
         }
         const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_6__.TelegramManager.getClient();
-        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_7__.leaveChannels)(client);
         res.json({ success: true });
+        void (0,_core_utils__WEBPACK_IMPORTED_MODULE_7__.leaveChannels)(client).catch((error) => {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, "Async error in /leaveChannels endpoint");
+            logger.error("Async leave-channels failed", error);
+        });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, "Error in /leaveChannels endpoint");
