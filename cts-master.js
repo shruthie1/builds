@@ -1433,7 +1433,9 @@ let AppService = AppService_1 = class AppService {
         return resp;
     }
     async leaveChannelsAll() {
-        await this.sendToAll('leavechannels');
+        void this.sendToAll('leavechannels').catch((error) => {
+            (0, utils_1.parseError)(error, 'leaveChannelsAll dispatch failed');
+        });
     }
     async sendToAll(endpoint) {
         const clients = await this.clientService.findAll();
