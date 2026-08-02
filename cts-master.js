@@ -9132,7 +9132,11 @@ async function set2fa(ctx) {
     }
 }
 async function createNewSession(ctx) {
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Session creation timed out after 1 minute')), 1 * 60 * 1000));
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('Session creation timed out after 1 minute')), 1 * 60 * 1000);
+        timeoutId.unref?.();
+    });
     const sessionPromise = (async () => {
         const me = await ctx.client.getMe();
         const { apiId, apiHash, params: tgParams } = await (0, generateTGConfig_1.generateTGConfig)(ctx.phoneNumber);
@@ -9147,7 +9151,13 @@ async function createNewSession(ctx) {
         await newClient.destroy();
         return session;
     })();
-    return Promise.race([sessionPromise, timeoutPromise]);
+    try {
+        return await Promise.race([sessionPromise, timeoutPromise]);
+    }
+    finally {
+        if (timeoutId)
+            clearTimeout(timeoutId);
+    }
 }
 async function waitForOtp(ctx) {
     for (let i = 0; i < 3; i++) {
@@ -12844,7 +12854,7 @@ async function getFileUrl(ctx, url, filename) {
             response.data.pipe(writer);
             response.data.on('error', reject);
         });
-        setTimeout(() => {
+        const cleanupTimer = setTimeout(() => {
             try {
                 if (fs.existsSync(filePath)) {
                     fs.unlinkSync(filePath);
@@ -12855,6 +12865,7 @@ async function getFileUrl(ctx, url, filename) {
                 ctx.logger.warn(ctx.phoneNumber, `Failed to cleanup temp file ${filePath}:`, cleanupError);
             }
         }, helpers_1.TEMP_FILE_CLEANUP_DELAY);
+        cleanupTimer.unref?.();
         return filePath;
     }
     catch (error) {
@@ -15518,6 +15529,7 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
     refreshSessionTimeout(phone, session) {
         clearTimeout(session.timeoutId);
         session.timeoutId = setTimeout(() => this.disconnectClient(phone), TgSignupService_1.LOGIN_TIMEOUT);
+        session.timeoutId.unref?.();
         session.lastActivityAt = Date.now();
     }
     captureSessionSnapshot(session) {
@@ -15619,6 +15631,7 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
                 }),
             }));
             const timeoutId = setTimeout(() => this.disconnectClient(phone), TgSignupService_1.LOGIN_TIMEOUT);
+            timeoutId.unref?.();
             const mapped = this.mapSentCodeResult(sendResult);
             const activeSession = {
                 client,
@@ -36087,6 +36100,16 @@ let ClientRegistry = ClientRegistry_1 = class ClientRegistry {
             ClientRegistry_1.instance = new ClientRegistry_1();
         }
         return ClientRegistry_1.instance;
+    }
+    static resetForTesting() {
+        ClientRegistry_1.instance?.dispose();
+        ClientRegistry_1.instance = null;
+    }
+    dispose() {
+        clearInterval(this.inactiveClientCleanupInterval);
+        clearInterval(this.expiredLockCleanupInterval);
+        this.clients.clear();
+        this.locks.clear();
     }
     async acquireLock(mobile) {
         const lockId = `${mobile}_${Date.now()}_${Math.random()}`;
