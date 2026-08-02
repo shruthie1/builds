@@ -21019,12 +21019,10 @@ const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.ut
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
 let BufferClientService = BufferClientService_1 = class BufferClientService extends base_client_service_1.BaseClientService {
     get checkingBufferClientsSince() {
-        return this.activeMaintenanceRun?.startedAt || 0;
+        return this.isWarmupCheckProcessing ? 1 : 0;
     }
     set checkingBufferClientsSince(value) {
-        this.activeMaintenanceRun = value > 0
-            ? { name: 'legacy-buffer-test-lock', startedAt: value }
-            : null;
+        this.isWarmupCheckProcessing = value > 0;
     }
     constructor(bufferClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, promoteClientServiceRef, sessionService, botsService) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, BufferClientService_1.name);
@@ -21962,13 +21960,15 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         };
     }
     async checkBufferClients() {
-        if (!this.beginMaintenanceRun('checkBufferClients'))
-            return;
-        if (this.telegramService.hasActiveClientSetup()) {
-            this.logger.warn('Ignored active check buffer channels as active client setup exists');
-            this.endMaintenanceRun();
+        if (this.isWarmupCheckProcessing) {
+            this.logger.warn('Skipping checkBufferClients: a warmup check is already running');
             return;
         }
+        if (this.telegramService.hasActiveClientSetup()) {
+            this.logger.warn('Ignored active check buffer channels as active client setup exists');
+            return;
+        }
+        this.isWarmupCheckProcessing = true;
         try {
             await this._checkBufferClientsInternal();
         }
@@ -21981,7 +21981,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             catch { }
         }
         finally {
-            this.endMaintenanceRun();
+            this.isWarmupCheckProcessing = false;
         }
     }
     async rotateReadyBufferClients() {
@@ -21993,8 +21993,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.warn('Ready buffer rotation skipped: active client setup exists');
             return false;
         }
-        if (this.isMaintenanceRunActive() && !this.isJoinOrLeaveMaintenanceRun()) {
-            this.logger.warn('Ready buffer rotation skipped: non-join maintenance is active');
+        if (this.isWarmupCheckProcessing) {
+            this.logger.warn('Ready buffer rotation skipped: warmup check is active');
             return false;
         }
         this.readyRotationInProgress = true;
@@ -22216,9 +22216,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.warn('Join/leave processing still in progress, skipping re-entry');
             return 'Join/leave still processing, skipped';
         }
-        if (!this.beginMaintenanceRun('prepareBufferJoinChannels')) {
-            return 'Warmup maintenance active, skipped';
+        if (this.isPrepareJoinChannelsProcessing) {
+            return 'Join-channel prepare already running, skipped';
         }
+        this.isPrepareJoinChannelsProcessing = true;
         this.logger.log('Starting join channel process for buffer clients');
         try {
             this.joinScopeClientId = clientId || null;
@@ -22298,7 +22299,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return `Buffer Join queued for: ${joinSet.size}, Leave queued for: ${leaveSet.size}`;
         }
         finally {
-            this.endMaintenanceRun();
+            this.isPrepareJoinChannelsProcessing = false;
         }
     }
     async isMobileEnrolledAnywhere(mobile) {
@@ -33912,12 +33913,10 @@ const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.ut
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
 let PromoteClientService = PromoteClientService_1 = class PromoteClientService extends base_client_service_1.BaseClientService {
     get checkingPromoteClientsSince() {
-        return this.activeMaintenanceRun?.startedAt || 0;
+        return this.isWarmupCheckProcessing ? 1 : 0;
     }
     set checkingPromoteClientsSince(value) {
-        this.activeMaintenanceRun = value > 0
-            ? { name: 'legacy-promote-test-lock', startedAt: value }
-            : null;
+        this.isWarmupCheckProcessing = value > 0;
     }
     constructor(promoteClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, bufferClientServiceRef, sessionService, botsService) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, PromoteClientService_1.name);
@@ -34524,9 +34523,10 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.logger.warn('Join/leave processing still in progress, skipping re-entry');
             return 'Join/leave still processing, skipped';
         }
-        if (!this.beginMaintenanceRun('preparePromoteJoinChannels')) {
-            return 'Warmup maintenance active, skipped';
+        if (this.isPrepareJoinChannelsProcessing) {
+            return 'Join-channel prepare already running, skipped';
         }
+        this.isPrepareJoinChannelsProcessing = true;
         try {
             this.logger.log('Starting join channel process');
             const preservedMobiles = await this.prepareJoinChannelRefresh(skipExisting);
@@ -34611,17 +34611,19 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             }
         }
         finally {
-            this.endMaintenanceRun();
+            this.isPrepareJoinChannelsProcessing = false;
         }
     }
     async checkPromoteClients() {
-        if (!this.beginMaintenanceRun('checkPromoteClients'))
-            return;
-        if (this.telegramService.hasActiveClientSetup()) {
-            this.logger.warn('Ignored active check promote channels as active client setup exists');
-            this.endMaintenanceRun();
+        if (this.isWarmupCheckProcessing) {
+            this.logger.warn('Skipping checkPromoteClients: a warmup check is already running');
             return;
         }
+        if (this.telegramService.hasActiveClientSetup()) {
+            this.logger.warn('Ignored active check promote channels as active client setup exists');
+            return;
+        }
+        this.isWarmupCheckProcessing = true;
         try {
             await this._checkPromoteClientsInternal();
         }
@@ -34634,7 +34636,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             catch { }
         }
         finally {
-            this.endMaintenanceRun();
+            this.isWarmupCheckProcessing = false;
         }
     }
     async rotateReadyPromoteClients() {
@@ -34646,8 +34648,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.logger.warn('Ready promote rotation skipped: active client setup exists');
             return false;
         }
-        if (this.isMaintenanceRunActive() && !this.isJoinOrLeaveMaintenanceRun()) {
-            this.logger.warn('Ready promote rotation skipped: non-join maintenance is active');
+        if (this.isWarmupCheckProcessing) {
+            this.logger.warn('Ready promote rotation skipped: warmup check is active');
             return false;
         }
         this.readyRotationInProgress = true;
@@ -38354,6 +38356,8 @@ class BaseClientService {
         this.leaveChannelIntervalId = null;
         this.isJoinChannelProcessing = false;
         this.isLeaveChannelProcessing = false;
+        this.isWarmupCheckProcessing = false;
+        this.isPrepareJoinChannelsProcessing = false;
         this.activeTimeouts = new Set();
         this.ONE_DAY_MS = 24 * 60 * 60 * 1000;
         this.THREE_MONTHS_MS = 3 * 30 * this.ONE_DAY_MS;
@@ -38373,9 +38377,6 @@ class BaseClientService {
         this.WARMUP_RUNS_PER_DAY = 4;
         this.MAX_SENSITIVE_ACTIONS_PER_CYCLE = 5;
         this.MAX_READY_ROTATIONS_PER_SWEEP = 1;
-        this.MAX_MAINTENANCE_DURATION_MS = 10 * 60 * 1000;
-        this.MAINTENANCE_LOCK_TTL_MS = 30 * 60 * 1000;
-        this.activeMaintenanceRun = null;
         this.LONG_WARMING_ALERT_DAYS = 60;
         this.dailyJoinCounts = new Map();
         this.dailyJoinDate = '';
@@ -38400,6 +38401,8 @@ class BaseClientService {
             this.leaveChannelMap.clear();
             this.isJoinChannelProcessing = false;
             this.isLeaveChannelProcessing = false;
+            this.isWarmupCheckProcessing = false;
+            this.isPrepareJoinChannelsProcessing = false;
         }
         catch (error) {
             this.logger.error('Error during cleanup:', error);
@@ -39106,32 +39109,6 @@ class BaseClientService {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
         }
     }
-    beginMaintenanceRun(name) {
-        if (!this.activeMaintenanceRun) {
-            this.activeMaintenanceRun = { name, startedAt: Date.now() };
-            return true;
-        }
-        const elapsedMs = Date.now() - this.activeMaintenanceRun.startedAt;
-        if (elapsedMs >= this.MAINTENANCE_LOCK_TTL_MS) {
-            this.logger.error(`Maintenance lock overdue: ${this.activeMaintenanceRun.name} has run for ${Math.floor(elapsedMs / 1000)}s; keeping lock to prevent overlapping Telegram work`);
-        }
-        const duration = Math.floor(elapsedMs / 1000);
-        const overdue = elapsedMs >= this.MAX_MAINTENANCE_DURATION_MS ? ' (past advisory duration)' : '';
-        this.logger.warn(`Skipping ${name}: ${this.activeMaintenanceRun.name} is still running for ${duration}s${overdue}`);
-        return false;
-    }
-    endMaintenanceRun() {
-        this.activeMaintenanceRun = null;
-    }
-    isMaintenanceRunActive() {
-        return this.activeMaintenanceRun !== null;
-    }
-    isJoinOrLeaveMaintenanceRun() {
-        return this.activeMaintenanceRun?.name === 'prepareBufferJoinChannels'
-            || this.activeMaintenanceRun?.name === 'preparePromoteJoinChannels'
-            || this.activeMaintenanceRun?.name === 'processJoinChannelInterval'
-            || this.activeMaintenanceRun?.name === 'processLeaveChannelInterval';
-    }
     async processClient(doc, client) {
         if (doc.inUse === true) {
             this.logger.debug(`Client ${doc.mobile} is marked as in use`);
@@ -39338,11 +39315,6 @@ class BaseClientService {
             await this.scheduleNextJoinRound();
             return;
         }
-        if (!this.beginMaintenanceRun('processJoinChannelInterval')) {
-            this.logger.warn('Deferring join-channel round while another warmup operation is active');
-            await this.scheduleNextJoinRound();
-            return;
-        }
         this.isJoinChannelProcessing = true;
         try {
             await this.processJoinChannelSequentially();
@@ -39352,7 +39324,6 @@ class BaseClientService {
         }
         finally {
             this.isJoinChannelProcessing = false;
-            this.endMaintenanceRun();
             await this.scheduleNextJoinRound();
         }
     }
@@ -39537,11 +39508,6 @@ class BaseClientService {
             this.clearLeaveChannelInterval();
             return;
         }
-        if (!this.beginMaintenanceRun('processLeaveChannelInterval')) {
-            this.logger.warn('Deferring leave-channel round while another warmup operation is active');
-            this.scheduleNextLeaveRound();
-            return;
-        }
         this.isLeaveChannelProcessing = true;
         try {
             await this.processLeaveChannelSequentially();
@@ -39551,7 +39517,6 @@ class BaseClientService {
         }
         finally {
             this.isLeaveChannelProcessing = false;
-            this.endMaintenanceRun();
             this.scheduleNextLeaveRound();
             if (!this.joinChannelIntervalId && !this.isJoinChannelProcessing) {
                 this.scheduleNextJoinRound();
