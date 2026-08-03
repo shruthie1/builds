@@ -38935,20 +38935,16 @@ class BaseClientService {
         catch (error) {
             const errorDetails = this.handleError(error, 'Error removing other auths', doc.mobile);
             const errorMsg = errorDetails?.message || '';
-            if (errorMsg.includes('Session self-check failed') || errorMsg.includes('session_revoked') || errorMsg.includes('auth_key_unregistered')) {
-                this.logger.error(`CRITICAL: Session lost for ${doc.mobile} during removeOtherAuths — marking inactive`);
-                const deactivated = await this.deactivateClient(doc.mobile, `Session lost during auth cleanup: ${errorMsg}`, { permanent: true });
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>CRITICAL SESSION LOSS</b> ${this.clientType} ${doc.mobile} — revoked during auth cleanup, ${deactivated ? 'inactivated' : 'inactivate FAILED'}\n${errorMsg?.substring(0, 120)}`, { parseMode: 'HTML' });
-                return 0;
-            }
             await this.update(doc.mobile, {
                 lastUpdateAttempt: new Date(),
                 failedUpdateAttempts: failedAttempts + 1,
                 lastUpdateFailure: new Date(),
             });
             if ((0, isPermanentError_1.default)(errorDetails)) {
+                this.logger.error(`Session permanently lost for ${doc.mobile} during removeOtherAuths — marking inactive`);
                 const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
-                await this.deactivateClient(doc.mobile, reason, { permanent: true });
+                const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
+                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>CRITICAL SESSION LOSS</b> ${this.clientType} ${doc.mobile} — revoked during auth cleanup, ${deactivated ? 'inactivated' : 'inactivate FAILED'}\n${errorMsg?.substring(0, 120)}`, { parseMode: 'HTML' });
             }
             return 0;
         }
