@@ -21857,24 +21857,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             }
             const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bc, now);
             const lastAttemptAge = bc.lastUpdateAttempt ? Math.round((now - new Date(bc.lastUpdateAttempt).getTime()) / (60 * 60 * 1000)) : null;
-            const lastUpdateAttempt = bc.lastUpdateAttempt ? new Date(bc.lastUpdateAttempt).getTime() : 0;
-            const lastAttemptAgeHours = lastUpdateAttempt > 0
-                ? (now - lastUpdateAttempt) / (60 * 60 * 1000)
-                : 10000;
             const computedPhase = warmupAction.phase;
-            const phaseBoost = {
-                [base_client_service_1.WarmupPhase.READY]: 25000, [base_client_service_1.WarmupPhase.MATURING]: 15000, [base_client_service_1.WarmupPhase.GROWING]: 10000,
-                [base_client_service_1.WarmupPhase.IDENTITY]: 7000, [base_client_service_1.WarmupPhase.SETTLING]: 5000, [base_client_service_1.WarmupPhase.ENROLLED]: 3000,
-                [base_client_service_1.WarmupPhase.SESSION_ROTATED]: 0,
-            };
-            const subStepBonus = {
-                'remove_other_auths': 2000, 'set_2fa': 1000, 'update_username': 1500,
-                'update_name_bio': 1000, 'upload_photo': 1000, 'rotate_session': 2000,
-            };
-            const actionBonus = subStepBonus[warmupAction.action] || 0;
-            const cappedFailurePenalty = Math.min(failedAttempts, 20) * 100;
-            const cappedAgeBonus = Math.min(lastAttemptAgeHours, 168);
-            const priority = (phaseBoost[computedPhase] || 5000) + actionBonus + cappedAgeBonus - cappedFailurePenalty;
+            const priority = (0, base_client_service_1.calculateWarmupPriority)(bc, warmupAction, now);
             actionCounts[warmupAction.action] = (actionCounts[warmupAction.action] || 0) + 1;
             const entry = {
                 mobile: bc.mobile,
@@ -22080,32 +22064,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             }
             if (warmupPhase === base_client_service_1.WarmupPhase.READY)
                 continue;
-            const failedAttempts = bufferClient.failedUpdateAttempts || 0;
-            const lastAttemptAgeHours = lastUpdateAttempt > 0
-                ? (now - lastUpdateAttempt) / (60 * 60 * 1000)
-                : 10000;
             const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now);
-            const computedPhase = warmupAction.phase;
-            const phaseBoost = {
-                [base_client_service_1.WarmupPhase.MATURING]: 15000,
-                [base_client_service_1.WarmupPhase.GROWING]: 10000,
-                [base_client_service_1.WarmupPhase.IDENTITY]: 7000,
-                [base_client_service_1.WarmupPhase.SETTLING]: 5000,
-                [base_client_service_1.WarmupPhase.ENROLLED]: 3000,
-                [base_client_service_1.WarmupPhase.SESSION_ROTATED]: 0,
-            };
-            const subStepBonus = {
-                'remove_other_auths': 2000,
-                'set_2fa': 1000,
-                'update_username': 1500,
-                'update_name_bio': 1000,
-                'upload_photo': 1000,
-            };
-            const warmupBoost = phaseBoost[computedPhase] ?? 5000;
-            const actionBonus = subStepBonus[warmupAction.action] || 0;
-            const cappedFailurePenalty = Math.min(failedAttempts, 20) * 100;
-            const cappedAgeBonus = Math.min(lastAttemptAgeHours, 168);
-            const priority = warmupBoost + actionBonus + cappedAgeBonus - cappedFailurePenalty;
+            const priority = (0, base_client_service_1.calculateWarmupPriority)(bufferClient, warmupAction, now);
             bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority });
         }
         bufferClientsToProcess.sort((a, b) => b.priority - a.priority);
@@ -34725,32 +34685,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             }
             if (warmupPhase === base_client_service_1.WarmupPhase.READY || warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
                 continue;
-            const failedAttempts = promoteClient.failedUpdateAttempts || 0;
-            const lastAttemptAgeHours = lastUpdateAttempt > 0
-                ? (now - lastUpdateAttempt) / (60 * 60 * 1000)
-                : 10000;
             const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now);
-            const computedPhase = warmupAction.phase;
-            const phaseBoost = {
-                [base_client_service_1.WarmupPhase.MATURING]: 15000,
-                [base_client_service_1.WarmupPhase.GROWING]: 10000,
-                [base_client_service_1.WarmupPhase.IDENTITY]: 7000,
-                [base_client_service_1.WarmupPhase.SETTLING]: 5000,
-                [base_client_service_1.WarmupPhase.ENROLLED]: 3000,
-                [base_client_service_1.WarmupPhase.SESSION_ROTATED]: 0,
-            };
-            const subStepBonus = {
-                'remove_other_auths': 2000,
-                'set_2fa': 1000,
-                'update_username': 1500,
-                'update_name_bio': 1000,
-                'upload_photo': 1000,
-            };
-            const warmupBoost = phaseBoost[computedPhase] ?? 5000;
-            const actionBonus = subStepBonus[warmupAction.action] || 0;
-            const cappedFailurePenalty = Math.min(failedAttempts, 20) * 100;
-            const cappedAgeBonus = Math.min(lastAttemptAgeHours, 168);
-            const priority = warmupBoost + actionBonus + cappedAgeBonus - cappedFailurePenalty;
+            const priority = (0, base_client_service_1.calculateWarmupPriority)(promoteClient, warmupAction, now);
             promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority });
         }
         promoteClientsToProcess.sort((a, b) => b.priority - a.priority);
@@ -38202,7 +38138,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BaseClientService = exports.performOrganicActivity = exports.getWarmupPhaseAction = exports.isAccountWarmingUp = exports.isAccountReady = exports.WarmupPhase = exports.ClientStatus = void 0;
+exports.BaseClientService = exports.performOrganicActivity = exports.calculateWarmupPriority = exports.getWarmupPhaseAction = exports.isAccountWarmingUp = exports.isAccountReady = exports.WarmupPhase = exports.ClientStatus = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
@@ -38226,6 +38162,7 @@ Object.defineProperty(exports, "performOrganicActivity", ({ enumerable: true, ge
 const warmup_phases_1 = __webpack_require__(/*! ./warmup-phases */ "./src/components/shared/warmup-phases.ts");
 Object.defineProperty(exports, "getWarmupPhaseAction", ({ enumerable: true, get: function () { return warmup_phases_1.getWarmupPhaseAction; } }));
 Object.defineProperty(exports, "WarmupPhase", ({ enumerable: true, get: function () { return warmup_phases_1.WarmupPhase; } }));
+Object.defineProperty(exports, "calculateWarmupPriority", ({ enumerable: true, get: function () { return warmup_phases_1.calculateWarmupPriority; } }));
 Object.defineProperty(exports, "isAccountReady", ({ enumerable: true, get: function () { return warmup_phases_1.isAccountReady; } }));
 Object.defineProperty(exports, "isAccountWarmingUp", ({ enumerable: true, get: function () { return warmup_phases_1.isAccountWarmingUp; } }));
 const mobile_utils_1 = __webpack_require__(/*! ./mobile-utils */ "./src/components/shared/mobile-utils.ts");
@@ -40838,6 +40775,7 @@ async function performFullActivity(client) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GROWING_ADVANCE_DEADLINE_DAYS = exports.MIN_CHANNELS_FOR_MATURING = exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS = exports.WARMUP_PHASE_THRESHOLDS = exports.WarmupPhase = void 0;
+exports.calculateWarmupPriority = calculateWarmupPriority;
 exports.getWarmupPhaseAction = getWarmupPhaseAction;
 exports.isAccountReady = isAccountReady;
 exports.isAccountWarmingUp = isAccountWarmingUp;
@@ -40865,6 +40803,57 @@ exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = 2;
 exports.MIN_CHANNELS_FOR_MATURING = 200;
 exports.GROWING_ADVANCE_DEADLINE_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const WARMUP_PHASE_PRIORITY = {
+    [exports.WarmupPhase.READY]: 25000,
+    [exports.WarmupPhase.MATURING]: 15000,
+    [exports.WarmupPhase.GROWING]: 10000,
+    [exports.WarmupPhase.IDENTITY]: 7000,
+    [exports.WarmupPhase.SETTLING]: 5000,
+    [exports.WarmupPhase.ENROLLED]: 3000,
+    [exports.WarmupPhase.SESSION_ROTATED]: 0,
+};
+const WARMUP_ACTION_PRIORITY = {
+    remove_other_auths: 2000,
+    set_2fa: 1000,
+    update_username: 1500,
+    update_name_bio: 1000,
+    upload_photo: 1000,
+    rotate_session: 2000,
+};
+const WARMUP_FAIR_AGING_ACTIONS = new Set([
+    'set_privacy',
+    'set_2fa',
+    'remove_other_auths',
+    'delete_photos',
+    'update_name_bio',
+    'update_username',
+    'upload_photo',
+    'advance_to_ready',
+    'rotate_session',
+]);
+const WARMUP_FAILURE_PENALTY_CAP = 20;
+const WARMUP_FAILURE_PENALTY_POINTS = 100;
+const FAIR_AGING_GRACE_HOURS = 3 * 24;
+const FAIR_AGING_FULL_RESCUE_HOURS = 30 * 24;
+const FAIR_AGING_MAX_BONUS = 20000;
+function calculateWarmupPriority(doc, warmupAction, now) {
+    const phaseBoost = WARMUP_PHASE_PRIORITY[warmupAction.phase] ?? 5000;
+    const actionBonus = WARMUP_ACTION_PRIORITY[warmupAction.action] || 0;
+    const failedAttempts = Math.max(0, doc.failedUpdateAttempts || 0);
+    const failurePenalty = Math.min(failedAttempts, WARMUP_FAILURE_PENALTY_CAP) * WARMUP_FAILURE_PENALTY_POINTS;
+    const lastTouch = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUpdateAttempt) ||
+        client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) ||
+        client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
+    const lastTouchAgeHours = lastTouch > 0 ? Math.max(0, (now - lastTouch) / ONE_HOUR_MS) : 0;
+    const agingWindowHours = FAIR_AGING_FULL_RESCUE_HOURS - FAIR_AGING_GRACE_HOURS;
+    const starvationHours = Math.max(0, lastTouchAgeHours - FAIR_AGING_GRACE_HOURS);
+    const ageRatio = Math.min(1, starvationHours / agingWindowHours);
+    const fairAgeBonus = WARMUP_FAIR_AGING_ACTIONS.has(warmupAction.action)
+        ? Math.round(ageRatio * FAIR_AGING_MAX_BONUS)
+        : 0;
+    return phaseBoost + actionBonus + fairAgeBonus - failurePenalty;
+}
 function getWarmupPhaseAction(doc, now) {
     const jitter = doc.warmupJitter || 0;
     const enrolledAt = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
