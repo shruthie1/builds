@@ -22066,13 +22066,14 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 continue;
             const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now);
             const priority = (0, base_client_service_1.calculateWarmupPriority)(bufferClient, warmupAction, now);
-            bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority });
+            bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority, warmupAction });
         }
         bufferClientsToProcess.sort((a, b) => b.priority - a.priority);
         const effectiveCap = this.getEffectiveUpdatesCap(bufferClientsToProcess.length);
         let sensitiveUpdates = 0;
-        this.logger.log(`Buffer warmup run: ${bufferClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}`);
-        for (const { bufferClient, client } of bufferClientsToProcess) {
+        let organicUpdates = 0;
+        this.logger.log(`Buffer warmup run: ${bufferClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
+        for (const { bufferClient, client, warmupAction } of bufferClientsToProcess) {
             if (totalUpdates >= effectiveCap)
                 break;
             const warmupPhase = bufferClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
@@ -22082,15 +22083,21 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 if (!healthCheck.passed)
                     continue;
             }
-            const nextAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now).action;
-            if (this.isSensitiveWarmupAction(nextAction) && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+            const plannedAction = warmupAction.action;
+            if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
                 continue;
             }
-            const processResult = await this.processClient(bufferClient, client);
+            const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
+            if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                continue;
+            }
+            if (plannedSensitive)
+                sensitiveUpdates++;
+            if (plannedAction === 'organic_only')
+                organicUpdates++;
+            const processResult = await this.processClient(bufferClient, client, warmupAction);
             if (processResult.updateCount > 0) {
                 totalUpdates += processResult.updateCount;
-                if (this.isSensitiveWarmupAction(processResult.updateSummary))
-                    sensitiveUpdates++;
                 updatedEntries.push(`${client.clientId} | ${bufferClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
             }
         }
@@ -34687,13 +34694,14 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 continue;
             const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now);
             const priority = (0, base_client_service_1.calculateWarmupPriority)(promoteClient, warmupAction, now);
-            promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority });
+            promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority, warmupAction });
         }
         promoteClientsToProcess.sort((a, b) => b.priority - a.priority);
         const effectiveCap = this.getEffectiveUpdatesCap(promoteClientsToProcess.length);
         let sensitiveUpdates = 0;
-        this.logger.log(`Promote warmup run: ${promoteClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}`);
-        for (const { promoteClient, client } of promoteClientsToProcess) {
+        let organicUpdates = 0;
+        this.logger.log(`Promote warmup run: ${promoteClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
+        for (const { promoteClient, client, warmupAction } of promoteClientsToProcess) {
             if (totalUpdates >= effectiveCap)
                 break;
             const warmupPhase = promoteClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
@@ -34703,14 +34711,20 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 if (!healthCheck.passed)
                     continue;
             }
-            const nextAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now).action;
-            if (this.isSensitiveWarmupAction(nextAction) && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+            const plannedAction = warmupAction.action;
+            if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
                 continue;
             }
-            const processResult = await this.processClient(promoteClient, client);
+            const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
+            if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                continue;
+            }
+            if (plannedSensitive)
+                sensitiveUpdates++;
+            if (plannedAction === 'organic_only')
+                organicUpdates++;
+            const processResult = await this.processClient(promoteClient, client, warmupAction);
             if (processResult.updateCount > 0) {
-                if (this.isSensitiveWarmupAction(processResult.updateSummary))
-                    sensitiveUpdates++;
                 totalUpdates += processResult.updateCount;
                 updatedEntries.push(`${client.clientId} | ${promoteClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
             }
@@ -38313,6 +38327,7 @@ class BaseClientService {
         this.WARMUP_TARGET_DRAIN_DAYS = 8;
         this.WARMUP_RUNS_PER_DAY = 4;
         this.MAX_SENSITIVE_ACTIONS_PER_CYCLE = 5;
+        this.MAX_ORGANIC_ACTIONS_PER_CYCLE = 5;
         this.MAX_READY_ROTATIONS_PER_SWEEP = 1;
         this.LONG_WARMING_ALERT_DAYS = 60;
         this.dailyJoinCounts = new Map();
@@ -39042,7 +39057,7 @@ class BaseClientService {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
         }
     }
-    async processClient(doc, client) {
+    async processClient(doc, client, plannedWarmupAction) {
         if (doc.inUse === true) {
             this.logger.debug(`Client ${doc.mobile} is marked as in use`);
             return { updateCount: 0 };
@@ -39083,7 +39098,7 @@ class BaseClientService {
             this.logger.debug(`Client ${doc.mobile} on cooldown`);
             return { updateCount: 0 };
         }
-        const warmupAction = (0, warmup_phases_1.getWarmupPhaseAction)(doc, now);
+        const warmupAction = plannedWarmupAction || (0, warmup_phases_1.getWarmupPhaseAction)(doc, now);
         this.logger.debug(`Client ${doc.mobile} warmup: storedPhase=${doc.warmupPhase || 'unset'}, resolvedPhase=${warmupAction.phase}, action=${warmupAction.action}`, {
             privacyUpdatedAt: doc.privacyUpdatedAt || null,
             twoFASetAt: doc.twoFASetAt || null,
@@ -41091,10 +41106,6 @@ __decorate([
     __metadata("design:type", Boolean)
 ], CreateStatDto.prototype, "secondShow", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Did Pay' }),
-    __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "didPay", void 0);
-__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Client' }),
     __metadata("design:type", String)
 ], CreateStatDto.prototype, "client", void 0);
@@ -41334,11 +41345,6 @@ __decorate([
     __metadata("design:type", Boolean)
 ], Stat.prototype, "secondShow", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Did Pay' }),
-    (0, mongoose_1.Prop)({ required: false }),
-    __metadata("design:type", Boolean)
-], Stat.prototype, "didPay", void 0);
-__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Client' }),
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
@@ -41503,10 +41509,6 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Second Show' }),
     __metadata("design:type", Boolean)
 ], CreateStatDto.prototype, "secondShow", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Did Pay' }),
-    __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "didPay", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Client' }),
     __metadata("design:type", String)
@@ -41750,11 +41752,6 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", Boolean)
 ], Stat2.prototype, "secondShow", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Did Pay' }),
-    (0, mongoose_1.Prop)({ required: false }),
-    __metadata("design:type", Boolean)
-], Stat2.prototype, "didPay", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Client' }),
     (0, mongoose_1.Prop)({ required: true }),
