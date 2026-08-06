@@ -26258,17 +26258,14 @@ class UserDataDtoCrud {
         if (Object.keys(inc).length)
             await this.recordDaily('reactionStatsDaily', inc, mobile);
     }
-    async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) {
+    async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow) {
         // Daily funnel analytics (best-effort, bounded via TTL). active on every stat write;
         // newUsers on first contact.
         //
-        // paid + revenue are DELIBERATELY NOT counted here. didPay=true is passed by several
-        // funnel events for the same payer and re-fires on every repeat message / full-show /
-        // call (recordFullShow, recordCallInitiated, recordExistingUserActivity), so an
-        // unconditional $inc double-counted a single payer 1.6x-3.1x and re-added their whole
-        // payAmount to revenue each time. paid/revenue are now incremented exactly ONCE per
+        // paid + revenue are DELIBERATELY NOT counted here. They are incremented exactly ONCE per
         // payer per day, at payment confirmation in recordPaymentAttribution (guarded by the
-        // per-day dailyPaidCountedAt marker), NOT per funnel event.
+        // per-day dailyPaidCountedAt marker), NOT per funnel event — otherwise a single payer's
+        // repeat messages / full-shows / calls double-counted revenue 1.6x-3.1x.
         void this.recordDailyUser({
             active: 1,
             newUsers: newUser ? 1 : 0,
@@ -26282,23 +26279,22 @@ class UserDataDtoCrud {
                     $inc: { count: 1 },
                     $set: {
                         payAmount: payAmount,
-                        didPay: didPay,
                         demoGiven: demoGiven,
                         paidReply, secondShow
                     }
                 });
             }
             else {
-                await this.statsDb.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, name, secondShow, didPay: false, paidReply, client: process.env.clientId, profile: process.env.dbcoll });
+                await this.statsDb.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: process.env.clientId, profile: process.env.dbcoll });
             }
             if (chat2) {
                 await this.statsDb2.updateOne(filter, {
                     $inc: { count: 1 },
-                    $set: { payAmount: payAmount, didPay: didPay, demoGiven: demoGiven, paidReply, secondShow }
+                    $set: { payAmount: payAmount, demoGiven: demoGiven, paidReply, secondShow }
                 });
             }
             else {
-                await this.statsDb2.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, didPay: false, client: process.env.clientId, profile: process.env.dbcoll });
+                await this.statsDb2.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: process.env.clientId, profile: process.env.dbcoll });
                 const textedClientCount = await this.textedClientCount(chatId);
                 if (textedClientCount.lastHour.length > 2) {
                     // Store timeout reference and unref to allow process exit if needed
@@ -26326,7 +26322,7 @@ class UserDataDtoCrud {
     // =========================================================================
     //  Named funnel-transition helpers.
     //  createOrUpdateStats has a positional-boolean signature
-    //  (name, payAmount, newUser, demoGiven, paidReply, secondShow, didPay) that is easy to
+    //  (name, payAmount, newUser, demoGiven, paidReply, secondShow) that is easy to
     //  mis-call — a wrong boolean slot once double-counted newUsers (CallInitiationService).
     //  These wrappers encode each real funnel transition ONCE so call sites read by intent and
     //  the arg order lives in a single place. Behavior is identical — they just call
@@ -26340,20 +26336,17 @@ class UserDataDtoCrud {
     async recordExistingUserActivity(chatId, name, state) {
         await this.createOrUpdateStats(chatId, name, state.payAmount ?? 0, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
     }
-    /** Demo given (₹10 tier): demoGiven+paidReply, secondShow=false, didPay left unset. */
+    /** Demo given (₹10 tier): demoGiven+paidReply, secondShow=false. */
     async recordDemoGiven(chatId, name = 'any', payAmount = 10) {
         await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, false);
     }
-    /**
-     * Full / second show (₹150 tier): demoGiven+paidReply+secondShow set. Preserves the original
-     * call exactly — didPay is left UNSET (undefined), so this does NOT itself mark a paid conversion.
-     */
+    /** Full / second show (₹150 tier): demoGiven+paidReply+secondShow set. */
     async recordFullShow(chatId, name = 'any', payAmount = 150) {
         await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, true);
     }
-    /** Call initiated for an existing paying user (didPay=true, never a new user). */
+    /** Call initiated for an existing paying user (never a new user). */
     async recordCallInitiated(chatId, payAmount, state) {
-        await this.createOrUpdateStats(chatId, null, payAmount, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow, true);
+        await this.createOrUpdateStats(chatId, null, payAmount, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
     }
     async updateStatSingleKey(chatId, mykey, value) {
         const filter = { chatId, profile: process.env.dbcoll, client: process.env.clientId };
@@ -31512,7 +31505,7 @@ async function initiateCall(amount, userDetails, reason = "Default") {
     // Update the passed userDetails object to keep it in sync
     Object.assign(userDetails, updatedDetails);
     // Call initiation is for an EXISTING (paying) user, not a first contact — recordCallInitiated
-    // encodes newUser=false + didPay=true, so newUsers is never double-counted here.
+    // encodes newUser=false, so newUsers is never double-counted here.
     await db.recordCallInitiated(chatId, adjustedAmount, {
         demoGiven: userDetails.demoGiven,
         paidReply: updatedUserDetails.paidReply,
@@ -52353,6 +52346,12 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess) {
             replyObj.msg = (0,_utils_maskSensitiveWords__WEBPACK_IMPORTED_MODULE_10__.maskSensitiveWords)(replyObj.msg);
         }
         if (replyObj.file !== undefined || (replyObj.msg && replyObj.msg !== '')) {
+            // Delivery observability: classify the outbound so the reply/close path is greppable.
+            // 'pic'/'prf' files + payment-keyworded text are the revenue-critical PITCH; everything
+            // else is a normal reply. Before this, a reply/pitch send left NO positive log — you
+            // could only see failures, never confirm a delivery, which made "is this account
+            // replying/pitching?" a DB-reconstruction job (see the payment-drop investigation).
+            const kind = classifyReply(replyObj);
             if (replyObj.file === undefined) {
                 // Send text message
                 await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => client.sendMessage(entity, {
@@ -52366,12 +52365,33 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess) {
             }
             // Call success callback to update queues
             onSuccess();
+            // [REPLY SENT] — one positive line per delivered reply. [PITCH SENT] highlights the
+            // revenue-critical close (payment prompt / paid-content pic) so the funnel is grep-able:
+            //   grep '\[PITCH SENT\]' → who got pitched | grep '\[REPLY SEND FAILED\]' → silent losses
+            logger.info(`[${kind === 'pitch' ? 'PITCH SENT' : 'REPLY SENT'}] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind}${replyObj.file ? ' file=' + replyObj.file.split('/').pop() : ''}`);
         }
     }
     catch (error) {
-        logger.error(`Cannot send reply to ${userDetail.chatId}:`, error);
+        // [REPLY SEND FAILED] — the close silently not landing IS lost revenue; make it a distinct,
+        // greppable, alerting line (parseError default surfaces it) rather than a generic error.
+        const kind = classifyReply(replyObj);
+        logger.error(`[REPLY SEND FAILED] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind} retry=${replyObj.retryCount ?? 0}:`, error);
         throw error; // Propagate to processSingleReply for requeue
     }
+}
+/**
+ * Classify an outbound reply for delivery logging. 'pitch' = the revenue-critical close: a payment
+ * prompt (QR/UPI/"pay"/amount) or a paid-content pic/prf file. Everything else is a normal reply.
+ * Keyword-based and best-effort — purely for observability, never affects send behavior.
+ */
+function classifyReply(replyObj) {
+    const f = (replyObj.file || '').toLowerCase();
+    if (f.includes('pic') || f.includes('prf') || f.includes('qr'))
+        return 'pitch';
+    const m = (replyObj.msg || '').toLowerCase();
+    if (/\b(pay|upi|gpay|paytm|qr|scan|₹|rupees?|amount|price|paid)\b/.test(m))
+        return 'pitch';
+    return 'reply';
 }
 /**
  * Send file (voice or image)
