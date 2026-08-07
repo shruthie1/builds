@@ -40853,9 +40853,10 @@ function calculateWarmupPriority(doc, warmupAction, now) {
     const actionBonus = WARMUP_ACTION_PRIORITY[warmupAction.action] || 0;
     const failedAttempts = Math.max(0, doc.failedUpdateAttempts || 0);
     const failurePenalty = Math.min(failedAttempts, WARMUP_FAILURE_PENALTY_CAP) * WARMUP_FAILURE_PENALTY_POINTS;
-    const lastTouch = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastUpdateAttempt) ||
-        client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) ||
-        client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
+    const lastProgress = Math.max(client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.privacyUpdatedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.twoFASetAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.otherAuthsRemovedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.profilePicsDeletedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.nameBioUpdatedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.usernameUpdatedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.profilePicsUpdatedAt), client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.sessionRotatedAt));
+    const lastTouch = lastProgress > 0
+        ? lastProgress
+        : (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt));
     const lastTouchAgeHours = lastTouch > 0 ? Math.max(0, (now - lastTouch) / ONE_HOUR_MS) : 0;
     const agingWindowHours = FAIR_AGING_FULL_RESCUE_HOURS - FAIR_AGING_GRACE_HOURS;
     const starvationHours = Math.max(0, lastTouchAgeHours - FAIR_AGING_GRACE_HOURS);
