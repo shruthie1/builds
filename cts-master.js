@@ -18936,7 +18936,8 @@ let BotsService = BotsService_1 = class BotsService {
             }
             if (!options.dryRun)
                 await this.refreshBotCache();
-            const pendingRepair = await this.reconcilePendingAdminBots(options);
+            const controllability = new Map();
+            const pendingRepair = await this.reconcilePendingAdminBots(options, controllability);
             failures.push(...pendingRepair.failures);
             proposedActions.push(...pendingRepair.proposedActions);
             stopPrivilegedWork = pendingRepair.stopPrivilegedWork;
@@ -18966,7 +18967,7 @@ let BotsService = BotsService_1 = class BotsService {
             let toppedUp = 0;
             if (!stopPrivilegedWork && creationBudget > 0) {
                 try {
-                    const topUp = await this.topUpCategoriesToMinHealthy(creationBudget, options.dryRun);
+                    const topUp = await this.topUpCategoriesToMinHealthy(creationBudget, options.dryRun, controllability);
                     toppedUp = topUp.toppedUp;
                     creationBudget -= topUp.creationAttempts;
                     failures.push(...topUp.topUpFailures);
@@ -18988,7 +18989,7 @@ let BotsService = BotsService_1 = class BotsService {
             this.replaceInProgress = false;
         }
     }
-    async reconcilePendingAdminBots(options) {
+    async reconcilePendingAdminBots(options, controllability) {
         const failures = [];
         const proposedActions = [];
         const now = new Date();
@@ -19013,6 +19014,10 @@ let BotsService = BotsService_1 = class BotsService {
             }
             if (options.dryRun) {
                 proposedActions.push(`reconcile pending-admin @${bot.username} in ${bot.channelId}`);
+                continue;
+            }
+            if (!(await this.resolveChannelAdminCached(bot.channelId, controllability))) {
+                proposedActions.push(`skip pending-admin @${bot.username}: channel ${bot.channelId} not controllable (no re-add possible)`);
                 continue;
             }
             try {
@@ -19160,7 +19165,69 @@ let BotsService = BotsService_1 = class BotsService {
         console.log(`[BotHealth] replaced dead @${deadBot.username} (${deadBot.category}) — active`);
         return saved;
     }
-    async topUpCategoriesToMinHealthy(creationBudget, dryRun) {
+    async reuseExistingBotsForCategory(category, channelId, want, dryRun, controllability) {
+        const proposedActions = [];
+        if (want <= 0)
+            return { reused: 0, proposedActions, stopPrivilegedWork: false };
+        const candidates = await this.botModel.find({
+            category,
+            channelId,
+            lifecycle: { $in: ['pending_admin', 'manual_attention'] },
+        }).sort({ lastValidatedAt: -1, createdAt: -1 }).limit(want * 3).lean().exec();
+        if (candidates.length === 0)
+            return { reused: 0, proposedActions, stopPrivilegedWork: false };
+        if (dryRun) {
+            for (const bot of candidates.slice(0, want)) {
+                proposedActions.push(`reuse live-token @${bot.username} (${category}) — would re-add to ${channelId} instead of creating`);
+            }
+            return { reused: Math.min(want, candidates.length), proposedActions, stopPrivilegedWork: false };
+        }
+        if (!(await this.resolveChannelAdminCached(channelId, controllability))) {
+            return { reused: 0, proposedActions, stopPrivilegedWork: false };
+        }
+        let reused = 0;
+        for (const bot of candidates) {
+            if (reused >= want)
+                break;
+            const check = await this.checkBotToken(bot.token);
+            if (check.verdict !== 'alive')
+                continue;
+            proposedActions.push(`reuse live-token @${bot.username} (${category}) — re-add to ${channelId} instead of creating`);
+            try {
+                const info = await this.telegramService.getBotInfo(bot.token);
+                const botId = String(info?.id || '');
+                if (!botId)
+                    continue;
+                await this.addBotToChannelAsAdmin(channelId, bot.token, bot.username);
+                if (!(await this.verifyBotIsChannelAdmin(channelId, botId)))
+                    continue;
+                await this.botModel.updateOne({ _id: bot._id }, {
+                    $set: { lifecycle: 'active_verified', lifecycleReason: 'reused: re-added to channel as admin', lifecycleUpdatedAt: new Date(), lastAdminVerifiedAt: new Date(), status: 'active', repairAttempts: 0 },
+                    $unset: { deadReason: '', deadAt: '', nextRepairAt: '' },
+                }).exec();
+                reused++;
+                console.log(`[BotHealth] REUSED @${bot.username} (${category}) — re-added to ${channelId} (no new bot created)`);
+            }
+            catch (err) {
+                if (this.isFloodSignal(err)) {
+                    if (reused > 0 && !dryRun)
+                        await this.refreshBotCache();
+                    return { reused, proposedActions, stopPrivilegedWork: true };
+                }
+            }
+        }
+        if (reused > 0 && !dryRun)
+            await this.refreshBotCache();
+        return { reused, proposedActions, stopPrivilegedWork: false };
+    }
+    async resolveChannelAdminCached(channelId, cache) {
+        if (cache.has(channelId))
+            return cache.get(channelId) ?? null;
+        const admin = await this.resolveChannelAdminMobile(channelId).catch(() => null);
+        cache.set(channelId, admin);
+        return admin;
+    }
+    async topUpCategoriesToMinHealthy(creationBudget, dryRun, controllability) {
         const topUpFailures = [];
         const proposedActions = [];
         let toppedUp = 0;
@@ -19185,7 +19252,29 @@ let BotsService = BotsService_1 = class BotsService {
                 topUpFailures.push(`${category}: below floor (${liveCount}/${this.minHealthyBotsPerCategory}) but no channelId known — skipped`);
                 continue;
             }
-            const need = Math.min(deficit, creationBudget - creationAttempts);
+            const reuse = await this.reuseExistingBotsForCategory(category, channelId, deficit, dryRun, controllability);
+            proposedActions.push(...reuse.proposedActions);
+            if (reuse.stopPrivilegedWork) {
+                stopPrivilegedWork = true;
+                break;
+            }
+            const remainingDeficit = deficit - reuse.reused;
+            if (remainingDeficit <= 0) {
+                if (reuse.reused > 0)
+                    console.log(`[BotHealth] ${category}: deficit met by REUSING ${reuse.reused} existing bot(s) — no creation`);
+                continue;
+            }
+            if (!dryRun) {
+                const adminMobile = await this.resolveChannelAdminCached(channelId, controllability);
+                if (!adminMobile) {
+                    const msg = `${category}: channel ${channelId} has NO controllable admin — NOT creating bots (would be abandoned). ${liveCount}/${this.minHealthyBotsPerCategory} live; ${reuse.reused} reused. Fix: make a manager account admin of the channel, or re-point the category to a controllable channel.`;
+                    topUpFailures.push(msg);
+                    await this.notify(`<b>Bot top-up BLOCKED — uncontrollable channel</b>\nCategory: ${category}\nChannel: ${channelId}\nHealthy: ${liveCount}/${this.minHealthyBotsPerCategory}\nCreation skipped to avoid orphan bots. Add a manager as channel admin, then bots self-heal.`);
+                    console.warn(`[BotHealth] ${msg}`);
+                    continue;
+                }
+            }
+            const need = Math.min(remainingDeficit, creationBudget - creationAttempts);
             for (let i = 0; i < need; i++) {
                 try {
                     proposedActions.push(`top up ${category} in ${channelId}`);
