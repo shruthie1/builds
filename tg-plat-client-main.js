@@ -12207,6 +12207,7 @@ const ChannelCategory = Object.freeze({
     PROMOTION_ACCOUNT: 'PROMOTION_ACCOUNT',
     CLIENT_ACCOUNT: 'CLIENT_ACCOUNT',
     PAYMENT_FAIL_QUERIES: 'PAYMENT_FAIL_QUERIES',
+    FAILED_PAYMENTS: 'FAILED_PAYMENTS',
     SAVED_MESSAGES: 'SAVED_MESSAGES',
     HTTP_FAILURES: 'HTTP_FAILURES',
     UNVDS: 'UNVDS',
@@ -30126,30 +30127,43 @@ async function callToPaid() {
         logger.log("Ids are undefined");
     }
 }
-async function sendImageToChannel(photoBuffer, chatId) {
-    logger.log("trying to send Image to channel");
+/**
+ * Forward a failed-payment screenshot to the FAILED_PAYMENTS review channel.
+ *
+ * Routing is CATEGORY-based, not a static channel id: BotConfig resolves the FAILED_PAYMENTS
+ * category to the channel + admin-bot pool from config (or the Mongo bot-doc fallback — bots
+ * tagged category:'FAILED_PAYMENTS' carry their own channelId). This means the target channel can
+ * be rotated/repaired in the bots collection with no code change and no env var, and delivery
+ * always uses a bot that is actually an admin of the resolved channel. (The old path routed via
+ * CHANNEL_NOTIFICATIONS with a targetChannelId override to a now-dead static id, so nothing
+ * delivered.)
+ */
+async function sendImageToChannel(photoBuffer) {
+    logger.log("Forwarding failed-payment image to FAILED_PAYMENTS channel");
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CHANNEL_NOTIFICATIONS, photoBuffer, {
-            targetChannelId: chatId,
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.FAILED_PAYMENTS, photoBuffer, {
             extension: 'jpg',
         });
         if (!sent) {
-            logger.error('Image channel notification was not sent', { chatId });
+            logger.error('Failed-payment image was not forwarded (no FAILED_PAYMENTS bot/channel resolved)');
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error sending image to channel', false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error forwarding failed-payment image to channel', false);
     }
 }
-async function sendVideoToChannel(photoBuffer) {
-    logger.log("trying to send Image to channel");
+async function sendVideoToChannel(videoBuffer) {
+    logger.log("Forwarding video to CHANNEL_NOTIFICATIONS channel");
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendVideo(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CHANNEL_NOTIFICATIONS, photoBuffer, {
-            targetChannelId: '-1001982401617',
+        // Category-routed, no static targetChannelId override: BotConfig resolves the channel +
+        // admin-bot pool for CHANNEL_NOTIFICATIONS. (Previously pinned to the literal
+        // '-1001982401617', which is now a dead channel — a send there fails silently. Same trap
+        // sendImageToChannel had.)
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendVideo(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CHANNEL_NOTIFICATIONS, videoBuffer, {
             extension: 'mp4',
         });
         if (!sent) {
-            logger.error('Video channel notification was not sent', { chatId: '-1001982401617' });
+            logger.error('Video channel notification was not sent (no CHANNEL_NOTIFICATIONS bot/channel resolved)');
         }
     }
     catch (error) {
@@ -38998,9 +39012,14 @@ async function processImage(event) {
         if (invalidPhotoCount > 4) {
             if (invalidPhotoCount > 6) {
                 // Single message: image + analysis in one caption (was forward + separate text card).
-                await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
+                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
                     caption: `BANNED (invalid pics x${invalidPhotoCount})\nChatId:${chatId} Name:${broadcastName}\nAmount:${userDetails.payAmount} DemoGiven:${userDetails.demoGiven}\nDescription: ${imageDetails.description}`.slice(0, 500),
                 });
+                // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
+                // must not vanish silently — otherwise a user is banned with no operator-visible record.
+                if (!banEvidenceSent) {
+                    logger.error(`[ProcessImage] BAN evidence photo NOT delivered to CLIENT_UPDATES (dead channel/no bot?) — banning ${chatId} without a visible record`);
+                }
                 userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
             }
             else {
@@ -39016,7 +39035,10 @@ async function processImage(event) {
             (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine)) {
             // Single message: the image WITH the analysis as its caption. (Previously this both
             // forwarded the image AND sent a separate text-only card — the same info twice.)
-            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
+            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
+            if (!paymentEvidenceSent) {
+                logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
+            }
         }
         else {
             // Forward the original image (renders as a photo in-chat) + a separate text card with the
@@ -39090,7 +39112,7 @@ async function processImage(event) {
                                 ]),
                             });
                         }, 10000, `processImage.failedPaymentReminder.${chatId}`);
-                        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.sendImageToChannel)(photoBuffer, process.env.FailedPaymentsChannel);
+                        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.sendImageToChannel)(photoBuffer);
                     }
                     else {
                         if ((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_24__.detectFakeScreenshot)(imageDetails.text)) {
@@ -65462,7 +65484,13 @@ async function forwardtoUnwanted(event, broadcastName) {
             extension: detection.fileExtension ?? undefined,
         };
         logger.log(`[Unwanted Media] Forwarding media to unwanted channel from : ${broadcastName} | ${chatId} | type: ${detection.mediaType}.${mediaContent.extension}`);
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMediaGroup(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, [mediaContent]);
+        const forwarded = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMediaGroup(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, [mediaContent]);
+        // Unwanted media is always deleted from the source regardless of forward outcome — this is
+        // junk we don't want to keep. A failed forward is only worth a log line (it's not evidence
+        // we need to preserve), never a reason to leave the media in place.
+        if (!forwarded) {
+            logger.error(`[Unwanted Media] UNVDS forward failed (deleting source anyway) | ${broadcastName} | ${chatId}`);
+        }
         if (detection.canDeleteMessage) {
             await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
             return;
