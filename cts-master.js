@@ -372,6 +372,7 @@ var AppController_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AppController = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const send_rate_limit_guard_1 = __webpack_require__(/*! ./guards/send-rate-limit.guard */ "./src/guards/send-rate-limit.guard.ts");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
 const execute_request_dto_1 = __webpack_require__(/*! ./components/shared/dto/execute-request.dto */ "./src/components/shared/dto/execute-request.dto.ts");
@@ -868,6 +869,7 @@ __decorate([
 ], AppController.prototype, "getPaymentStats", null);
 __decorate([
     (0, common_1.Get)('sendToChannel'),
+    (0, common_1.UseGuards)(send_rate_limit_guard_1.SendRateLimitGuard),
     (0, swagger_1.ApiOperation)({ summary: 'Send message to channel' }),
     (0, swagger_1.ApiQuery)({ name: 'msg', description: 'Message to send', type: String, required: true }),
     (0, swagger_1.ApiQuery)({ name: 'chatId', description: 'Chat ID of the channel', type: String, required: false }),
@@ -17500,6 +17502,7 @@ exports.BotsController = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const bots_service_1 = __webpack_require__(/*! ./bots.service */ "./src/components/bots/bots.service.ts");
+const send_rate_limit_guard_1 = __webpack_require__(/*! ../../guards/send-rate-limit.guard */ "./src/guards/send-rate-limit.guard.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const create_bot_dto_1 = __webpack_require__(/*! ./dto/create-bot.dto */ "./src/components/bots/dto/create-bot.dto.ts");
 const send_message_dto_1 = __webpack_require__(/*! ./dto/send-message.dto */ "./src/components/bots/dto/send-message.dto.ts");
@@ -17713,6 +17716,7 @@ __decorate([
 ], BotsController.prototype, "deleteBot", null);
 __decorate([
     (0, common_1.Post)('category/:category/message'),
+    (0, common_1.UseGuards)(send_rate_limit_guard_1.SendRateLimitGuard),
     (0, swagger_1.ApiOperation)({
         summary: 'Send a message using bots in a category',
         description: 'Sends a text message using either all bots in a category or a specific bot if botId is provided.'
@@ -17743,6 +17747,7 @@ __decorate([
 ], BotsController.prototype, "sendMessageByCategory", null);
 __decorate([
     (0, common_1.Post)('category/:category/photo'),
+    (0, common_1.UseGuards)(send_rate_limit_guard_1.SendRateLimitGuard),
     (0, swagger_1.ApiOperation)({
         summary: 'Send a photo using bots in a category',
         description: 'Sends a photo using either all bots in a category or a specific bot if botId is provided.'
@@ -17773,6 +17778,7 @@ __decorate([
 ], BotsController.prototype, "sendPhotoByCategory", null);
 __decorate([
     (0, common_1.Post)('category/:category/video'),
+    (0, common_1.UseGuards)(send_rate_limit_guard_1.SendRateLimitGuard),
     (0, swagger_1.ApiOperation)({
         summary: 'Send a video using bots in a category',
         description: 'Sends a video using either all bots in a category or a specific bot if botId is provided.'
@@ -48864,6 +48870,87 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 __exportStar(__webpack_require__(/*! ./auth.guard */ "./src/guards/auth.guard.ts"), exports);
+
+
+/***/ },
+
+/***/ "./src/guards/send-rate-limit.guard.ts"
+/*!*********************************************!*\
+  !*** ./src/guards/send-rate-limit.guard.ts ***!
+  \*********************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var SendRateLimitGuard_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SendRateLimitGuard = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+let SendRateLimitGuard = SendRateLimitGuard_1 = class SendRateLimitGuard {
+    constructor() {
+        this.logger = new common_1.Logger(SendRateLimitGuard_1.name);
+        this.windowMs = 60_000;
+        this.hits = new Map();
+        this.lastSweep = 0;
+    }
+    get limit() {
+        const n = Number(process.env.RATE_LIMIT_SENDS_PER_MIN);
+        return Number.isFinite(n) && n > 0 ? n : 30;
+    }
+    canActivate(context) {
+        const req = context.switchToHttp().getRequest();
+        const now = Date.now();
+        const ip = this.extractRealClientIP(req);
+        if (now - this.lastSweep > this.windowMs) {
+            this.lastSweep = now;
+            for (const [k, arr] of this.hits) {
+                if (arr.length === 0 || now - arr[arr.length - 1] > this.windowMs)
+                    this.hits.delete(k);
+            }
+        }
+        const arr = this.hits.get(ip) ?? [];
+        const fresh = arr.filter((t) => now - t < this.windowMs);
+        if (fresh.length >= this.limit) {
+            this.hits.set(ip, fresh);
+            this.logger.warn(`Send rate limit hit: ip=${ip} count=${fresh.length}/${this.limit} in ${this.windowMs}ms`);
+            throw new common_1.HttpException({ statusCode: common_1.HttpStatus.TOO_MANY_REQUESTS, message: `Send rate limit exceeded (${this.limit}/min per IP)` }, common_1.HttpStatus.TOO_MANY_REQUESTS);
+        }
+        fresh.push(now);
+        this.hits.set(ip, fresh);
+        return true;
+    }
+    extractRealClientIP(req) {
+        const header = (name) => {
+            const raw = req.headers[name];
+            return Array.isArray(raw) ? raw[0] : raw;
+        };
+        if (process.env.TRUST_PROXY_HEADERS !== 'false') {
+            const cf = header('cf-connecting-ip');
+            if (cf)
+                return cf;
+            const xr = header('x-real-ip');
+            if (xr)
+                return xr;
+            const xff = header('x-forwarded-for');
+            if (xff)
+                return xff.split(',')[0].trim();
+        }
+        if (req.ip)
+            return req.ip.replace('::ffff:', '');
+        if (req.connection?.remoteAddress)
+            return req.connection.remoteAddress.replace('::ffff:', '');
+        return 'unknown';
+    }
+};
+exports.SendRateLimitGuard = SendRateLimitGuard;
+exports.SendRateLimitGuard = SendRateLimitGuard = SendRateLimitGuard_1 = __decorate([
+    (0, common_1.Injectable)()
+], SendRateLimitGuard);
 
 
 /***/ },
