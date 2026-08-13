@@ -17152,6 +17152,23 @@ function stripChannelPrefix(id) {
     return String(id ?? '').replace(/^-100/, '');
 }
 /**
+ * KIND-MARKED entity-cache key for a peer: user `X`, basic group `-X`, channel/supergroup `-100X`.
+ *
+ * This is Telegram's own "marked id" convention (the same one GramJS `utils.getPeerId` and our
+ * DeduplicatingSession use). It exists because the three kinds SHARE a numeric id-space — keying the
+ * entity cache by bare digits lets a channel be returned when a user with the same trailing digits
+ * is requested, which is precisely what EntityCacheManager's docblock forbids.
+ */
+function peerCacheKey(peer) {
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser)
+        return `${peer.userId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat)
+        return `-${peer.chatId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel)
+        return `-100${peer.channelId.toJSNumber()}`;
+    return undefined;
+}
+/**
  * Comprehensive Dialog Manager for Telegram using GramJS
  * Supports multiple instances in a single Node.js process
  * Manages dialogs, real-time updates, filtering, and read status
@@ -18451,14 +18468,24 @@ class DialogManager {
     async getEntityForPeer(peer) {
         try {
             const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(peer);
-            if (peerId) {
-                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(peerId);
+            // The ENTITY CACHE must be keyed by the KIND-MARKED id, not the bare digits that
+            // getPeerDialogId returns. Telegram's user / basic-group / channel id-spaces overlap, so
+            // user X, chat -X and channel -100X can share trailing digits; EntityCacheManager's own
+            // docblock states it "MUST NOT collapse them onto one key, or get() would return the
+            // wrong-kind (and wrong) entity". Caching under the bare id did exactly that — a channel
+            // stored at "1234567890" was returned for user 1234567890. Symptom: intermittent
+            // PEER_ID_INVALID / CHANNEL_INVALID, or a DM delivered to the wrong peer kind, that looks
+            // like Telegram flakiness. getPeerDialogId's bare form is still correct for the DIALOG map
+            // key (its other callers), so only the cache key is marked here.
+            const cacheKey = peerCacheKey(peer);
+            if (cacheKey) {
+                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(cacheKey);
                 if (cached)
                     return cached;
             }
             const entity = await this.client.getEntity(peer);
-            if (entity && peerId) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(peerId, entity);
+            if (entity && cacheKey) {
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(cacheKey, entity);
             }
             return entity;
         }
