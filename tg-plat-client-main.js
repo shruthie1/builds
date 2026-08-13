@@ -17260,6 +17260,23 @@ function stripChannelPrefix(id) {
     return String(id ?? '').replace(/^-100/, '');
 }
 /**
+ * KIND-MARKED entity-cache key for a peer: user `X`, basic group `-X`, channel/supergroup `-100X`.
+ *
+ * This is Telegram's own "marked id" convention (the same one GramJS `utils.getPeerId` and our
+ * DeduplicatingSession use). It exists because the three kinds SHARE a numeric id-space — keying the
+ * entity cache by bare digits lets a channel be returned when a user with the same trailing digits
+ * is requested, which is precisely what EntityCacheManager's docblock forbids.
+ */
+function peerCacheKey(peer) {
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser)
+        return `${peer.userId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat)
+        return `-${peer.chatId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel)
+        return `-100${peer.channelId.toJSNumber()}`;
+    return undefined;
+}
+/**
  * Comprehensive Dialog Manager for Telegram using GramJS
  * Supports multiple instances in a single Node.js process
  * Manages dialogs, real-time updates, filtering, and read status
@@ -18559,14 +18576,24 @@ class DialogManager {
     async getEntityForPeer(peer) {
         try {
             const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(peer);
-            if (peerId) {
-                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(peerId);
+            // The ENTITY CACHE must be keyed by the KIND-MARKED id, not the bare digits that
+            // getPeerDialogId returns. Telegram's user / basic-group / channel id-spaces overlap, so
+            // user X, chat -X and channel -100X can share trailing digits; EntityCacheManager's own
+            // docblock states it "MUST NOT collapse them onto one key, or get() would return the
+            // wrong-kind (and wrong) entity". Caching under the bare id did exactly that — a channel
+            // stored at "1234567890" was returned for user 1234567890. Symptom: intermittent
+            // PEER_ID_INVALID / CHANNEL_INVALID, or a DM delivered to the wrong peer kind, that looks
+            // like Telegram flakiness. getPeerDialogId's bare form is still correct for the DIALOG map
+            // key (its other callers), so only the cache key is marked here.
+            const cacheKey = peerCacheKey(peer);
+            if (cacheKey) {
+                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(cacheKey);
                 if (cached)
                     return cached;
             }
             const entity = await this.client.getEntity(peer);
-            if (entity && peerId) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(peerId, entity);
+            if (entity && cacheKey) {
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(cacheKey, entity);
             }
             return entity;
         }
@@ -30727,7 +30754,14 @@ async function joinGrps(client, str) {
     logger.log('Joining groups...', result.chats);
     for (let i = 0; i < result.chats.length; i++) {
         const chat = result.chats[i];
-        if (!chat.toJSON().broadcast) {
+        // contacts.Search returns Api.TypeChat[] — Api.Chat (basic group), Api.ChatForbidden and
+        // Api.ChannelForbidden come back alongside Api.Channel. The old `as Api.Channel` cast made
+        // `.broadcast` undefined on those, so `!undefined` was TRUE and every one of them passed the
+        // filter into channels.JoinChannel — a channel-only RPC that rejects them
+        // ("Cannot cast InputPeerChat to any kind of InputChannel" / PEER_ID_INVALID). Each failure
+        // burns the 3-minute sleep below. Only a real Api.Channel that is NOT a broadcast channel
+        // (i.e. a supergroup) is joinable here.
+        if (chat instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Channel && !chat.broadcast) {
             try {
                 const joinResult = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.channels.JoinChannel({
                     channel: await getChannelEntity(client, chat.id.toString())
@@ -30805,6 +30839,17 @@ async function channelInfo(client, sendInChannel = true, sendIds = false, maxDia
                         title: chat.title
                     });
                     logger.log("No entity found for chat:", chat);
+                    continue;
+                }
+                // `chat.isGroup` is TRUE for legacy basic groups (Api.Chat), which have none of the
+                // channel permission fields. The old `as Api.Channel` cast made broadcast /
+                // defaultBannedRights / restricted / left all `undefined`, so computeLiveCanSendMsgs
+                // saw no blocking facts and returned canSendMsgs:true — a basic group was scored
+                // sendable BY ABSENCE rather than by evidence, and its id was pushed into
+                // channelArray as a promotion candidate that then fails at send time. Only real
+                // channels/supergroups (Api.Channel) carry the fields this block reads.
+                if (!(chat.entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Channel)) {
+                    logger.debug(`Skipping non-channel dialog ${chat.id?.toString()} (${chat.entity?.className}) — no channel permission facts to read`);
                     continue;
                 }
                 const chatEntity = chat.entity.toJSON();
@@ -30930,9 +30975,32 @@ async function joinChannels(client, str, sendInChannel = true) {
 }
 async function leaveChannel(client, channel) {
     try {
-        const joinResult = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.channels.LeaveChannel({
-            channel: channel?.channelId ? channel.channelId : channel?.username,
-        }));
+        // Leaving is entity-type-specific and the two RPCs are NOT interchangeable:
+        //   Api.Channel (broadcast channel OR supergroup) -> channels.LeaveChannel (needs InputChannel)
+        //   Api.Chat    (basic/legacy group)              -> messages.DeleteChatUser
+        // This previously always called channels.LeaveChannel with the BARE stored channelId
+        // (activeChannels stores ids without the -100 prefix, so "1234567" is a USER-shaped id).
+        // For a basic group that throws "Cannot cast InputPeerChat to any kind of InputChannel",
+        // the failure is only logged, and the account STAYS IN THE GROUP — leaveChannels then
+        // retries it every sweep, each attempt paying the 120s sleep below. Resolve the entity
+        // first and branch on its real type (mirrors CommonTgService channel-operations.ts).
+        const target = channel?.channelId ?? channel?.username;
+        const entity = channel?.channelId
+            ? await getChannelEntity(client, String(channel.channelId))
+            : target;
+        if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
+            const me = await client.getMe();
+            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.DeleteChatUser({
+                chatId: entity.id,
+                userId: me.id,
+                revokeHistory: false,
+            }));
+        }
+        else {
+            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.channels.LeaveChannel({
+                channel: (entity ?? target),
+            }));
+        }
         await sendJoinResultMessage(`Successfully LEFT group: @${channel?.username}`, channel?.title);
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(120000);
     }
