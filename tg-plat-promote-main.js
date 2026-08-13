@@ -8270,6 +8270,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* binding */ evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* binding */ evaluateChannelSendability),
 /* harmony export */   getChannelDocStaleness: () => (/* binding */ getChannelDocStaleness),
+/* harmony export */   isUsableChannelIdForSend: () => (/* binding */ isUsableChannelIdForSend),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* binding */ mergeHydratedChannelFacts),
 /* harmony export */   normalizeChannelId: () => (/* binding */ normalizeChannelId),
 /* harmony export */   resolvePromotionFailureAction: () => (/* binding */ resolvePromotionFailureAction),
@@ -8326,6 +8327,19 @@ function normalizeChannelId(input) {
         return '';
     return String(input).trim().replace(/^-100/, '').replace(/^-/, '');
 }
+/**
+ * Does this channelId denote a real, usable channel? Normalizes first, then requires a plain
+ * positive integer — so `"0"`, `"-1000"` (which normalizes to `"0"`), `""`, `"abc"` and `"12.5"`
+ * are all rejected.
+ *
+ * Kept in lockstep with `isUsableActiveChannelId` in @tg/core (the write-boundary gate). They must
+ * agree: it would be incoherent for a channel to be judged sendable here and rejected as a junk key
+ * there. Defined locally rather than imported to keep this module dependency-free.
+ */
+function isUsableChannelIdForSend(input) {
+    const normalized = normalizeChannelId(input);
+    return normalized.length > 0 && normalized !== '0' && /^\d+$/.test(normalized);
+}
 function deriveTelegramChannelLiveFacts(entity) {
     const sendMessages = entity.sendMessages === true || entity.defaultBannedRights?.sendMessages === true;
     const sendPlain = entity.sendPlain === true || entity.defaultBannedRights?.sendPlain === true;
@@ -8343,7 +8357,12 @@ function deriveTelegramChannelLiveFacts(entity) {
 }
 function evaluateChannelSendability(input) {
     const facts = deriveTelegramChannelLiveFacts(input);
-    if (!normalizeChannelId(facts.channelId))
+    // Must VALIDATE, not merely normalize. normalizeChannelId is transform-only, so "0" normalizes to
+    // the string "0" and "-1000" also normalizes to "0" — both TRUTHY, so a plain `!normalizeChannelId(x)`
+    // let a bogus id through this gate and reported it sendable. That also disagreed with
+    // isUsableActiveChannelId (@tg/core), which correctly rejects "0" at the write boundary: the same
+    // channel was "sendable" here and "junk" there.
+    if (!isUsableChannelIdForSend(facts.channelId))
         return blocked('invalid_channel_id', facts);
     if (input.banned === true)
         return blocked('banned', facts);
@@ -10013,6 +10032,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isFloodWait: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isFloodWait),
 /* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.isHealthCheckActionable),
 /* harmony export */   isHealthyDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__.isHealthyDaysLeft),
+/* harmony export */   isMongoUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.isMongoUpdateExpression),
 /* harmony export */   isPeerFlood: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isPeerFlood),
 /* harmony export */   isPermanentEntityError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isPermanentEntityError),
 /* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_32__["default"]),
@@ -10344,11 +10364,13 @@ async function getFullEntityInfo(client, entity, options = {}) {
     const { timeout = 5000, maxRetries = 1, label = "entity" } = options;
     if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Channel) {
         const res = await (0,_utils_withTimeout__WEBPACK_IMPORTED_MODULE_2__.withTimeout)(() => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.channels.GetFullChannel({ channel: entity })), { timeout, maxRetries, errorMessage: `GetFullChannel timeout for ${label}` });
-        return res.fullChat instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChannelFull ? res.fullChat : null;
+        // Optional-chained: withTimeout throws by default, but a caller passing `throwErr: false`
+        // would resolve `undefined` here — never turn that into a TypeError.
+        return res?.fullChat instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChannelFull ? res.fullChat : null;
     }
     if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
         const res = await (0,_utils_withTimeout__WEBPACK_IMPORTED_MODULE_2__.withTimeout)(() => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.GetFullChat({ chatId: big_integer__WEBPACK_IMPORTED_MODULE_1___default()(entity.id) })), { timeout, maxRetries, errorMessage: `GetFullChat timeout for ${label}` });
-        return res.fullChat instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatFull ? res.fullChat : null;
+        return res?.fullChat instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatFull ? res.fullChat : null;
     }
     return null;
 }
@@ -11260,18 +11282,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _getSafeEntity__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
 
-/**
- * Resolve a Telegram entity via the standard tg-aut chain: dialog-scoped resolver first, then the
- * multi-strategy safeGetEntity fallback. This consolidates the
- * `dialogManager.getEntity(x).catch(() => null) || await safeGetEntity(client, x)` construct that
- * was copy-pasted (byte-identical) across send-message, askToPayByEvent, botDetection, and utils —
- * one ordering, one failure semantic, one place to change.
- *
- * Semantics preserved from the originals:
- *   - dialog resolver first; its errors/undefined fall through to safeGetEntity (the `.catch(()=>null) ||`).
- *   - safeGetEntity runs on `safeFallbackId ?? chatId` (covers the utils `-100`-strip nuance).
- *   - by default safeGetEntity is allowed to throw on total failure (matches the 4 identical sites).
- */
 async function resolveEntity(client, dialogManager, chatId, options = {}) {
     const { safeFallbackId, swallowMiss = false } = options;
     const fromDialog = dialogManager
@@ -11526,6 +11536,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* binding */ activeChannelHydrationReasonUpdateExpression),
 /* harmony export */   buildActiveChannelUpsertPipeline: () => (/* binding */ buildActiveChannelUpsertPipeline),
 /* harmony export */   coerceActiveChannelBooleans: () => (/* binding */ coerceActiveChannelBooleans),
+/* harmony export */   isMongoUpdateExpression: () => (/* binding */ isMongoUpdateExpression),
 /* harmony export */   isUsableActiveChannelId: () => (/* binding */ isUsableActiveChannelId),
 /* harmony export */   normalizeActiveChannelBoolean: () => (/* binding */ normalizeActiveChannelBoolean),
 /* harmony export */   pickActiveChannelWrite: () => (/* binding */ pickActiveChannelWrite)
@@ -11620,7 +11631,7 @@ function normalizeActiveChannelBoolean(value) {
  * evaluated server-side inside an update pipeline. Flattening one to a boolean would silently
  * destroy the durable-flag logic (a banned/forbidden channel could be re-marked sendable).
  */
-function isMongoExpression(value) {
+function isMongoUpdateExpression(value) {
     return (typeof value === 'object'
         && value !== null
         && !Array.isArray(value)
@@ -11634,7 +11645,7 @@ function isMongoExpression(value) {
 function coerceActiveChannelBooleans(data) {
     for (const field of ACTIVE_CHANNEL_BOOLEAN_FIELDS) {
         const key = field;
-        if (key in data && !isMongoExpression(data[key])) {
+        if (key in data && !isMongoUpdateExpression(data[key])) {
             data[key] = normalizeActiveChannelBoolean(data[key]);
         }
     }
@@ -26188,7 +26199,14 @@ class UserDataDtoCrud {
         // not, so a stringly-typed flag arriving here persisted as a string in the SHARED collection.
         (0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.coerceActiveChannelBooleans)(data);
         if (data.banned === true || data.private === true || data.forbidden === true || data.broadcast === true) {
-            data.canSendMsgs = false;
+            // Only overwrite a PLAIN value. When canSendMsgs is the activeChannelCanSendUpdateExpression
+            // ($cond evaluated server-side), replacing it with a literal drops the atomic guarantee that
+            // a CONCURRENT operator ban still wins over this refresh. The resulting value is the same
+            // either way today (the $cond also yields false for a banned/forbidden doc), so this is a
+            // contract fix rather than a behaviour change — but the literal is silently weaker.
+            if (!(0,_tg_core__WEBPACK_IMPORTED_MODULE_3__.isMongoUpdateExpression)(data.canSendMsgs)) {
+                data.canSendMsgs = false;
+            }
         }
         // Runtime refresh/hydration can never unban a globally disabled channel.
         if (data.banned === false)
