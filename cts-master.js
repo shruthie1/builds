@@ -25582,7 +25582,6 @@ let ClientService = ClientService_1 = class ClientService {
                 inUse: false,
                 lastUsed: new Date(),
                 warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
-                sessionRotatedAt: null,
                 message: 'Returned to buffer pool; channel capacity will be verified',
             };
             const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
