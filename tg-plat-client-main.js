@@ -25340,12 +25340,36 @@ __webpack_require__.r(__webpack_exports__);
  * `reactions_disabled` is deliberately NOT handled here. That one is a real channel property, is
  * persisted to the DB, and must stay permanent.
  */
-/** Escalating retry windows for repeat restrictions on the same channel. */
+/**
+ * Escalating retry windows for repeat restrictions on the same channel.
+ *
+ * ── WHY THE FIRST RUNG IS 2 MINUTES, NOT 15 ────────────────────────────────────────────────────
+ * The first version used 15m by analogy with the promotion block ladder. Measured on arpitha2 after
+ * deploying it, that was wrong by construction — the two paths have completely different throughput:
+ *
+ *     observed restriction rate : ~12 channels/min (spam-limited account, most sends rejected)
+ *     pool cap (MAX_CHANNELS)   : 100
+ *     time to drain the pool    : 100 / 12 = 8.3 min
+ *     first release at          : 15 min
+ *
+ * So the pool emptied ~7 minutes BEFORE anything became eligible to return, and three samples 20s
+ * apart showed a monotonic 96 -> 92 -> 88 decline. At steady state a 15m window holds ~180 channels
+ * restricted — larger than the entire pool.
+ *
+ * The first rung must therefore be shorter than the drain time. 2 minutes holds ~24 channels
+ * in-flight against a 100-channel pool, which keeps it populated while still backing off a channel
+ * that genuinely keeps rejecting. Later rungs stay long: a repeat offender should not be retried
+ * every couple of minutes.
+ *
+ * NOTE for spam-limited accounts: most rejections there are account-side and hit every channel
+ * equally, so no window length fully fixes them — the account itself is limited. A short first rung
+ * keeps the pool populated instead of empty, which is the achievable goal.
+ */
 const RUNTIME_RESTRICTION_TTL_LADDER_MS = [
-    15 * 60 * 1000, // 1st: 15m  — most account-side rejections clear fast
-    60 * 60 * 1000, // 2nd: 1h
-    4 * 60 * 60 * 1000, // 3rd: 4h
-    24 * 60 * 60 * 1000, // 4th+: 1d (HARD CEILING)
+    2 * 60 * 1000, // 1st: 2m   — shorter than the ~8min pool drain time
+    10 * 60 * 1000, // 2nd: 10m
+    60 * 60 * 1000, // 3rd: 1h
+    6 * 60 * 60 * 1000, // 4th+: 6h (well under the 1d ceiling)
 ];
 /**
  * No runtime restriction may outlive a day. The ban belongs to the ACCOUNT and clears on its own,
