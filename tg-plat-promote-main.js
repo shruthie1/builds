@@ -18436,17 +18436,27 @@ class DialogManager {
         const serverTimestamp = serverDialog.date * 1000;
         const serverMessageId = serverDialog.message?.id || 0;
         const serverIsPinned = serverDialog.pinned || false;
-        const serverIsMuted = serverDialog.archived || false;
-        // Update if server has newer message data OR if pinned/muted status changed
+        const serverIsArchived = serverDialog.archived || false;
+        // BACKWARD COMPATIBILITY: isMuted has always been populated from `archived`, and the
+        // /dialogs route copies it into isArchived, so both fields have carried archive state.
+        // Existing clients read isMuted expecting exactly this, so its value is unchanged; the
+        // correctly-named isArchived is added alongside it.
+        const serverIsMuted = serverIsArchived;
+        // Position of the read boundary, for an accurate unread divider.
+        const serverReadInboxMaxId = serverDialog.readInboxMaxId || 0;
+        // Update if server has newer message data OR if pinned/muted/read status changed
         const hasNewerMessage = this.shouldUpdateFromServer(serverTimestamp, serverMessageId, existing);
         const pinnedStatusChanged = existing.isPinned !== serverIsPinned;
         const mutedStatusChanged = existing.isMuted !== serverIsMuted;
-        if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged) {
+        const readStatusChanged = existing.readInboxMaxId !== serverReadInboxMaxId;
+        if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged || readStatusChanged) {
             this.updateDialog(existing.id, {
                 lastMessageTimestamp: serverTimestamp,
                 lastMessageId: serverMessageId,
                 unreadCount: serverDialog.unreadCount || 0,
                 isMuted: serverIsMuted,
+                isArchived: serverIsArchived,
+                readInboxMaxId: serverReadInboxMaxId,
                 isPinned: serverIsPinned,
                 message: serverDialog.message || null
             });
@@ -18528,6 +18538,8 @@ class DialogManager {
                 lastMessageTimestamp: dialog.date * 1000, // Convert seconds to ms
                 lastMessageId: dialog.message?.id || 0,
                 isMuted: dialog.archived || false,
+                isArchived: dialog.archived || false,
+                readInboxMaxId: 0,
                 isPinned: dialog.pinned || false,
                 peer: this.getPeerFromDialog(dialog)
             };
@@ -18892,6 +18904,8 @@ class DialogManager {
             message: null,
             lastMessageId: 0,
             isMuted: false,
+            isArchived: false,
+            readInboxMaxId: 0,
             isPinned: false,
             peer,
         };
@@ -18955,6 +18969,8 @@ class DialogManager {
             message: null,
             lastMessageId: 0,
             isMuted: false,
+            isArchived: false,
+            readInboxMaxId: 0,
             isPinned: false,
             peer
         };
@@ -23273,6 +23289,8 @@ class ReactionService {
                         lastMessageTimestamp: dialog.date ? dialog.date * 1000 : Date.now(),
                         lastMessageId: dialog.message?.id || 0,
                         isMuted: dialog.archived || false,
+                        isArchived: dialog.archived || false,
+                        readInboxMaxId: 0,
                         isPinned: dialog.pinned || false,
                         peer
                     };
