@@ -5131,6 +5131,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
 /* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+
 
 
 
@@ -5694,15 +5696,31 @@ class BasePromotionEngine {
     isPromotionPreflightError(error) {
         return Boolean(error && typeof error === 'object' && error.promotionPreflight === true);
     }
+    /**
+     * Final gate before a promotion message reaches Telegram.
+     *
+     * Structural sanitization runs HERE (not only at generation) because ~61% of already-persisted
+     * pool entries carry indent/blank-line corruption from the retired getPatternedIndent formatter.
+     * Repairing on the way out fixes legacy pool text without a data migration, and covers every
+     * send path in both apps since they all funnel through this method.
+     *
+     * Length is validated AFTER sanitization so we measure what is actually sent.
+     */
     assertSendablePromotionText(text) {
-        const length = Array.from(text).length;
+        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_13__.sanitizePromotionRendering)(text);
+        if (!sanitized) {
+            throw this.createPromotionPreflightError('MSG_EMPTY_AFTER_SANITIZE', {
+                length: Array.from(text).length,
+            });
+        }
+        const length = Array.from(sanitized).length;
         if (length > this.MAX_TELEGRAM_PROMOTION_MESSAGE_LENGTH) {
             throw this.createPromotionPreflightError('MSG_TOO_LONG', {
                 length,
                 limit: this.MAX_TELEGRAM_PROMOTION_MESSAGE_LENGTH,
             });
         }
-        return text;
+        return sanitized;
     }
     isSendErrorUncheckable(error) {
         return Boolean(error && typeof error === "object" && error.checkableByChannelId === false);
@@ -6074,7 +6092,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_pattern_indent__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/pattern-indent */ "../../packages/tg-core/src/utils/pattern-indent.ts");
+/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
 /* harmony import */ var _tg_llm__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/llm */ "../../packages/tg-llm/src/index.ts");
 /* harmony import */ var _tg_llm_math_bold__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/llm/math-bold */ "../../packages/tg-llm/src/math-bold.ts");
 // promotion-message-helpers/ai-generate-msgs.ts
@@ -6198,14 +6216,21 @@ async function generateAIMsg(client, channelInfo) {
         messageHistory.length = 0;
         if (!plainMessage)
             return null;
-        const indentedMessage = (0,_tg_core_utils_pattern_indent__WEBPACK_IMPORTED_MODULE_3__.getPatternedIndent)(plainMessage);
+        // NOTE: getPatternedIndent() used to run here. It prepended up to 15 leading spaces and up
+        // to 5 consecutive newlines per line, which assumes a fixed-width canvas. Telegram wraps by
+        // PIXEL width, so indented lines overflowed the bubble and broke mid-word ("VIDEOCA"/"LL"),
+        // separator rules detached from their corners, and short messages rendered as a huge hollow
+        // box with orphaned stray characters. Verified in production 2026-08-14: 60.9% of stored
+        // pool entries carry >=4-space indents and 2.5% carry blank-line runs. Real people do not
+        // indent chat messages — send the cleaned text as-is.
+        const formattedMessage = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_3__.sanitizePromotionRendering)(plainMessage);
         plainMessage = '';
-        if (!indentedMessage) {
+        if (!formattedMessage) {
             logger.warn('AI promotion message skipped: formatter returned empty text');
             return null;
         }
-        logger.log("AI Message: \n", indentedMessage);
-        return indentedMessage;
+        logger.log("AI Message: \n", formattedMessage);
+        return formattedMessage;
     }
     return null;
 }
@@ -6659,8 +6684,11 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_TEMP_BLOCK_TTL_SECONDS: () => (/* binding */ MAX_TEMP_BLOCK_TTL_SECONDS),
 /* harmony export */   PERM_BLOCK_TTL_SECONDS: () => (/* binding */ PERM_BLOCK_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* binding */ RedisAccountChannelBlock),
+/* harmony export */   STRIKE_TTL_SECONDS: () => (/* binding */ STRIKE_TTL_SECONDS),
+/* harmony export */   TEMP_BLOCK_TTL_LADDER_SECONDS: () => (/* binding */ TEMP_BLOCK_TTL_LADDER_SECONDS),
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* binding */ TEMP_BLOCK_TTL_SECONDS)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
@@ -6683,8 +6711,35 @@ __webpack_require__.r(__webpack_exports__);
  *   value "perm" (30-day TTL) or "temp" (3h TTL). exists() is enough for the pre-flight check.
  */
 
-const TEMP_BLOCK_TTL_SECONDS = 3 * 60 * 60; // 3 hours — USER_BANNED_IN_CHANNEL
+const TEMP_BLOCK_TTL_SECONDS = 3 * 60 * 60; // 3 hours — first USER_BANNED_IN_CHANNEL
 const PERM_BLOCK_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days — structural channel block self-heal
+/**
+ * Escalating TTL ladder for repeat USER_BANNED_IN_CHANNEL on the same (mobile, channel).
+ *
+ * A flat 3h block assumes the ban is a transient spam-limit that clears within hours. Measured in
+ * production (2026-08-14) that assumption fails: account-level limitations carry a `daysLeft`
+ * counter and last DAYS, so the block expires ~8x/day and the account walks straight back into the
+ * same banned channel. arpitha2 sent 1,490 messages for 7 successes against only ~190 distinct
+ * channels — i.e. ~8 futile retries per channel per day, which is itself the spam pressure that
+ * sustains the limitation.
+ *
+ * Each re-ban after a block expires moves this pair one rung down the ladder. The first entry stays
+ * at 3h so a genuinely transient ban still self-heals quickly.
+ */
+const TEMP_BLOCK_TTL_LADDER_SECONDS = [
+    3 * 60 * 60, // 1st ban  — 3h  (transient spam-limit assumption)
+    6 * 60 * 60, // 2nd ban  — 6h
+    12 * 60 * 60, // 3rd ban  — 12h
+    24 * 60 * 60, // 4th+ ban — 1d (HARD CEILING)
+];
+/**
+ * Hard ceiling for a USER_BANNED_IN_CHANNEL block. This ban is the account's own spam-limit
+ * leaking into the channel, NOT a statement that the channel rejects this account — so it must
+ * always be retried within a day. Structural rejections use blockPermanent() instead.
+ */
+const MAX_TEMP_BLOCK_TTL_SECONDS = 24 * 60 * 60;
+/** How long the ban-strike counter itself survives; must outlive the longest ladder rung. */
+const STRIKE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 class RedisAccountChannelBlock {
     constructor(redis) {
         if (!isRedisLike(redis)) {
@@ -6718,12 +6773,50 @@ class RedisAccountChannelBlock {
             return;
         await this.redis.set(key, 'perm', 'EX', PERM_BLOCK_TTL_SECONDS);
     }
-    /** Temporarily block this channel for this mobile for 3h (USER_BANNED_IN_CHANNEL / spam-limit). */
+    /** Strike-counter key: how many times this mobile has been banned in this channel. */
+    strikeKey(mobile, channelId) {
+        const base = this.key(mobile, channelId);
+        return base ? `${base}:strikes` : null;
+    }
+    /**
+     * Temporarily block this channel for this mobile (USER_BANNED_IN_CHANNEL / spam-limit).
+     *
+     * The TTL escalates with repeat bans on the same pair (see TEMP_BLOCK_TTL_LADDER_SECONDS): a
+     * one-off ban still clears in 3h, but an account that keeps getting re-banned in the same channel
+     * backs off progressively instead of retrying ~8x/day forever.
+     */
     async blockTemporary(mobile, channelId) {
         const key = this.key(mobile, channelId);
-        if (!key)
+        const strikeKey = this.strikeKey(mobile, channelId);
+        if (!key || !strikeKey)
             return;
-        await this.redis.set(key, 'temp', 'EX', TEMP_BLOCK_TTL_SECONDS);
+        // Count this ban, then pick the ladder rung. INCR returns the post-increment value, so the
+        // first ban yields 1 -> index 0 -> 3h. A Redis hiccup on the counter must never escalate
+        // wrongly, so fall back to the conservative first rung.
+        // incr/expire are optional on RedisLike — without them escalation is simply unavailable and we
+        // keep the original flat 3h behaviour rather than failing the block outright.
+        let strikes = 1;
+        if (typeof this.redis.incr === 'function') {
+            try {
+                const raw = await this.redis.incr(strikeKey);
+                const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10);
+                if (Number.isFinite(parsed) && parsed >= 1)
+                    strikes = parsed;
+                // Refresh the counter window on every ban so an actively-banned pair keeps its history.
+                if (typeof this.redis.expire === 'function') {
+                    await this.redis.expire(strikeKey, STRIKE_TTL_SECONDS);
+                }
+            }
+            catch {
+                strikes = 1;
+            }
+        }
+        const rung = Math.min(strikes, TEMP_BLOCK_TTL_LADDER_SECONDS.length) - 1;
+        const laddered = TEMP_BLOCK_TTL_LADDER_SECONDS[rung] ?? TEMP_BLOCK_TTL_SECONDS;
+        // Clamp defensively: a ban-driven block must never exceed one day regardless of how the
+        // ladder is edited later, because the ban belongs to the ACCOUNT and clears on its own.
+        const ttl = Math.min(laddered, MAX_TEMP_BLOCK_TTL_SECONDS);
+        await this.redis.set(key, 'temp', 'EX', ttl);
     }
     /** True if this channel is currently blocked for this mobile (permanent, or temp still within TTL). */
     async isBlocked(mobile, channelId) {
@@ -10004,148 +10097,149 @@ function toIso(value) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ACTIVE_CHANNEL_BOOLEAN_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.ACTIVE_CHANNEL_BOOLEAN_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.ACTIVE_CHANNEL_WRITABLE_KEYS),
+/* harmony export */   ACTIVE_CHANNEL_BOOLEAN_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_BOOLEAN_FIELDS),
+/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
+/* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   BotConfig: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig),
 /* harmony export */   ChannelCategory: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory),
-/* harmony export */   EntityCacheManager: () => (/* reexport safe */ _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager),
-/* harmony export */   EntityNotFoundError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.EntityNotFoundError),
+/* harmony export */   EntityCacheManager: () => (/* reexport safe */ _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager),
+/* harmony export */   EntityNotFoundError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.EntityNotFoundError),
 /* harmony export */   ErrorUtils: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.ErrorUtils),
-/* harmony export */   HEALTHY_DAYS_LEFT: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__.HEALTHY_DAYS_LEFT),
-/* harmony export */   InvalidClientError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.InvalidClientError),
+/* harmony export */   HEALTHY_DAYS_LEFT: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_31__.HEALTHY_DAYS_LEFT),
+/* harmony export */   InvalidClientError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.InvalidClientError),
 /* harmony export */   Logger: () => (/* reexport safe */ _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger),
 /* harmony export */   NotificationSeverity: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
-/* harmony export */   RedisClient: () => (/* reexport safe */ _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_16__.RedisClient),
-/* harmony export */   SPAMBOT_PROBE_MIN_INTERVAL_MS: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_34__.SPAMBOT_PROBE_MIN_INTERVAL_MS),
-/* harmony export */   SPAM_BOT_USERNAME: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.SPAM_BOT_USERNAME),
-/* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.SeededRandom),
-/* harmony export */   __resetTGConfigForTests: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.__resetTGConfigForTests),
-/* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.acceptPhoneCall),
-/* harmony export */   activeChannelCanSendUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.activeChannelCanSendUpdateExpression),
-/* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.activeChannelHydrationReasonUpdateExpression),
-/* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.aggregateHealthStatus),
-/* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.analyzeText),
-/* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.attemptReverse),
-/* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.attemptReverseFuzzy),
-/* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.batchGetEntities),
-/* harmony export */   batchObfuscate: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.batchObfuscate),
-/* harmony export */   buildActiveChannelUpsertPipeline: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.buildActiveChannelUpsertPipeline),
-/* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_34__.checktghealth),
-/* harmony export */   claimSpamBotNotification: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.claimSpamBotNotification),
-/* harmony export */   classifySpamBotMessage: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.classifySpamBotMessage),
-/* harmony export */   cleanupMessageCache: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__.cleanupMessageCache),
-/* harmony export */   clearNegativeEntityCache: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.clearNegativeEntityCache),
-/* harmony export */   coerceActiveChannelBooleans: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.coerceActiveChannelBooleans),
-/* harmony export */   confirmPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.confirmPhoneCall),
-/* harmony export */   contains: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_29__.contains),
-/* harmony export */   containsAll: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_29__.containsAll),
+/* harmony export */   RedisClient: () => (/* reexport safe */ _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_15__.RedisClient),
+/* harmony export */   SPAMBOT_PROBE_MIN_INTERVAL_MS: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_35__.SPAMBOT_PROBE_MIN_INTERVAL_MS),
+/* harmony export */   SPAM_BOT_USERNAME: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.SPAM_BOT_USERNAME),
+/* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.SeededRandom),
+/* harmony export */   __resetTGConfigForTests: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.__resetTGConfigForTests),
+/* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.acceptPhoneCall),
+/* harmony export */   activeChannelCanSendUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelCanSendUpdateExpression),
+/* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelHydrationReasonUpdateExpression),
+/* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.aggregateHealthStatus),
+/* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.analyzeText),
+/* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverse),
+/* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverseFuzzy),
+/* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.batchGetEntities),
+/* harmony export */   batchObfuscate: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.batchObfuscate),
+/* harmony export */   buildActiveChannelUpsertPipeline: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.buildActiveChannelUpsertPipeline),
+/* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_35__.checktghealth),
+/* harmony export */   claimSpamBotNotification: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.claimSpamBotNotification),
+/* harmony export */   classifySpamBotMessage: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.classifySpamBotMessage),
+/* harmony export */   cleanupMessageCache: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_18__.cleanupMessageCache),
+/* harmony export */   clearNegativeEntityCache: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.clearNegativeEntityCache),
+/* harmony export */   coerceActiveChannelBooleans: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.coerceActiveChannelBooleans),
+/* harmony export */   confirmPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.confirmPhoneCall),
+/* harmony export */   contains: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_30__.contains),
+/* harmony export */   containsAll: () => (/* reexport safe */ _utils_contains__WEBPACK_IMPORTED_MODULE_30__.containsAll),
 /* harmony export */   createError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.createError),
-/* harmony export */   createHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.createHealthCheck),
-/* harmony export */   createHealthErrorSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.createHealthErrorSnapshot),
-/* harmony export */   createHealthRecoveryPlan: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.createHealthRecoveryPlan),
-/* harmony export */   createHealthSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.createHealthSnapshot),
-/* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.createPhoneCallState),
-/* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.decodePhoneCallData),
-/* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.destroyPhoneCallState),
-/* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.encodePhoneCallData),
+/* harmony export */   createHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.createHealthCheck),
+/* harmony export */   createHealthErrorSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.createHealthErrorSnapshot),
+/* harmony export */   createHealthRecoveryPlan: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.createHealthRecoveryPlan),
+/* harmony export */   createHealthSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.createHealthSnapshot),
+/* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.createPhoneCallState),
+/* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.decodePhoneCallData),
+/* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.destroyPhoneCallState),
+/* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.encodePhoneCallData),
 /* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
 /* harmony export */   extractMessage: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.extractMessage),
-/* harmony export */   extractSpamBotReleaseDate: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.extractSpamBotReleaseDate),
+/* harmony export */   extractSpamBotReleaseDate: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.extractSpamBotReleaseDate),
 /* harmony export */   fetchWithTimeout: () => (/* reexport safe */ _utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_4__.fetchWithTimeout),
-/* harmony export */   findHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.findHealthCheck),
+/* harmony export */   findHealthCheck: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.findHealthCheck),
 /* harmony export */   formatRichNotification: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification),
-/* harmony export */   generateEmojiFingerprint: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.generateEmojiFingerprint),
+/* harmony export */   generateEmojiFingerprint: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.generateEmojiFingerprint),
 /* harmony export */   generateEmojis: () => (/* reexport safe */ _utils_emoji__WEBPACK_IMPORTED_MODULE_10__.generateEmojis),
-/* harmony export */   generateRealisticConfig: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.generateRealisticConfig),
-/* harmony export */   generateTGConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.generateTGConfig),
-/* harmony export */   generateTGConfigWithProxy: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.generateTGConfigWithProxy),
-/* harmony export */   generateVariants: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.generateVariants),
-/* harmony export */   getAllMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.getAllMobileProxyStatus),
-/* harmony export */   getAllReactionsFromTg: () => (/* reexport safe */ _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_24__.getAllReactionsFromTg),
-/* harmony export */   getAvailablePlatforms: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getAvailablePlatforms),
-/* harmony export */   getAvailableReactions: () => (/* reexport safe */ _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_22__.getAvailableReactions),
+/* harmony export */   generateRealisticConfig: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.generateRealisticConfig),
+/* harmony export */   generateTGConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.generateTGConfig),
+/* harmony export */   generateTGConfigWithProxy: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.generateTGConfigWithProxy),
+/* harmony export */   generateVariants: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.generateVariants),
+/* harmony export */   getAllMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.getAllMobileProxyStatus),
+/* harmony export */   getAllReactionsFromTg: () => (/* reexport safe */ _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_23__.getAllReactionsFromTg),
+/* harmony export */   getAvailablePlatforms: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getAvailablePlatforms),
+/* harmony export */   getAvailableReactions: () => (/* reexport safe */ _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_21__.getAvailableReactions),
 /* harmony export */   getBackoffDelay: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.getBackoffDelay),
-/* harmony export */   getConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.getConfig),
-/* harmony export */   getCredentialsForMobile: () => (/* reexport safe */ _utils_tg_apps__WEBPACK_IMPORTED_MODULE_14__.getCredentialsForMobile),
-/* harmony export */   getExpectedAuthFingerprint: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getExpectedAuthFingerprint),
-/* harmony export */   getFullEntityInfo: () => (/* reexport safe */ _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_22__.getFullEntityInfo),
-/* harmony export */   getMessages: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__.getMessages),
-/* harmony export */   getMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.getMobileProxyStatus),
-/* harmony export */   getParticipantCount: () => (/* reexport safe */ _telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_20__.getParticipantCount),
-/* harmony export */   getPatternedIndent: () => (/* reexport safe */ _utils_pattern_indent__WEBPACK_IMPORTED_MODULE_12__.getPatternedIndent),
-/* harmony export */   getPeerDialogId: () => (/* reexport safe */ _telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_21__.getPeerDialogId),
-/* harmony export */   getPlatformConfig: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getPlatformConfig),
-/* harmony export */   getProxyForMobile: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.getProxyForMobile),
+/* harmony export */   getConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.getConfig),
+/* harmony export */   getCredentialsForMobile: () => (/* reexport safe */ _utils_tg_apps__WEBPACK_IMPORTED_MODULE_13__.getCredentialsForMobile),
+/* harmony export */   getExpectedAuthFingerprint: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getExpectedAuthFingerprint),
+/* harmony export */   getFullEntityInfo: () => (/* reexport safe */ _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_21__.getFullEntityInfo),
+/* harmony export */   getMessages: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_18__.getMessages),
+/* harmony export */   getMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.getMobileProxyStatus),
+/* harmony export */   getParticipantCount: () => (/* reexport safe */ _telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_19__.getParticipantCount),
+/* harmony export */   getPeerDialogId: () => (/* reexport safe */ _telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_20__.getPeerDialogId),
+/* harmony export */   getPlatformConfig: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getPlatformConfig),
+/* harmony export */   getProxyForMobile: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.getProxyForMobile),
 /* harmony export */   getRandomEmoji: () => (/* reexport safe */ _utils_emoji__WEBPACK_IMPORTED_MODULE_10__.getRandomEmoji),
 /* harmony export */   getReadableTimeDifference: () => (/* reexport safe */ _utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_7__.getReadableTimeDifference),
-/* harmony export */   getRetryDelayMs: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.getRetryDelayMs),
-/* harmony export */   getTelegramCredentialPool: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getTelegramCredentialPool),
-/* harmony export */   getTelegramCredentialsForMobile: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.getTelegramCredentialsForMobile),
-/* harmony export */   handleMobileProxyFailure: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.handleMobileProxyFailure),
-/* harmony export */   healthCheckHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.healthCheckHttpStatus),
-/* harmony export */   healthErrorMessage: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.healthErrorMessage),
-/* harmony export */   healthHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.healthHttpStatus),
-/* harmony export */   healthOwnerForComponent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.healthOwnerForComponent),
-/* harmony export */   homoglyphMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.homoglyphMap),
-/* harmony export */   invalidateConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.invalidateConfig),
-/* harmony export */   invisibleChars: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.invisibleChars),
-/* harmony export */   isAuthAllowlisted: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.isAuthAllowlisted),
-/* harmony export */   isAuthError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isAuthError),
-/* harmony export */   isAuthFingerprintMatch: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.isAuthFingerprintMatch),
+/* harmony export */   getRetryDelayMs: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.getRetryDelayMs),
+/* harmony export */   getTelegramCredentialPool: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getTelegramCredentialPool),
+/* harmony export */   getTelegramCredentialsForMobile: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getTelegramCredentialsForMobile),
+/* harmony export */   handleMobileProxyFailure: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.handleMobileProxyFailure),
+/* harmony export */   healthCheckHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.healthCheckHttpStatus),
+/* harmony export */   healthErrorMessage: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.healthErrorMessage),
+/* harmony export */   healthHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.healthHttpStatus),
+/* harmony export */   healthOwnerForComponent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.healthOwnerForComponent),
+/* harmony export */   homoglyphMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.homoglyphMap),
+/* harmony export */   invalidateConfig: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.invalidateConfig),
+/* harmony export */   invisibleChars: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.invisibleChars),
+/* harmony export */   isAuthAllowlisted: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.isAuthAllowlisted),
+/* harmony export */   isAuthError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isAuthError),
+/* harmony export */   isAuthFingerprintMatch: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.isAuthFingerprintMatch),
 /* harmony export */   isAxiosError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.isAxiosError),
-/* harmony export */   isChannelRestricted: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isChannelRestricted),
-/* harmony export */   isFloodWait: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isFloodWait),
-/* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.isHealthCheckActionable),
-/* harmony export */   isHealthyDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__.isHealthyDaysLeft),
-/* harmony export */   isMongoUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.isMongoUpdateExpression),
-/* harmony export */   isPeerFlood: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isPeerFlood),
-/* harmony export */   isPermanentEntityError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isPermanentEntityError),
-/* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_32__["default"]),
-/* harmony export */   isPermanentTelegramError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isPermanentTelegramError),
-/* harmony export */   isReactionInvalid: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isReactionInvalid),
-/* harmony export */   isRetryable: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isRetryable),
-/* harmony export */   isSocksError: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.isSocksError),
-/* harmony export */   isSpamLimited: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__.isSpamLimited),
-/* harmony export */   isTelegramRuntimeFailure: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_35__.isTelegramRuntimeFailure),
-/* harmony export */   isTransient: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__.isTransient),
-/* harmony export */   isUsableActiveChannelId: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.isUsableActiveChannelId),
+/* harmony export */   isChannelRestricted: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isChannelRestricted),
+/* harmony export */   isFloodWait: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isFloodWait),
+/* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.isHealthCheckActionable),
+/* harmony export */   isHealthyDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_31__.isHealthyDaysLeft),
+/* harmony export */   isMongoUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isMongoUpdateExpression),
+/* harmony export */   isPeerFlood: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isPeerFlood),
+/* harmony export */   isPermanentEntityError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isPermanentEntityError),
+/* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_33__["default"]),
+/* harmony export */   isPermanentTelegramError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isPermanentTelegramError),
+/* harmony export */   isReactionInvalid: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isReactionInvalid),
+/* harmony export */   isRetryable: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isRetryable),
+/* harmony export */   isSocksError: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.isSocksError),
+/* harmony export */   isSpamLimited: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_31__.isSpamLimited),
+/* harmony export */   isTelegramRuntimeFailure: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_36__.isTelegramRuntimeFailure),
+/* harmony export */   isTransient: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isTransient),
+/* harmony export */   isUsableActiveChannelId: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isUsableActiveChannelId),
 /* harmony export */   loadGeminiKeys: () => (/* reexport safe */ _utils_gemini_keys__WEBPACK_IMPORTED_MODULE_5__.loadGeminiKeys),
-/* harmony export */   millisecondsSince: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.millisecondsSince),
-/* harmony export */   normalizeActiveChannelBoolean: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.normalizeActiveChannelBoolean),
-/* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.numberMap),
-/* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.obfuscateText),
+/* harmony export */   millisecondsSince: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.millisecondsSince),
+/* harmony export */   naturalizeText: () => (/* reexport safe */ _utils_naturalizeText__WEBPACK_IMPORTED_MODULE_28__.naturalizeText),
+/* harmony export */   normalizeActiveChannelBoolean: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.normalizeActiveChannelBoolean),
+/* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.numberMap),
+/* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.obfuscateText),
 /* harmony export */   parseError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError),
 /* harmony export */   parseTelegramError: () => (/* reexport safe */ _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError),
-/* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_36__.percent),
-/* harmony export */   pickActiveChannelWrite: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__.pickActiveChannelWrite),
-/* harmony export */   quickGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.quickGetEntity),
-/* harmony export */   readLatestSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.readLatestSpamBotReply),
-/* harmony export */   removeProxyMapping: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.removeProxyMapping),
-/* harmony export */   reportManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.reportManualSpamBotProbe),
-/* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__.requestPhoneCall),
-/* harmony export */   resetMobileIdentity: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.resetMobileIdentity),
-/* harmony export */   resolveEntity: () => (/* reexport safe */ _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_23__.resolveEntity),
-/* harmony export */   rotateProxy: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.rotateProxy),
-/* harmony export */   runManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.runManualSpamBotProbe),
-/* harmony export */   safeGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.safeGetEntity),
+/* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_37__.percent),
+/* harmony export */   pickActiveChannelWrite: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.pickActiveChannelWrite),
+/* harmony export */   quickGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.quickGetEntity),
+/* harmony export */   readLatestSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.readLatestSpamBotReply),
+/* harmony export */   removeProxyMapping: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.removeProxyMapping),
+/* harmony export */   reportManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.reportManualSpamBotProbe),
+/* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.requestPhoneCall),
+/* harmony export */   resetMobileIdentity: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.resetMobileIdentity),
+/* harmony export */   resolveEntity: () => (/* reexport safe */ _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__.resolveEntity),
+/* harmony export */   rotateProxy: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.rotateProxy),
+/* harmony export */   runManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.runManualSpamBotProbe),
+/* harmony export */   safeGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.safeGetEntity),
 /* harmony export */   safeStringify: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.safeStringify),
-/* harmony export */   sanitizeLimitedDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__.sanitizeLimitedDaysLeft),
+/* harmony export */   sanitizeLimitedDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_31__.sanitizeLimitedDaysLeft),
+/* harmony export */   sanitizePromotionRendering: () => (/* reexport safe */ _utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_29__.sanitizePromotionRendering),
 /* harmony export */   scheduleUnrefTimeout: () => (/* reexport safe */ _utils_timers__WEBPACK_IMPORTED_MODULE_9__.scheduleUnrefTimeout),
 /* harmony export */   selectRandomElements: () => (/* reexport safe */ _utils_random__WEBPACK_IMPORTED_MODULE_11__.selectRandomElements),
-/* harmony export */   sendManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__.sendManualSpamBotProbe),
-/* harmony export */   sendMessageWithTimeout: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_33__.sendMessageWithTimeout),
-/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_33__.sendMessageWithTimeoutOrThrow),
-/* harmony export */   setAllFailedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setAllFailedCallback),
-/* harmony export */   setBeforeProxyRestartCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setBeforeProxyRestartCallback),
-/* harmony export */   setProxyRotatedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.setProxyRotatedCallback),
-/* harmony export */   specialCharMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.specialCharMap),
-/* harmony export */   stableHash: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__.stableHash),
-/* harmony export */   stopHealthMonitor: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__.stopHealthMonitor),
-/* harmony export */   testReverseCoverage: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.testReverseCoverage),
-/* harmony export */   tryGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__.tryGetEntity),
+/* harmony export */   sendManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__.sendManualSpamBotProbe),
+/* harmony export */   sendMessageWithTimeout: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_34__.sendMessageWithTimeout),
+/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_34__.sendMessageWithTimeoutOrThrow),
+/* harmony export */   setAllFailedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setAllFailedCallback),
+/* harmony export */   setBeforeProxyRestartCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setBeforeProxyRestartCallback),
+/* harmony export */   setProxyRotatedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setProxyRotatedCallback),
+/* harmony export */   specialCharMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.specialCharMap),
+/* harmony export */   stableHash: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.stableHash),
+/* harmony export */   stopHealthMonitor: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.stopHealthMonitor),
+/* harmony export */   testReverseCoverage: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.testReverseCoverage),
+/* harmony export */   tryGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.tryGetEntity),
 /* harmony export */   unrefTimer: () => (/* reexport safe */ _utils_timers__WEBPACK_IMPORTED_MODULE_9__.unrefTimer),
-/* harmony export */   validateConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__.validateConfig),
+/* harmony export */   validateConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.validateConfig),
 /* harmony export */   withBackoff: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.withBackoff),
 /* harmony export */   withTimeout: () => (/* reexport safe */ _utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)
 /* harmony export */ });
@@ -10161,34 +10255,36 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_timers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _utils_emoji__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./utils/emoji */ "../../packages/tg-core/src/utils/emoji.ts");
 /* harmony import */ var _utils_random__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./utils/random */ "../../packages/tg-core/src/utils/random.ts");
-/* harmony import */ var _utils_pattern_indent__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./utils/pattern-indent */ "../../packages/tg-core/src/utils/pattern-indent.ts");
-/* harmony import */ var _utils_tg_config__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
-/* harmony import */ var _utils_tg_apps__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./utils/tg-apps */ "../../packages/tg-core/src/utils/tg-apps.ts");
-/* harmony import */ var _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
-/* harmony import */ var _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./telegram-utils/getMessages */ "../../packages/tg-core/src/telegram-utils/getMessages.ts");
-/* harmony import */ var _telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./telegram-utils/getParticipants */ "../../packages/tg-core/src/telegram-utils/getParticipants.ts");
-/* harmony import */ var _telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./telegram-utils/getFullEntityInfo */ "../../packages/tg-core/src/telegram-utils/getFullEntityInfo.ts");
-/* harmony import */ var _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
-/* harmony import */ var _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./telegram-utils/getAllReactions */ "../../packages/tg-core/src/telegram-utils/getAllReactions.ts");
-/* harmony import */ var _types_telegram_errors__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./types/telegram-errors */ "../../packages/tg-core/src/types/telegram-errors.ts");
-/* harmony import */ var _types_activeChannel__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./types/activeChannel */ "../../packages/tg-core/src/types/activeChannel.ts");
-/* harmony import */ var _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
-/* harmony import */ var _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
-/* harmony import */ var _utils_contains__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _utils_spam_limit__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ./telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ./telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ./telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
-/* harmony import */ var _health__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ./health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _utils_tg_apps__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./utils/tg-apps */ "../../packages/tg-core/src/utils/tg-apps.ts");
+/* harmony import */ var _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./telegram-utils/getMessages */ "../../packages/tg-core/src/telegram-utils/getMessages.ts");
+/* harmony import */ var _telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./telegram-utils/getParticipants */ "../../packages/tg-core/src/telegram-utils/getParticipants.ts");
+/* harmony import */ var _telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./telegram-utils/getFullEntityInfo */ "../../packages/tg-core/src/telegram-utils/getFullEntityInfo.ts");
+/* harmony import */ var _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./telegram-utils/getAllReactions */ "../../packages/tg-core/src/telegram-utils/getAllReactions.ts");
+/* harmony import */ var _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./types/telegram-errors */ "../../packages/tg-core/src/types/telegram-errors.ts");
+/* harmony import */ var _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./types/activeChannel */ "../../packages/tg-core/src/types/activeChannel.ts");
+/* harmony import */ var _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
+/* harmony import */ var _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
+/* harmony import */ var _utils_naturalizeText__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./utils/naturalizeText */ "../../packages/tg-core/src/utils/naturalizeText.ts");
+/* harmony import */ var _utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+/* harmony import */ var _utils_contains__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _utils_spam_limit__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ./telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ./telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ./telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
+/* harmony import */ var _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ./telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
+/* harmony import */ var _health__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ./health */ "../../packages/tg-core/src/health.ts");
 // @tg/core — shared leaf infrastructure barrel.
 // NOTE: tg-apps.ts and tg-config.ts BOTH export `ITelegramCredentials`. tg-config is the canonical
 // source; we re-export tg-apps without its (duplicate) ITelegramCredentials to avoid a name clash.
+
 
 
 
@@ -15092,6 +15188,610 @@ const logger = new Logger();
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/naturalizeText.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/naturalizeText.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   naturalizeText: () => (/* binding */ naturalizeText)
+/* harmony export */ });
+/**
+ * Telegram-safe text variation engine.
+ *
+ * Makes every message unique and eye-catching without homoglyphs or
+ * mixed Unicode scripts. Uses Mathematical Sans-Serif Bold/Italic
+ * (single consistent Unicode block) for unicode styling.
+ */
+// ── Helpers ────────────────────────────────────────────────────
+function pick(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+}
+function chance(p) {
+    return Math.random() < p;
+}
+function randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+/** Weighted random pick — weights don't need to sum to 1 */
+function weightedPick(items, weights) {
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * total;
+    for (let i = 0; i < items.length; i++) {
+        r -= weights[i];
+        if (r <= 0)
+            return items[i];
+    }
+    return items[items.length - 1];
+}
+// ── Unicode Font Maps ──────────────────────────────────────────
+const UNICODE_BOLD_MAP = {
+    'A': '𝗔', 'B': '𝗕', 'C': '𝗖', 'D': '𝗗', 'E': '𝗘', 'F': '𝗙',
+    'G': '𝗚', 'H': '𝗛', 'I': '𝗜', 'J': '𝗝', 'K': '𝗞', 'L': '𝗟',
+    'M': '𝗠', 'N': '𝗡', 'O': '𝗢', 'P': '𝗣', 'Q': '𝗤', 'R': '𝗥',
+    'S': '𝗦', 'T': '𝗧', 'U': '𝗨', 'V': '𝗩', 'W': '𝗪', 'X': '𝗫',
+    'Y': '𝗬', 'Z': '𝗭',
+    'a': '𝗮', 'b': '𝗯', 'c': '𝗰', 'd': '𝗱', 'e': '𝗲', 'f': '𝗳',
+    'g': '𝗴', 'h': '𝗵', 'i': '𝗶', 'j': '𝗷', 'k': '𝗸', 'l': '𝗹',
+    'm': '𝗺', 'n': '𝗻', 'o': '𝗼', 'p': '𝗽', 'q': '𝗾', 'r': '𝗿',
+    's': '𝘀', 't': '𝘁', 'u': '𝘂', 'v': '𝘃', 'w': '𝘄', 'x': '𝘅',
+    'y': '𝘆', 'z': '𝘇',
+    '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
+    '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵',
+};
+const UNICODE_ITALIC_BOLD_MAP = {
+    'A': '𝘼', 'B': '𝘽', 'C': '𝘾', 'D': '𝘿', 'E': '𝙀', 'F': '𝙁',
+    'G': '𝙂', 'H': '𝙃', 'I': '𝙄', 'J': '𝙅', 'K': '𝙆', 'L': '𝙇',
+    'M': '𝙈', 'N': '𝙉', 'O': '𝙊', 'P': '𝙋', 'Q': '𝙌', 'R': '𝙍',
+    'S': '𝙎', 'T': '𝙏', 'U': '𝙐', 'V': '𝙑', 'W': '𝙒', 'X': '𝙓',
+    'Y': '𝙔', 'Z': '𝙕',
+    'a': '𝙖', 'b': '𝙗', 'c': '𝙘', 'd': '𝙙', 'e': '𝙚', 'f': '𝙛',
+    'g': '𝙜', 'h': '𝙝', 'i': '𝙞', 'j': '𝙟', 'k': '𝙠', 'l': '𝙡',
+    'm': '𝙢', 'n': '𝙣', 'o': '𝙤', 'p': '𝙥', 'q': '𝙦', 'r': '𝙧',
+    's': '𝙨', 't': '𝙩', 'u': '𝙪', 'v': '𝙫', 'w': '𝙬', 'x': '𝙭',
+    'y': '𝙮', 'z': '𝙯',
+};
+function toUnicodeFont(text, style = 'bold') {
+    const map = style === 'bold-italic' ? UNICODE_ITALIC_BOLD_MAP : UNICODE_BOLD_MAP;
+    let result = '';
+    for (const char of text) {
+        result += map[char] || char;
+    }
+    return result;
+}
+function stripBold(text) {
+    return text.replace(/\*\*/g, '');
+}
+// Weights tuned for conversion: eye-catching styles weighted higher
+const BOLD_STYLE_ENTRIES = [
+    ['md-full', 15],
+    ['md-keywords', 8],
+    ['md-first-line', 5],
+    ['md-last-line', 5],
+    ['unicode-full', 18], // most eye-catching
+    ['unicode-keywords', 10],
+    ['unicode-italic', 8],
+    ['mixed', 10],
+    ['mixed-italic', 6],
+    ['highlight-cta', 10], // high conversion — CTA stands out
+    ['none', 5],
+];
+function pickBoldStyle() {
+    return weightedPick(BOLD_STYLE_ENTRIES.map(e => e[0]), BOLD_STYLE_ENTRIES.map(e => e[1]));
+}
+function mdBoldKeywords(line) {
+    return line.replace(/\b([a-zA-Z]{3,})\b/g, (m) => chance(0.45) ? `**${m}**` : m);
+}
+function unicodeBoldKeywords(line, style = 'bold') {
+    return line.replace(/\b([a-zA-Z]{3,})\b/g, (m) => chance(0.5) ? toUnicodeFont(m, style) : m);
+}
+function applyBoldStyle(text, style) {
+    const clean = stripBold(text);
+    const lines = clean.split('\n');
+    // Find content lines (non-empty, non-connector)
+    const contentIndices = lines.map((l, i) => l.trim() && !/^[.~\-_\s]{1,3}$/.test(l.trim()) ? i : -1).filter(i => i >= 0);
+    const lastContentIdx = contentIndices.length > 0 ? contentIndices[contentIndices.length - 1] : -1;
+    const firstContentIdx = contentIndices.length > 0 ? contentIndices[0] : -1;
+    switch (style) {
+        case 'md-full':
+            return lines.map(l => l.trim() ? `**${l}**` : l).join('\n');
+        case 'md-keywords':
+            return lines.map(l => mdBoldKeywords(l)).join('\n');
+        case 'md-first-line':
+            return lines.map((l, i) => (i === firstContentIdx && l.trim()) ? `**${l}**` : l).join('\n');
+        case 'md-last-line':
+            return lines.map((l, i) => (i === lastContentIdx && l.trim()) ? `**${l}**` : l).join('\n');
+        case 'unicode-full':
+            return lines.map(l => l.trim() ? toUnicodeFont(stripBold(l)) : l).join('\n');
+        case 'unicode-keywords':
+            return lines.map(l => unicodeBoldKeywords(l)).join('\n');
+        case 'unicode-italic':
+            return lines.map(l => l.trim() ? toUnicodeFont(stripBold(l), 'bold-italic') : l).join('\n');
+        case 'mixed': {
+            let firstDone = false;
+            return lines.map(l => {
+                if (!l.trim())
+                    return l;
+                if (!firstDone) {
+                    firstDone = true;
+                    return toUnicodeFont(stripBold(l));
+                }
+                return `**${l}**`;
+            }).join('\n');
+        }
+        case 'mixed-italic': {
+            let firstDone = false;
+            return lines.map(l => {
+                if (!l.trim())
+                    return l;
+                if (!firstDone) {
+                    firstDone = true;
+                    return toUnicodeFont(stripBold(l), 'bold-italic');
+                }
+                return `**${l}**`;
+            }).join('\n');
+        }
+        case 'highlight-cta':
+            // CTA (last content line) gets bold, rest is plain — draws eye to action
+            return lines.map((l, i) => {
+                if (i === lastContentIdx && l.trim()) {
+                    return chance(0.5) ? `**${l}**` : toUnicodeFont(stripBold(l));
+                }
+                return stripBold(l);
+            }).join('\n');
+        case 'none':
+            return clean;
+        default:
+            return text;
+    }
+}
+// ── Punctuation ────────────────────────────────────────────────
+/** Vary only pure punctuation runs (!!, ??) — NOT dots mixed with text */
+function varyPunctuation(text) {
+    // Match !! or ?? (not dots — handled separately)
+    return text.replace(/([!?])\1+/g, (match, char) => {
+        const delta = randInt(-1, 2);
+        return char.repeat(Math.max(1, match.length + delta));
+    });
+}
+/** Vary standalone dot sequences (..... used as ellipsis/pause) */
+function varyDots(text) {
+    // Only match 3+ dots that aren't part of a separator pattern
+    return text.replace(/(?<![_~\-])\.{3,}(?![_~\-])/g, (match) => {
+        const delta = randInt(-1, 2);
+        return '.'.repeat(Math.max(2, match.length + delta));
+    });
+}
+// ── Vowel Stretching ───────────────────────────────────────────
+function varyVowelStretch(text) {
+    return text.replace(/([aeiouAEIOU])\1{2,}/g, (match, vowel) => {
+        const delta = randInt(-1, 2);
+        return vowel.repeat(Math.max(2, match.length + delta));
+    });
+}
+const CONNECTOR_TEMPLATES = {
+    'dots': () => '\n' + '.'.repeat(randInt(1, 3)) + '\n',
+    'newlines': () => '\n'.repeat(randInt(2, 4)),
+    'dash-dots': () => '\n' + pick(['-.-', '-.-.', '-..', '.-.', '·.·']) + '\n',
+    'tilde': () => '\n' + '~'.repeat(randInt(1, 3)) + '\n',
+    'minimal': () => '\n\n',
+    'spaced-dots': () => '\n.\n.\n',
+    'arrow': () => '\n' + pick(['⇣', '↓', '⤵']) + '\n',
+    'star': () => '\n' + pick(['·', '✦', '⋆', '★']) + '\n',
+};
+function varyConnectors(text) {
+    // Match the .\n.\n.\n.\n pattern (dots on their own lines)
+    return text.replace(/(?:\n[.~\-]{0,3}){2,}\n/g, () => {
+        const style = pick(Object.keys(CONNECTOR_TEMPLATES));
+        return CONNECTOR_TEMPLATES[style]();
+    });
+}
+// ── Separators ─────────────────────────────────────────────────
+const SEPARATOR_POOL = [
+    '_._._._._._._',
+    '...........',
+    '~.~.~.~.~.~',
+    '----------',
+    '___________',
+    '~-~-~-~-~-~',
+    '-~-~-~-~-~-',
+    '_ . _ . _ . _',
+    '. _ . _ . _ .',
+    '- . - . - . -',
+    '~ ~ ~ ~ ~',
+    '. . . . .',
+    '- - - - -',
+    '·.·.·.·.·',
+    '_ _ _ _ _',
+    '═══════════',
+    '━━━━━━━━',
+    '▸▸▸▸▸▸▸',
+    '⋆ ⋆ ⋆ ⋆ ⋆',
+    '✦.✦.✦.✦',
+];
+function varySeparators(text) {
+    // Two-pass approach:
+    // 1. Match mixed-char separator patterns (_._._, ~.~.~, -~-~-) — these are
+    //    unambiguously separators even when attached to words
+    // 2. Match pure single-char runs (_____, ------, ~~~~) that are standalone
+    //    but NOT pure dots (.....) since those are ellipsis in text
+    // Pass 1: Mixed separators like _._._ or ~.~.~ (must contain 2+ different chars from _.-~)
+    let result = text.replace(/[_.\-~]{5,}/g, (match) => {
+        const uniqueChars = new Set(match.split(''));
+        // Only replace if it uses 2+ different separator chars (it's a pattern, not ellipsis)
+        if (uniqueChars.size >= 2)
+            return pick(SEPARATOR_POOL);
+        return match;
+    });
+    // Pass 2: Pure single-char runs (_____, ------, ~~~~~) but NOT dots
+    // These need space/boundary context to avoid matching inside words
+    result = result.replace(/(?<=^|[\s*])([_\-~])\1{4,}(?=$|[\s*])/gm, () => pick(SEPARATOR_POOL));
+    return result;
+}
+// ── Emoji Variation ────────────────────────────────────────────
+const EMOJI_SWAPS = {
+    '👀': ['👁️', '🫣', '🧐', '🤭', '😏', '👀'],
+    '😭': ['🥺', '😩', '😫', '🥲', '😢', '😭'],
+    '🔥': ['💥', '⚡', '✨', '💫', '🌟', '🔥'],
+    '❤': ['💕', '💗', '💖', '🩷', '♥️', '❤'],
+    '😁': ['😄', '😊', '🤗', '☺️', '😸', '😁'],
+    '🥰': ['😍', '💓', '🤩', '💞', '😻', '🥰'],
+};
+function varyEmojis(text) {
+    let result = text;
+    for (const [emoji, pool] of Object.entries(EMOJI_SWAPS)) {
+        if (result.includes(emoji) && chance(0.45)) {
+            // Replace first occurrence only to keep the rest natural
+            result = result.replace(emoji, pick(pool));
+        }
+    }
+    return result;
+}
+// ── Urgency Boosters (Conversion) ──────────────────────────────
+const URGENCY_TAGS = [
+    '⏰', '🔴', '📍', '⚡', '🆕', '💯', '🎯',
+];
+const CTA_BOOSTERS = [
+    ' 👆', ' ⬆️', ' 🔝', ' ☝️', '',
+];
+/** Occasionally add urgency signals near the CTA line */
+function addUrgencySignals(text) {
+    if (!chance(0.2))
+        return text;
+    const lines = text.split('\n');
+    const contentLines = lines.map((l, i) => ({ l, i })).filter(x => x.l.trim().length > 5);
+    if (contentLines.length < 2)
+        return text;
+    // Add to last content line (the CTA)
+    const last = contentLines[contentLines.length - 1];
+    const booster = pick(CTA_BOOSTERS);
+    if (booster) {
+        const hasBoldEnd = lines[last.i].endsWith('**');
+        if (hasBoldEnd) {
+            lines[last.i] = lines[last.i].slice(0, -2) + booster + '**';
+        }
+        else {
+            lines[last.i] = lines[last.i] + booster;
+        }
+    }
+    return lines.join('\n');
+}
+// ── Casual Fillers ─────────────────────────────────────────────
+function addCasualFillers(text) {
+    if (!chance(0.25))
+        return text;
+    const fillers = ['~', '..', ' ~', '..!', ' .', '...'];
+    const lines = text.split('\n');
+    return lines.map(line => {
+        if (!line.trim() || !chance(0.2))
+            return line;
+        const filler = pick(fillers);
+        const hasBoldEnd = line.endsWith('**');
+        if (hasBoldEnd) {
+            return line.slice(0, -2) + filler + '**';
+        }
+        return line + filler;
+    }).join('\n');
+}
+// ── Micro Case Variation ───────────────────────────────────────
+function microCaseVariation(text) {
+    if (!chance(0.2))
+        return text;
+    return text.replace(/([a-z])\1{3,}/g, (match) => {
+        if (!chance(0.35))
+            return match;
+        const pos = randInt(1, match.length - 1);
+        return match.slice(0, pos) + match[pos].toUpperCase() + match.slice(pos + 1);
+    });
+}
+// ── Greeting Enhancers (Conversion) ────────────────────────────
+const GREETING_SPARKLES = ['✨', '💫', '⭐', '🌟', '💖', '🫶', ''];
+/** Occasionally add a sparkle after the greeting word */
+function enhanceGreeting(text) {
+    if (!chance(0.25))
+        return text;
+    // Match common greetings at the start of text
+    return text.replace(/^(\*\*)?(H[eaiylou]{3,}|O[yieou]{3,})/i, (match) => match + pick(GREETING_SPARKLES));
+}
+// ── Letter Spacing (for emphasis) ──────────────────────────────
+/** Occasionally space out a short key word: FREE -> F R E E */
+function spacedEmphasis(text) {
+    if (!chance(0.12))
+        return text;
+    // Only space out short ALL-CAPS words (likely intentional emphasis)
+    return text.replace(/\b([A-Z]{2,5})\b/, (match) => {
+        if (!chance(0.5))
+            return match;
+        return match.split('').join(' ');
+    });
+}
+// ── Patterned Layout System ────────────────────────────────────
+//
+// Makes messages look designed with indentation patterns.
+// Works on any line count. Separates "content lines" from
+// "filler lines" (connectors, single-char decorators) and
+// indents each content line according to a visual pattern.
+const SP4 = '    '; // 4 spaces
+const SP8 = '        '; // 8 spaces
+const SP12 = '            '; // 12 spaces
+const SP16 = '                '; // 16 spaces
+/** Indent levels mapped to spaces */
+const INDENT_MAP = {
+    0: '', 1: SP4, 2: SP8, 3: SP12, 4: SP16,
+};
+function indent(level) {
+    return INDENT_MAP[level] || '';
+}
+/** Is this line a filler/connector (dots, tildes, arrows, single char)? */
+function isFillerLine(line) {
+    const t = line.trim();
+    if (!t)
+        return true;
+    // Single decorative chars or short connector patterns
+    if (t.length <= 4 && /^[.~\-_·✦⋆★⇣↓⤵▸═━]+$/.test(t))
+        return true;
+    return false;
+}
+const LAYOUT_PATTERNS = [
+    {
+        name: 'left-aligned',
+        getIndents: (n) => Array(n).fill(0),
+        weight: 8,
+    },
+    {
+        name: 'center-block',
+        getIndents: (n) => Array(n).fill(2),
+        fillerIndent: 3,
+        weight: 10,
+    },
+    {
+        name: 'staircase-down',
+        getIndents: (n) => {
+            const step = Math.min(4, Math.ceil(4 / Math.max(n - 1, 1)));
+            return Array.from({ length: n }, (_, i) => Math.min(4, i * step));
+        },
+        weight: 15, // eye-catching
+    },
+    {
+        name: 'staircase-up',
+        getIndents: (n) => {
+            const step = Math.min(4, Math.ceil(4 / Math.max(n - 1, 1)));
+            return Array.from({ length: n }, (_, i) => Math.min(4, (n - 1 - i) * step));
+        },
+        weight: 12,
+    },
+    {
+        name: 'wave',
+        getIndents: (n) => {
+            if (n <= 1)
+                return [0];
+            if (n === 2)
+                return [0, 2];
+            // 0 → peak → 0
+            const mid = Math.floor(n / 2);
+            return Array.from({ length: n }, (_, i) => {
+                const dist = Math.abs(i - mid);
+                return Math.max(0, Math.min(4, 3 - dist));
+            });
+        },
+        fillerIndent: 2,
+        weight: 10,
+    },
+    {
+        name: 'right-heavy',
+        getIndents: (n) => {
+            if (n <= 1)
+                return [0];
+            // First line flush, rest indented
+            return [0, ...Array(n - 1).fill(3)];
+        },
+        weight: 10,
+    },
+    {
+        name: 'left-heavy',
+        getIndents: (n) => {
+            if (n <= 1)
+                return [2];
+            // First line indented, rest flush
+            return [3, ...Array(n - 1).fill(0)];
+        },
+        weight: 8,
+    },
+    {
+        name: 'diamond',
+        getIndents: (n) => {
+            if (n <= 1)
+                return [2];
+            if (n === 2)
+                return [2, 0];
+            // indent → flush → indent
+            const mid = Math.floor(n / 2);
+            return Array.from({ length: n }, (_, i) => {
+                const dist = Math.abs(i - mid);
+                return Math.min(4, dist * 2);
+            });
+        },
+        fillerIndent: 1,
+        weight: 10,
+    },
+    {
+        name: 'funnel',
+        getIndents: (n) => {
+            // wide (flush) → narrow (indented)
+            if (n <= 1)
+                return [0];
+            const step = Math.ceil(4 / (n - 1));
+            return Array.from({ length: n }, (_, i) => Math.min(4, i * step));
+        },
+        fillerIndent: 2,
+        weight: 10,
+    },
+    {
+        name: 'zigzag',
+        getIndents: (n) => Array.from({ length: n }, (_, i) => i % 2 === 0 ? 0 : 3),
+        weight: 7,
+    },
+];
+function pickLayout() {
+    return weightedPick(LAYOUT_PATTERNS, LAYOUT_PATTERNS.map(p => p.weight));
+}
+/**
+ * Apply a visual layout pattern to a multi-line message.
+ * Identifies content vs filler lines, indents content lines
+ * per the chosen pattern, and optionally indents fillers.
+ */
+function applyPatternedLayout(text) {
+    const lines = text.split('\n');
+    if (lines.length < 3)
+        return text; // Too short for layout to matter
+    // Classify each line
+    const classified = lines.map((line, i) => ({
+        text: line,
+        index: i,
+        isFiller: isFillerLine(line),
+    }));
+    const contentLines = classified.filter(c => !c.isFiller);
+    if (contentLines.length < 2)
+        return text; // Only 1 content line — layout won't help
+    const layout = pickLayout();
+    const indents = layout.getIndents(contentLines.length);
+    // Build indent map: content line index → indent level
+    const indentByOrigIndex = new Map();
+    contentLines.forEach((cl, ci) => {
+        indentByOrigIndex.set(cl.index, indents[ci] ?? 0);
+    });
+    // Apply indents
+    const result = classified.map(cl => {
+        if (cl.isFiller) {
+            // Filler gets the layout's filler indent or stays as is
+            const fIndent = layout.fillerIndent ?? 0;
+            const trimmed = cl.text.trim();
+            if (!trimmed)
+                return ''; // blank lines stay blank
+            return indent(fIndent) + trimmed;
+        }
+        const level = indentByOrigIndex.get(cl.index) ?? 0;
+        return indent(level) + cl.text;
+    });
+    return result.join('\n');
+}
+// ── Decorative Borders (occasional) ───────────────────────────
+const BORDER_STYLES = [
+    { top: '┌─────────────────────┐', bottom: '└─────────────────────┘' },
+    { top: '╭───────────────────╮', bottom: '╰───────────────────╯' },
+    { top: '✧══════════════════✧', bottom: '✧══════════════════✧' },
+    { top: '⊱ ──────── ⊰', bottom: '⊱ ──────── ⊰' },
+    { top: '▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️', bottom: '▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️' },
+    { top: '·˚ ༘ ┊͙✧˖*°', bottom: '°*˖✧͙┊ ༘ ˚·' },
+    { top: '━━━━━━━━━━━━━━━━━', bottom: '━━━━━━━━━━━━━━━━━' },
+    { top: '⋆ ˚。⋆ ˚。⋆ ˚。⋆ ˚。⋆', bottom: '⋆ ˚。⋆ ˚。⋆ ˚。⋆ ˚。⋆' },
+    { top: '꒰ ˶• ᴗ •˶꒱', bottom: '꒰ ˶• ᴗ •˶꒱' },
+];
+/** Occasionally wrap the entire message in a decorative border */
+function addDecorativeBorder(text) {
+    if (!chance(0.15))
+        return text;
+    const border = pick(BORDER_STYLES);
+    return `${border.top}\n${text}\n${border.bottom}`;
+}
+// ── Bullet / Arrow Prefix (for CTA lines) ─────────────────────
+const CTA_PREFIXES = [
+    '➜ ', '▸ ', '► ', '⟩ ', '→ ', '◆ ', '✦ ', '⇒ ',
+    '❥ ', '☞ ', '⊳ ', '▹ ',
+];
+/** Occasionally add an arrow/bullet prefix to the CTA (last content) line */
+function prefixCTA(text) {
+    if (!chance(0.2))
+        return text;
+    const lines = text.split('\n');
+    // Find last content line
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const t = lines[i].trim();
+        if (t && !isFillerLine(lines[i])) {
+            // Preserve leading indent
+            const leadingSpaces = lines[i].match(/^(\s*)/)?.[1] || '';
+            const content = lines[i].trimStart();
+            lines[i] = leadingSpaces + pick(CTA_PREFIXES) + content;
+            break;
+        }
+    }
+    return lines.join('\n');
+}
+// ── Clean Up ──────────────────────────────────────────────────
+function preserveParagraphBreaks(text) {
+    return text.replace(/\n{5,}/g, '\n\n\n');
+}
+/**
+ * Apply natural, Telegram-safe variations to make each message unique
+ * and eye-catching. No homoglyphs, no mixed scripts.
+ */
+function naturalizeText(text, options = {}) {
+    if (!text || !text.trim())
+        return text;
+    let result = text;
+    // 1. Emoji swaps (before any formatting changes)
+    result = varyEmojis(result);
+    // 2. Punctuation & dots (order matters: dots first, then !/?)
+    result = varyDots(result);
+    result = varyPunctuation(result);
+    // 3. Vowel stretch variation
+    result = varyVowelStretch(result);
+    // 4. Separator variation (the _._._. patterns)
+    result = varySeparators(result);
+    // 5. Connector variation (the .\n.\n.\n spacers)
+    result = varyConnectors(result);
+    // 6. Micro case variation in stretched words
+    result = microCaseVariation(result);
+    // 7. Greeting enhancer (sparkle after greeting)
+    result = enhanceGreeting(result);
+    // 8. Spaced emphasis on short caps words
+    result = spacedEmphasis(result);
+    if (!options.maintainFormatting) {
+        // 9. Add casual fillers (before bold to avoid breaking markers)
+        result = addCasualFillers(result);
+        // 10. Add urgency signals near CTA
+        result = addUrgencySignals(result);
+        // 11. Apply bold style variation
+        const style = pickBoldStyle();
+        result = applyBoldStyle(result, style);
+        // 12. Patterned layout (indent content lines in visual patterns)
+        result = applyPatternedLayout(result);
+        // 13. CTA prefix (arrow/bullet before the action line)
+        result = prefixCTA(result);
+        // 14. Decorative border (occasional)
+        result = addDecorativeBorder(result);
+    }
+    // 15. Clean up excessive whitespace
+    result = preserveParagraphBreaks(result);
+    return result.trim();
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/notification-format.ts"
 /*!***************************************************************!*\
   !*** ../../packages/tg-core/src/utils/notification-format.ts ***!
@@ -16123,170 +16823,6 @@ const ErrorUtils = {
 
 /***/ },
 
-/***/ "../../packages/tg-core/src/utils/pattern-indent.ts"
-/*!**********************************************************!*\
-  !*** ../../packages/tg-core/src/utils/pattern-indent.ts ***!
-  \**********************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   getPatternedIndent: () => (/* binding */ getPatternedIndent)
-/* harmony export */ });
-// Define exact indent spaces
-const INDENT_0 = '';
-const INDENT_5 = '        '; // 5 spaces
-const INDENT_10 = '               '; // 10 spaces
-/**
- * Available indent patterns (spaces for line1, line2, line3)
- */
-const PATTERNS = {
-    PATTERN_1: [0, 5, 10], // Ascending
-    PATTERN_2: [0, 0, 10], // Flat then jump
-    PATTERN_3: [10, 5, 0], // Descending
-    PATTERN_4: [0, 10, 0], // Peak in middle
-    PATTERN_5: [0, 5, 0], // Small peak
-};
-function selectPattern(lengths) {
-    const [len1, len2, len3] = lengths;
-    // Relative comparison when most lines are short
-    const maxLen = Math.max(len1, len2, len3);
-    const minLen = Math.min(len1, len2, len3);
-    // If all lines are very similar length (±3 chars), prefer symmetric patterns
-    if (maxLen - minLen <= 3) {
-        // Alternate between small peak and flat-then-jump for variety
-        if (len2 < len1 || len2 < len3) {
-            return PATTERNS.PATTERN_5; // [0,5,0] small peak
-        }
-        return PATTERNS.PATTERN_2; // [0,0,10] flat then drop
-    }
-    // Clear longest line gets least indent, shortest gets most
-    const indentOrder = [0, 1, 2].sort((a, b) => lengths[a] - lengths[b]); // ascending length → more indent
-    // Map: shortest → 10, middle → 5, longest → 0
-    const indentMap = [0, 0, 0];
-    indentMap[indentOrder[0]] = 10; // shortest line
-    indentMap[indentOrder[1]] = 5; // middle
-    indentMap[indentOrder[2]] = 0; // longest line
-    // Force into available patterns (closest match)
-    const indentKey = indentMap.join(',');
-    const patternMap = {
-        '10,5,0': PATTERNS.PATTERN_3,
-        '10,0,5': [10, 0, 5],
-        '5,10,0': [5, 10, 0],
-        '5,0,10': [5, 0, 10],
-        '0,10,5': [0, 10, 5],
-        '0,5,10': PATTERNS.PATTERN_1,
-        '0,10,0': PATTERNS.PATTERN_4,
-        '0,5,0': PATTERNS.PATTERN_5,
-        '0,0,10': PATTERNS.PATTERN_2,
-        '10,0,0': [10, 0, 0],
-        '5,0,0': [5, 0, 0],
-    };
-    if (patternMap[indentKey]) {
-        return patternMap[indentKey];
-    }
-    return PATTERNS.PATTERN_2;
-}
-/**
- * Convert indent number to actual spaces
- */
-function getIndentSpaces(indentLevel) {
-    switch (indentLevel) {
-        case 0: return INDENT_0;
-        case 5: return INDENT_5;
-        case 10: return INDENT_10;
-        default: return INDENT_0;
-    }
-}
-/**
- * Applies pattern-based indent for short promotion messages.
- * Longer lines → patterns with less indent
- * Shorter lines → patterns with more indent
- *
- * @param message - Input string with 2 or 3 lines
- * @returns Formatted string with pattern-based indents
- */
-function getPatternedIndent(message) {
-    if (!message)
-        return '';
-    const lines = message.split('\n').map(l => l.trim());
-    if (lines.length === 2) {
-        return `${getIndentSpaces(0)}${lines[0]}\n${getIndentSpaces(5)}${lines[1]}`;
-    }
-    if (lines.length !== 3) {
-        return lines.join('\n');
-    }
-    const lengths = lines.map(l => l.length);
-    const pattern = selectPattern(lengths);
-    const possiblePatterns = [
-        [1, 1, 1],
-        [1, 1, 5],
-        [2, 2, 2]
-    ];
-    const breaksPattern = possiblePatterns[Math.floor(Math.random() * possiblePatterns.length)];
-    return lines.map((line, i) => {
-        const indent = getIndentSpaces(pattern[i]);
-        const breaks = '\n'.repeat(breaksPattern[i] || 1);
-        return indent + line + breaks;
-    }).join('');
-}
-// // ============================================
-// // LIVE EXAMPLES - Pattern Demonstrations
-// // ============================================
-// console.log("=== PATTERN 1: [0, 5, 10] - Ascending ===");
-// console.log("(Best for: Short lines)\n");
-// console.log(getPatternedIndent("Hi!\nYes\nOk"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("Hey\nCool\nNice"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("Go\nYes please\nSounds good!"));
-// console.log("\n\n");
-// console.log("=== PATTERN 2: [0, 0, 10] - Flat then jump ===");
-// console.log("(Best for: Long first two lines, short last)\n");
-// console.log(getPatternedIndent("This is a very long message that contains a lot of information\nAnother lengthy line with substantial content here\nOk!"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("I wanted to let you know about the upcoming changes\nWe'll be implementing new features next week\nYes"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("The meeting has been rescheduled for tomorrow at noon\nPlease make sure to bring all necessary documents\nOk"));
-// console.log("\n\n");
-// console.log("=== PATTERN 3: [10, 5, 0] - Descending ===");
-// console.log("(Best for: Short first line, long last line)\n");
-// console.log(getPatternedIndent("Hi\nHow are you?\nI've been working on this project and would love to get your feedback"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("Hey!\nLet me know\nI think we should schedule a meeting to discuss all the details"));
-// console.log("\n\n");
-// console.log("=== PATTERN 4: [0, 10, 0] - Peak in middle ===");
-// console.log("(Best for: Long first and last, short middle)\n");
-// console.log(getPatternedIndent("I hope you're having a wonderful day today\nYes!\nThank you so much for reaching out"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("Let's meet at the coffee shop tomorrow\nOk\nI'll bring the documents we discussed"));
-// console.log("\n\n");
-// console.log("=== PATTERN 5: [0, 5, 0] - Small peak ===");
-// console.log("(Best for: Mostly long/medium lines)\n");
-// console.log(getPatternedIndent("This is a comprehensive message with detailed information\nAnother substantial line that provides context\nAnd finally one more lengthy statement here"));
-// console.log("\n---\n");
-// console.log(getPatternedIndent("I've been thinking about our conversation yesterday\nLet me know what you think about this approach\nWe can discuss further when we meet next week"));
-// console.log("\n\n");
-// console.log("=== MIXED EXAMPLES ===\n");
-// console.log("Example 1:");
-// console.log(getPatternedIndent("Meeting at 3pm\nDon't forget!\nBring the files"));
-// console.log("\n");
-// console.log("Example 2:");
-// console.log(getPatternedIndent("URGENT\nPlease call me as soon as possible\nOk"));
-// console.log("\n");
-// console.log("Example 3:");
-// console.log(getPatternedIndent("Your order has been confirmed\nYes\nThank you for your purchase!"));
-// console.log("\n");
-// console.log("Example 4:");
-// console.log(getPatternedIndent("Go\nI think we should reconsider our strategy\nNo"));
-// console.log("\n");
-// console.log("Example 5:");
-// console.log(getPatternedIndent("I wanted to inform you about the changes\nThe new policy will take effect next month\nLet me know if you have questions"));
-
-
-/***/ },
-
 /***/ "../../packages/tg-core/src/utils/random.ts"
 /*!**************************************************!*\
   !*** ../../packages/tg-core/src/utils/random.ts ***!
@@ -16422,6 +16958,90 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
     if (secs > 0 || result.length === 0)
         result.push(`${secs}s`);
     return result.join(" ");
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts"
+/*!**********************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/sanitizePromotionRendering.ts ***!
+  \**********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   sanitizePromotionRendering: () => (/* binding */ sanitizePromotionRendering)
+/* harmony export */ });
+/**
+ * Structural sanitizer for outgoing promotion text.
+ *
+ * Telegram bubbles are VARIABLE width and wrap by pixel, not by character. Any layout that assumes
+ * a fixed-width canvas — leading-space indentation, letter-spaced banners, box-drawing frames —
+ * overflows the bubble and breaks mid-word. Observed in production 2026-08-14:
+ *
+ *   - "V I D E O C A L L" wrapped into "VIDEOCA" / "LL"
+ *   - box-drawing corners detached from their horizontal rules
+ *   - a 2-word message rendered as a ~500px hollow box with orphaned stray dots
+ *
+ * Measured over 10,984 stored pool entries: 60.9% carried >=4-space leading indents and 2.5%
+ * carried blank-line runs. Those entries are already persisted, so this runs on the SEND path
+ * (not only at generation) to repair legacy pool text on the way out.
+ *
+ * This is deliberately structural only. It does not touch wording, emoji, or the mathematical-bold
+ * styling applied elsewhere — AI-sourced messages measurably outperform the legacy pool
+ * (2.42% vs 2.12% DM-per-send), so their CONTENT is left alone.
+ */
+/** Max consecutive newlines to keep. One blank line is human; four is a broken layout. */
+const MAX_CONSECUTIVE_NEWLINES = 2;
+/**
+ * Collapse runs of 4+ letter-spaced single characters ("V I D E O") back into a word ("VIDEO").
+ * Requires 4+ so ordinary short words and initialisms ("I m", "U R") are untouched.
+ */
+function collapseLetterSpacing(line) {
+    return line.replace(/(?:[\p{L}\p{N}] ){3,}[\p{L}\p{N}](?!\S)/gu, (match) => match.replace(/ /g, ''));
+}
+/** Strip box-drawing, block-element, and rule characters used to frame messages. */
+function stripFrameCharacters(text) {
+    return text.replace(/[─-╿▀-▟■-◿]+/g, ' ');
+}
+/**
+ * Normalize the structure of a promotion message without altering its wording.
+ *
+ * - removes leading/trailing whitespace per line (kills indent-based layout)
+ * - drops box-drawing frame characters
+ * - collapses letter-spaced banners
+ * - caps consecutive blank lines
+ * - drops lines left empty of any letter/number/emoji content (the orphaned "." artifacts)
+ */
+function sanitizePromotionRendering(text) {
+    if (typeof text !== 'string' || text.trim() === '')
+        return '';
+    const lines = stripFrameCharacters(text)
+        .replace(/\r\n?/g, '\n')
+        .split('\n')
+        .map((line) => collapseLetterSpacing(line.replace(/[^\S\n]+/g, ' ').trim()));
+    const kept = [];
+    let blankRun = 0;
+    for (const line of lines) {
+        if (line === '') {
+            blankRun++;
+            // A blank line is only meaningful between two content lines, and never more than one.
+            if (blankRun < MAX_CONSECUTIVE_NEWLINES && kept.length > 0)
+                kept.push('');
+            continue;
+        }
+        // A line with no letters, digits, or emoji is a layout artifact (a stray "." or "~" left
+        // behind by a wrapped separator), not content.
+        if (!/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(line))
+            continue;
+        blankRun = 0;
+        kept.push(line);
+    }
+    while (kept.length > 0 && kept[kept.length - 1] === '')
+        kept.pop();
+    return kept.join('\n').trim();
 }
 
 
@@ -22277,6 +22897,13 @@ class ReactionService {
         this.emoticonPreferences = [];
         // MEMORY FIX: Maximum channels to keep in memory
         this.MAX_CHANNELS = 100;
+        /**
+         * Reaction pool composition. Deliberately leaves ~30% for dialog-order fill so channels with no
+         * participant/DM signal yet (newly joined, not hydrated) still enter the pool and can earn one.
+         * A 100% scored pool would freeze the account onto today's known-good set and never explore.
+         */
+        this.REACTION_POOL_ATTRIBUTED_SHARE = 0.35;
+        this.REACTION_POOL_PARTICIPANT_SHARE = 0.35;
         // Stats reset interval
         this.STATS_RESET_INTERVAL = 24 * 60 * 60 * 1000;
         // Health check interval
@@ -22989,7 +23616,7 @@ class ReactionService {
             if (unrestricted.length > maxChannels) {
                 logger.warn(`[LIMIT] Channels trimmed from ${unrestricted.length} to ${maxChannels} (MAX_CHANNELS=${this.MAX_CHANNELS})`);
             }
-            this.channels = unrestricted.slice(0, maxChannels);
+            this.channels = await this.buildReactionPool(unrestricted, maxChannels);
             // Reset round-robin index
             this.channelRoundRobinIndex = 0;
             if (oldChannels && oldChannels !== this.channels) {
@@ -23051,6 +23678,87 @@ class ReactionService {
      * Round-robin channel selection for even distribution across all channels.
      * Skips channels that are restricted, on cooldown, or at daily limit.
      */
+    /**
+     * Build the reaction pool as a deliberate MIX of reach and proven value, then shuffle.
+     *
+     * The pool used to be `unrestricted.slice(0, maxChannels)` — the first N dialogs Telegram
+     * happened to return, ordered roughly by recent activity. That correlates with neither audience
+     * size nor conversion, so a dead 40-member group and a 50-DM converter got identical budget.
+     *
+     * Composition (of `limit` slots):
+     *   - ATTRIBUTED_SHARE  : highest `dmsCredited` — channels that provably produce DMs
+     *   - PARTICIPANT_SHARE : largest `participantsCount` — reach, where a reaction is most seen
+     *   - remainder         : dialog-order fill, preserving discovery of channels with no signal yet
+     *
+     * The result is SHUFFLED because selectChannel() walks a round-robin index: leaving the list in
+     * score order would make every account react to the same top channels in the same sequence
+     * every cycle — a recognisable pattern, and a thundering herd on the best channels.
+     *
+     * Falls back to the previous dialog-order slice when the store supplies no signals.
+     */
+    async buildReactionPool(candidates, limit) {
+        // Nothing to choose between: round-robin already visits every channel, so shuffling here
+        // would only add nondeterminism (and make order-based assertions flaky) for no benefit.
+        if (candidates.length <= limit)
+            return candidates;
+        if (typeof this.db.getReactionChannelSignals !== 'function')
+            return candidates.slice(0, limit);
+        let signals;
+        try {
+            signals = await this.db.getReactionChannelSignals(candidates.map((channel) => this.normalizeChannelId(channel.id)));
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Channel signal lookup failed; using dialog order', false);
+            return candidates.slice(0, limit);
+        }
+        if (!signals || signals.size === 0)
+            return candidates.slice(0, limit);
+        const attributedSlots = Math.floor(limit * this.REACTION_POOL_ATTRIBUTED_SHARE);
+        const participantSlots = Math.floor(limit * this.REACTION_POOL_PARTICIPANT_SHARE);
+        const picked = new Set();
+        const pool = [];
+        const take = (ranked, slots) => {
+            for (const channel of ranked) {
+                if (pool.length >= limit || slots <= 0)
+                    break;
+                const id = this.normalizeChannelId(channel.id);
+                if (picked.has(id))
+                    continue;
+                picked.add(id);
+                pool.push(channel);
+                slots--;
+            }
+        };
+        const scoreOf = (channel, key) => {
+            const value = signals?.get(this.normalizeChannelId(channel.id))?.[key];
+            return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+        };
+        // Proven converters first — they are the scarcer resource (1,676 fleet-wide with >=5 DMs).
+        take(candidates.filter((c) => scoreOf(c, 'dmsCredited') > 0)
+            .sort((a, b) => scoreOf(b, 'dmsCredited') - scoreOf(a, 'dmsCredited')), attributedSlots);
+        // Then reach.
+        take(candidates.filter((c) => scoreOf(c, 'participantsCount') > 0)
+            .sort((a, b) => scoreOf(b, 'participantsCount') - scoreOf(a, 'participantsCount')), participantSlots);
+        // Discovery: fill remaining slots from channels with NO signal yet, in dialog order. These
+        // are prioritised over leftover scored channels because a scored channel already had its
+        // chance at the ranked slots above — without this, a candidate list whose top entries are
+        // all scored consumes every discovery slot and the pool never explores anything new.
+        take(candidates.filter((c) => scoreOf(c, 'dmsCredited') === 0 && scoreOf(c, 'participantsCount') === 0), limit - pool.length);
+        // Anything still unfilled (e.g. every candidate is scored) falls back to dialog order.
+        take(candidates, limit - pool.length);
+        logger.info(`[${this.instanceId}] Reaction pool: ${pool.length}/${candidates.length} ` +
+            `(attributed<=${attributedSlots}, participants<=${participantSlots}, signals=${signals.size})`);
+        return this.shuffleDialogs(pool);
+    }
+    /** Fisher-Yates. The pool must not stay in score order — see buildReactionPool. */
+    shuffleDialogs(dialogs) {
+        const shuffled = [...dialogs];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        return shuffled;
+    }
     selectChannel() {
         if (this.channels.length === 0)
             return null;
@@ -27822,6 +28530,44 @@ class UserDataDtoCrud {
     //         parseError(error)
     //     }
     // }
+    /**
+     * Ranking signals for the reaction channel pool, keyed by normalized channelId.
+     *
+     * Reactions used to select channels in raw dialog order (~recency of activity), which tracks
+     * neither audience size nor value. This supplies the two signals the pool mixes on:
+     * `participantsCount` from activeChannels (present on ~86% of rows) and `dmsCredited` from
+     * channelIntelligence. Best-effort: a failure returns null and the caller keeps dialog order.
+     */
+    async getReactionChannelSignals(channelIds) {
+        try {
+            const normalized = [...new Set((channelIds || [])
+                    .map((id) => this.normalizeChannelIdForDb(id))
+                    .filter((id) => (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.isUsableActiveChannelId)(id)))];
+            if (normalized.length === 0)
+                return null;
+            const signals = new Map();
+            const activeRows = await this.activeChannelDb.find({ channelId: { $in: normalized } }, { projection: { channelId: 1, participantsCount: 1, _id: 0 } }).toArray();
+            for (const row of activeRows) {
+                const count = Number(row.participantsCount);
+                if (Number.isFinite(count) && count > 0) {
+                    signals.set(String(row.channelId), { participantsCount: count });
+                }
+            }
+            const intelRows = await this.channelIntelligenceDb.find({ channelId: { $in: normalized } }, { projection: { channelId: 1, 'DMs.credited': 1, _id: 0 } }).toArray();
+            for (const row of intelRows) {
+                const credited = Number(row.DMs?.credited);
+                if (!Number.isFinite(credited) || credited <= 0)
+                    continue;
+                const key = String(row.channelId);
+                signals.set(key, { ...(signals.get(key) ?? {}), dmsCredited: credited });
+            }
+            return signals.size > 0 ? signals : null;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error getting reaction channel signals', false);
+            return null;
+        }
+    }
     async getRestrictedChannels() {
         // reactRestricted is CHANNEL-WIDE reactions-off only (account bans stay in-memory per instance).
         // 7-day lookback self-heals: a genuinely disabled channel re-persists on next probe, refreshing
@@ -49930,14 +50676,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
 /* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../index */ "./src/index.ts");
 /* harmony import */ var _tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
-/* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../messages/messageUtils */ "./src/messages/messageUtils.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/naturalizeText */ "../../packages/tg-core/src/utils/naturalizeText.ts");
+/* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../messages/messageUtils */ "./src/messages/messageUtils.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+
 
 
 
@@ -49955,8 +50703,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const randomNumber = Math.floor(Math.random() * 10);
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger(`promotion-engine-${randomNumber}`);
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.BasePromotionEngine {
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger(`promotion-engine-${randomNumber}`);
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || "defaultClient", options.instanceId || process.env.mobile || "defaultMobile");
         this.channelIndex = 0;
@@ -50056,13 +50804,13 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.generateCustomMessage)(_messages_messageUtils__WEBPACK_IMPORTED_MODULE_7__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.generateCustomMessage)(_messages_messageUtils__WEBPACK_IMPORTED_MODULE_8__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.generateFollowupMsg)(),
         };
     }
     errorMessageIndicatesMissingEntity(errorMessage) {
-        return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(errorMessage, ['Telegram entity not found']);
+        return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_9__.contains)(errorMessage, ['Telegram entity not found']);
     }
     adapterShouldContinue() {
         return this.shouldContinueHelperPromotion();
@@ -50292,7 +51040,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         }
     }
     strategyForMessageIndex(messageIndex) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.messageIndexToStrategy)(messageIndex) || (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.messageIndexToStrategy)(messageIndex) || (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
     }
     extractLogFields(message) {
         const fields = {};
@@ -50422,7 +51170,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     }
     async shouldContinueHelperPromotion() {
         const paidUserStats = await _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().getTodayPaidUsers();
-        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.isPaidUserLimitReached)(paidUserStats)) {
+        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPaidUserLimitReached)(paidUserStats)) {
             logger.log("💰 Paid user limits reached, stopping promotions");
             await _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().deactivatePromotions();
             this.promotionActive = false;
@@ -50474,14 +51222,22 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
     // =================================================================
     async sendMessageToChannel(channelInfo, message) {
         try {
-            // Skip obfuscation for AI-generated messages (already unique + math bold formatted)
-            const obfuscatedMessage = message.skipObfuscation
+            // Skip obfuscation for AI-generated messages (already unique + math bold formatted).
+            //
+            // naturalizeText MUST wrap obfuscateText here, exactly as promote-clients does. Raw
+            // obfuscator output substitutes ~20% of Latin letters with Cyrillic/Greek homoglyphs;
+            // naturalizeText is the pass that renders that back to a single consistent script
+            // ("without homoglyphs or mixed Unicode scripts" per its own contract). tg-aut was
+            // sending the raw output, which is why its messages showed visible corruption
+            // ("assisf", "cIaяify", "Anyoηə") that promote-clients' never did — and why tg-aut's
+            // send success rate ran at 16.9% against promote-clients' 37.8% on 2026-08-14.
+            const outgoing = message.skipObfuscation
                 ? message.message
-                : (0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_6__.obfuscateText)(message.message, {
+                : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_7__.naturalizeText)((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_6__.obfuscateText)(message.message, {
                     substitutionRate: 0.2,
                     maintainFormatting: message.maintainFormatting || false,
-                });
-            const validatedMessage = this.assertSendablePromotionText(obfuscatedMessage);
+                }), { maintainFormatting: message.maintainFormatting || false });
+            const validatedMessage = this.assertSendablePromotionText(outgoing);
             // Browse delay before sending (human-like)
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(this.delayCalculator.getBrowseDelay());
             const entity = await this.resolvePromotionEntity(channelInfo);
@@ -50494,17 +51250,17 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 logger.warn(`[${this.mobile}] Helper send skipped: Telegram entity not found for channelId=${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeoutOrThrow)(this.client, entity, {
+            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithTimeoutOrThrow)(this.client, entity, {
                 message: validatedMessage
             });
             return { message: sentMessage, checkableByChannelId: true };
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, channelInfo.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, channelInfo.channelId);
             switch (parsed.type) {
                 case 'CHANNEL_RESTRICTED':
                     if (parsed.reason === 'banned') {
-                        await (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_9__.checktghealth)(this.client, this.mobile);
+                        await (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_10__.checktghealth)(this.client, this.mobile);
                     }
                     else if (parsed.reason === 'private') {
                         const fallbackUsername = this.normalizeTelegramUsername(channelInfo.username);
@@ -50514,14 +51270,18 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                             break;
                         }
                         try {
-                            const fallbackText = this.assertSendablePromotionText((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_6__.obfuscateText)(message.message, {
+                            // Mirrors promote-clients' private-channel fallback: naturalize the
+                            // obfuscated text so the username retry never sends mixed-script
+                            // characters. This path previously used substitutionRate 0.3 with no
+                            // naturalize at all, making it the most corrupted send in the system.
+                            const fallbackText = this.assertSendablePromotionText((0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_7__.naturalizeText)((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_6__.obfuscateText)(message.message, {
                                 preserveCase: true,
                                 preserveNumbers: true,
                                 maintainFormatting: false,
                                 preserveSpecialChars: true,
-                                substitutionRate: 0.3,
-                            }));
-                            const fallbackMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeoutOrThrow)(this.client, fallbackUsername, {
+                                substitutionRate: 0.2,
+                            }), { maintainFormatting: message.maintainFormatting || false }));
+                            const fallbackMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithTimeoutOrThrow)(this.client, fallbackUsername, {
                                 message: fallbackText
                             });
                             return { message: fallbackMessage, checkableByChannelId: false };
@@ -50530,7 +51290,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                             if (this.isPromotionPreflightError(fallbackError)) {
                                 throw fallbackError;
                             }
-                            const fallbackParsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(fallbackError, channelInfo.channelId);
+                            const fallbackParsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(fallbackError, channelInfo.channelId);
                             if (fallbackParsed.type === 'PEER_FLOOD') {
                                 logger.warn(`[LIMIT] PEER_FLOOD in private channel fallback ${fallbackUsername}; skipping channel only`);
                             }
@@ -50598,7 +51358,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         this.stats.totalFailed++;
         this.stats.failStreak++;
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-        void db.recordDailyPromo((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(errorMsg, ['USER_BANNED_IN_CHANNEL']) ? { sent: 1, failed: 1, banned: 1 } : { sent: 1, failed: 1 });
+        void db.recordDailyPromo((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_9__.contains)(errorMsg, ['USER_BANNED_IN_CHANNEL']) ? { sent: 1, failed: 1, banned: 1 } : { sent: 1, failed: 1 });
         try {
             await this.applyPromotionFailureState(channelId, errorMsg);
         }
@@ -50607,7 +51367,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         }
     }
     async applyPromotionFailureState(channelId, errorMsg) {
-        const action = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
+        const action = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
         if (action.skipPersist || !action.channelUpdate) {
             logger.debug(`PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
             return;
@@ -50629,7 +51389,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
                 // remaining consumer) — this used to stamp a message cursor on activeChannels that
                 // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-                if (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.isPoolMessageIndex)(messageIndex)) {
+                if (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPoolMessageIndex)(messageIndex)) {
                     await db.addToAvailableMsgs({ channelId: messageItem.channelId }, messageIndex);
                 }
                 logger.debug([
@@ -50725,7 +51485,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         ].join(',');
     }
     mergeLivePromotionChannelInfo(existing, liveChannelInfo) {
-        const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.mergeHydratedChannelFacts)(existing, liveChannelInfo);
+        const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeHydratedChannelFacts)(existing, liveChannelInfo);
         // NOTE: messageId/messageIndex/freeformDeletedCount/followUpDeletedCount/deletedCount/
         // lastMessageTime are dropped from IChannel (channelIntelligence.outcomes is now the source
         // of truth for the outcome counters; the rest were dead-on-read). Carry legacy values through
@@ -50869,7 +51629,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 ? `${Math.floor(survivalMs / 3600000)}h ${Math.floor((survivalMs % 3600000) / 60000)}m`
                 : `${Math.floor(survivalMs / 60000)}m`;
             this.notifyPromotionChannel('🗑️', channelInfo.username || null, channelId, channelInfo.title || channelId, messageId, messageIndex, `survived: ${survivalStr}`);
-            const localDeletionPolicy = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.evaluateDeletionPolicy)(messageIndex, availableMsgs.length);
+            const localDeletionPolicy = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.evaluateDeletionPolicy)(messageIndex, availableMsgs.length);
             const localDeletionActions = messageIndex === 'ai'
                 ? [
                     ...localDeletionPolicy.actions.filter((action) => action !== 'remove_message_index'),
@@ -50920,7 +51680,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                     return;
                 }
                 await this.sendPromotionLogNotification({
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING,
                     title: "Promotion template removed",
                     fields: [
                         { label: "Channel", value: this.formatUsername(channelInfo.username) },
@@ -50941,14 +51701,14 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         // notifications belong in the dedicated CLIENT_PROMOTIONS channels, not the generic
         // PROM_LOGS channels (those are the promote-clients service's own engine logs).
         const suffix = this.clientId?.slice(-1);
-        return suffix === '2' ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_PROMOTIONS_2 : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_PROMOTIONS_1;
+        return suffix === '2' ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_PROMOTIONS_2 : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_PROMOTIONS_1;
     }
     promotionBaseFields(extra = []) {
         return [...extra];
     }
     async sendPromotionLogNotification(notification, errorContext) {
         try {
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(this.promotionLogCategory(), {
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendMessage(this.promotionLogCategory(), {
                 ...notification,
                 fields: this.promotionBaseFields(notification.fields ?? []),
             });
@@ -50968,7 +51728,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             : `https://t.me/c/${channelId}/${messageId}`;
         const isDeletion = emoji.includes('🗑');
         const notification = {
-            severity: isDeletion ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.SUCCESS,
+            severity: isDeletion ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.SUCCESS,
             // No summary: it just restated the title + the Channel field below.
             title: isDeletion ? "Promotion message deleted" : "Promotion message sent",
             fields: this.promotionBaseFields([
@@ -50983,7 +51743,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         };
         // The raw t.me link is replaced by a tappable inline button — cleaner than a URL line.
         const replyMarkup = { inline_keyboard: [[{ text: "🔗 View message", url: link }]] };
-        void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(category, notification, {
+        void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendMessage(category, notification, {
             disableWebPagePreview: true,
             disableNotification: true,
             replyMarkup,
@@ -51125,7 +51885,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
             let channelInfo = await db.getActiveChannel({ channelId: normalizedChannelId });
             const missingPromotabilityFields = channelInfo ? this.getMissingPromotabilityFields(channelInfo) : [];
             const missingPromotabilityState = missingPromotabilityFields.length > 0;
-            const needsHydration = !channelInfo || missingPromotabilityState || (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.shouldHydrateBeforeFinalReject)(channelInfo);
+            const needsHydration = !channelInfo || missingPromotabilityState || (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.shouldHydrateBeforeFinalReject)(channelInfo);
             const canHydrateNow = needsHydration && (!channelInfo || this.claimChannelHydrationAttempt(normalizedChannelId));
             if (needsHydration && canHydrateNow) {
                 if (channelInfo) {
@@ -51138,12 +51898,12 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
                 else {
                     logger.debug(`Channel ${channelId} not found in DB, fetching from Telegram`);
                 }
-                const channelInfoFromTg = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.getChannelFromTg)(this.client, normalizedChannelId);
+                const channelInfoFromTg = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.getChannelFromTg)(this.client, normalizedChannelId);
                 if (!channelInfoFromTg) {
                     logger.error(`Could not get channel info for ${channelId}`);
                     return null;
                 }
-                const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.mergeHydratedChannelFacts)(channelInfo, channelInfoFromTg);
+                const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeHydratedChannelFacts)(channelInfo, channelInfoFromTg);
                 channelInfo = this.mergeLivePromotionChannelInfo(channelInfo, channelInfoFromTg);
                 await db.updateActiveChannel({ channelId: normalizedChannelId }, channelInfo);
                 if (hydrated.recoveredSendability) {
@@ -51198,7 +51958,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_13__.Ba
         this.channels = [];
         this.channelIndex = 0;
         await this.sendPromotionLogNotification({
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.INFO,
             title: "Promotions stopped",
             fields: [
                 { label: "Cleared channels", value: clearedChannelCount },
