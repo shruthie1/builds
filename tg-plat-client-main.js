@@ -33909,7 +33909,49 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
                 });
             }
             const rawText = message.message || '';
-            const visibleText = rawText || (message.out && !media ? '[outgoing action/message without text]' : '');
+            // SERVICE MESSAGES (calls, pins, joins, photo changes) are Api.MessageService: they
+            // carry an `action` object and NO `message` field. The mapper previously had no
+            // handling for them, so every one fell through to a debug placeholder —
+            // "[outgoing action/message without text]" — which leaked into the UI as message text.
+            //
+            // `action` is emitted as a NEW field; nothing existing is removed or retyped, so older
+            // clients are unaffected and simply ignore it.
+            const rawAction = message.action;
+            let action = null;
+            if (rawAction && typeof rawAction['className'] === 'string') {
+                const className = String(rawAction['className']);
+                if (className === 'MessageActionPhoneCall') {
+                    const reasonObj = rawAction['reason'];
+                    action = {
+                        type: 'phone_call',
+                        // Absent duration means the call was never answered — the UI shows
+                        // "Missed"/"Cancelled" rather than a 0s call.
+                        callDurationSec: typeof rawAction['duration'] === 'number'
+                            ? rawAction['duration']
+                            : undefined,
+                        callReason: typeof reasonObj?.['className'] === 'string'
+                            ? String(reasonObj['className']).replace('PhoneCallDiscardReason', '').toLowerCase()
+                            : undefined,
+                        isVideoCall: rawAction['video'] === true,
+                    };
+                }
+                else {
+                    // Everything else is surfaced by its class name with the Telegram prefix
+                    // stripped (MessageActionPinMessage -> pin_message), so the UI can label new
+                    // action types without a server change.
+                    action = {
+                        type: className
+                            .replace(/^MessageAction/, '')
+                            .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                            .toLowerCase(),
+                    };
+                }
+            }
+            // Only fall back to the placeholder when there is genuinely nothing to show: no text,
+            // no media, and no recognised action. Kept (rather than emptied) so a truly blank
+            // message is still visible in the UI rather than silently disappearing.
+            const visibleText = rawText
+                || (message.out && !media && !action ? '[outgoing action/message without text]' : '');
             const senderId = message.senderId?.toString() || null;
             return {
                 id: message.id,
@@ -33928,7 +33970,8 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
                 forward_from,
                 edit_date: message.editDate,
                 is_pinned: message.pinned || false,
-                reactions
+                reactions,
+                action
             };
         });
         // MEMORY FIX: Process messages in smaller batches to prevent memory spikes
