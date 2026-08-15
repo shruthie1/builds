@@ -4425,6 +4425,41 @@ const ACCOUNT_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACCOUNT_SEND_KEY_TTL_MS = ACCOUNT_SEND_WINDOW_MS + 60 * 60 * 1000;
 const ACCOUNT_CAP_MIN = 1200;
 const ACCOUNT_CAP_MAX = 3500;
+/**
+ * DELIBERATE: a spam-limited account gets a cap ABOVE the healthy ceiling (4200 > 3500), and the
+ * DelayCalculator paces it FASTER (3-4min vs 6-8min). This looks inverted on first read and has
+ * been questioned more than once. It is intentional — do NOT "fix" it without re-reading this.
+ *
+ * WHY: the limit is ALREADY applied by Telegram and its countdown runs on wall-clock time no matter
+ * what we do. Throttling a limited account does not shorten the limit, does not repair the account,
+ * and buys back nothing — it only forfeits whatever volume the account can still push before the
+ * window closes. So while limited, push harder, not softer. (Owner's call, 2026-08-15.)
+ *
+ * ── WHAT THE DATA SAYS, so the trade-off is re-argued from numbers and not vibes ────────────────
+ * Fleet census 2026-08-15 (mobiles with >=50 sends that day, n=98):
+ *
+ *     cohort            mobiles   dead(<5% delivery)   delivery
+ *     healthy(-1)          12          0  (0%)           98.0%
+ *     limited(1)           38         12 (32%)           46.7%
+ *     UNSTAMPED            48         30 (63%)           10.9%
+ *
+ * Delivery is strongly BIMODAL — 49 mobiles under 10%, 45 above 70%, only 2 in the whole 30-70%
+ * band. An account is either working or fully refused; there is no graceful middle.
+ *
+ * ── THE KNOWN LIMIT OF THIS STRATEGY (open, not yet resolved) ───────────────────────────────────
+ * "Push harder" assumes a limited account still delivers SOMETHING. For part of the cohort it
+ * delivers exactly nothing: on 2026-08-15 six correctly-stamped daysLeft=1 mobiles returned ZERO
+ * deliveries (sneha1 1088->0, meghana1 973->0, keerthi2 836->0, sowmya1 787->0). Fleet-wide, dead
+ * mobiles burned 55% of all sends for 2.2% of deliveries.
+ *
+ * For that zero-delivery subset the extra volume has no upside left, and the open question is
+ * whether it carries a cost (deeper limits, session/fingerprint risk) or is merely wasted cycles.
+ * That is UNMEASURED. If it is ever shown to carry a cost, the right change is to split the
+ * zero-delivery subset out — NOT to throttle limited accounts generally, which is settled.
+ *
+ * Related: the failStreak escalation gap (a limited account is never "stale", so it never triggers
+ * recovery) and the unstamped-account problem are tracked separately; see delay-calculator.ts.
+ */
 const ACCOUNT_CAP_LIMITED = 4200;
 /**
  * Rolling 24h promotion cap keyed by stable account identity (clientId).
@@ -6512,6 +6547,30 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //  - HEALTHY  (daysLeft === -1): not spam-limited. Human-like cadence, env-tunable (default 6-8 min).
 //  - UNHEALTHY (any other daysLeft: 0 or a positive countdown): send faster to extract volume while
 //    the account still can — env-tunable (default 3-4 min).
+//
+// DELIBERATE, and questioned repeatedly: a LIMITED account is paced FASTER, not slower — the mirror
+// of the cap policy in pool/account-cap.ts. Read ACCOUNT_CAP_LIMITED's comment there before changing
+// either; they must agree, and the split between them was already a real bug once. Rationale in one
+// line: Telegram's limit countdown runs on wall-clock regardless of our behaviour, so slowing down
+// forfeits volume without shortening the limit. (Owner's call, 2026-08-15.)
+//
+// ── TWO KNOWN GAPS AROUND THIS POLICY (real, open, NOT fixed by tuning these windows) ───────────
+// 1. SUSTAINED FAILURE NEVER ESCALATES. service-health.ts flags failStreak>15 as `degraded` but is
+//    explicitly barred from raising it to `unhealthy` (`status !== "unhealthy"` guard); only >100
+//    reaches unhealthy. On top of that, health-monitor.ts only prepares a replacement when the
+//    account is ALSO stale (`lastMessageAgeMs >= stopTimeoutMs`). A spam-limited account is the
+//    opposite of stale — it is maximally busy and uniformly refused — so it satisfies neither gate
+//    and is never recovered. Observed 2026-08-15: arpitha2 failStreak=64 and sowmya1 failStreak=77,
+//    both sending all day, both invisible to recovery.
+// 2. daysLeft IS UNKNOWN FOR ~85% OF THE FLEET (999/1171 promoteClients have daysLeft=null). The
+//    per-mobile daysLeftMap is IN-MEMORY (checkTgHealth.ts) and starts empty on every process
+//    restart; setMobileStats() restores the engine's own `this.daysLeft` from the DB but never
+//    repopulates that Map, so the two diverge immediately after boot. Unknown then coalesces to -1
+//    (the healthy sentinel) via `stats.daysLeft ?? -1`, so an unprobed account is treated as
+//    healthy. NOTE this is the CONSERVATIVE direction under the current policy (healthy = slower,
+//    smaller cap) — see normalizeDaysLeft in account-cap.ts, which documents the same choice.
+//    Rehydrating the Map from the DB at boot is the correctness fix; it is safe precisely BECAUSE
+//    the policy above is intentional.
 // Windows come from the same env vars as the main-send delay (see delay-policy.ts) so main-send and
 // main->follow-up cadence stay consistent.
 const DEFAULT_DELAY_CONFIG = {
@@ -25339,6 +25398,29 @@ __webpack_require__.r(__webpack_exports__);
  *
  * `reactions_disabled` is deliberately NOT handled here. That one is a real channel property, is
  * persisted to the DB, and must stay permanent.
+ *
+ * ── READ THIS BEFORE TUNING THE LADDER AGAIN: THE POOL COLLAPSE IS A SYMPTOM ────────────────────
+ * The runtime restrictions this store manages are CAUSED by account-level spam limits, not by the
+ * channels. A limited account is refused everywhere, so it re-restricts channels as fast as they are
+ * released and the pool sits pinned at its floor no matter how the TTLs are tuned.
+ *
+ * Verified on arpitha2 (2026-08-15): after the ladder shipped, the pool held flat at channels=100 /
+ * restricted=135 (runtimeOnly=135) for 100+ minutes while lastReaction age GREW 17m -> 37m. Its
+ * promotion side the same day: 3253 sends -> 37 deliveries (1.1%), failStreak=64. Every one of its
+ * five sending mobiles was in the "dead" band (<5% delivery). The ladder was releasing correctly;
+ * there was simply nothing for it to fix. Two earlier "the fix is working" reports on this client
+ * were WRONG — both read a periodic refresh peak rather than the trend.
+ *
+ * Consequence for anyone debugging a shrinking reaction pool: check the account's spam-limit state
+ * FIRST (promoteStatsDaily delivery rate, or daysLeft on the pool record). If delivery is in the
+ * dead band, the reaction pool is a downstream symptom and no TTL value will restore it.
+ *
+ * NOTE: this package has NO spam-limit awareness at all — no daysLeft, no isSpamLimited. Reactions
+ * keep firing at full rate on an account that cannot act anywhere. Whether reactions should back off
+ * (or stop) while limited is an OPEN question, deliberately left open: the promotion side made the
+ * opposite call — a limited account pushes HARDER, because Telegram's countdown runs on wall-clock
+ * and throttling forfeits volume without shortening the limit (see pool/account-cap.ts). Reactions
+ * may warrant the same treatment, but it has not been measured here. Do not assume either way.
  */
 /**
  * Escalating retry windows for repeat restrictions on the same channel.
@@ -48685,7 +48767,7 @@ const paidPatterns = [
                 !isCallRequestExcluded(text) &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MUSIC) // guard: "listen music" is not a voice-message request
             ) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell), './confirm.mp3');
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell), './takefull.mp3');
                 return true;
             }
             const callType = getCallRequestType(text);
@@ -51642,7 +51724,7 @@ async function handleDemoPriceRequest(event, userDetails, context) {
     demoPricePromptState.set(context.chatId, { lastAt: now, suppressed: 0 });
     await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.noFreeDemo}\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo}`);
     (0,_timeoutHelper__WEBPACK_IMPORTED_MODULE_13__.trackedSetTimeout)(context, async () => {
-        await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(userDetails.payAmount)), './takefull.mp3');
+        await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(userDetails.payAmount)), './confirm.mp3');
     }, 15000);
 }
 /**
@@ -51689,7 +51771,7 @@ const unpaidPatterns = [
                 });
             }, 12000);
             (0,_timeoutHelper__WEBPACK_IMPORTED_MODULE_13__.trackedSetTimeout)(context, async () => {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(userDetails.payAmount)), './takefull.mp3');
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(userDetails.payAmount)), './confirm.mp3');
             }, 22000);
             return true;
         }
@@ -53861,11 +53943,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./replier */ "./src/replier/replier.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _media_throttle__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./media-throttle */ "./src/replier/media-throttle.ts");
 /**
  * Replier Module
  * Main entry point for replier functionality
  * Provides backward-compatible exports
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:replier-index");
@@ -53899,10 +53983,25 @@ function getReplierInstance() {
 }
 /**
  * Push reply to queue (backward compatible)
+ *
+ * CENTRALISED MEDIA THROTTLE: every audio/media prompt in the codebase funnels through here, so the
+ * per-(chat, file) duplicate guard lives here rather than at each call site. See media-throttle.ts
+ * for why the queue's own dedup cannot cover this (it merges text-only items by construction).
+ *
+ * When a clip is suppressed, any accompanying TEXT is still delivered — dropping the whole reply
+ * would leave the user with silence, which reads as a dead bot.
  */
 async function pushToReplies(event, chatId, msg, file, msgId, waitTime) {
     const replier = getReplierInstance();
-    await replier.pushToReplies(event, chatId, msg, file, msgId, waitTime);
+    let effectiveFile = file;
+    if (file && !(await (0,_media_throttle__WEBPACK_IMPORTED_MODULE_2__.claimMediaSend)(chatId, file))) {
+        effectiveFile = undefined;
+        if (!msg) {
+            // Nothing left to send: the reply was media-only and that clip is throttled.
+            return;
+        }
+    }
+    await replier.pushToReplies(event, chatId, msg, effectiveFile, msgId, waitTime);
 }
 /**
  * Main replier function (backward compatible)
@@ -53964,6 +54063,118 @@ function updateQueues() {
 function handleFloodErrors(error) {
     const replier = getReplierInstance();
     replier.handleFloodErrors(error);
+}
+
+
+/***/ },
+
+/***/ "./src/replier/media-throttle.ts"
+/*!***************************************!*\
+  !*** ./src/replier/media-throttle.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_MEDIA_THROTTLE_SECONDS: () => (/* binding */ DEFAULT_MEDIA_THROTTLE_SECONDS),
+/* harmony export */   claimMediaSend: () => (/* binding */ claimMediaSend),
+/* harmony export */   resolveThrottleSeconds: () => (/* binding */ resolveThrottleSeconds),
+/* harmony export */   setMediaThrottleRedisForTest: () => (/* binding */ setMediaThrottleRedisForTest)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:media-throttle");
+/**
+ * CENTRALISED per-(chat, file) media send throttle.
+ *
+ * ── THE PROBLEM ────────────────────────────────────────────────────────────────────────────────
+ * Audio/media prompts (takefull.mp3, confirm.mp3, sabdika.mp3, notfake.mp3, …) were sent with no
+ * cross-site tracking, so the same clip could be delivered repeatedly to one user:
+ *
+ *   - Only ONE of the audio call sites had any throttle at all (demoPricePromptState, 90s, guarding
+ *     unpaidPatterns' demo-price path). The other sites had nothing.
+ *   - The reply queue's dedup CANNOT help: queue-manager.ts merges only text-only items
+ *     (`if (!file)`), so every media push skips dedup by construction.
+ *   - Several sites fire on trackedSetTimeout (15s / 22s). The per-site check runs BEFORE the delay,
+ *     so a second trigger inside the window still lands a second identical clip.
+ *
+ * ── THE APPROACH ───────────────────────────────────────────────────────────────────────────────
+ * One guard at the single chokepoint every site already funnels through (pushToReplies), keyed by
+ * chat + file. No per-site state to add, and a new call site is covered automatically.
+ *
+ * Redis-backed with a TTL rather than an in-memory Map, because:
+ *   - tg-aut restarts often (buffer swaps, PM2 recycles) and an in-memory Map resets to empty,
+ *     which is exactly how a user gets the same clip again right after a restart;
+ *   - the TTL expires entries on its own, so there is no unbounded map and no cleanup job.
+ *
+ * FAIL-OPEN: if Redis is unreachable we ALLOW the send. A muted prompt is a worse failure than a
+ * duplicate one — silence reads as a dead bot, which is the same reasoning the demo-price throttle
+ * already applies when it substitutes a short nudge instead of going quiet.
+ */
+/**
+ * Window a given clip is suppressed for, per chat.
+ *
+ * 2h is a deliberate single value (owner's call, 2026-08-15): long enough to kill the repeat-send
+ * complaint — the same clip can no longer arrive twice in one conversation, since sessions are far
+ * shorter than 2h — while still letting a user who comes back later in the day hear it again. One
+ * uniform number also means there is no per-file table to keep in sync as clips are added.
+ */
+const DEFAULT_MEDIA_THROTTLE_SECONDS = 2 * 60 * 60; // 2h
+/**
+ * Per-file overrides. Empty by design: every clip currently uses the uniform 2h window above. Add an
+ * entry here only with a specific reason for that clip to differ.
+ */
+const FILE_THROTTLE_SECONDS = {};
+/** Normalise './takefull.mp3' / 'takefull.mp3' to a stable key segment. */
+function normaliseFileKey(file) {
+    return file.replace(/^\.\//, '').trim().toLowerCase();
+}
+let redisAccessor = () => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.getClient();
+/** TEST SEAM ONLY. Pass no argument to restore the real client. */
+function setMediaThrottleRedisForTest(accessor) {
+    redisAccessor = accessor ?? (() => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.getClient());
+}
+function resolveThrottleSeconds(file) {
+    return FILE_THROTTLE_SECONDS[normaliseFileKey(file)] ?? DEFAULT_MEDIA_THROTTLE_SECONDS;
+}
+/**
+ * Claim the right to send `file` to `chatId`.
+ *
+ * @returns true when the caller should send. false when an identical clip was already sent to this
+ *          chat inside the throttle window.
+ *
+ * Atomic: uses SET NX EX so two concurrent triggers (e.g. two trackedSetTimeout callbacks firing
+ * together) cannot both win. A non-atomic setnx-then-expire would leak a permanent key if the
+ * process died between the two calls, permanently muting that clip for that user.
+ */
+async function claimMediaSend(chatId, file) {
+    if (!file)
+        return true; // text-only replies are not throttled here
+    const fileKey = normaliseFileKey(file);
+    if (!fileKey)
+        return true;
+    const key = `tgaut:media:${chatId}:${fileKey}`;
+    const ttl = resolveThrottleSeconds(file);
+    try {
+        const client = redisAccessor();
+        const result = await client.set(key, String(Date.now()), 'EX', ttl, 'NX');
+        if (result === null) {
+            // Visible at default log level (not debug): this is the signal for "are we still
+            // spamming the same clip?", and it is the only place a suppression is observable.
+            logger.log(`[MediaThrottle] SUPPRESSED duplicate ${fileKey} | chat=${chatId} | window=${ttl}s`);
+            return false;
+        }
+        logger.debug(`[MediaThrottle] allowed ${fileKey} | chat=${chatId} | window=${ttl}s`);
+        return true;
+    }
+    catch (error) {
+        // FAIL-OPEN — see the header note. Never block a reply because Redis is unavailable.
+        logger.warn(`[MediaThrottle] Redis unavailable, allowing ${fileKey} for ${chatId}: ${String(error)}`);
+        return true;
+    }
 }
 
 
