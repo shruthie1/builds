@@ -1124,6 +1124,7 @@ const channels_module_1 = __webpack_require__(/*! ./components/channels/channels
 const app_controller_1 = __webpack_require__(/*! ./app.controller */ "./src/app.controller.ts");
 const logger_middleware_1 = __webpack_require__(/*! ./middlewares/logger.middleware */ "./src/middlewares/logger.middleware.ts");
 const build_module_1 = __webpack_require__(/*! ./components/builds/build.module */ "./src/components/builds/build.module.ts");
+const translate_module_1 = __webpack_require__(/*! ./components/translate/translate.module */ "./src/components/translate/translate.module.ts");
 const upi_ids_module_1 = __webpack_require__(/*! ./components/upi-ids/upi-ids.module */ "./src/components/upi-ids/upi-ids.module.ts");
 const promote_msgs_module_1 = __webpack_require__(/*! ./components/promote-msgs/promote-msgs.module */ "./src/components/promote-msgs/promote-msgs.module.ts");
 const stat_module_1 = __webpack_require__(/*! ./components/stats/stat.module */ "./src/components/stats/stat.module.ts");
@@ -1160,6 +1161,7 @@ exports.AppModule = AppModule = __decorate([
         imports: [
             init_module_1.InitModule,
             Telegram_module_1.TelegramModule,
+            translate_module_1.TranslateModule,
             components_1.BotsModule,
             active_channels_module_1.ActiveChannelsModule,
             client_module_1.ClientModule,
@@ -3122,7 +3124,10 @@ let TelegramController = class TelegramController {
         if (sendMediaDto.url) {
             try {
                 const headResponse = await axios_1.default.head(sendMediaDto.url, { timeout: 10000 });
-                const contentLength = parseInt(String(headResponse.headers['content-length'] ?? '0'), 10);
+                const rawContentLength = headResponse.headers['content-length'];
+                const contentLength = parseInt(typeof rawContentLength === 'string' || typeof rawContentLength === 'number'
+                    ? String(rawContentLength)
+                    : '0', 10);
                 const maxSize = 100 * 1024 * 1024;
                 if (contentLength > maxSize) {
                     const fileSizeMB = (contentLength / (1024 * 1024)).toFixed(2);
@@ -3513,8 +3518,14 @@ let TelegramController = class TelegramController {
             filename: viewOnceDto.filename
         });
     }
-    async getChatHistory(mobile, chatId, offset, limit) {
-        return this.telegramService.getMessagesNew(mobile, chatId, offset, limit);
+    async getChatHistory(mobile, chatId, offset, limit, addOffset) {
+        const toInt = (v) => {
+            if (v === undefined || v === null || v === '')
+                return undefined;
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.trunc(n) : undefined;
+        };
+        return this.telegramService.getMessagesNew(mobile, chatId, toInt(offset) ?? 0, toInt(limit) ?? 20, toInt(addOffset) ?? 0);
     }
     async promoteToAdmin(mobile, adminOp) {
         return this.telegramService.promoteToAdmin(mobile, adminOp.groupId, adminOp.userId, adminOp.permissions, adminOp.rank);
@@ -4713,15 +4724,17 @@ __decorate([
     (0, swagger_1.ApiOperation)({ summary: 'Get chat history with metadata' }),
     (0, swagger_1.ApiParam)({ name: 'mobile', description: 'Mobile number', required: true }),
     (0, swagger_1.ApiQuery)({ name: 'chatId', required: true }),
-    (0, swagger_1.ApiQuery)({ name: 'offset', required: false, type: Number }),
+    (0, swagger_1.ApiQuery)({ name: 'offset', required: false, type: Number, description: 'Message id to anchor on. Returns messages OLDER than this id. 0/omitted starts from the newest message.' }),
     (0, swagger_1.ApiQuery)({ name: 'limit', required: false, type: Number }),
+    (0, swagger_1.ApiQuery)({ name: 'addOffset', required: false, type: Number, description: 'Window shift relative to `offset`. 0 (default) returns older messages. A NEGATIVE value returns messages NEWER than `offset` — used to load context above a search hit so a message can be shown with history on both sides.' }),
     (0, swagger_1.ApiResponse)({ type: Object }),
     __param(0, (0, common_1.Param)('mobile')),
     __param(1, (0, common_1.Query)('chatId')),
     __param(2, (0, common_1.Query)('offset')),
     __param(3, (0, common_1.Query)('limit')),
+    __param(4, (0, common_1.Query)('addOffset')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String, Number, Number]),
+    __metadata("design:paramtypes", [String, String, Number, Number, Number]),
     __metadata("design:returntype", Promise)
 ], TelegramController.prototype, "getChatHistory", null);
 __decorate([
@@ -5320,9 +5333,9 @@ let TelegramService = TelegramService_1 = class TelegramService {
         const telegramClient = await connection_manager_1.connectionManager.getClient(mobile);
         return telegramClient.getMessages(username, limit, offsetId);
     }
-    async getMessagesNew(mobile, username, offset, limit) {
+    async getMessagesNew(mobile, username, offset, limit, addOffset) {
         const telegramClient = await connection_manager_1.connectionManager.getClient(mobile);
-        return telegramClient.getMessagesNew(username, offset, limit);
+        return telegramClient.getMessagesNew(username, offset, limit, addOffset ?? 0);
     }
     async sendInlineMessage(mobile, chatId, message, url) {
         const telegramClient = await connection_manager_1.connectionManager.getClient(mobile);
@@ -7721,13 +7734,24 @@ __decorate([
 ], SearchMessagesDto.prototype, "limit", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({
-        description: 'Offset ID for pagination'
+        description: 'Offset ID for pagination — return messages OLDER than this message id. Pass the '
+            + 'last id of the previous page to fetch the next page. Omit (or 0) for the first page.'
     }),
     (0, class_validator_1.IsInt)(),
     (0, class_validator_1.Min)(0),
     (0, class_validator_1.IsOptional)(),
     __metadata("design:type", Number)
 ], SearchMessagesDto.prototype, "offsetId", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({
+        description: 'Window shift relative to offsetId. 0 (default) returns messages older than '
+            + 'offsetId. A NEGATIVE value returns messages NEWER than offsetId — this is how a client '
+            + 'loads context ABOVE a search hit, so a result can be opened with history on both sides.'
+    }),
+    (0, class_validator_1.IsInt)(),
+    (0, class_validator_1.IsOptional)(),
+    __metadata("design:type", Number)
+], SearchMessagesDto.prototype, "addOffset", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({
         description: 'Offset date as Unix timestamp'
@@ -8660,8 +8684,8 @@ class TelegramManager {
     async getAllChats() {
         return chatOps.getAllChats(this.ctx);
     }
-    async getMessagesNew(chatId, offset = 0, limit = 20) {
-        return chatOps.getMessagesNew(this.ctx, chatId, offset, limit);
+    async getMessagesNew(chatId, offset = 0, limit = 20, addOffset = 0) {
+        return chatOps.getMessagesNew(this.ctx, chatId, offset, limit, addOffset);
     }
     async safeGetEntity(entityId) {
         return chatOps.safeGetEntityById(this.ctx, entityId);
@@ -9958,9 +9982,9 @@ function formatReactions(reactions) {
         return { reaction, count: r.count ?? 0 };
     }).filter(x => (x.count ?? 0) > 0);
 }
-async function getMessagesNew(ctx, chatId, offset = 0, limit = 20) {
+async function getMessagesNew(ctx, chatId, offset = 0, limit = 20, addOffset = 0) {
     const fetchLimit = limit + 1;
-    const messages = await ctx.client.getMessages(chatId, { offsetId: offset, limit: fetchLimit });
+    const messages = await ctx.client.getMessages(chatId, { offsetId: offset, limit: fetchLimit, addOffset });
     const hasMore = messages.length > limit;
     const slicedMessages = hasMore ? messages.slice(0, limit) : messages;
     const senderIds = new Set();
@@ -13055,6 +13079,7 @@ async function searchMessages(ctx, params) {
         }
         return false;
     }
+    const senderNames = new Map();
     for (const type of types) {
         const filter = (0, helpers_1.getSearchFilter)(type);
         const queryFilter = {
@@ -13062,6 +13087,8 @@ async function searchMessages(ctx, params) {
             ...(maxId ? { maxId } : {}),
             ...(minId ? { minId } : {}),
         };
+        const offsetId = params.offsetId ?? 0;
+        const addOffset = params.addOffset ?? 0;
         ctx.logger.info(ctx.phoneNumber, type, queryFilter);
         let messages = [];
         let count = 0;
@@ -13076,8 +13103,8 @@ async function searchMessages(ctx, params) {
                 hash: (0, big_integer_1.default)(0),
                 minDate: 0,
                 maxDate: 0,
-                addOffset: 0,
-                offsetId: 0,
+                addOffset,
+                offsetId,
             }));
             if (!('messages' in result))
                 return finalResult;
@@ -13093,7 +13120,7 @@ async function searchMessages(ctx, params) {
                 ...queryFilter,
                 offsetRate: 0,
                 offsetPeer: new telegram_1.Api.InputPeerEmpty(),
-                offsetId: 0,
+                offsetId,
             }));
             if (!('messages' in result))
                 return finalResult;
@@ -13120,10 +13147,35 @@ async function searchMessages(ctx, params) {
         }));
         const filteredMsgs = processedMessages.filter((msg) => msg !== null);
         const filteredIds = filteredMsgs.map(m => m.id);
+        const uniqueSenderIds = [...new Set(filteredMsgs
+                .map(m => (m.fromId instanceof telegram_1.Api.PeerUser ? m.fromId.userId.toString() : null))
+                .filter((id) => Boolean(id)))];
+        const senderNameById = new Map();
+        await Promise.all(uniqueSenderIds.map(async (senderId) => {
+            if (senderNames.has(senderId)) {
+                senderNameById.set(senderId, senderNames.get(senderId));
+                return;
+            }
+            try {
+                const entity = await (0, chat_operations_1.safeGetEntityById)(ctx, senderId);
+                const resolved = entity
+                    ? (`${entity.firstName || ''} ${entity.lastName || ''}`.trim()
+                        || entity.username
+                        || entity.title
+                        || senderId)
+                    : senderId;
+                senderNames.set(senderId, resolved);
+                senderNameById.set(senderId, resolved);
+            }
+            catch {
+                senderNameById.set(senderId, senderId);
+            }
+        }));
         const enrichedData = filteredMsgs.map((msg) => {
             let senderName = null;
             if (msg.fromId instanceof telegram_1.Api.PeerUser) {
-                senderName = msg.fromId.userId.toString();
+                const senderId = msg.fromId.userId.toString();
+                senderName = senderNameById.get(senderId) ?? senderId;
             }
             let mediaType = null;
             if (msg.media && !(msg.media instanceof telegram_1.Api.MessageMediaEmpty)) {
@@ -43186,6 +43238,356 @@ exports.TransactionService = TransactionService = TransactionService_1 = __decor
     __param(0, (0, mongoose_1.InjectModel)(transaction_schema_1.Transaction.name)),
     __metadata("design:paramtypes", [mongoose_2.Model])
 ], TransactionService);
+
+
+/***/ },
+
+/***/ "./src/components/translate/translate.controller.ts"
+/*!**********************************************************!*\
+  !*** ./src/components/translate/translate.controller.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TranslateController = exports.TranslateBatchDto = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
+const swagger_2 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const translate_service_1 = __webpack_require__(/*! ./translate.service */ "./src/components/translate/translate.service.ts");
+const MAX_MESSAGES_PER_REQUEST = 200;
+class TranslateBatchDto {
+}
+exports.TranslateBatchDto = TranslateBatchDto;
+__decorate([
+    (0, swagger_2.ApiProperty)({
+        type: [String],
+        description: 'Chat messages to translate, in display order. The response preserves this order exactly.',
+    }),
+    (0, class_validator_1.IsArray)(),
+    (0, class_validator_1.ArrayMaxSize)(MAX_MESSAGES_PER_REQUEST),
+    (0, class_validator_1.IsString)({ each: true }),
+    __metadata("design:type", Array)
+], TranslateBatchDto.prototype, "messages", void 0);
+__decorate([
+    (0, swagger_2.ApiPropertyOptional)({ description: 'Target language name. Defaults to English.' }),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.IsOptional)(),
+    __metadata("design:type", String)
+], TranslateBatchDto.prototype, "targetLang", void 0);
+__decorate([
+    (0, swagger_2.ApiPropertyOptional)({
+        type: [String],
+        description: 'Earlier turns from the same chat, oldest first, used as REFERENCE ONLY — they are never '
+            + 'translated or returned. Supplying these materially improves short ambiguous replies '
+            + '("apram", "sari"), which are most of a chat. Capped server-side; send the ~10 messages '
+            + 'immediately preceding the batch. Prefix with a speaker label ("me: ...") when known.',
+    }),
+    (0, class_validator_1.IsArray)(),
+    (0, class_validator_1.ArrayMaxSize)(50),
+    (0, class_validator_1.IsString)({ each: true }),
+    (0, class_validator_1.IsOptional)(),
+    __metadata("design:type", Array)
+], TranslateBatchDto.prototype, "context", void 0);
+let TranslateController = class TranslateController {
+    constructor(translateService) {
+        this.translateService = translateService;
+    }
+    async translateBatch(body) {
+        const context = (body.context || []).map(line => {
+            const separator = line.indexOf(':');
+            return separator > 0 && separator < 12
+                ? { speaker: line.slice(0, separator).trim(), text: line.slice(separator + 1).trim() }
+                : { text: line };
+        });
+        return this.translateService.translateBatch(body.messages, body.targetLang || 'English', context);
+    }
+};
+exports.TranslateController = TranslateController;
+__decorate([
+    (0, common_1.Post)('batch'),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Translate a batch of chat messages',
+        description: 'Proxies translation server-side so no provider key ships in the browser bundle. '
+            + 'Returns one translation per input message, in the same order. On provider failure the '
+            + 'ORIGINAL text is returned for that message rather than an error, so a chat always renders.',
+    }),
+    (0, swagger_1.ApiBody)({ type: TranslateBatchDto }),
+    (0, swagger_1.ApiResponse)({ status: 201, description: 'Translations in input order.' }),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [TranslateBatchDto]),
+    __metadata("design:returntype", Promise)
+], TranslateController.prototype, "translateBatch", null);
+exports.TranslateController = TranslateController = __decorate([
+    (0, swagger_1.ApiTags)('Translate'),
+    (0, common_1.Controller)('translate'),
+    __metadata("design:paramtypes", [translate_service_1.TranslateService])
+], TranslateController);
+
+
+/***/ },
+
+/***/ "./src/components/translate/translate.module.ts"
+/*!******************************************************!*\
+  !*** ./src/components/translate/translate.module.ts ***!
+  \******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TranslateModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const translate_service_1 = __webpack_require__(/*! ./translate.service */ "./src/components/translate/translate.service.ts");
+const translate_controller_1 = __webpack_require__(/*! ./translate.controller */ "./src/components/translate/translate.controller.ts");
+let TranslateModule = class TranslateModule {
+};
+exports.TranslateModule = TranslateModule;
+exports.TranslateModule = TranslateModule = __decorate([
+    (0, common_1.Module)({
+        providers: [translate_service_1.TranslateService],
+        controllers: [translate_controller_1.TranslateController],
+        exports: [translate_service_1.TranslateService],
+    })
+], TranslateModule);
+
+
+/***/ },
+
+/***/ "./src/components/translate/translate.service.ts"
+/*!*******************************************************!*\
+  !*** ./src/components/translate/translate.service.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var TranslateService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TranslateService = exports.MAX_BATCH_SIZE = exports.MAX_CONTEXT_TURNS = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+exports.MAX_CONTEXT_TURNS = 10;
+const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_FALLBACK_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+exports.MAX_BATCH_SIZE = 20;
+const MAX_CHARS_PER_MESSAGE = 1000;
+const MAX_CACHE_ENTRIES = 5000;
+const REQUEST_TIMEOUT_MS = 20000;
+let TranslateService = TranslateService_1 = class TranslateService {
+    constructor() {
+        this.logger = new common_1.Logger(TranslateService_1.name);
+        this.cache = new Map();
+        this.keyCursor = 0;
+    }
+    getKeys() {
+        return String(process.env.GROQ_API_KEYS || '')
+            .split(/[,\s]+/)
+            .map(k => k.trim())
+            .filter(Boolean);
+    }
+    nextKey(keys) {
+        const key = keys[this.keyCursor % keys.length];
+        this.keyCursor = (this.keyCursor + 1) % keys.length;
+        return key;
+    }
+    cacheSet(text, translation) {
+        if (this.cache.size >= MAX_CACHE_ENTRIES) {
+            const oldest = this.cache.keys().next().value;
+            if (oldest !== undefined)
+                this.cache.delete(oldest);
+        }
+        this.cache.set(text, translation);
+    }
+    async translateBatch(messages, targetLang = 'English', context = []) {
+        if (!Array.isArray(messages) || messages.length === 0) {
+            return { translations: [], provider: GROQ_MODEL, cached: 0 };
+        }
+        const out = new Array(messages.length);
+        const pending = [];
+        let cachedCount = 0;
+        const contextKey = this.contextFingerprint(context, targetLang);
+        messages.forEach((raw, index) => {
+            const text = String(raw ?? '').trim();
+            if (!text) {
+                out[index] = '';
+                return;
+            }
+            const hit = this.cache.get(`${contextKey}::${text}`);
+            if (hit !== undefined) {
+                out[index] = hit;
+                cachedCount += 1;
+                return;
+            }
+            pending.push({ index, text: text.slice(0, MAX_CHARS_PER_MESSAGE) });
+        });
+        if (pending.length === 0) {
+            return { translations: out, provider: 'cache', cached: cachedCount };
+        }
+        const keys = this.getKeys();
+        if (keys.length === 0) {
+            this.logger.warn('GROQ_API_KEYS is empty — returning original text untranslated');
+            pending.forEach(({ index, text }) => { out[index] = text; });
+            return { translations: out, provider: 'none', cached: cachedCount };
+        }
+        for (let start = 0; start < pending.length; start += exports.MAX_BATCH_SIZE) {
+            const slice = pending.slice(start, start + exports.MAX_BATCH_SIZE);
+            try {
+                let translated;
+                try {
+                    translated = await this.callProvider(slice.map(s => s.text), targetLang, keys, context);
+                }
+                catch (primaryError) {
+                    this.logger.warn(`Primary model failed (${String(primaryError)}), retrying on ${GROQ_FALLBACK_MODEL}`);
+                    translated = await this.callProvider(slice.map(s => s.text), targetLang, keys, context, GROQ_FALLBACK_MODEL);
+                }
+                slice.forEach(({ index, text }, i) => {
+                    const value = translated[i];
+                    if (typeof value === 'string' && value.trim() && value.trim() !== text) {
+                        out[index] = value.trim();
+                        this.cacheSet(`${contextKey}::${text}`, value.trim());
+                    }
+                    else {
+                        out[index] = text;
+                    }
+                });
+            }
+            catch (error) {
+                this.logger.warn(`Translate batch failed, falling back to original text: ${String(error)}`);
+                slice.forEach(({ index, text }) => { out[index] = text; });
+            }
+        }
+        return { translations: out, provider: GROQ_MODEL, cached: cachedCount };
+    }
+    contextFingerprint(context, targetLang) {
+        if (!context || context.length === 0)
+            return targetLang;
+        const joined = context.slice(-exports.MAX_CONTEXT_TURNS).map(t => `${t.speaker || ''}:${t.text || ''}`).join('|');
+        let hash = 0;
+        for (let i = 0; i < joined.length; i += 1) {
+            hash = ((hash << 5) - hash + joined.charCodeAt(i)) | 0;
+        }
+        return `${targetLang}#${hash}`;
+    }
+    async callProvider(texts, targetLang, keys, context = [], model = GROQ_MODEL) {
+        const numbered = texts.map((t, i) => `${i + 1}. ${t}`).join('\n');
+        const contextBlock = context.length > 0
+            ? [
+                'CONTEXT (earlier turns, for reference ONLY — do NOT translate or output these):',
+                context.slice(-exports.MAX_CONTEXT_TURNS)
+                    .map(turn => `${turn.speaker ? `${turn.speaker}: ` : ''}${String(turn.text || '').slice(0, MAX_CHARS_PER_MESSAGE)}`)
+                    .join('\n'),
+                '',
+            ].join('\n')
+            : '';
+        const prompt = [
+            `You are translating one Telegram conversation into ${targetLang}.`,
+            'The source is often ROMANISED Tamil/Telugu/Hindi (Indian languages typed in Latin script), sometimes mixed with English.',
+            '',
+            contextBlock,
+            `TRANSLATE ONLY these ${texts.length} messages, in order:`,
+            numbered,
+            '',
+            'Rules:',
+            '- Translate literally what each line says. Do NOT invent names, subjects or details that are not present.',
+            '- Use the context only to resolve pronouns and implied subjects, never to add new information.',
+            '- Keep a bare acknowledgement short (e.g. "ok", "later") rather than expanding it into a sentence.',
+            '- Preserve tone; these are casual chat messages.',
+            `Respond with ONLY a JSON object of the form {"translations": [...]} containing exactly ${texts.length} strings, in the same order. No markdown, no commentary.`,
+        ].filter(Boolean).join('\n');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        try {
+            const response = await fetch(GROQ_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${this.nextKey(keys)}`,
+                },
+                body: JSON.stringify({
+                    model,
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.2,
+                    response_format: { type: 'json_object' },
+                }),
+                signal: controller.signal,
+            });
+            if (!response.ok) {
+                throw new Error(`Groq HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+            }
+            const payload = await response.json();
+            const content = payload?.choices?.[0]?.message?.content ?? '';
+            return this.parseTranslations(content, texts.length);
+        }
+        finally {
+            clearTimeout(timer);
+        }
+    }
+    parseTranslations(content, expected) {
+        const cleaned = content.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+        const asArray = (value) => {
+            if (!Array.isArray(value))
+                return null;
+            const strings = value.map(v => (typeof v === 'string' ? v : String(v ?? '')));
+            return strings.length === expected ? strings : null;
+        };
+        try {
+            const parsed = JSON.parse(cleaned);
+            const direct = asArray(parsed);
+            if (direct)
+                return direct;
+            if (parsed && typeof parsed === 'object') {
+                for (const value of Object.values(parsed)) {
+                    const nested = asArray(value);
+                    if (nested)
+                        return nested;
+                }
+            }
+        }
+        catch {
+        }
+        const first = cleaned.indexOf('[');
+        const last = cleaned.lastIndexOf(']');
+        if (first !== -1 && last > first) {
+            try {
+                const scanned = asArray(JSON.parse(cleaned.slice(first, last + 1)));
+                if (scanned)
+                    return scanned;
+            }
+            catch {
+            }
+        }
+        throw new Error(`Unparseable translation response (expected ${expected} items)`);
+    }
+};
+exports.TranslateService = TranslateService;
+exports.TranslateService = TranslateService = TranslateService_1 = __decorate([
+    (0, common_1.Injectable)()
+], TranslateService);
 
 
 /***/ },
