@@ -19496,17 +19496,27 @@ class DialogManager {
         const serverTimestamp = serverDialog.date * 1000;
         const serverMessageId = serverDialog.message?.id || 0;
         const serverIsPinned = serverDialog.pinned || false;
-        const serverIsMuted = serverDialog.archived || false;
-        // Update if server has newer message data OR if pinned/muted status changed
+        const serverIsArchived = serverDialog.archived || false;
+        // BACKWARD COMPATIBILITY: isMuted has always been populated from `archived`, and the
+        // /dialogs route copies it into isArchived, so both fields have carried archive state.
+        // Existing clients read isMuted expecting exactly this, so its value is unchanged; the
+        // correctly-named isArchived is added alongside it.
+        const serverIsMuted = serverIsArchived;
+        // Position of the read boundary, for an accurate unread divider.
+        const serverReadInboxMaxId = serverDialog.readInboxMaxId || 0;
+        // Update if server has newer message data OR if pinned/muted/read status changed
         const hasNewerMessage = this.shouldUpdateFromServer(serverTimestamp, serverMessageId, existing);
         const pinnedStatusChanged = existing.isPinned !== serverIsPinned;
         const mutedStatusChanged = existing.isMuted !== serverIsMuted;
-        if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged) {
+        const readStatusChanged = existing.readInboxMaxId !== serverReadInboxMaxId;
+        if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged || readStatusChanged) {
             this.updateDialog(existing.id, {
                 lastMessageTimestamp: serverTimestamp,
                 lastMessageId: serverMessageId,
                 unreadCount: serverDialog.unreadCount || 0,
                 isMuted: serverIsMuted,
+                isArchived: serverIsArchived,
+                readInboxMaxId: serverReadInboxMaxId,
                 isPinned: serverIsPinned,
                 message: serverDialog.message || null
             });
@@ -19588,6 +19598,8 @@ class DialogManager {
                 lastMessageTimestamp: dialog.date * 1000, // Convert seconds to ms
                 lastMessageId: dialog.message?.id || 0,
                 isMuted: dialog.archived || false,
+                isArchived: dialog.archived || false,
+                readInboxMaxId: 0,
                 isPinned: dialog.pinned || false,
                 peer: this.getPeerFromDialog(dialog)
             };
@@ -19952,6 +19964,8 @@ class DialogManager {
             message: null,
             lastMessageId: 0,
             isMuted: false,
+            isArchived: false,
+            readInboxMaxId: 0,
             isPinned: false,
             peer,
         };
@@ -20015,6 +20029,8 @@ class DialogManager {
             message: null,
             lastMessageId: 0,
             isMuted: false,
+            isArchived: false,
+            readInboxMaxId: 0,
             isPinned: false,
             peer
         };
@@ -24751,6 +24767,8 @@ class ReactionService {
                         lastMessageTimestamp: dialog.date ? dialog.date * 1000 : Date.now(),
                         lastMessageId: dialog.message?.id || 0,
                         isMuted: dialog.archived || false,
+                        isArchived: dialog.archived || false,
+                        readInboxMaxId: 0,
                         isPinned: dialog.pinned || false,
                         peer
                     };
@@ -64276,8 +64294,16 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             unreadCount: dialog.unreadCount || 0,
                             lastMessage: lastMessageInfo,
                             isPinned: dialog.isPinned || false,
+                            // BACKWARD COMPATIBILITY: isMuted has always carried ARCHIVE state, not notification
+                            // state (DialogManager populates it from `archived`). Existing clients read it that
+                            // way, so its value is unchanged.
                             isMuted: dialog.isMuted || false,
-                            isArchived: dialog.isMuted || false,
+                            // Was `dialog.isMuted` — a copy-paste that made isArchived a duplicate of isMuted
+                            // rather than an independent field. Now sourced correctly.
+                            isArchived: dialog.isArchived ?? dialog.isMuted ?? false,
+                            // Position of the read boundary. A client needs this (not just unreadCount) to draw
+                            // an accurate "N new messages" divider: a count cannot say WHERE the unread run starts.
+                            readInboxMaxId: dialog.readInboxMaxId ?? 0,
                             lastMessageTimestamp: dialog.lastMessageTimestamp || null,
                             lastMessageId: dialog.lastMessageId || 0,
                             ...enhancedInfo
