@@ -4399,6 +4399,41 @@ const ACCOUNT_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACCOUNT_SEND_KEY_TTL_MS = ACCOUNT_SEND_WINDOW_MS + 60 * 60 * 1000;
 const ACCOUNT_CAP_MIN = 1200;
 const ACCOUNT_CAP_MAX = 3500;
+/**
+ * DELIBERATE: a spam-limited account gets a cap ABOVE the healthy ceiling (4200 > 3500), and the
+ * DelayCalculator paces it FASTER (3-4min vs 6-8min). This looks inverted on first read and has
+ * been questioned more than once. It is intentional — do NOT "fix" it without re-reading this.
+ *
+ * WHY: the limit is ALREADY applied by Telegram and its countdown runs on wall-clock time no matter
+ * what we do. Throttling a limited account does not shorten the limit, does not repair the account,
+ * and buys back nothing — it only forfeits whatever volume the account can still push before the
+ * window closes. So while limited, push harder, not softer. (Owner's call, 2026-08-15.)
+ *
+ * ── WHAT THE DATA SAYS, so the trade-off is re-argued from numbers and not vibes ────────────────
+ * Fleet census 2026-08-15 (mobiles with >=50 sends that day, n=98):
+ *
+ *     cohort            mobiles   dead(<5% delivery)   delivery
+ *     healthy(-1)          12          0  (0%)           98.0%
+ *     limited(1)           38         12 (32%)           46.7%
+ *     UNSTAMPED            48         30 (63%)           10.9%
+ *
+ * Delivery is strongly BIMODAL — 49 mobiles under 10%, 45 above 70%, only 2 in the whole 30-70%
+ * band. An account is either working or fully refused; there is no graceful middle.
+ *
+ * ── THE KNOWN LIMIT OF THIS STRATEGY (open, not yet resolved) ───────────────────────────────────
+ * "Push harder" assumes a limited account still delivers SOMETHING. For part of the cohort it
+ * delivers exactly nothing: on 2026-08-15 six correctly-stamped daysLeft=1 mobiles returned ZERO
+ * deliveries (sneha1 1088->0, meghana1 973->0, keerthi2 836->0, sowmya1 787->0). Fleet-wide, dead
+ * mobiles burned 55% of all sends for 2.2% of deliveries.
+ *
+ * For that zero-delivery subset the extra volume has no upside left, and the open question is
+ * whether it carries a cost (deeper limits, session/fingerprint risk) or is merely wasted cycles.
+ * That is UNMEASURED. If it is ever shown to carry a cost, the right change is to split the
+ * zero-delivery subset out — NOT to throttle limited accounts generally, which is settled.
+ *
+ * Related: the failStreak escalation gap (a limited account is never "stale", so it never triggers
+ * recovery) and the unstamped-account problem are tracked separately; see delay-calculator.ts.
+ */
 const ACCOUNT_CAP_LIMITED = 4200;
 /**
  * Rolling 24h promotion cap keyed by stable account identity (clientId).
@@ -6469,6 +6504,30 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //  - HEALTHY  (daysLeft === -1): not spam-limited. Human-like cadence, env-tunable (default 6-8 min).
 //  - UNHEALTHY (any other daysLeft: 0 or a positive countdown): send faster to extract volume while
 //    the account still can — env-tunable (default 3-4 min).
+//
+// DELIBERATE, and questioned repeatedly: a LIMITED account is paced FASTER, not slower — the mirror
+// of the cap policy in pool/account-cap.ts. Read ACCOUNT_CAP_LIMITED's comment there before changing
+// either; they must agree, and the split between them was already a real bug once. Rationale in one
+// line: Telegram's limit countdown runs on wall-clock regardless of our behaviour, so slowing down
+// forfeits volume without shortening the limit. (Owner's call, 2026-08-15.)
+//
+// ── TWO KNOWN GAPS AROUND THIS POLICY (real, open, NOT fixed by tuning these windows) ───────────
+// 1. SUSTAINED FAILURE NEVER ESCALATES. service-health.ts flags failStreak>15 as `degraded` but is
+//    explicitly barred from raising it to `unhealthy` (`status !== "unhealthy"` guard); only >100
+//    reaches unhealthy. On top of that, health-monitor.ts only prepares a replacement when the
+//    account is ALSO stale (`lastMessageAgeMs >= stopTimeoutMs`). A spam-limited account is the
+//    opposite of stale — it is maximally busy and uniformly refused — so it satisfies neither gate
+//    and is never recovered. Observed 2026-08-15: arpitha2 failStreak=64 and sowmya1 failStreak=77,
+//    both sending all day, both invisible to recovery.
+// 2. daysLeft IS UNKNOWN FOR ~85% OF THE FLEET (999/1171 promoteClients have daysLeft=null). The
+//    per-mobile daysLeftMap is IN-MEMORY (checkTgHealth.ts) and starts empty on every process
+//    restart; setMobileStats() restores the engine's own `this.daysLeft` from the DB but never
+//    repopulates that Map, so the two diverge immediately after boot. Unknown then coalesces to -1
+//    (the healthy sentinel) via `stats.daysLeft ?? -1`, so an unprobed account is treated as
+//    healthy. NOTE this is the CONSERVATIVE direction under the current policy (healthy = slower,
+//    smaller cap) — see normalizeDaysLeft in account-cap.ts, which documents the same choice.
+//    Rehydrating the Map from the DB at boot is the correctness fix; it is safe precisely BECAUSE
+//    the policy above is intentional.
 // Windows come from the same env vars as the main-send delay (see delay-policy.ts) so main-send and
 // main->follow-up cadence stay consistent.
 const DEFAULT_DELAY_CONFIG = {
@@ -23859,6 +23918,29 @@ __webpack_require__.r(__webpack_exports__);
  *
  * `reactions_disabled` is deliberately NOT handled here. That one is a real channel property, is
  * persisted to the DB, and must stay permanent.
+ *
+ * ── READ THIS BEFORE TUNING THE LADDER AGAIN: THE POOL COLLAPSE IS A SYMPTOM ────────────────────
+ * The runtime restrictions this store manages are CAUSED by account-level spam limits, not by the
+ * channels. A limited account is refused everywhere, so it re-restricts channels as fast as they are
+ * released and the pool sits pinned at its floor no matter how the TTLs are tuned.
+ *
+ * Verified on arpitha2 (2026-08-15): after the ladder shipped, the pool held flat at channels=100 /
+ * restricted=135 (runtimeOnly=135) for 100+ minutes while lastReaction age GREW 17m -> 37m. Its
+ * promotion side the same day: 3253 sends -> 37 deliveries (1.1%), failStreak=64. Every one of its
+ * five sending mobiles was in the "dead" band (<5% delivery). The ladder was releasing correctly;
+ * there was simply nothing for it to fix. Two earlier "the fix is working" reports on this client
+ * were WRONG — both read a periodic refresh peak rather than the trend.
+ *
+ * Consequence for anyone debugging a shrinking reaction pool: check the account's spam-limit state
+ * FIRST (promoteStatsDaily delivery rate, or daysLeft on the pool record). If delivery is in the
+ * dead band, the reaction pool is a downstream symptom and no TTL value will restore it.
+ *
+ * NOTE: this package has NO spam-limit awareness at all — no daysLeft, no isSpamLimited. Reactions
+ * keep firing at full rate on an account that cannot act anywhere. Whether reactions should back off
+ * (or stop) while limited is an OPEN question, deliberately left open: the promotion side made the
+ * opposite call — a limited account pushes HARDER, because Telegram's countdown runs on wall-clock
+ * and throttling forfeits volume without shortening the limit (see pool/account-cap.ts). Reactions
+ * may warrant the same treatment, but it has not been measured here. Do not assume either way.
  */
 /**
  * Escalating retry windows for repeat restrictions on the same channel.
