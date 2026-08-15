@@ -22012,7 +22012,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     processSkipReason = `failed_${failedAttempts}_backoff`;
                 }
             }
-            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bc, now);
+            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bc, now, { operationalFloor: this.operationalFloor });
             const lastAttemptAge = bc.lastUpdateAttempt ? Math.round((now - new Date(bc.lastUpdateAttempt).getTime()) / (60 * 60 * 1000)) : null;
             const computedPhase = warmupAction.phase;
             const priority = (0, base_client_service_1.calculateWarmupPriority)(bc, warmupAction, now);
@@ -22221,7 +22221,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             }
             if (warmupPhase === base_client_service_1.WarmupPhase.READY)
                 continue;
-            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now);
+            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now, { operationalFloor: this.operationalFloor });
             const priority = (0, base_client_service_1.calculateWarmupPriority)(bufferClient, warmupAction, now);
             bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority, warmupAction });
         }
@@ -34865,7 +34865,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             }
             if (warmupPhase === base_client_service_1.WarmupPhase.READY || warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
                 continue;
-            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now);
+            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now, { operationalFloor: this.operationalFloor });
             const priority = (0, base_client_service_1.calculateWarmupPriority)(promoteClient, warmupAction, now);
             promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority, warmupAction });
         }
@@ -38439,6 +38439,9 @@ class BaseClientService {
     getJoinedChannelIdsFromInfo(channels) {
         return [...new Set([...(channels?.ids ?? []), ...(channels?.canSendFalseChats ?? [])].map(String).filter(Boolean))];
     }
+    get operationalFloor() {
+        return this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING;
+    }
     getOperationalChannelEligibilityFilter() {
         return {
             channels: { $gte: this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
@@ -39189,7 +39192,7 @@ class BaseClientService {
         if (this.isOnCooldown(doc.mobile, doc.lastUpdateAttempt, now)) {
             return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
         }
-        const warmupAction = (0, warmup_phases_1.getWarmupPhaseAction)(doc, now);
+        const warmupAction = (0, warmup_phases_1.getWarmupPhaseAction)(doc, now, { operationalFloor: this.operationalFloor });
         if (warmupAction.action !== 'rotate_session') {
             this.logger.warn(`READY rotation deferred for ${doc.mobile}: resolved action is ${warmupAction.action}`);
             return { updateCount: 0, updateSummary: 'ready_rotation_deferred' };
@@ -39271,7 +39274,7 @@ class BaseClientService {
             this.logger.debug(`Client ${doc.mobile} on cooldown`);
             return { updateCount: 0 };
         }
-        const warmupAction = plannedWarmupAction || (0, warmup_phases_1.getWarmupPhaseAction)(doc, now);
+        const warmupAction = plannedWarmupAction || (0, warmup_phases_1.getWarmupPhaseAction)(doc, now, { operationalFloor: this.operationalFloor });
         this.logger.debug(`Client ${doc.mobile} warmup: storedPhase=${doc.warmupPhase || 'unset'}, resolvedPhase=${warmupAction.phase}, action=${warmupAction.action}`, {
             privacyUpdatedAt: doc.privacyUpdatedAt || null,
             twoFASetAt: doc.twoFASetAt || null,
@@ -41039,8 +41042,11 @@ function calculateWarmupPriority(doc, warmupAction, now) {
         : 0;
     return phaseBoost + actionBonus + fairAgeBonus - failurePenalty;
 }
-function getWarmupPhaseAction(doc, now) {
+function getWarmupPhaseAction(doc, now, thresholds) {
     const jitter = doc.warmupJitter || 0;
+    const operationalFloor = thresholds?.operationalFloor ?? exports.MIN_CHANNELS_FOR_MATURING;
+    const channelsNow = doc.channels || 0;
+    const belowOperationalFloor = channelsNow < operationalFloor;
     const enrolledAt = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
     const daysSinceEnrolled = enrolledAt > 0 ? (now - enrolledAt) / ONE_DAY_MS : 0;
     const phase = doc.warmupPhase || exports.WarmupPhase.ENROLLED;
@@ -41159,7 +41165,7 @@ function getWarmupPhaseAction(doc, now) {
         const pastAdvanceDeadline = growingDuration > exports.GROWING_ADVANCE_DEADLINE_DAYS;
         const effectiveChannelTarget = pastAdvanceDeadline
             ? 0
-            : (stalledLong ? Math.floor(exports.MIN_CHANNELS_FOR_MATURING / 2) : exports.MIN_CHANNELS_FOR_MATURING);
+            : (stalledLong ? Math.floor(operationalFloor / 2) : operationalFloor);
         if (channels < effectiveChannelTarget) {
             return { phase: exports.WarmupPhase.GROWING, action: 'join_channels', organicIntensity: 'light' };
         }
@@ -41192,6 +41198,9 @@ function getWarmupPhaseAction(doc, now) {
         return { phase: exports.WarmupPhase.MATURING, action: 'organic_only', organicIntensity: 'light' };
     }
     if (phase === exports.WarmupPhase.READY) {
+        if (belowOperationalFloor) {
+            return { phase: exports.WarmupPhase.READY, action: 'join_channels', organicIntensity: 'light' };
+        }
         const sessionRotated = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.sessionRotatedAt) > 0;
         if (!sessionRotated) {
             return { phase: exports.WarmupPhase.READY, action: 'rotate_session', organicIntensity: 'light' };
@@ -41199,6 +41208,9 @@ function getWarmupPhaseAction(doc, now) {
         return { phase: exports.WarmupPhase.SESSION_ROTATED, action: 'wait', organicIntensity: 'light' };
     }
     if (phase === exports.WarmupPhase.SESSION_ROTATED) {
+        if (belowOperationalFloor) {
+            return { phase: exports.WarmupPhase.SESSION_ROTATED, action: 'join_channels', organicIntensity: 'light' };
+        }
         return { phase: exports.WarmupPhase.SESSION_ROTATED, action: 'wait', organicIntensity: 'light' };
     }
     return { phase: exports.WarmupPhase.ENROLLED, action: 'wait', organicIntensity: 'light' };
@@ -43957,6 +43969,10 @@ __decorate([
     __metadata("design:type", String)
 ], UserData.prototype, "profile", void 0);
 __decorate([
+    (0, mongoose_1.Prop)({ required: false, index: true }),
+    __metadata("design:type", String)
+], UserData.prototype, "clientId", void 0);
+__decorate([
     (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
 ], UserData.prototype, "picsSent", void 0);
@@ -44123,8 +44139,14 @@ __decorate([
 ], UserDataController.prototype, "updateAll", null);
 __decorate([
     (0, common_1.Get)(':profile/:chatId'),
-    (0, swagger_1.ApiOperation)({ summary: 'Get user data by profile and chat ID', description: 'Retrieves a specific user data entry by profile and chat ID.' }),
-    (0, swagger_1.ApiParam)({ name: 'profile', description: 'User profile identifier', type: String }),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Get user data by profile/clientId and chat ID',
+        description: 'Retrieves a user data entry by chat ID. The first path segment accepts EITHER a persona/profile '
+            + '(e.g. "shruthi", the legacy form) OR a clientId (e.g. "shruthi2"). When a clientId is given, a '
+            + 'row owned by that client is preferred and the shared persona row is used as fallback. Callers '
+            + 'that currently strip digits off a clientId to make this resolve no longer need to.',
+    }),
+    (0, swagger_1.ApiParam)({ name: 'profile', description: 'Persona/profile (e.g. "shruthi") or clientId (e.g. "shruthi2")', type: String }),
     (0, swagger_1.ApiParam)({ name: 'chatId', description: 'Chat ID associated with the user', type: String }),
     (0, swagger_1.ApiResponse)({ status: 200, description: 'User data found.', type: user_data_schema_1.UserData }),
     (0, swagger_1.ApiResponse)({ status: 404, description: 'User data not found.' }),
@@ -44280,6 +44302,8 @@ let UserDataService = UserDataService_1 = class UserDataService {
         this.userDataModel = userDataModel;
         this.callCounts = new Map();
         this.logger = new utils_1.Logger(UserDataService_1.name);
+        this.clientIdToProfile = new Map();
+        this.clientMapLoadedAt = 0;
     }
     recordCall(chatId) {
         const currentCount = (this.callCounts.get(chatId) || 0) + 1;
@@ -44303,10 +44327,32 @@ let UserDataService = UserDataService_1 = class UserDataService {
     async findAll(limit = 99) {
         return this.userDataModel.find().limit(limit).lean().exec();
     }
-    async findOne(profile, chatId) {
-        const user = await this.userDataModel.findOne({ profile, chatId }).lean().exec();
+    async resolveProfileForClientId(candidate) {
+        const key = candidate.trim();
+        if (!key)
+            return null;
+        const FIVE_MIN = 5 * 60 * 1000;
+        if (Date.now() - this.clientMapLoadedAt > FIVE_MIN) {
+            try {
+                const rows = await this.userDataModel.db
+                    .collection('clients')
+                    .find({}, { projection: { clientId: 1, dbcoll: 1, _id: 0 } })
+                    .toArray();
+                this.clientIdToProfile = new Map(rows
+                    .filter((r) => typeof r?.clientId === 'string' && typeof r?.dbcoll === 'string')
+                    .map((r) => [r.clientId, r.dbcoll]));
+                this.clientMapLoadedAt = Date.now();
+            }
+            catch (error) {
+                this.logger.warn(`clientId->profile map refresh failed: ${(0, parseError_1.parseError)(error).message}`);
+            }
+        }
+        return this.clientIdToProfile.get(key) ?? null;
+    }
+    async findOne(identifier, chatId) {
+        const user = await this.userDataModel.findOne(await this.userRowFilter(identifier, chatId)).lean().exec();
         if (!user) {
-            throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
+            throw new common_1.NotFoundException(`UserData with profile "${identifier}" and chatId "${chatId}" not found`);
         }
         const currentCount = this.recordCall(chatId);
         return { ...user, count: currentCount };
@@ -44319,13 +44365,20 @@ let UserDataService = UserDataService_1 = class UserDataService {
         this.callCounts.clear();
         return 'All counts cleared.';
     }
+    async userRowFilter(identifier, chatId) {
+        const resolvedProfile = await this.resolveProfileForClientId(identifier);
+        if (!resolvedProfile)
+            return { profile: identifier, chatId };
+        const owned = await this.userDataModel.findOne({ clientId: identifier, chatId }).select('_id').lean().exec();
+        return owned ? { clientId: identifier, chatId } : { profile: resolvedProfile, chatId };
+    }
     async update(profile, chatId, updateUserDataDto) {
         const sanitizedDto = { ...updateUserDataDto };
         delete sanitizedDto._id;
         delete sanitizedDto.profile;
         delete sanitizedDto.chatId;
         const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $set: sanitizedDto }, { new: true, upsert: false })
+            .findOneAndUpdate(await this.userRowFilter(profile, chatId), { $set: sanitizedDto }, { new: true, upsert: false })
             .lean()
             .exec();
         if (!updatedUser) {
@@ -44345,7 +44398,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         if (botsService) {
             botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, `Deleting UserData: ${profile} (chat ${chatId})`);
         }
-        const deletedUser = await this.userDataModel.findOneAndDelete({ profile, chatId }).lean().exec();
+        const deletedUser = await this.userDataModel.findOneAndDelete(await this.userRowFilter(profile, chatId)).lean().exec();
         if (!deletedUser) {
             throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
         }
