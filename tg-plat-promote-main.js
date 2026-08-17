@@ -18443,7 +18443,16 @@ class DialogManager {
         // correctly-named isArchived is added alongside it.
         const serverIsMuted = serverIsArchived;
         // Position of the read boundary, for an accurate unread divider.
-        const serverReadInboxMaxId = serverDialog.readInboxMaxId || 0;
+        // readInboxMaxId lives on the RAW TL object (Api.Dialog), NOT on GramJS's custom Dialog
+        // wrapper — the wrapper only re-exposes unreadCount/archived/pinned/folderId/message.
+        // Reading it off the wrapper returned undefined, so the field shipped as 0 for every dialog
+        // (verified live: 25 dialogs, all 0, including one with unreadCount=1). The wrapper keeps
+        // the raw object on `.dialog`, so read through that and fall back to the wrapper in case a
+        // caller passes a raw Api.Dialog directly.
+        const rawDialog = serverDialog.dialog;
+        const serverReadInboxMaxId = rawDialog?.readInboxMaxId
+            ?? serverDialog.readInboxMaxId
+            ?? 0;
         // Update if server has newer message data OR if pinned/muted/read status changed
         const hasNewerMessage = this.shouldUpdateFromServer(serverTimestamp, serverMessageId, existing);
         const pinnedStatusChanged = existing.isPinned !== serverIsPinned;
@@ -18539,7 +18548,9 @@ class DialogManager {
                 lastMessageId: dialog.message?.id || 0,
                 isMuted: dialog.archived || false,
                 isArchived: dialog.archived || false,
-                readInboxMaxId: 0,
+                // Read through `.dialog` — the raw Api.Dialog. GramJS's custom Dialog wrapper does
+                // not re-expose readInboxMaxId, so this was hardcoded 0 and the field was useless.
+                readInboxMaxId: dialog.dialog?.readInboxMaxId ?? 0,
                 isPinned: dialog.pinned || false,
                 peer: this.getPeerFromDialog(dialog)
             };
