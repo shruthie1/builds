@@ -50188,6 +50188,7 @@ const RETRYABLE_NETWORK_ERRORS = [
     'ECONNRESET',
     'ERR_NETWORK',
     'ERR_BAD_RESPONSE',
+    'ERR_CANCELED',
     'EHOSTUNREACH',
     'ENETUNREACH',
 ];
@@ -50340,7 +50341,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries) {
             lastError = error instanceof Error ? error : new Error(String(error));
             let parsedError;
             try {
-                parsedError = (0, parseError_1.parseError)(error, `host: ${host}\nendpoint:${endpoint}`, false);
+                parsedError = (0, parseError_1.parseError)(error, `host: ${host} endpoint: ${endpoint}`, false);
             }
             catch (parseErrorError) {
                 console.error('Error in parseError:', parseErrorError);
@@ -50355,6 +50356,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries) {
                 : JSON.stringify(parsedError.message);
             const isTimeout = axios_1.default.isAxiosError(error) &&
                 (error.code === 'ECONNABORTED' ||
+                    error.code === 'ERR_CANCELED' ||
                     message.includes('timeout') ||
                     parsedError.status === 408);
             if ((parsedError.status === 403 || parsedError.status === 495) && !isTelegramBotApiUrl(url)) {
@@ -50368,7 +50370,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries) {
                 catch (bypassError) {
                     let errorDetails;
                     try {
-                        const bypassParsedError = (0, parseError_1.parseError)(bypassError, `host: ${host}\nendpoint:${endpoint}`, false);
+                        const bypassParsedError = (0, parseError_1.parseError)(bypassError, `host: ${host} endpoint: ${endpoint}`, false);
                         errorDetails = (0, parseError_1.extractMessage)(bypassParsedError);
                     }
                     catch (extractBypassError) {
@@ -50407,7 +50409,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries) {
         let errorData;
         try {
             if (lastError) {
-                const parsedLastError = (0, parseError_1.parseError)(lastError, `${clientId} host: ${host}\nendpoint:${endpoint}`, false);
+                const parsedLastError = (0, parseError_1.parseError)(lastError, `${clientId} host: ${host} endpoint: ${endpoint}`, false);
                 errorData = (0, parseError_1.extractMessage)(parsedLastError);
             }
             else {
