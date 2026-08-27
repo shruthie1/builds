@@ -34464,6 +34464,38 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             throw error;
         }
     }
+    async findPrioritizedJoinCandidates(query) {
+        const limit = this.config.maxMapSize;
+        const operationalFloor = this.config.operationalChannelThreshold ?? 230;
+        const recoveryQuery = {
+            ...query,
+            warmupPhase: { $in: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
+            channels: { $lt: operationalFloor },
+        };
+        const recoveryQueryResult = this.promoteClientModel
+            .find(recoveryQuery)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
+        if (recoveryCandidates.length >= limit)
+            return recoveryCandidates;
+        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
+        const standardQueryResult = this.promoteClientModel
+            .find(query)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
+        return [
+            ...recoveryCandidates,
+            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
+        ].slice(0, limit);
+    }
+    async resolveJoinCandidateQuery(query) {
+        const executable = query;
+        return typeof executable.exec === 'function'
+            ? executable.exec()
+            : Promise.resolve(query);
+    }
     async refillJoinQueue(clientId) {
         if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing)
             return 0;
@@ -34478,11 +34510,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         };
         if (clientId)
             query.clientId = clientId;
-        const eligible = await this.promoteClientModel
-            .find(query)
-            .sort({ channels: -1 })
-            .limit(this.config.maxMapSize)
-            .exec();
+        const eligible = await this.findPrioritizedJoinCandidates(query);
         let added = 0;
         let leaveAdded = 0;
         for (const doc of eligible) {
@@ -34722,15 +34750,12 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.logger.log('Starting join channel process');
             const preservedMobiles = await this.prepareJoinChannelRefresh(skipExisting);
             try {
-                const clients = await this.promoteClientModel
-                    .find({
+                const clients = await this.findPrioritizedJoinCandidates({
                     channels: { $lt: this.config.channelTarget },
                     mobile: { $nin: Array.from(preservedMobiles) },
                     status: 'active',
                     ...this.getJoinCapacityEligibilityFilter(),
-                })
-                    .sort({ channels: -1 })
-                    .limit(this.config.maxMapSize);
+                });
                 const joinSet = new Set();
                 const leaveSet = new Set();
                 let successCount = 0;
