@@ -16996,12 +16996,15 @@ const PATTERNS_2LINE = {
 };
 const PATTERN_KEYS_3LINE = Object.keys(PATTERNS_3LINE);
 const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
+/**
+ * Cap a pattern's requested indent by the line's own length so padding can never push real words
+ * past the bubble's wrap width. A line too long for its requested tier steps DOWN a tier (10 -> 5
+ * -> 0) rather than being dropped from the pattern entirely.
+ */
 function capIndentForLength(indentLevel, len) {
     if (indentLevel >= 10 && len <= MAX_LEN_FOR_INDENT_10)
         return 10;
     if (indentLevel >= 5 && len <= MAX_LEN_FOR_INDENT_5)
-        return 5;
-    if (indentLevel >= 10 && len <= MAX_LEN_FOR_INDENT_5)
         return 5;
     return 0;
 }
@@ -17017,7 +17020,16 @@ function pick(arr) {
 }
 /**
  * Applies a length-aware pattern (indent + break rhythm) to a 2-3 line message.
- * Lines longer than 1 are left as-is (no pattern system defined for longer messages here).
+ *
+ * A 0/1-line message is returned unchanged. A message of 4+ lines has no pattern defined, so it
+ * falls back to flat blank-line separation ('\n\n' between every line) — no indentation, which is
+ * the safe choice for a length this function was not designed around.
+ *
+ * NOTE: pattern selection is RANDOM per call, so the same input yields different (all valid)
+ * layouts across calls. That is intentional — it varies the look of repeated promotion sends. It
+ * also means this function is not referentially transparent; do not use its output as a cache or
+ * dedupe key. (Pool identity uses poolEntryKey(), which normalizes punctuation/whitespace away and
+ * is provably unaffected by this variance.)
  */
 function getPatternedIndent(message) {
     if (!message)
@@ -17235,7 +17247,7 @@ __webpack_require__.r(__webpack_exports__);
  *     compounds into a cramped block otherwise (multiple dot-separated sentences back to back).
  */
 
-/** Max consecutive newlines to keep for the <=2-line preserved path is irrelevant; kept for >2. */
+/** Max consecutive newlines to keep. One blank line is human; four is a broken layout. */
 const MAX_CONSECUTIVE_NEWLINES = 2;
 /**
  * Collapse runs of 4+ letter-spaced single characters ("V I D E O") back into a word ("VIDEO").
