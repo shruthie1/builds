@@ -6214,13 +6214,13 @@ async function generateAIMsg(client, channelInfo) {
         messageHistory.length = 0;
         if (!plainMessage)
             return null;
-        // NOTE: getPatternedIndent() used to run here. It prepended up to 15 leading spaces and up
-        // to 5 consecutive newlines per line, which assumes a fixed-width canvas. Telegram wraps by
-        // PIXEL width, so indented lines overflowed the bubble and broke mid-word ("VIDEOCA"/"LL"),
-        // separator rules detached from their corners, and short messages rendered as a huge hollow
-        // box with orphaned stray characters. Verified in production 2026-08-14: 60.9% of stored
-        // pool entries carry >=4-space indents and 2.5% carry blank-line runs. Real people do not
-        // indent chat messages — send the cleaned text as-is.
+        // NOTE: an earlier getPatternedIndent() call was removed from here (2026-08-15) because it
+        // prepended up to 15 leading spaces and up to 5 consecutive newlines UNCONDITIONALLY — that
+        // overflowed Telegram's pixel-width bubble and broke mid-word ("VIDEOCA"/"LL"). The prompt
+        // constrains AI output to 2-3 lines of <=40 chars each, so sanitizePromotionRendering()
+        // (2026-08-27) now safely re-applies pattern indentation here via its own >2-real-line
+        // branch — packages/tg-core/src/utils/patternedIndent.ts caps each line's indent by its own
+        // length, so it can't repeat the overflow. 2-line AI output passes through unchanged.
         const formattedMessage = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_3__.sanitizePromotionRendering)(plainMessage);
         plainMessage = '';
         if (!formattedMessage) {
@@ -13811,6 +13811,14 @@ const RETRYABLE_NETWORK_ERRORS = [
     "ECONNRESET",
     "ERR_NETWORK",
     "ERR_BAD_RESPONSE",
+    // The only thing that ever calls controller.abort() in this module is our own per-attempt
+    // timeout below, so a canceled request IS a timeout — just reported by axios under a
+    // different code/message ("canceled"/ERR_CANCELED) than ECONNABORTED. Without this, every
+    // abort fell through shouldRetry as non-retryable and failed permanently on attempt 0,
+    // discarding the entire point of the retry loop for exactly the failure it exists to survive.
+    // Same fix applied in CommonTgService's copy of this module after it was observed causing
+    // dozens of untried "canceled" failures per hour against api.telegram.org in production.
+    "ERR_CANCELED",
     "EHOSTUNREACH",
     "ENETUNREACH",
 ];
@@ -14012,7 +14020,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries // Kept for backwa
             // Try to parse the error for better handling
             let parsedError;
             try {
-                parsedError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, `host: ${host}\nendpoint:${endpoint}`, false);
+                parsedError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, `host: ${host} endpoint: ${endpoint}`, false);
             }
             catch (parseErrorError) {
                 logger.error("Error in parseError:", parseErrorError);
@@ -14027,6 +14035,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries // Kept for backwa
             // Check if it's a timeout
             const isTimeout = axios__WEBPACK_IMPORTED_MODULE_0___default().isAxiosError(error) &&
                 (error.code === "ECONNABORTED" ||
+                    error.code === "ERR_CANCELED" ||
                     (message && message.includes("timeout")) ||
                     parsedError.status === 408);
             // Handle 403/495 with bypass
@@ -14041,7 +14050,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries // Kept for backwa
                 catch (bypassError) {
                     let errorDetails;
                     try {
-                        const bypassParsedError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(bypassError, `host: ${host}\nendpoint:${endpoint}`, false);
+                        const bypassParsedError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(bypassError, `host: ${host} endpoint: ${endpoint}`, false);
                         errorDetails = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.extractMessage)(bypassParsedError);
                     }
                     catch (extractBypassError) {
@@ -14084,7 +14093,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries // Kept for backwa
         let finalStatus;
         try {
             if (lastError) {
-                const parsedLastError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(lastError, `${clientId} host: ${host}\nendpoint:${endpoint}`, false);
+                const parsedLastError = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(lastError, `${clientId} host: ${host} endpoint: ${endpoint}`, false);
                 finalStatus = parsedLastError.status;
                 errorData = (0,_parseError__WEBPACK_IMPORTED_MODULE_1__.extractMessage)(parsedLastError);
             }
@@ -16838,6 +16847,103 @@ const ErrorUtils = {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/patternedIndent.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/patternedIndent.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getPatternedIndent: () => (/* binding */ getPatternedIndent)
+/* harmony export */ });
+/**
+ * Length-aware pattern indentation for short promotion messages (2-3 lines).
+ *
+ * The original pattern-indent.ts (removed 2026-08-15, commit 8ce08e3) applied a FIXED indent
+ * per pattern shape regardless of line length. Telegram bubbles wrap by PIXEL width, not
+ * character count — prepending spaces to a line that's already close to the wrap width pushes
+ * real words past it, so they wrap onto a second physical line with no indent, looking orphaned
+ * (observed production case: "V I D E O C A L L" -> "VIDEOCA" / "LL").
+ *
+ * This version keeps the same fixed indent tiers and pattern shapes, but caps the indent
+ * ELIGIBLE for a given line by that line's own length — a line only receives the 10-space
+ * indent if it's short enough that padding it can't approach the wrap width; a longer line is
+ * capped to 5 or 0 automatically. Real message pools (generateFollowupMsg, generateCustomMsg)
+ * run 5-33 chars, median 11 — most lines keep the full staircase effect; only the rare long
+ * line gets pulled back.
+ *
+ * Line breaks (1 or 2, capped at 2) are a second, independent pattern dial for vertical rhythm,
+ * used when indent gets capped to 0 on longer lines so patterns stay visually distinct.
+ */
+const INDENT_0 = '';
+const INDENT_5 = '     '; // 5 spaces
+const INDENT_10 = '          '; // 10 spaces
+// A line only qualifies for an indent tier if len + indent stays safely under the wrap budget.
+const MAX_LEN_FOR_INDENT_10 = 20;
+const MAX_LEN_FOR_INDENT_5 = 35;
+const MAX_LINE_BREAKS = 2;
+const PATTERNS_3LINE = {
+    BUILD_UP: { indent: [0, 5, 10], breaks: [1, 2, 1] },
+    PEAK_MIDDLE: { indent: [0, 10, 0], breaks: [1, 1, 1] },
+    DESCENDING: { indent: [10, 5, 0], breaks: [1, 1, 1] },
+    FLAT_WIDE_CLOSE: { indent: [0, 0, 0], breaks: [1, 2, 1] },
+    SMALL_PEAK: { indent: [0, 5, 0], breaks: [1, 1, 2] },
+};
+const PATTERNS_2LINE = {
+    STEP_DOWN: { indent: [0, 5], breaks: [1, 1] },
+    STEP_UP: { indent: [5, 0], breaks: [1, 1] },
+    FLAT: { indent: [0, 0], breaks: [2, 1] },
+};
+const PATTERN_KEYS_3LINE = Object.keys(PATTERNS_3LINE);
+const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
+function capIndentForLength(indentLevel, len) {
+    if (indentLevel >= 10 && len <= MAX_LEN_FOR_INDENT_10)
+        return 10;
+    if (indentLevel >= 5 && len <= MAX_LEN_FOR_INDENT_5)
+        return 5;
+    if (indentLevel >= 10 && len <= MAX_LEN_FOR_INDENT_5)
+        return 5;
+    return 0;
+}
+function getIndentSpaces(level) {
+    if (level >= 10)
+        return INDENT_10;
+    if (level >= 5)
+        return INDENT_5;
+    return INDENT_0;
+}
+function pick(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+}
+/**
+ * Applies a length-aware pattern (indent + break rhythm) to a 2-3 line message.
+ * Lines longer than 1 are left as-is (no pattern system defined for longer messages here).
+ */
+function getPatternedIndent(message) {
+    if (!message)
+        return '';
+    const lines = message.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+    if (lines.length < 2 || lines.length > 3)
+        return lines.join('\n\n');
+    const pattern = lines.length === 2
+        ? PATTERNS_2LINE[pick(PATTERN_KEYS_2LINE)]
+        : PATTERNS_3LINE[pick(PATTERN_KEYS_3LINE)];
+    return lines
+        .map((line, i) => {
+        const rawIndent = pattern.indent[i] ?? 0;
+        const safeIndent = capIndentForLength(rawIndent, line.length);
+        const breakCount = Math.min(pattern.breaks[i] ?? 1, MAX_LINE_BREAKS);
+        const isLast = i === lines.length - 1;
+        const trailer = isLast ? '' : '\n'.repeat(breakCount);
+        return `${getIndentSpaces(safeIndent)}${line}${trailer}`;
+    })
+        .join('');
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/random.ts"
 /*!**************************************************!*\
   !*** ../../packages/tg-core/src/utils/random.ts ***!
@@ -16985,6 +17091,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   sanitizePromotionRendering: () => (/* binding */ sanitizePromotionRendering)
 /* harmony export */ });
+/* harmony import */ var _patternedIndent__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./patternedIndent */ "../../packages/tg-core/src/utils/patternedIndent.ts");
 /**
  * Structural sanitizer for outgoing promotion text.
  *
@@ -17003,8 +17110,29 @@ __webpack_require__.r(__webpack_exports__);
  * This is deliberately structural only. It does not touch wording, emoji, or the mathematical-bold
  * styling applied elsewhere — AI-sourced messages measurably outperform the legacy pool
  * (2.42% vs 2.12% DM-per-send), so their CONTENT is left alone.
+ *
+ * ── UPDATED 2026-08-27: separator lines are intentional authoring, not corruption ────────────────
+ * Static template pools (generateCustomMsg.ts) deliberately author dot/tilde/dash separator runs
+ * between sentences, e.g. connector = '\n.\n.\n.\n.\n'. A line with no letters/digits/emoji is only
+ * a genuine layout artifact when it's a STRAY leftover (an orphaned "." from a wrapped banner); the
+ * same shape is legitimate when it's how the author chose to space out a short message. The two
+ * cases can't be told apart by character alone, so the rule is now LINE-COUNT based instead:
+ *
+ *   - Count "real" content lines only (a line with a letter/digit/emoji); separator-only lines
+ *     (any run length, even a lone one) never count toward this, matching how a human reads them.
+ *   - <=2 real content lines: separator lines are KEPT (not dropped) and blank-run capping still
+ *     applies same as always; each line is still trimmed of leading/trailing whitespace (that's
+ *     rendering noise removal, not touching the author's choice of separator). This is the
+ *     confirmed-good case, e.g. "Hyyyy_._._._._._._!!\n.\n.\n.\n.\nU therre???" survives with its
+ *     separator lines intact, while a box-drawing-corrupted 2-line message (frame chars present)
+ *     still gets its per-line indentation stripped like before.
+ *   - >2 real content lines: separator lines are DROPPED (not just de-indented) and a fresh visual
+ *     pattern (packages/tg-core/src/utils/patternedIndent.ts) is applied to the remaining content
+ *     lines instead of trusting the original ad-hoc spacing — this is the case that visually
+ *     compounds into a cramped block otherwise (multiple dot-separated sentences back to back).
  */
-/** Max consecutive newlines to keep. One blank line is human; four is a broken layout. */
+
+/** Max consecutive newlines to keep for the <=2-line preserved path is irrelevant; kept for >2. */
 const MAX_CONSECUTIVE_NEWLINES = 2;
 /**
  * Collapse runs of 4+ letter-spaced single characters ("V I D E O") back into a word ("VIDEO").
@@ -17017,42 +17145,51 @@ function collapseLetterSpacing(line) {
 function stripFrameCharacters(text) {
     return text.replace(/[─-╿▀-▟■-◿]+/g, ' ');
 }
+/** A "real" content line has a letter, digit, or emoji. Separator-only lines never count. */
+function isContentLine(line) {
+    return /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(line);
+}
 /**
  * Normalize the structure of a promotion message without altering its wording.
  *
- * - removes leading/trailing whitespace per line (kills indent-based layout)
- * - drops box-drawing frame characters
- * - collapses letter-spaced banners
- * - caps consecutive blank lines
- * - drops lines left empty of any letter/number/emoji content (the orphaned "." artifacts)
+ * Always: strips box-drawing frame characters, collapses letter-spaced banners (both are
+ * corruption regardless of message length).
+ *
+ * Then branches on the number of REAL content lines (separator-only lines don't count):
+ * - <=2 content lines: every line is trimmed and blank runs capped as always, but separator-only
+ *   lines are KEPT rather than dropped — the author's spacing choice survives, corruption doesn't.
+ * - >2 content lines: separator lines are dropped entirely; a fresh pattern (getPatternedIndent)
+ *   is applied to the remaining content lines instead of trusting the original ad-hoc spacing.
  */
 function sanitizePromotionRendering(text) {
     if (typeof text !== 'string' || text.trim() === '')
         return '';
-    const lines = stripFrameCharacters(text)
+    const rawLines = stripFrameCharacters(text)
         .replace(/\r\n?/g, '\n')
         .split('\n')
         .map((line) => collapseLetterSpacing(line.replace(/[^\S\n]+/g, ' ').trim()));
+    const contentLineCount = rawLines.filter((line) => isContentLine(line)).length;
+    const dropSeparators = contentLineCount > 2;
     const kept = [];
     let blankRun = 0;
-    for (const line of lines) {
+    for (const line of rawLines) {
         if (line === '') {
             blankRun++;
-            // A blank line is only meaningful between two content lines, and never more than one.
             if (blankRun < MAX_CONSECUTIVE_NEWLINES && kept.length > 0)
                 kept.push('');
             continue;
         }
-        // A line with no letters, digits, or emoji is a layout artifact (a stray "." or "~" left
-        // behind by a wrapped separator), not content.
-        if (!/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(line))
+        if (dropSeparators && !isContentLine(line))
             continue;
         blankRun = 0;
         kept.push(line);
     }
     while (kept.length > 0 && kept[kept.length - 1] === '')
         kept.pop();
-    return kept.join('\n').trim();
+    if (!dropSeparators)
+        return kept.join('\n').trim();
+    const contentOnly = kept.filter((line) => line !== '');
+    return (0,_patternedIndent__WEBPACK_IMPORTED_MODULE_0__.getPatternedIndent)(contentOnly.join('\n')).trim();
 }
 
 
