@@ -30402,16 +30402,53 @@ async function notifyPreviousSuccessMessages(messages, managerCount) {
     }
 }
 /**
+ * How many mobiles ONE promote process runs concurrently.
+ *
+ * This was hardcoded to 2, with `getInstance()` always called without a config, so 2 was the
+ * effective fleet-wide value and there was no override path. Measured on prod 2026-08-27: 211
+ * promote accounts were runtime-eligible but only 62 sent — 149 fully-warmed accounts idle,
+ * because 20 promote processes x 2 mobiles caps concurrency at ~40. Per-client the ceiling is
+ * obvious: sowmya2 had 29 eligible and 3 sending; shruthi1 19 eligible and 4 sending.
+ *
+ * Raising this is the single highest-leverage throughput change available — it uses accounts that
+ * are ALREADY warm, so it adds no warmup/rotation Telegram exposure. But each extra mobile is
+ * another concurrent Telegram client per process (memory: processes currently sit ~200MB) and more
+ * simultaneous connections from one IP, which touches the anti-fingerprinting posture that is this
+ * platform's #1 operational priority. So it stays env-gated and conservative by default: keep 2
+ * unless PROMOTE_TARGET_MOBILE_COUNT is set, roll out to ONE process on ONE VM first, and watch
+ * for auth-key/session errors before widening.
+ */
+const DEFAULT_TARGET_MOBILE_COUNT = 2;
+const MAX_TARGET_MOBILE_COUNT = 8;
+function resolveTargetMobileCount() {
+    const raw = process.env.PROMOTE_TARGET_MOBILE_COUNT;
+    if (!raw)
+        return DEFAULT_TARGET_MOBILE_COUNT;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        logger.warn(`Ignoring invalid PROMOTE_TARGET_MOBILE_COUNT="${raw}"; using ${DEFAULT_TARGET_MOBILE_COUNT}`);
+        return DEFAULT_TARGET_MOBILE_COUNT;
+    }
+    if (parsed > MAX_TARGET_MOBILE_COUNT) {
+        logger.warn(`PROMOTE_TARGET_MOBILE_COUNT=${parsed} exceeds the ${MAX_TARGET_MOBILE_COUNT} ceiling; clamping`);
+        return MAX_TARGET_MOBILE_COUNT;
+    }
+    return parsed;
+}
+/**
  * Centralized Mobile Management System
  * Handles all mobile lifecycle, state synchronization, and Telegram integration
  */
 class MobileManager {
     // private prevMsgsInterval: NodeJS.Timeout | null = null;
-    constructor(config = { targetMobileCount: 2, minChannels: 180 }) {
+    constructor(config) {
         this.clientsMap = new Map();
         this.telegramManagers = new Map();
         this.isInitialized = false;
-        this.config = config;
+        this.config = config ?? {
+            targetMobileCount: resolveTargetMobileCount(),
+            minChannels: 180,
+        };
         // this.prevMsgsInterval = setInterval(() => {
         //   this.getPreviousSuccessMessages()
         // }, 10* 60 * 1000); // Every 10 minutes
