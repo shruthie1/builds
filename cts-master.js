@@ -21799,8 +21799,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             }
             if (this.isMobileDailyCapped(doc.mobile))
                 continue;
+            let client = null;
             try {
-                const client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
+                client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
                 const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                 await this.update(doc.mobile, { channels: channels.ids.length });
                 if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
@@ -21823,7 +21824,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             catch (error) {
                 const errorDetails = (0, parseError_1.parseError)(error, `RefillJoinQueueErr: ${doc.mobile}`);
                 if ((0, isPermanentError_1.default)(errorDetails)) {
-                    const reason = await this.buildPermanentAccountReason(errorDetails.message);
+                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
                     await this.deactivateClient(doc.mobile, reason, { permanent: true });
                 }
             }
@@ -22422,8 +22423,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             for (let i = 0; i < clients.length; i++) {
                 const document = clients[i];
                 const mobile = document.mobile;
+                let client = null;
                 try {
-                    const client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
+                    client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
                     const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                     await this.update(mobile, { channels: channels.ids.length });
                     if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
@@ -22454,7 +22456,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     failCount++;
                     const errorDetails = (0, parseError_1.parseError)(error, `JoinChannelErr: ${mobile}`);
                     if ((0, isPermanentError_1.default)(errorDetails)) {
-                        const reason = await this.buildPermanentAccountReason(errorDetails.message);
+                        const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
                         await this.deactivateClient(mobile, reason, { permanent: true });
                     }
                 }
@@ -34516,8 +34518,9 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         for (const doc of eligible) {
             if (this.isMobileDailyCapped(doc.mobile))
                 continue;
+            let client = null;
             try {
-                const client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
+                client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
                 const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                 await this.update(doc.mobile, { channels: channels.ids.length });
                 if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
@@ -34540,7 +34543,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             catch (error) {
                 const errorDetails = (0, parseError_1.parseError)(error, `RefillJoinQueueErr: ${doc.mobile}`);
                 if ((0, isPermanentError_1.default)(errorDetails)) {
-                    const reason = await this.buildPermanentAccountReason(errorDetails.message);
+                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
                     await this.deactivateClient(doc.mobile, reason, { permanent: true });
                 }
             }
@@ -34762,8 +34765,9 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 let failCount = 0;
                 for (const document of clients) {
                     const mobile = document.mobile;
+                    let client = null;
                     try {
-                        const client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
+                        client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
                         await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
                         const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
                         await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
@@ -34799,7 +34803,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         const errorDetails = (0, parseError_1.parseError)(error);
                         if ((0, isPermanentError_1.default)(errorDetails)) {
                             await (0, Helpers_1.sleep)(1000);
-                            const reason = await this.buildPermanentAccountReason(errorDetails.message);
+                            const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
                             await this.deactivateClient(mobile, reason, { permanent: true });
                         }
                     }
