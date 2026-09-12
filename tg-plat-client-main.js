@@ -15404,6 +15404,25 @@ const BOLD_STYLE_ENTRIES = [
 function pickBoldStyle() {
     return weightedPick(BOLD_STYLE_ENTRIES.map(e => e[0]), BOLD_STYLE_ENTRIES.map(e => e[1]));
 }
+/**
+ * Wrap a line in Telegram markdown bold WITHOUT swallowing its leading/trailing whitespace.
+ *
+ * Telegram only renders `**bold**` when the markers sit tight against the text. Pool entries carry
+ * staircase indentation, so the naive `**${line}**` produced `**      Hyyyyyyyyy**` — markers
+ * separated from the text by six spaces, which Telegram renders as LITERAL asterisks. Measured on
+ * the live promoteMsgs pool: 53.2% of renders came out with broken markers, and those stray `*`
+ * characters were visible in production chat screenshots.
+ *
+ * Keeping the indent OUTSIDE the markers preserves the staircase layout and renders as bold.
+ */
+function mdBold(line) {
+    const leading = line.match(/^\s*/)?.[0] ?? '';
+    const trailing = line.match(/\s*$/)?.[0] ?? '';
+    const core = line.slice(leading.length, line.length - trailing.length);
+    if (!core)
+        return line;
+    return `${leading}**${core}**${trailing}`;
+}
 function mdBoldKeywords(line) {
     return line.replace(/\b([a-zA-Z]{3,})\b/g, (m) => chance(0.45) ? `**${m}**` : m);
 }
@@ -15419,13 +15438,13 @@ function applyBoldStyle(text, style) {
     const firstContentIdx = contentIndices.length > 0 ? contentIndices[0] : -1;
     switch (style) {
         case 'md-full':
-            return lines.map(l => l.trim() ? `**${l}**` : l).join('\n');
+            return lines.map(l => l.trim() ? mdBold(l) : l).join('\n');
         case 'md-keywords':
             return lines.map(l => mdBoldKeywords(l)).join('\n');
         case 'md-first-line':
-            return lines.map((l, i) => (i === firstContentIdx && l.trim()) ? `**${l}**` : l).join('\n');
+            return lines.map((l, i) => (i === firstContentIdx && l.trim()) ? mdBold(l) : l).join('\n');
         case 'md-last-line':
-            return lines.map((l, i) => (i === lastContentIdx && l.trim()) ? `**${l}**` : l).join('\n');
+            return lines.map((l, i) => (i === lastContentIdx && l.trim()) ? mdBold(l) : l).join('\n');
         case 'unicode-full':
             return lines.map(l => l.trim() ? toUnicodeFont(stripBold(l)) : l).join('\n');
         case 'unicode-keywords':
@@ -15441,7 +15460,7 @@ function applyBoldStyle(text, style) {
                     firstDone = true;
                     return toUnicodeFont(stripBold(l));
                 }
-                return `**${l}**`;
+                return mdBold(l);
             }).join('\n');
         }
         case 'mixed-italic': {
@@ -15453,14 +15472,14 @@ function applyBoldStyle(text, style) {
                     firstDone = true;
                     return toUnicodeFont(stripBold(l), 'bold-italic');
                 }
-                return `**${l}**`;
+                return mdBold(l);
             }).join('\n');
         }
         case 'highlight-cta':
             // CTA (last content line) gets bold, rest is plain — draws eye to action
             return lines.map((l, i) => {
                 if (i === lastContentIdx && l.trim()) {
-                    return chance(0.5) ? `**${l}**` : toUnicodeFont(stripBold(l));
+                    return chance(0.5) ? mdBold(l) : toUnicodeFont(stripBold(l));
                 }
                 return stripBold(l);
             }).join('\n');
@@ -15501,8 +15520,6 @@ const CONNECTOR_TEMPLATES = {
     'tilde': () => '\n' + '~'.repeat(randInt(1, 3)) + '\n',
     'minimal': () => '\n\n',
     'spaced-dots': () => '\n.\n.\n',
-    'arrow': () => '\n' + pick(['⇣', '↓', '⤵']) + '\n',
-    'star': () => '\n' + pick(['·', '✦', '⋆', '★']) + '\n',
 };
 function varyConnectors(text) {
     // Match the .\n.\n.\n.\n pattern (dots on their own lines)
@@ -15528,12 +15545,12 @@ const SEPARATOR_POOL = [
     '- - - - -',
     '·.·.·.·.·',
     '_ _ _ _ _',
-    '═══════════',
-    '━━━━━━━━',
-    '▸▸▸▸▸▸▸',
-    '⋆ ⋆ ⋆ ⋆ ⋆',
-    '✦.✦.✦.✦',
 ];
+// Note: box-drawing and decorative-glyph separators (═══, ━━━, ▸▸▸, ⋆ ⋆ ⋆, ✦.✦.✦)
+// were removed. sanitizePromotionRendering() strips box-drawing characters as a
+// corruption signal, so emitting them here only to strip them later was wasted
+// work; the glyph ones also read as bot decoration. Plain ASCII separators read
+// as a human typing a divider, so those are kept.
 function varySeparators(text) {
     // Two-pass approach:
     // 1. Match mixed-char separator patterns (_._._, ~.~.~, -~-~-) — these are
@@ -15572,35 +15589,13 @@ function varyEmojis(text) {
     }
     return result;
 }
-// ── Urgency Boosters (Conversion) ──────────────────────────────
-const URGENCY_TAGS = [
-    '⏰', '🔴', '📍', '⚡', '🆕', '💯', '🎯',
-];
-const CTA_BOOSTERS = [
-    ' 👆', ' ⬆️', ' 🔝', ' ☝️', '',
-];
-/** Occasionally add urgency signals near the CTA line */
-function addUrgencySignals(text) {
-    if (!chance(0.2))
-        return text;
-    const lines = text.split('\n');
-    const contentLines = lines.map((l, i) => ({ l, i })).filter(x => x.l.trim().length > 5);
-    if (contentLines.length < 2)
-        return text;
-    // Add to last content line (the CTA)
-    const last = contentLines[contentLines.length - 1];
-    const booster = pick(CTA_BOOSTERS);
-    if (booster) {
-        const hasBoldEnd = lines[last.i].endsWith('**');
-        if (hasBoldEnd) {
-            lines[last.i] = lines[last.i].slice(0, -2) + booster + '**';
-        }
-        else {
-            lines[last.i] = lines[last.i] + booster;
-        }
-    }
-    return lines.join('\n');
-}
+// ── Urgency Boosters — REMOVED ─────────────────────────────────
+//
+// addUrgencySignals() appended a pointing emoji (👆 ⬆️ 🔝 ☝️) to the action line,
+// and URGENCY_TAGS (⏰ 🔴 📍 ⚡ 🆕 💯 🎯) sat unused beside it. Both are advert
+// furniture — nobody types an up-arrow emoji at the end of a chat message.
+// Removed rather than neutered so the pipeline does not burn a random roll on a
+// step that can no longer change the text.
 // ── Casual Fillers ─────────────────────────────────────────────
 function addCasualFillers(text) {
     if (!chance(0.25))
@@ -15630,7 +15625,10 @@ function microCaseVariation(text) {
     });
 }
 // ── Greeting Enhancers (Conversion) ────────────────────────────
-const GREETING_SPARKLES = ['✨', '💫', '⭐', '🌟', '💖', '🫶', ''];
+// A single heart after a stretched greeting ("Hyyy💖") is something a person
+// actually types, so this step stays. The astral/sparkle set (✨ 💫 ⭐ 🌟) read as
+// advert decoration and was dropped; the empty entry keeps most greetings bare.
+const GREETING_SPARKLES = ['💖', '🫶', '', '', ''];
 /** Occasionally add a sparkle after the greeting word */
 function enhanceGreeting(text) {
     if (!chance(0.25))
@@ -15820,48 +15818,21 @@ function applyPatternedLayout(text) {
     });
     return result.join('\n');
 }
-// ── Decorative Borders (occasional) ───────────────────────────
-const BORDER_STYLES = [
-    { top: '┌─────────────────────┐', bottom: '└─────────────────────┘' },
-    { top: '╭───────────────────╮', bottom: '╰───────────────────╯' },
-    { top: '✧══════════════════✧', bottom: '✧══════════════════✧' },
-    { top: '⊱ ──────── ⊰', bottom: '⊱ ──────── ⊰' },
-    { top: '▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️', bottom: '▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️▫️▪️' },
-    { top: '·˚ ༘ ┊͙✧˖*°', bottom: '°*˖✧͙┊ ༘ ˚·' },
-    { top: '━━━━━━━━━━━━━━━━━', bottom: '━━━━━━━━━━━━━━━━━' },
-    { top: '⋆ ˚。⋆ ˚。⋆ ˚。⋆ ˚。⋆', bottom: '⋆ ˚。⋆ ˚。⋆ ˚。⋆ ˚。⋆' },
-    { top: '꒰ ˶• ᴗ •˶꒱', bottom: '꒰ ˶• ᴗ •˶꒱' },
-];
-/** Occasionally wrap the entire message in a decorative border */
-function addDecorativeBorder(text) {
-    if (!chance(0.15))
-        return text;
-    const border = pick(BORDER_STYLES);
-    return `${border.top}\n${text}\n${border.bottom}`;
-}
-// ── Bullet / Arrow Prefix (for CTA lines) ─────────────────────
-const CTA_PREFIXES = [
-    '➜ ', '▸ ', '► ', '⟩ ', '→ ', '◆ ', '✦ ', '⇒ ',
-    '❥ ', '☞ ', '⊳ ', '▹ ',
-];
-/** Occasionally add an arrow/bullet prefix to the CTA (last content) line */
-function prefixCTA(text) {
-    if (!chance(0.2))
-        return text;
-    const lines = text.split('\n');
-    // Find last content line
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const t = lines[i].trim();
-        if (t && !isFillerLine(lines[i])) {
-            // Preserve leading indent
-            const leadingSpaces = lines[i].match(/^(\s*)/)?.[1] || '';
-            const content = lines[i].trimStart();
-            lines[i] = leadingSpaces + pick(CTA_PREFIXES) + content;
-            break;
-        }
-    }
-    return lines.join('\n');
-}
+// ── Decorative Borders / CTA prefixes — REMOVED ───────────────
+//
+// addDecorativeBorder() used to wrap 15% of messages in a box-drawing or
+// kaomoji frame, and prefixCTA() used to prepend an arrow glyph (➜ ❥ ☞ …) to
+// the action line. Both are gone deliberately:
+//
+//   1. They worked against sanitizePromotionRendering(), which treats
+//      box-drawing frame characters as a CORRUPTION signal and strips them.
+//      One utility added the frame, the next tried to detect and remove it.
+//   2. The output did not read as natural human chat. A kaomoji frame around a
+//      promo is instantly recognisable as bot decoration.
+//
+// Message variety now comes from the pieces that DO look human: staircase
+// indentation (applyPatternedLayout), multi-line ASCII separators
+// (varySeparators/varyConnectors), punctuation and vowel-stretch variation.
 // ── Clean Up ──────────────────────────────────────────────────
 function preserveParagraphBreaks(text) {
     return text.replace(/\n{5,}/g, '\n\n\n');
@@ -15894,19 +15865,13 @@ function naturalizeText(text, options = {}) {
     if (!options.maintainFormatting) {
         // 9. Add casual fillers (before bold to avoid breaking markers)
         result = addCasualFillers(result);
-        // 10. Add urgency signals near CTA
-        result = addUrgencySignals(result);
-        // 11. Apply bold style variation
+        // 10. Apply bold style variation
         const style = pickBoldStyle();
         result = applyBoldStyle(result, style);
-        // 12. Patterned layout (indent content lines in visual patterns)
+        // 11. Patterned layout (indent content lines in visual patterns)
         result = applyPatternedLayout(result);
-        // 13. CTA prefix (arrow/bullet before the action line)
-        result = prefixCTA(result);
-        // 14. Decorative border (occasional)
-        result = addDecorativeBorder(result);
     }
-    // 15. Clean up excessive whitespace
+    // 12. Clean up excessive whitespace
     result = preserveParagraphBreaks(result);
     return result.trim();
 }
@@ -16957,7 +16922,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getPatternedIndent: () => (/* binding */ getPatternedIndent)
 /* harmony export */ });
 /**
- * Length-aware pattern indentation for short promotion messages (2-3 lines).
+ * Length-aware pattern indentation for multi-line promotion messages.
  *
  * The original pattern-indent.ts (removed 2026-08-15, commit 8ce08e3) applied a FIXED indent
  * per pattern shape regardless of line length. Telegram bubbles wrap by PIXEL width, not
@@ -16972,8 +16937,14 @@ __webpack_require__.r(__webpack_exports__);
  * run 5-33 chars, median 11 — most lines keep the full staircase effect; only the rare long
  * line gets pulled back.
  *
- * Line breaks (1 or 2, capped at 2) are a second, independent pattern dial for vertical rhythm,
- * used when indent gets capped to 0 on longer lines so patterns stay visually distinct.
+ * A message gets ONE of two looks, never both: a STAIRCASE (indented lines, plain blank-line
+ * rhythm) or SEPARATORS (flush-left lines divided by a short dot run). Mixing them stacks two
+ * competing decorations in one bubble, which reads as bot output rather than someone typing.
+ *
+ * Each mode carries its own vertical rhythm, and it is not random: STAIRCASE always puts a blank
+ * line between content lines (the gap is what makes an indent step read as a step), while
+ * SEPARATOR puts none — the dots attach to the lines they divide, matching how the pools author
+ * them by hand. A blank line either side detaches them into a floating paragraph of their own.
  */
 const INDENT_0 = '';
 const INDENT_5 = '     '; // 5 spaces
@@ -16983,19 +16954,98 @@ const MAX_LEN_FOR_INDENT_10 = 20;
 const MAX_LEN_FOR_INDENT_5 = 35;
 const MAX_LINE_BREAKS = 2;
 const PATTERNS_3LINE = {
-    BUILD_UP: { indent: [0, 5, 10], breaks: [1, 2, 1] },
-    PEAK_MIDDLE: { indent: [0, 10, 0], breaks: [1, 1, 1] },
-    DESCENDING: { indent: [10, 5, 0], breaks: [1, 1, 1] },
-    FLAT_WIDE_CLOSE: { indent: [0, 0, 0], breaks: [1, 2, 1] },
-    SMALL_PEAK: { indent: [0, 5, 0], breaks: [1, 1, 2] },
+    BUILD_UP: { indent: [0, 5, 10] },
+    PEAK_MIDDLE: { indent: [0, 10, 0] },
+    DESCENDING: { indent: [10, 5, 0] },
+    FLAT_WIDE_CLOSE: { indent: [0, 0, 0] },
+    SMALL_PEAK: { indent: [0, 5, 0] },
 };
+// Two-line messages are the most common shape in the pools, so they get the same range of
+// staircase depth as the 3-line set rather than a shallow 0/5 step. Each shape exists at both
+// depths (5 and 10) so short lines get a pronounced staircase while longer ones degrade to the
+// 5-space version automatically via capIndentForLength().
 const PATTERNS_2LINE = {
-    STEP_DOWN: { indent: [0, 5], breaks: [1, 1] },
-    STEP_UP: { indent: [5, 0], breaks: [1, 1] },
-    FLAT: { indent: [0, 0], breaks: [2, 1] },
+    STEP_DOWN: { indent: [0, 5] },
+    STEP_DOWN_WIDE: { indent: [0, 10] },
+    STEP_UP: { indent: [5, 0] },
+    STEP_UP_WIDE: { indent: [10, 0] },
+    FLAT: { indent: [0, 0] },
 };
 const PATTERN_KEYS_3LINE = Object.keys(PATTERNS_3LINE);
 const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
+/**
+ * Indent shapes for messages of 4 or more lines, generated rather than hand-listed.
+ *
+ * These used to fall through to flat blank-line spacing with no indentation at all — the 2- and
+ * 3-line tables were written by hand, so anything longer simply had no entry. That left the
+ * longest messages, which need the visual break the most, as the only ones that always looked
+ * identical between sends.
+ *
+ * The shapes are the same four ideas the short tables express, extended to any length:
+ *   BUILD_UP    step inward line by line, capped at the deepest tier
+ *   DESCENDING  the reverse — start deep and walk back out to flush left
+ *   PEAK        step in to the middle, then back out
+ *   FLAT        no indent; the blank-line rhythm carries it alone
+ *
+ * Each step is one tier (0 -> 5 -> 10) and clamps at 10 rather than growing without bound, so a
+ * long message can never march off the right edge of the bubble. capIndentForLength() still caps
+ * each line individually afterwards.
+ */
+function buildLongPatterns(lineCount) {
+    const tier = (step) => Math.min(step, 2) * 5;
+    const buildUp = Array.from({ length: lineCount }, (_, i) => tier(i));
+    const descending = Array.from({ length: lineCount }, (_, i) => tier(lineCount - 1 - i));
+    const peak = Array.from({ length: lineCount }, (_, i) => tier(Math.min(i, lineCount - 1 - i)));
+    const flat = Array.from({ length: lineCount }, () => 0);
+    return [buildUp, descending, peak, flat];
+}
+/**
+ * Vertical rhythm. Not random — each mode has exactly one, chosen by the mode.
+ *
+ * STAIRCASE puts a blank line between content lines: the gap is what makes an indent step read as
+ * a deliberate step rather than a ragged left edge.
+ *
+ * SEPARATOR puts none. The dots attach directly to the lines they divide, which is how the stored
+ * pool entries are authored by hand ('\n.\n.\n' between two sentences). Padding a blank line either
+ * side of the run was tried and rejected on sight: it detaches the dots into a floating paragraph
+ * of their own instead of reading as a divider between two lines.
+ */
+const STAIRCASE_LINE_BREAKS = 2;
+/**
+ * Dot separators placed BETWEEN lines, as an alternative to staircase indentation.
+ *
+ * A message gets ONE of the two looks, never both: stacking a dot separator under an indented
+ * staircase reads as two competing decorations in one bubble. So layout picks a mode up front —
+ * SEPARATOR mode keeps every line flush left and divides them with a short dot run attached
+ * directly to the lines; STAIRCASE mode indents the lines and uses a blank-line gap instead.
+ *
+ * Two shapes, both dot-based:
+ *   INLINE   a single short run on one line ('.', '..', '...', '. . .')
+ *   STACKED  dots on consecutive lines ('.\n.', '.\n.\n.') — the vertical spacer style the
+ *            message pools already author by hand, which opens the bubble up more than one line
+ *
+ * Kept to dots (not ~ or -) because those read as a typed pause rather than a drawn divider, and
+ * deliberately short: anything longer looks like a drawn rule.
+ */
+// Every run is flush left: indentation belongs to staircase mode only, and a separator that
+// stepped inward would read as a staircase made of dots.
+const SEPARATOR_RUNS_INLINE = ['.', '..', '...', '. . .'];
+const SEPARATOR_RUNS_STACKED = ['.\n.', '.\n.\n.'];
+/**
+ * Stacked runs are only offered on a 2-line message, where there is exactly ONE gap to fill.
+ *
+ * On a 3-line message there are two gaps, and a stacked run in both rebuilds the very shape the
+ * sanitizer strips on the way in — dot-separated sentences stacked into a cramped block (the
+ * "hollow box" case from 2026-08-14). Caught by a flaky test: the 3-line assertion failed on ~25%
+ * of runs because it only sampled one random layout per run.
+ */
+function separatorRunsFor(lineCount) {
+    return lineCount === 2
+        ? [...SEPARATOR_RUNS_INLINE, ...SEPARATOR_RUNS_STACKED]
+        : SEPARATOR_RUNS_INLINE;
+}
+/** Share of patterned messages that use dot separators instead of a staircase. */
+const SEPARATOR_MODE_CHANCE = 0.35;
 /**
  * Cap a pattern's requested indent by the line's own length so padding can never push real words
  * past the bubble's wrap width. A line too long for its requested tier steps DOWN a tier (10 -> 5
@@ -17019,11 +17069,12 @@ function pick(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
 /**
- * Applies a length-aware pattern (indent + break rhythm) to a 2-3 line message.
+ * Applies a length-aware layout to a 2-3 line message: either a staircase (indent + break rhythm)
+ * or flush-left lines divided by dot separators, chosen per call and never combined.
  *
- * A 0/1-line message is returned unchanged. A message of 4+ lines has no pattern defined, so it
- * falls back to flat blank-line separation ('\n\n' between every line) — no indentation, which is
- * the safe choice for a length this function was not designed around.
+ * A 0/1-line message is returned unchanged. 2- and 3-line messages use the hand-written shape
+ * tables; 4+ lines use generated shapes of the same four ideas (see buildLongPatterns), so length
+ * no longer decides whether a message gets a layout at all.
  *
  * NOTE: pattern selection is RANDOM per call, so the same input yields different (all valid)
  * layouts across calls. That is intentional — it varies the look of repeated promotion sends. It
@@ -17035,16 +17086,29 @@ function getPatternedIndent(message) {
     if (!message)
         return '';
     const lines = message.split('\n').map((l) => l.trim()).filter((l) => l !== '');
-    if (lines.length < 2 || lines.length > 3)
+    if (lines.length < 2)
         return lines.join('\n\n');
-    const pattern = lines.length === 2
-        ? PATTERNS_2LINE[pick(PATTERN_KEYS_2LINE)]
-        : PATTERNS_3LINE[pick(PATTERN_KEYS_3LINE)];
+    // Separators OR staircase, never both in one message.
+    if (Math.random() < SEPARATOR_MODE_CHANCE) {
+        const separator = pick(separatorRunsFor(lines.length));
+        return lines.join(`\n${separator}\n`);
+    }
+    let indents;
+    if (lines.length === 2) {
+        indents = PATTERNS_2LINE[pick(PATTERN_KEYS_2LINE)].indent;
+    }
+    else if (lines.length === 3) {
+        indents = PATTERNS_3LINE[pick(PATTERN_KEYS_3LINE)].indent;
+    }
+    else {
+        indents = pick(buildLongPatterns(lines.length));
+    }
+    const pattern = { indent: indents };
     return lines
         .map((line, i) => {
         const rawIndent = pattern.indent[i] ?? 0;
         const safeIndent = capIndentForLength(rawIndent, line.length);
-        const breakCount = Math.min(pattern.breaks[i] ?? 1, MAX_LINE_BREAKS);
+        const breakCount = Math.min(STAIRCASE_LINE_BREAKS, MAX_LINE_BREAKS);
         const isLast = i === lines.length - 1;
         const trailer = isLast ? '' : '\n'.repeat(breakCount);
         return `${getIndentSpaces(safeIndent)}${line}${trailer}`;
@@ -17235,16 +17299,19 @@ __webpack_require__.r(__webpack_exports__);
  *
  *   - Count "real" content lines only (a line with a letter/digit/emoji); separator-only lines
  *     (any run length, even a lone one) never count toward this, matching how a human reads them.
- *   - <=2 real content lines: separator lines are KEPT (not dropped) and blank-run capping still
- *     applies same as always; each line is still trimmed of leading/trailing whitespace (that's
- *     rendering noise removal, not touching the author's choice of separator). This is the
- *     confirmed-good case, e.g. "Hyyyy_._._._._._._!!\n.\n.\n.\n.\nU therre???" survives with its
- *     separator lines intact, while a box-drawing-corrupted 2-line message (frame chars present)
- *     still gets its per-line indentation stripped like before.
- *   - >2 real content lines: separator lines are DROPPED (not just de-indented) and a fresh visual
- *     pattern (packages/tg-core/src/utils/patternedIndent.ts) is applied to the remaining content
- *     lines instead of trusting the original ad-hoc spacing — this is the case that visually
- *     compounds into a cramped block otherwise (multiple dot-separated sentences back to back).
+ *   - 1 real content line: nothing to lay out. Separator lines are KEPT and blank runs capped, so
+ *     a single-line message with the author's own spacing survives untouched.
+ *   - 2 or 3 real content lines: the original ad-hoc separators/indentation are DROPPED and a
+ *     fresh layout (packages/tg-core/src/utils/patternedIndent.ts) is applied instead — either a
+ *     staircase with blank-line gaps, or flush-left lines divided by a dot run, never both.
+ *
+ *     UPDATED 2026-09-12: this used to be ">2 content lines", so 2-line messages kept their stored
+ *     spacing and never received a pattern at all. patternedIndent now defines five 2-line shapes
+ *     (including the deep 10-space step and its reverse) plus separator mode, so a 2-line message
+ *     gets the same varied treatment as a 3-line one. Keeping the old threshold meant the most
+ *     common pool shape was the one shape that never varied between sends.
+ *   - 4+ real content lines: no pattern is defined for that length, so getPatternedIndent falls
+ *     back to flat blank-line separation with no indentation.
  */
 
 /** Max consecutive newlines to keep. One blank line is human; four is a broken layout. */
@@ -17271,9 +17338,9 @@ function isContentLine(line) {
  * corruption regardless of message length).
  *
  * Then branches on the number of REAL content lines (separator-only lines don't count):
- * - <=2 content lines: every line is trimmed and blank runs capped as always, but separator-only
+ * - 1 content line: every line is trimmed and blank runs capped as always, but separator-only
  *   lines are KEPT rather than dropped — the author's spacing choice survives, corruption doesn't.
- * - >2 content lines: separator lines are dropped entirely; a fresh pattern (getPatternedIndent)
+ * - 2+ content lines: separator lines are dropped entirely; a fresh layout (getPatternedIndent)
  *   is applied to the remaining content lines instead of trusting the original ad-hoc spacing.
  */
 function sanitizePromotionRendering(text) {
@@ -17284,7 +17351,7 @@ function sanitizePromotionRendering(text) {
         .split('\n')
         .map((line) => collapseLetterSpacing(line.replace(/[^\S\n]+/g, ' ').trim()));
     const contentLineCount = rawLines.filter((line) => isContentLine(line)).length;
-    const dropSeparators = contentLineCount > 2;
+    const dropSeparators = contentLineCount > 1;
     const kept = [];
     let blankRun = 0;
     for (const line of rawLines) {
