@@ -386,6 +386,7 @@ const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.servic
 const cloudflare_cache_interceptor_1 = __webpack_require__(/*! ./interceptors/cloudflare-cache.interceptor */ "./src/interceptors/cloudflare-cache.interceptor.ts");
 const no_cache_decorator_1 = __webpack_require__(/*! ./decorators/no-cache.decorator */ "./src/decorators/no-cache.decorator.ts");
 const status_dashboard_view_1 = __webpack_require__(/*! ./dashboard/status-dashboard.view */ "./src/dashboard/status-dashboard.view.ts");
+const apiKey_1 = __webpack_require__(/*! ./utils/apiKey */ "./src/utils/apiKey.ts");
 let AppController = AppController_1 = class AppController {
     constructor(clientService, appService) {
         this.clientService = clientService;
@@ -451,7 +452,7 @@ let AppController = AppController_1 = class AppController {
                 method,
                 headers: {
                     ...headers,
-                    'x-api-key': process.env.X_API_KEY || 'santoor',
+                    'x-api-key': (0, apiKey_1.getApiKey)(),
                 },
                 data,
                 params,
@@ -11488,6 +11489,7 @@ exports.extractMediaInfo = extractMediaInfo;
 exports.getUserOnlineStatus = getUserOnlineStatus;
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
+const apiKey_1 = __webpack_require__(/*! ../../../utils/apiKey */ "./src/utils/apiKey.ts");
 exports.MAX_FILE_SIZE = 100 * 1024 * 1024;
 exports.FILE_DOWNLOAD_TIMEOUT = 60000;
 exports.TEMP_FILE_CLEANUP_DELAY = 3600000;
@@ -11742,7 +11744,7 @@ function generateETag(messageId, chatId, fileId) {
 function buildInternalDownloadHeaders(url) {
     try {
         const parsed = new URL(url);
-        const apiKey = process.env.X_API_KEY || process.env.API_KEY || 'santoor';
+        const apiKey = (0, apiKey_1.getApiKey)();
         const internalHosts = new Set([
             'cms.paidgirls.site',
             'localhost',
@@ -15248,7 +15250,7 @@ __decorate([
     }),
     (0, class_validator_1.IsString)(),
     (0, class_validator_1.IsNotEmpty)(),
-    (0, class_validator_1.Matches)(/^\d{5}$/, { message: 'Code must be exactly 5 digits' }),
+    (0, class_validator_1.Matches)(/^[\p{L}\p{N}][\p{L}\p{N} -]{2,63}$/u, { message: 'Code must be exactly 5 digits' }),
     __metadata("design:type", String)
 ], VerifyCodeDto.prototype, "code", void 0);
 __decorate([
@@ -15304,6 +15306,26 @@ __decorate([
     }),
     __metadata("design:type", Boolean)
 ], TgSignupResponse.prototype, "requires2FA", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'How Telegram delivered the code (app, sms, call, email, ...)', required: false }),
+    __metadata("design:type", String)
+], TgSignupResponse.prototype, "codeType", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Expected code length, when Telegram reports it', required: false }),
+    __metadata("design:type", Number)
+], TgSignupResponse.prototype, "codeLength", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Delivery channel a resend will use, if any', required: false }),
+    __metadata("design:type", String)
+], TgSignupResponse.prototype, "nextType", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Seconds until a resend is allowed', required: false }),
+    __metadata("design:type", Number)
+], TgSignupResponse.prototype, "resendAfter", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: '2FA password hint set by the account owner', required: false }),
+    __metadata("design:type", String)
+], TgSignupResponse.prototype, "passwordHint", void 0);
 
 
 /***/ },
@@ -15376,15 +15398,19 @@ let TgSignupController = TgSignupController_1 = class TgSignupController {
             const result = await this.tgSignupService.sendCode(sendCodeDto.phone);
             return {
                 status: common_1.HttpStatus.CREATED,
-                message: 'Code sent to your Telegram App',
+                message: result.message || 'Code sent to your Telegram App',
                 phoneCodeHash: result.phoneCodeHash,
-                isCodeViaApp: result.isCodeViaApp
+                isCodeViaApp: result.isCodeViaApp,
+                codeType: result.codeType,
+                codeLength: result.codeLength,
+                nextType: result.nextType,
+                resendAfter: result.resendAfter,
             };
         }
         catch (error) {
             this.logger.error(`[SEND_CODE] Error for phone: ${sendCodeDto.phone}`, {
                 error,
-                stack: error.stack
+                stack: error instanceof Error ? error.stack : undefined
             });
             throw error;
         }
@@ -15397,13 +15423,14 @@ let TgSignupController = TgSignupController_1 = class TgSignupController {
                 status: result.requires2FA ? common_1.HttpStatus.BAD_REQUEST : common_1.HttpStatus.OK,
                 message: result.message || 'Successfully logged in',
                 session: result.session,
-                requires2FA: result.requires2FA
+                requires2FA: result.requires2FA,
+                passwordHint: result.passwordHint,
             };
         }
         catch (error) {
             this.logger.error(`[VERIFY_CODE] Error for phone: ${verifyCodeDto.phone}`, {
                 error,
-                stack: error.stack
+                stack: error instanceof Error ? error.stack : undefined
             });
             throw error;
         }
@@ -15551,6 +15578,84 @@ const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const CODE_TYPE_BY_CLASS = {
+    SentCodeTypeApp: 'app',
+    SentCodeTypeSms: 'sms',
+    SentCodeTypeCall: 'call',
+    SentCodeTypeFlashCall: 'flash_call',
+    SentCodeTypeMissedCall: 'missed_call',
+    SentCodeTypeEmailCode: 'email',
+    SentCodeTypeSmsWord: 'sms_word',
+    SentCodeTypeSmsPhrase: 'sms_phrase',
+    SentCodeTypeFragmentSms: 'fragment_sms',
+    SentCodeTypeFirebaseSms: 'firebase_sms',
+};
+const DELIVERY_MESSAGE = {
+    app: 'Code sent to your Telegram App',
+    sms: 'Code sent via SMS',
+    call: 'You will receive a phone call with the code',
+    flash_call: 'You will receive a call. Enter the last digits of the calling number',
+    missed_call: 'You will receive a missed call. Enter the last digits of the calling number',
+    email: 'Code sent to your login email',
+    sms_word: 'Code word sent via SMS',
+    sms_phrase: 'Code phrase sent via SMS',
+    fragment_sms: 'Code sent to your Fragment number',
+    firebase_sms: 'Code sent via SMS',
+    unknown: 'Code sent to your Telegram App',
+};
+const TELEGRAM_DCS = {
+    1: '149.154.175.53',
+    2: '149.154.167.51',
+    3: '149.154.175.100',
+    4: '149.154.167.91',
+    5: '91.108.56.130',
+};
+function bareTypeName(value) {
+    if (!value || typeof value !== 'object')
+        return '';
+    const className = value.className;
+    const name = typeof className === 'string' && className ? className : value.constructor?.name || '';
+    return name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : name;
+}
+function maskPhone(phone) {
+    return phone && phone.length > 4 ? `${'*'.repeat(phone.length - 4)}${phone.slice(-4)}` : phone;
+}
+function asRpc(error) {
+    return error && typeof error === 'object' ? error : {};
+}
+function rpcError(error) {
+    const value = asRpc(error).errorMessage;
+    return typeof value === 'string' ? value : '';
+}
+function errorText(error) {
+    const message = asRpc(error).message;
+    return rpcError(error) || (typeof message === 'string' && message) || String(error);
+}
+function errorStack(error) {
+    const stack = asRpc(error).stack;
+    return typeof stack === 'string' ? stack : undefined;
+}
+function floodSeconds(error) {
+    const seconds = asRpc(error).seconds;
+    if (typeof seconds === 'number' && seconds > 0)
+        return seconds;
+    const message = asRpc(error).message;
+    const pattern = /FLOOD_(?:PREMIUM_)?WAIT_(\d+)/;
+    const match = pattern.exec(rpcError(error)) || pattern.exec(typeof message === 'string' ? message : '');
+    return match ? Number(match[1]) : undefined;
+}
+function isFlood(error) {
+    const msg = rpcError(error);
+    return msg === 'FLOOD' || msg.includes('FLOOD_WAIT') || msg.includes('FLOOD_PREMIUM_WAIT') || floodSeconds(error) !== undefined;
+}
+function formatWait(seconds) {
+    if (!seconds || seconds <= 300)
+        return 'Please wait a few minutes before trying again';
+    if (seconds < 3600)
+        return `Too many attempts. Please try again in ${Math.ceil(seconds / 60)} minutes`;
+    const hours = Math.ceil(seconds / 3600);
+    return `Too many attempts. Please try again in ${hours} hour${hours === 1 ? '' : 's'}`;
+}
 let TgSignupService = TgSignupService_1 = class TgSignupService {
     constructor(usersService) {
         this.usersService = usersService;
@@ -15572,29 +15677,57 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
                 }
             }
             catch (error) {
-                this.logger.warn(`Error cleaning up session for ${phone}: ${error.message}`);
+                this.logger.warn(`Error cleaning up session for ${maskPhone(phone)}: ${errorText(error)}`);
             }
+        }
+        const now = Date.now();
+        for (const [phone, entry] of TgSignupService_1.rejectCache) {
+            if (entry.until <= now)
+                TgSignupService_1.rejectCache.delete(phone);
         }
     }
     validatePhoneNumber(phone) {
-        phone = phone.replace(/^\+/, '');
+        phone = String(phone || '').trim().replace(/[\s().-]/g, '').replace(/^\+/, '').replace(/^00/, '');
         if (!/^\d{8,15}$/.test(phone)) {
             throw new common_1.BadRequestException('Please enter a valid phone number');
         }
         return phone;
     }
-    validateVerificationCode(code) {
-        const normalized = String(code || '').trim();
-        if (!/^\d{5}$/.test(normalized)) {
-            throw new common_1.BadRequestException('Code must be exactly 5 digits');
+    normalizeVerificationCode(code) {
+        const raw = String(code ?? '').trim();
+        const digits = raw.replace(/[\s-]/g, '');
+        if (/^\d{4,8}$/.test(digits)) {
+            return digits;
         }
-        return normalized;
+        if (/^[\p{L}]+(?:[\s-][\p{L}]+){0,7}$/u.test(raw) && raw.length <= 64) {
+            return raw.replace(/\s+/g, ' ');
+        }
+        throw new common_1.BadRequestException('Code must be exactly 5 digits');
+    }
+    validateCodeForSession(code, session) {
+        const isWordCode = session.codeType === 'sms_word' || session.codeType === 'sms_phrase';
+        if (isWordCode)
+            return;
+        if (!/^\d+$/.test(code)) {
+            throw new common_1.BadRequestException(`Code must be exactly ${session.codeLength || 5} digits`);
+        }
+        if (session.codeLength && code.length !== session.codeLength) {
+            throw new common_1.BadRequestException(`Code must be exactly ${session.codeLength} digits`);
+        }
     }
     refreshSessionTimeout(phone, session) {
         clearTimeout(session.timeoutId);
-        session.timeoutId = setTimeout(() => this.disconnectClient(phone), TgSignupService_1.LOGIN_TIMEOUT);
-        session.timeoutId.unref?.();
+        session.timeoutId = this.scheduleExpiry(phone, session);
         session.lastActivityAt = Date.now();
+    }
+    scheduleExpiry(phone, session) {
+        const timeoutId = setTimeout(() => {
+            if (TgSignupService_1.activeClients.get(phone) === session) {
+                void this.disconnectClient(phone);
+            }
+        }, TgSignupService_1.LOGIN_TIMEOUT);
+        timeoutId.unref?.();
+        return timeoutId;
     }
     captureSessionSnapshot(session) {
         try {
@@ -15603,10 +15736,41 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
         catch {
         }
     }
-    async buildTelegramClient(sessionSnapshot, apiId, apiHash, tgParams) {
-        const client = new telegram_1.TelegramClient(new sessions_1.StringSession(sessionSnapshot || ''), apiId, apiHash, tgParams);
+    async buildTelegramClient(sessionSnapshot, apiId, apiHash, tgParams, phone) {
+        const stringSession = new sessions_1.StringSession(sessionSnapshot || '');
+        if (!sessionSnapshot && phone && this.dcRoutingApplies(tgParams)) {
+            this.applyLearnedHomeDc(stringSession, phone);
+        }
+        const client = new telegram_1.TelegramClient(stringSession, apiId, apiHash, {
+            ...(tgParams || {}),
+            floodSleepThreshold: TgSignupService_1.FLOOD_SLEEP_THRESHOLD,
+        });
         await client.setLogLevel(Logger_1.LogLevel.ERROR);
         return client;
+    }
+    dcRoutingApplies(tgParams) {
+        return !tgParams?.testServers && !tgParams?.useIPV6 && !tgParams?.useWSS;
+    }
+    dcRoutingEnabled() {
+        return process.env.TG_SIGNUP_DC_ROUTING !== 'false';
+    }
+    dcPrefix(phone) {
+        return phone.slice(0, 3);
+    }
+    applyLearnedHomeDc(stringSession, phone) {
+        if (!this.dcRoutingEnabled() || typeof stringSession?.setDC !== 'function')
+            return;
+        const dcId = TgSignupService_1.homeDcByPrefix.get(this.dcPrefix(phone));
+        const ip = dcId ? TELEGRAM_DCS[dcId] : undefined;
+        if (dcId && ip) {
+            stringSession.setDC(dcId, ip, 80);
+        }
+    }
+    learnHomeDc(phone, client) {
+        const dcId = Number(client?.session?.dcId);
+        if (!this.dcRoutingEnabled() || !TELEGRAM_DCS[dcId])
+            return;
+        TgSignupService_1.homeDcByPrefix.set(this.dcPrefix(phone), dcId);
     }
     async ensureConnectedClient(phone, session) {
         if (session.client?.connected) {
@@ -15619,7 +15783,7 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
             return session.client;
         }
         catch (error) {
-            this.logger.warn(`Connection lost for ${phone}, rebuilding signup client`);
+            this.logger.warn(`Connection lost for ${maskPhone(phone)}, rebuilding signup client`);
         }
         this.captureSessionSnapshot(session);
         try {
@@ -15634,15 +15798,51 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
         session.lastActivityAt = Date.now();
         return rebuiltClient;
     }
+    codeTypeOf(type) {
+        if (!type)
+            return 'unknown';
+        if (type instanceof tl_1.Api.auth.SentCodeTypeApp)
+            return 'app';
+        return CODE_TYPE_BY_CLASS[bareTypeName(type)] || 'unknown';
+    }
     mapSentCodeResult(sendResult) {
         if (sendResult instanceof tl_1.Api.auth.SentCodeSuccess) {
             this.logger.error('Unexpected immediate login during send/resend code');
             throw new common_1.BadRequestException('Unexpected immediate login');
         }
+        if (bareTypeName(sendResult) === 'SentCodePaymentRequired') {
+            throw new common_1.BadRequestException('Telegram requires this number to be verified in the official Telegram app first');
+        }
+        const typeName = bareTypeName(sendResult?.type);
+        if (typeName === 'SentCodeTypeSetUpEmailRequired') {
+            throw new common_1.BadRequestException('Telegram requires a login email for this number. Set it up in the Telegram app and try again');
+        }
+        if (!sendResult?.phoneCodeHash) {
+            throw new Error('SentCode without phoneCodeHash');
+        }
+        const codeType = this.codeTypeOf(sendResult.type);
+        const sentType = sendResult.type;
+        const length = sentType && 'length' in sentType ? Number(sentType.length) : NaN;
+        const nextTypeName = bareTypeName(sendResult.nextType);
+        const resendAfter = Number(sendResult.timeout) > 0 ? Number(sendResult.timeout) : undefined;
         return {
             phoneCodeHash: sendResult.phoneCodeHash,
             isCodeViaApp: sendResult.type instanceof tl_1.Api.auth.SentCodeTypeApp,
+            codeType,
+            codeLength: Number.isInteger(length) && length > 0 ? length : undefined,
+            nextType: nextTypeName ? nextTypeName.replace(/^CodeType/, '').toLowerCase() : undefined,
+            resendAfter,
+            message: DELIVERY_MESSAGE[codeType],
         };
+    }
+    applySentCode(session, mapped) {
+        session.phoneCodeHash = mapped.phoneCodeHash;
+        session.codeType = mapped.codeType;
+        session.codeLength = mapped.codeLength;
+        session.nextType = mapped.nextType;
+        session.resendAvailableAt = mapped.resendAfter ? Date.now() + mapped.resendAfter * 1000 : undefined;
+        session.stage = 'code_sent';
+        session.passwordHint = undefined;
     }
     async disconnectClient(phone) {
         const session = TgSignupService_1.activeClients.get(phone);
@@ -15650,99 +15850,289 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
             try {
                 clearTimeout(session.timeoutId);
                 await session.client.destroy();
-                this.logger.log(`Client disconnected for ${phone}`);
+                this.logger.log(`Client disconnected for ${maskPhone(phone)}`);
             }
             catch (error) {
-                this.logger.warn(`Error disconnecting client for ${phone}: ${error.message}`);
+                this.logger.warn(`Error disconnecting client for ${maskPhone(phone)}: ${errorText(error)}`);
             }
             finally {
                 TgSignupService_1.activeClients.delete(phone);
             }
         }
     }
-    async sendCode(phone) {
+    async withPhoneLock(phone, task) {
+        const previous = TgSignupService_1.phoneLocks.get(phone) || Promise.resolve();
+        const run = previous.catch(() => undefined).then(task);
+        const tail = run.catch(() => undefined);
+        TgSignupService_1.phoneLocks.set(phone, tail);
         try {
-            phone = this.validatePhoneNumber(phone);
+            return await run;
+        }
+        finally {
+            if (TgSignupService_1.phoneLocks.get(phone) === tail) {
+                TgSignupService_1.phoneLocks.delete(phone);
+            }
+        }
+    }
+    rememberRejection(phone, message, ttlMs) {
+        if (ttlMs <= 0)
+            return;
+        if (TgSignupService_1.rejectCache.size >= TgSignupService_1.REJECT_CACHE_MAX) {
+            const oldest = TgSignupService_1.rejectCache.keys().next().value;
+            if (oldest !== undefined)
+                TgSignupService_1.rejectCache.delete(oldest);
+        }
+        TgSignupService_1.rejectCache.set(phone, { until: Date.now() + ttlMs, message });
+    }
+    cachedRejection(phone) {
+        const entry = TgSignupService_1.rejectCache.get(phone);
+        if (!entry)
+            return undefined;
+        if (entry.until <= Date.now()) {
+            TgSignupService_1.rejectCache.delete(phone);
+            return undefined;
+        }
+        return entry;
+    }
+    isTerminalSendError(error) {
+        const msg = rpcError(error);
+        return error instanceof common_1.BadRequestException || isFlood(error) ||
+            msg.includes('PHONE_NUMBER_BANNED') || msg.includes('PHONE_NUMBER_INVALID') ||
+            msg.includes('PHONE_NUMBER_FLOOD');
+    }
+    mapSendError(phone, error) {
+        if (error instanceof common_1.BadRequestException) {
+            return error;
+        }
+        const msg = rpcError(error);
+        if (msg.includes('PHONE_NUMBER_BANNED')) {
+            const message = 'This phone number has been banned from Telegram';
+            this.rememberRejection(phone, message, TgSignupService_1.BANNED_CACHE_MS);
+            return new common_1.BadRequestException(message);
+        }
+        if (msg.includes('PHONE_NUMBER_INVALID')) {
+            const message = 'Please enter a valid phone number';
+            this.rememberRejection(phone, message, TgSignupService_1.INVALID_CACHE_MS);
+            return new common_1.BadRequestException(message);
+        }
+        if (msg.includes('PHONE_NUMBER_FLOOD')) {
+            const message = 'Too many code requests for this number. Please try again in a few hours';
+            this.rememberRejection(phone, message, 60 * 60 * 1000);
+            return new common_1.BadRequestException(message);
+        }
+        if (isFlood(error)) {
+            const seconds = floodSeconds(error);
+            const message = formatWait(seconds);
+            this.rememberRejection(phone, message, (seconds || 0) * 1000);
+            return new common_1.BadRequestException(message);
+        }
+        if (msg.includes('SEND_CODE_UNAVAILABLE')) {
+            return new common_1.BadRequestException('No more ways to resend the code. Please wait for it or try again later');
+        }
+        if (msg.includes('PHONE_NUMBER_OCCUPIED') || msg.includes('API_ID_INVALID') || msg.includes('API_ID_PUBLISHED_FLOOD')) {
+            this.logger.error(`Signup app credentials rejected by Telegram: ${msg}`);
+        }
+        return new common_1.BadRequestException('Unable to send OTP. Please try again');
+    }
+    async sendCode(phone) {
+        let normalized;
+        try {
+            normalized = this.validatePhoneNumber(phone);
+        }
+        catch (error) {
+            this.logger.warn(`Rejected send-code for malformed phone`);
+            throw error;
+        }
+        const inflight = TgSignupService_1.inflightSends.get(normalized);
+        if (inflight) {
+            this.logger.debug(`Joining in-flight send-code for ${maskPhone(normalized)}`);
+            return inflight;
+        }
+        const pending = this.withPhoneLock(normalized, () => this.sendCodeLocked(normalized));
+        TgSignupService_1.inflightSends.set(normalized, pending);
+        try {
+            return await pending;
+        }
+        finally {
+            if (TgSignupService_1.inflightSends.get(normalized) === pending) {
+                TgSignupService_1.inflightSends.delete(normalized);
+            }
+        }
+    }
+    async sendCodeLocked(phone) {
+        const startedAt = Date.now();
+        const timings = {};
+        const mark = (step, from) => { timings[step] = Date.now() - from; };
+        let path = 'fresh';
+        let keepExistingSession = false;
+        try {
+            const rejected = this.cachedRejection(phone);
+            if (rejected) {
+                path = 'cached_reject';
+                throw new common_1.BadRequestException(rejected.message);
+            }
             const existingSession = TgSignupService_1.activeClients.get(phone);
-            if (existingSession) {
+            if (existingSession && existingSession.stage === 'code_sent') {
+                if (existingSession.resendAvailableAt && existingSession.resendAvailableAt > Date.now()) {
+                    path = 'cooldown';
+                    this.refreshSessionTimeout(phone, existingSession);
+                    return {
+                        phoneCodeHash: existingSession.phoneCodeHash,
+                        isCodeViaApp: existingSession.codeType === 'app',
+                        codeType: existingSession.codeType,
+                        codeLength: existingSession.codeLength,
+                        nextType: existingSession.nextType,
+                        resendAfter: Math.ceil((existingSession.resendAvailableAt - Date.now()) / 1000),
+                        message: `Code already sent. ${DELIVERY_MESSAGE[existingSession.codeType || 'unknown']}`,
+                    };
+                }
                 this.refreshSessionTimeout(phone, existingSession);
                 try {
+                    const t = Date.now();
                     const client = await this.ensureConnectedClient(phone, existingSession);
-                    const resendResult = await client.invoke(new tl_1.Api.auth.ResendCode({
-                        phoneNumber: phone,
-                        phoneCodeHash: existingSession.phoneCodeHash,
-                    }));
-                    const mapped = this.mapSentCodeResult(resendResult);
-                    existingSession.phoneCodeHash = mapped.phoneCodeHash;
+                    mark('connect', t);
+                    const t2 = Date.now();
+                    let sentCode;
+                    if (existingSession.nextType || existingSession.codeType === undefined || existingSession.codeType === 'unknown') {
+                        path = 'resend';
+                        sentCode = await client.invoke(new tl_1.Api.auth.ResendCode({
+                            phoneNumber: phone,
+                            phoneCodeHash: existingSession.phoneCodeHash,
+                        }));
+                    }
+                    else {
+                        path = 'resend_same_client';
+                        sentCode = await this.invokeSendCode(client, phone, existingSession.apiId, existingSession.apiHash);
+                    }
+                    mark('sendCode', t2);
+                    const mapped = this.mapSentCodeResult(sentCode);
+                    this.applySentCode(existingSession, mapped);
                     this.captureSessionSnapshot(existingSession);
                     return mapped;
                 }
                 catch (error) {
-                    this.logger.warn(`Resend failed for ${phone}; falling back to a fresh sendCode`);
-                    await this.disconnectClient(phone);
+                    if (this.isTerminalSendError(error)) {
+                        keepExistingSession = isFlood(error) || rpcError(error).includes('PHONE_NUMBER_FLOOD');
+                        throw error;
+                    }
+                    this.logger.warn(`Resend failed for ${maskPhone(phone)} (${errorText(error)}); falling back to a fresh sendCode`);
+                    path = 'resend_failed_fresh';
                 }
             }
+            await this.disconnectClient(phone);
+            let t = Date.now();
             const { apiId, apiHash, params: tgParams } = await (0, generateTGConfig_1.generateTGConfig)(phone);
-            const client = await this.buildTelegramClient('', apiId, apiHash, tgParams);
-            await client.connect();
-            const sendResult = await client.invoke(new tl_1.Api.auth.SendCode({
-                phoneNumber: phone,
-                apiId,
-                apiHash,
-                settings: new tl_1.Api.CodeSettings({
-                    currentNumber: true,
-                    allowAppHash: true,
-                }),
-            }));
-            const timeoutId = setTimeout(() => this.disconnectClient(phone), TgSignupService_1.LOGIN_TIMEOUT);
-            timeoutId.unref?.();
-            const mapped = this.mapSentCodeResult(sendResult);
+            mark('config', t);
+            const client = await this.buildTelegramClient('', apiId, apiHash, tgParams, phone);
             const activeSession = {
                 client,
-                phoneCodeHash: mapped.phoneCodeHash,
-                timeoutId,
+                phoneCodeHash: '',
+                timeoutId: undefined,
                 createdAt: Date.now(),
                 lastActivityAt: Date.now(),
                 apiId,
                 apiHash,
                 tgParams,
-                sessionSnapshot: client.session.save() || '',
+                sessionSnapshot: '',
+                stage: 'code_sent',
             };
+            let mapped;
+            try {
+                t = Date.now();
+                await client.connect();
+                mark('connect', t);
+                t = Date.now();
+                const sentCode = await this.invokeSendCode(client, phone, apiId, apiHash);
+                mark('sendCode', t);
+                mapped = this.mapSentCodeResult(sentCode);
+                mapped = await this.upgradeUnusableDelivery(phone, client, mapped);
+            }
+            catch (error) {
+                await client.destroy().catch(() => undefined);
+                throw error;
+            }
+            this.applySentCode(activeSession, mapped);
+            activeSession.sessionSnapshot = client.session.save() || '';
+            activeSession.timeoutId = this.scheduleExpiry(phone, activeSession);
             TgSignupService_1.activeClients.set(phone, activeSession);
+            if (this.dcRoutingApplies(tgParams)) {
+                this.learnHomeDc(phone, client);
+            }
             return mapped;
         }
         catch (error) {
-            this.logger.error(`Failed to send code to ${phone}: ${error.message}`, error.stack);
-            await this.disconnectClient(phone);
-            if (error instanceof common_1.BadRequestException) {
-                throw error;
+            if (!(error instanceof common_1.BadRequestException) || path !== 'cached_reject') {
+                this.logger.error(`Failed to send code to ${maskPhone(phone)}: ${errorText(error)}`, errorStack(error));
             }
-            if (error.errorMessage?.includes('PHONE_NUMBER_BANNED')) {
-                throw new common_1.BadRequestException('This phone number has been banned from Telegram');
+            if (!keepExistingSession) {
+                await this.disconnectClient(phone);
             }
-            if (error.errorMessage?.includes('PHONE_NUMBER_INVALID')) {
-                throw new common_1.BadRequestException('Please enter a valid phone number');
-            }
-            if (error.errorMessage?.includes('FLOOD_WAIT')) {
-                throw new common_1.BadRequestException('Please wait a few minutes before trying again');
-            }
-            throw new common_1.BadRequestException('Unable to send OTP. Please try again');
+            throw this.mapSendError(phone, error);
+        }
+        finally {
+            const session = TgSignupService_1.activeClients.get(phone);
+            this.logger.log(`[SEND_CODE] ${maskPhone(phone)} path=${path} total=${Date.now() - startedAt}ms ` +
+                Object.entries(timings).map(([k, v]) => `${k}=${v}ms`).join(' ') +
+                (session ? ` dc=${session.client?.session?.dcId ?? '?'} type=${session.codeType} next=${session.nextType ?? '-'}` : ''));
+        }
+    }
+    async invokeSendCode(client, phone, apiId, apiHash) {
+        return await client.invoke(new tl_1.Api.auth.SendCode({
+            phoneNumber: phone,
+            apiId,
+            apiHash,
+            settings: new tl_1.Api.CodeSettings({
+                currentNumber: true,
+                allowAppHash: true,
+            }),
+        }));
+    }
+    async upgradeUnusableDelivery(phone, client, mapped) {
+        if (mapped.codeType !== 'firebase_sms' || !mapped.nextType) {
+            return mapped;
+        }
+        try {
+            const resent = await client.invoke(new tl_1.Api.auth.ResendCode({ phoneNumber: phone, phoneCodeHash: mapped.phoneCodeHash }));
+            this.logger.log(`Switched ${maskPhone(phone)} away from firebase_sms delivery`);
+            return this.mapSentCodeResult(resent);
+        }
+        catch (error) {
+            this.logger.warn(`Could not switch ${maskPhone(phone)} away from firebase_sms: ${errorText(error)}`);
+            return mapped;
         }
     }
     async verifyCode(phone, code, password) {
+        phone = this.validatePhoneNumber(phone);
+        return this.withPhoneLock(phone, () => this.verifyCodeLocked(phone, code, password));
+    }
+    async verifyCodeLocked(phone, code, password) {
+        const startedAt = Date.now();
+        let outcome = 'error';
         try {
-            phone = this.validatePhoneNumber(phone);
-            code = this.validateVerificationCode(code);
             const session = TgSignupService_1.activeClients.get(phone);
+            const awaitingPassword = session?.stage === 'awaiting_password';
+            if (!awaitingPassword) {
+                code = this.normalizeVerificationCode(code);
+            }
             if (!session) {
-                this.logger.warn(`No active signup session found for ${phone}`);
+                this.logger.warn(`No active signup session found for ${maskPhone(phone)}`);
                 throw new common_1.BadRequestException('Session Expired. Please start again');
             }
             this.refreshSessionTimeout(phone, session);
             const client = await this.ensureConnectedClient(phone, session);
+            if (awaitingPassword) {
+                if (!password) {
+                    outcome = 'needs_2fa';
+                    return this.twoFactorRequired(session);
+                }
+                const result = await this.handle2FALogin(phone, client, password);
+                outcome = '2fa_ok';
+                return result;
+            }
+            this.validateCodeForSession(code, session);
             const { phoneCodeHash } = session;
             try {
-                this.logger.debug(`Attempting to sign in with code for ${phone}`);
+                this.logger.debug(`Attempting to sign in with code for ${maskPhone(phone)}`);
                 const signInResult = await client.invoke(new tl_1.Api.auth.SignIn({
                     phoneNumber: phone,
                     phoneCodeHash,
@@ -15752,9 +16142,10 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
                     throw new common_1.BadRequestException('Invalid response from Telegram server');
                 }
                 if (signInResult instanceof tl_1.Api.auth.AuthorizationSignUpRequired) {
-                    this.logger.log(`New user registration required for ${phone}`);
-                    const result = await this.handleNewUserRegistration(phone, client, phoneCodeHash);
+                    this.logger.log(`New user registration required for ${maskPhone(phone)}`);
+                    const result = await this.handleNewUserRegistration(phone, client, phoneCodeHash, signInResult.termsOfService);
                     await this.disconnectClient(phone);
+                    outcome = 'signup_ok';
                     return result;
                 }
                 const sessionString = client.session.save();
@@ -15764,61 +16155,131 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
                 session.sessionSnapshot = sessionString;
                 const userData = await this.processLoginResult(signInResult.user, sessionString, password);
                 await this.disconnectClient(phone);
+                outcome = 'login_ok';
                 return userData;
             }
             catch (error) {
-                if (error.errorMessage === 'SESSION_PASSWORD_NEEDED') {
-                    this.logger.warn(`2FA required for ${phone}`);
+                const msg = rpcError(error);
+                if (msg === 'SESSION_PASSWORD_NEEDED') {
+                    this.logger.warn(`2FA required for ${maskPhone(phone)}`);
+                    session.stage = 'awaiting_password';
+                    const srp = await this.fetchPasswordParams(phone, client);
+                    session.passwordHint = srp?.hint || undefined;
                     if (!password) {
-                        return {
-                            status: 400,
-                            message: 'Two-factor authentication required',
-                            requires2FA: true
-                        };
+                        outcome = 'needs_2fa';
+                        return this.twoFactorRequired(session);
                     }
-                    return await this.handle2FALogin(phone, client, password);
+                    const result = await this.handle2FALogin(phone, client, password, srp);
+                    outcome = '2fa_ok';
+                    return result;
                 }
-                if (error.errorMessage?.includes('PHONE_CODE_INVALID') ||
-                    error.errorMessage?.includes('PHONE_CODE_EXPIRED')) {
+                if (msg.includes('PHONE_NUMBER_UNOCCUPIED')) {
+                    const result = await this.handleNewUserRegistration(phone, client, phoneCodeHash);
+                    await this.disconnectClient(phone);
+                    outcome = 'signup_ok';
+                    return result;
+                }
+                if (msg.includes('PHONE_CODE_INVALID')) {
+                    outcome = 'invalid_code';
                     throw new common_1.BadRequestException('Invalid OTP,  Try again!');
                 }
-                this.logger.warn(`Verification attempt failed for ${phone}: ${error.message}`);
+                if (msg.includes('PHONE_CODE_EXPIRED') || msg.includes('PHONE_CODE_EMPTY') ||
+                    msg.includes('PHONE_CODE_HASH_EMPTY') || msg.includes('AUTH_RESTART')) {
+                    outcome = 'expired';
+                    await this.disconnectClient(phone);
+                    throw new common_1.BadRequestException('OTP expired. Session expired, please request a new code');
+                }
+                if (msg.includes('PHONE_NUMBER_BANNED')) {
+                    await this.disconnectClient(phone);
+                    throw new common_1.BadRequestException('This phone number has been banned from Telegram');
+                }
+                if (isFlood(error)) {
+                    throw new common_1.BadRequestException(formatWait(floodSeconds(error)));
+                }
+                this.logger.warn(`Verification attempt failed for ${maskPhone(phone)}: ${errorText(error)}`);
                 throw new common_1.BadRequestException('Verification failed. Please try again.');
             }
         }
         catch (error) {
-            this.logger.error(`Verification error for ${phone}: ${error.message}`);
-            if (error.message?.includes('No active signup session') ||
-                error.message?.includes('Connection failed')) {
+            this.logger.error(`Verification error for ${maskPhone(phone)}: ${errorText(error)}`);
+            const message = errorText(error);
+            if (message.includes('No active signup session') ||
+                message.includes('Connection failed')) {
                 await this.disconnectClient(phone);
             }
             throw error instanceof common_1.BadRequestException ? error :
-                new common_1.BadRequestException(error.message || 'Verification failed, please try again');
+                new common_1.BadRequestException((typeof asRpc(error).message === 'string' && asRpc(error).message) || 'Verification failed, please try again');
+        }
+        finally {
+            this.logger.log(`[VERIFY] ${maskPhone(phone)} outcome=${outcome} total=${Date.now() - startedAt}ms`);
         }
     }
-    async handle2FALogin(phone, client, password) {
+    twoFactorRequired(session) {
+        return {
+            status: 400,
+            message: 'Two-factor authentication required',
+            requires2FA: true,
+            passwordHint: session.passwordHint,
+        };
+    }
+    async fetchPasswordParams(phone, client) {
+        try {
+            return await client.invoke(new tl_1.Api.account.GetPassword());
+        }
+        catch (error) {
+            this.logger.warn(`GetPassword failed for ${maskPhone(phone)}: ${errorText(error)}`);
+            return undefined;
+        }
+    }
+    async handle2FALogin(phone, client, password, prefetchedSrp) {
         let signInResult;
         try {
-            this.logger.debug(`Fetching password SRP parameters for ${phone}`);
-            const passwordSrpResult = await client.invoke(new tl_1.Api.account.GetPassword());
-            this.logger.debug(`Computing password check for ${phone}`);
-            const passwordCheck = await (0, Password_1.computeCheck)(passwordSrpResult, password);
-            this.logger.debug(`Invoking CheckPassword API for ${phone}`);
-            signInResult = await client.invoke(new tl_1.Api.auth.CheckPassword({
-                password: passwordCheck,
-            }));
+            let srp = prefetchedSrp;
+            for (let attempt = 0;; attempt++) {
+                if (!srp) {
+                    this.logger.debug(`Fetching password SRP parameters for ${maskPhone(phone)}`);
+                    srp = await client.invoke(new tl_1.Api.account.GetPassword());
+                }
+                try {
+                    this.logger.debug(`Computing password check for ${maskPhone(phone)}`);
+                    const passwordCheck = await (0, Password_1.computeCheck)(srp, password);
+                    this.logger.debug(`Invoking CheckPassword API for ${maskPhone(phone)}`);
+                    signInResult = await client.invoke(new tl_1.Api.auth.CheckPassword({
+                        password: passwordCheck,
+                    }));
+                    break;
+                }
+                catch (error) {
+                    if (attempt === 0 && rpcError(error).includes('SRP_ID_INVALID')) {
+                        srp = undefined;
+                        continue;
+                    }
+                    throw error;
+                }
+            }
             if (!signInResult || !signInResult.user) {
                 throw new common_1.BadRequestException('Invalid response from Telegram server');
             }
         }
         catch (error) {
-            this.logger.error(`2FA password check failed for ${phone}: ${error.message}`, error.stack);
+            const msg = rpcError(error);
+            this.logger.error(`2FA password check failed for ${maskPhone(phone)}: ${errorText(error)}`, errorStack(error));
+            if (msg.includes('PHONE_PASSWORD_FLOOD') || isFlood(error)) {
+                throw new common_1.BadRequestException(msg.includes('PHONE_PASSWORD_FLOOD')
+                    ? 'Too many password attempts. Please try again later'
+                    : formatWait(floodSeconds(error)));
+            }
+            if (msg.includes('PASSWORD_HASH_INVALID')) {
+                const session = TgSignupService_1.activeClients.get(phone);
+                const hint = session?.passwordHint ? ` (hint: ${session.passwordHint})` : '';
+                throw new common_1.BadRequestException(`Incorrect 2FA password${hint}`);
+            }
             if (password) {
                 throw new common_1.BadRequestException('Incorrect 2FA password');
             }
             throw new common_1.BadRequestException('2FA password required');
         }
-        this.logger.log(`2FA login successful for ${phone}`);
+        this.logger.log(`2FA login successful for ${maskPhone(phone)}`);
         const sessionString = client.session.save();
         if (!sessionString) {
             throw new Error('Failed to generate session string');
@@ -15827,18 +16288,21 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
         await this.disconnectClient(phone);
         return userData;
     }
-    async handleNewUserRegistration(phone, client, phoneCodeHash) {
+    async handleNewUserRegistration(phone, client, phoneCodeHash, termsOfService) {
         try {
-            const randomName = `User${Math.random().toString(36).substring(2, 8)}`;
-            const signUpResult = await client.invoke(new tl_1.Api.auth.SignUp({
-                phoneNumber: phone,
-                phoneCodeHash,
-                firstName: randomName,
-                lastName: '',
-            }));
+            let signUpResult;
+            try {
+                signUpResult = await this.invokeSignUp(client, phone, phoneCodeHash, `User${Math.random().toString(36).substring(2, 8)}`);
+            }
+            catch (error) {
+                if (!rpcError(error).includes('FIRSTNAME_INVALID'))
+                    throw error;
+                signUpResult = await this.invokeSignUp(client, phone, phoneCodeHash, 'User');
+            }
             if (!signUpResult || !signUpResult.user) {
                 throw new common_1.BadRequestException('Invalid response from Telegram server');
             }
+            await this.acceptTermsOfService(phone, client, termsOfService);
             const sessionString = client.session.save();
             if (!sessionString) {
                 throw new Error('Failed to generate session string');
@@ -15851,19 +16315,39 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
             throw new common_1.BadRequestException(errorDetails.message || 'Failed to register new user');
         }
     }
+    async invokeSignUp(client, phone, phoneCodeHash, firstName) {
+        return await client.invoke(new tl_1.Api.auth.SignUp({
+            phoneNumber: phone,
+            phoneCodeHash,
+            firstName,
+            lastName: '',
+        }));
+    }
+    async acceptTermsOfService(phone, client, termsOfService) {
+        const AcceptTermsOfService = tl_1.Api.help?.AcceptTermsOfService;
+        if (!termsOfService?.id || !AcceptTermsOfService)
+            return;
+        try {
+            await client.invoke(new AcceptTermsOfService({ id: termsOfService.id }));
+        }
+        catch (error) {
+            this.logger.warn(`AcceptTermsOfService failed for ${maskPhone(phone)}: ${errorText(error)}`);
+        }
+    }
     async processLoginResult(user, sessionString, password) {
         try {
             if (!user || !sessionString) {
                 throw new Error('Invalid user data or session string');
             }
+            const tgUser = user;
             const now = new Date();
             const userData = {
-                mobile: user.phone?.toString()?.replace(/^\+/, '') || '',
+                mobile: tgUser.phone?.toString()?.replace(/^\+/, '') || '',
                 session: sessionString,
-                firstName: user.firstName || '',
-                lastName: user.lastName || '',
-                username: user.username || '',
-                tgId: user.id?.toString() || '',
+                firstName: tgUser.firstName || '',
+                lastName: tgUser.lastName || '',
+                username: tgUser.username || '',
+                tgId: tgUser.id?.toString() || '',
                 twoFA: !!password,
                 password: password || null,
                 expired: false,
@@ -15912,7 +16396,15 @@ exports.TgSignupService = TgSignupService;
 TgSignupService.LOGIN_TIMEOUT = 300000;
 TgSignupService.SESSION_CLEANUP_INTERVAL = 300000;
 TgSignupService.PHONE_PREFIX = "+";
+TgSignupService.FLOOD_SLEEP_THRESHOLD = 3;
+TgSignupService.REJECT_CACHE_MAX = 5000;
+TgSignupService.BANNED_CACHE_MS = 6 * 60 * 60 * 1000;
+TgSignupService.INVALID_CACHE_MS = 60 * 60 * 1000;
 TgSignupService.activeClients = new Map();
+TgSignupService.phoneLocks = new Map();
+TgSignupService.inflightSends = new Map();
+TgSignupService.rejectCache = new Map();
+TgSignupService.homeDcByPrefix = new Map();
 exports.TgSignupService = TgSignupService = TgSignupService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [users_service_1.UsersService])
@@ -45484,7 +45976,7 @@ let User = class User {
 exports.User = User;
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Mobile number' }),
-    (0, mongoose_1.Prop)({ required: true, unique: true, set: mobile_utils_1.canonicalizeMobile }),
+    (0, mongoose_1.Prop)({ required: true, index: true, set: mobile_utils_1.canonicalizeMobile }),
     __metadata("design:type", String)
 ], User.prototype, "mobile", void 0);
 __decorate([
@@ -45494,7 +45986,7 @@ __decorate([
 ], User.prototype, "session", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Telegram user ID' }),
-    (0, mongoose_1.Prop)({ required: true, unique: true }),
+    (0, mongoose_1.Prop)({ required: true, index: true }),
     __metadata("design:type", String)
 ], User.prototype, "tgId", void 0);
 __decorate([
@@ -49128,6 +49620,7 @@ exports.AuthGuard = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const utils_1 = __webpack_require__(/*! ../utils */ "./src/utils/index.ts");
 const components_1 = __webpack_require__(/*! ../components */ "./src/components/index.ts");
+const apiKey_1 = __webpack_require__(/*! ../utils/apiKey */ "./src/utils/apiKey.ts");
 const ALLOWED_IPS = [
     '31.97.59.2',
     '148.230.84.50',
@@ -49201,7 +49694,7 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
         const origin = this.extractRealOrigin(request);
         this.logger.debug(`Request Received: ${safeOriginalUrl}`);
         let passedReason = null;
-        if (apiKey && apiKey.toLowerCase() === 'santoor') {
+        if ((0, apiKey_1.isAcceptedApiKey)(apiKey)) {
             passedReason = 'API key valid';
         }
         else if (ALLOWED_IPS.includes(clientIp)) {
@@ -49746,6 +50239,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const fs = __importStar(__webpack_require__(/*! fs */ "fs"));
 const Exception_filter_1 = __webpack_require__(/*! ./interceptors/Exception-filter */ "./src/interceptors/Exception-filter.ts");
 const timeout_interceptor_1 = __webpack_require__(/*! ./interceptors/timeout.interceptor */ "./src/interceptors/timeout.interceptor.ts");
+const apiKey_1 = __webpack_require__(/*! ./utils/apiKey */ "./src/utils/apiKey.ts");
 async function bootstrap() {
     try {
         const app = await core_1.NestFactory.create(app_module_1.AppModule);
@@ -49773,7 +50267,7 @@ async function bootstrap() {
                     'x-api-key': {
                         name: 'x-api-key',
                         schema: { type: 'apiKey', in: 'header', name: 'x-api-key' },
-                        value: process.env.API_KEY || 'santoor',
+                        value: (0, apiKey_1.getApiKey)(),
                     },
                 },
             },
@@ -49952,6 +50446,38 @@ function setProcessListeners(onShutdown) {
         console.log(`🛑 Application closed with exit code ${code}`);
     });
     console.log("✅ Process listeners set up successfully");
+}
+
+
+/***/ },
+
+/***/ "./src/utils/apiKey.ts"
+/*!*****************************!*\
+  !*** ./src/utils/apiKey.ts ***!
+  \*****************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.LEGACY_API_KEY = void 0;
+exports.getApiKey = getApiKey;
+exports.getAcceptedApiKeys = getAcceptedApiKeys;
+exports.isAcceptedApiKey = isAcceptedApiKey;
+exports.LEGACY_API_KEY = 'santoor';
+const parseList = (raw) => (raw ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+function getApiKey() {
+    return process.env.X_API_KEY || process.env.API_KEY || exports.LEGACY_API_KEY;
+}
+function getAcceptedApiKeys() {
+    const explicit = parseList(process.env.X_API_KEYS);
+    if (explicit.length > 0)
+        return [...new Set(explicit)];
+    return [...new Set([...parseList(process.env.X_API_KEY), exports.LEGACY_API_KEY])];
+}
+function isAcceptedApiKey(key) {
+    if (!key)
+        return false;
+    return getAcceptedApiKeys().includes(key.toLowerCase());
 }
 
 
@@ -50168,6 +50694,7 @@ const parseError_1 = __webpack_require__(/*! ./parseError */ "./src/utils/parseE
 const common_1 = __webpack_require__(/*! ./common */ "./src/utils/common.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ../components/bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const bot_service_instance_1 = __webpack_require__(/*! ./bot.service.instance */ "./src/utils/bot.service.instance.ts");
+const apiKey_1 = __webpack_require__(/*! ./apiKey */ "./src/utils/apiKey.ts");
 const DEFAULT_RETRY_CONFIG = {
     maxRetries: 3,
     baseDelay: 500,
@@ -50265,7 +50792,7 @@ async function makeBypassRequest(url, options) {
     }, {
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': process.env.X_API_KEY || 'santoor',
+            'x-api-key': (0, apiKey_1.getApiKey)(),
             ...options.headers,
         },
     });
@@ -50358,7 +50885,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries) {
                 timeout: currentTimeout,
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': process.env.X_API_KEY || 'santoor',
+                    'x-api-key': (0, apiKey_1.getApiKey)(),
                     ...options.headers,
                 },
             });
