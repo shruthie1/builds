@@ -1,6 +1,587 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ "../../packages/tg-analytics/src/analytics-sink.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-analytics/src/analytics-sink.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AnalyticsSink: () => (/* binding */ AnalyticsSink)
+/* harmony export */ });
+const DEFAULTS = {
+    maxBufferedRows: 10000,
+    batchSize: 500,
+    flushIntervalMs: 5000,
+    backoffBaseMs: 1000,
+    backoffMaxMs: 5 * 60000,
+    queryTimeoutMs: 15000,
+    stopTimeoutMs: 5000,
+};
+/** Rejects with `message` after `ms`; resolves/rejects with `work` otherwise. Timer never leaks. */
+function withTimeout(work, ms, message) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+        timer?.unref?.();
+    });
+    // If the timeout wins, `work` may reject later; that must not become an unhandledRejection.
+    work.catch(() => { });
+    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+/**
+ * The NOT NULL columns of each table, straight from analytics/schema.sql. A row missing one of
+ * these fails the whole multi-row INSERT, taking up to 499 good rows with it, so it is rejected
+ * at enqueue instead. Columns NOT listed here are nullable on purpose.
+ */
+const REQUIRED_COLUMNS = {
+    promotion_send: new Set(["ts", "client_id", "mobile", "channel_id", "outcome"]),
+    conversion_event: new Set(["conversion_id", "chat_id", "channel_id", "weight", "kind"]),
+    payment_event: new Set(["chat_id", "client_id", "persona_id", "amount"]),
+    daily_client: new Set(["day", "client_id", "namespace"]),
+};
+class AnalyticsSink {
+    constructor(options = {}) {
+        this.pool = null;
+        this.buffer = [];
+        this.timer = null;
+        this.flushing = false;
+        this.stopped = false;
+        this.enabled = false;
+        this.disabledReason = "not started";
+        this.enqueued = 0;
+        this.written = 0;
+        this.droppedOverflow = 0;
+        this.droppedError = 0;
+        /** Rows rejected before buffering because they would have failed the whole INSERT batch. */
+        this.droppedInvalid = 0;
+        this.flushFailures = 0;
+        this.consecutiveFailures = 0;
+        this.backoffUntil = 0;
+        this.connectionString = (options.connectionString ?? "").trim();
+        this.poolFactory = options.poolFactory;
+        this.logger = options.logger ?? { info: () => { }, warn: () => { } };
+        this.opts = {
+            maxBufferedRows: options.maxBufferedRows ?? DEFAULTS.maxBufferedRows,
+            batchSize: options.batchSize ?? DEFAULTS.batchSize,
+            flushIntervalMs: options.flushIntervalMs ?? DEFAULTS.flushIntervalMs,
+            backoffBaseMs: options.backoffBaseMs ?? DEFAULTS.backoffBaseMs,
+            backoffMaxMs: options.backoffMaxMs ?? DEFAULTS.backoffMaxMs,
+            queryTimeoutMs: options.queryTimeoutMs ?? DEFAULTS.queryTimeoutMs,
+            stopTimeoutMs: options.stopTimeoutMs ?? DEFAULTS.stopTimeoutMs,
+            now: options.now ?? (() => Date.now()),
+        };
+    }
+    /**
+     * Rule 1: never throws, never awaits a connection. Returns whether analytics is on, purely so a
+     * caller can log it — no caller is required to check.
+     */
+    async start() {
+        if (!this.connectionString) {
+            this.disable("ANALYTICS_DB_URL not set — analytics disabled (this is a supported configuration)");
+            return false;
+        }
+        if (!/^postgres(ql)?:\/\//i.test(this.connectionString)) {
+            this.disable("ANALYTICS_DB_URL is not a postgres:// URL — analytics disabled");
+            return false;
+        }
+        // loadPgFactory() returns `| null` while poolFactory is `| undefined`; the `if (!factory)`
+        // guard below treats them identically, so the local holds both rather than casting.
+        let factory = this.poolFactory;
+        if (!factory) {
+            factory = await this.loadPgFactory();
+            if (!factory) {
+                this.disable("`pg` driver is not installed — analytics disabled");
+                return false;
+            }
+        }
+        try {
+            this.pool = factory(this.connectionString);
+        }
+        catch (err) {
+            this.disable(`analytics pool could not be created: ${describe(err)}`);
+            return false;
+        }
+        this.enabled = true;
+        this.disabledReason = "";
+        this.stopped = false;
+        this.timer = setInterval(() => { void this.flush(); }, this.opts.flushIntervalMs);
+        // Never hold the process open for analytics: an idle fleet must still be able to exit.
+        this.timer.unref?.();
+        this.logger.info("[analytics] enabled");
+        return true;
+    }
+    /**
+     * `pg` is not a declared dependency (see the class doc). Loading it dynamically means its absence
+     * is a disabled sink rather than a module-resolution crash in a revenue-earning app.
+     */
+    async loadPgFactory() {
+        try {
+            // The specifier is built at runtime so TypeScript does not try to resolve `pg` at compile
+            // time. It is genuinely absent from this monorepo, and a hard import specifier would make
+            // `npm run typecheck` fail on an OPTIONAL feature.
+            const specifier = "pg";
+            const mod = await Function("s", "return import(s)")(specifier);
+            const Pool = mod?.Pool ?? mod?.default?.Pool;
+            if (typeof Pool !== "function")
+                return null;
+            return (connectionString) => {
+                const pool = new Pool({
+                    connectionString,
+                    max: 4,
+                    // Sydney from India: fail fast rather than tie up a handler's event loop.
+                    connectionTimeoutMillis: 10000,
+                    idleTimeoutMillis: 30000,
+                    // Bound every query client-side (pg) and server-side, so a half-open socket cannot hang.
+                    query_timeout: this.opts.queryTimeoutMs,
+                    statement_timeout: this.opts.queryTimeoutMs,
+                    ssl: { rejectUnauthorized: false },
+                });
+                // A pg Pool emits 'error' when a client that is IDLE in the pool dies — a Postgres
+                // restart, an idle-timeout kill, a network reset. That is an EventEmitter 'error' with
+                // no listener, which Node escalates to an uncaughtException: it does NOT surface at the
+                // query() call site and no try/catch around flush() can see it. Measured 2026-10-02:
+                // without this listener the process exits; with it, it logs and carries on.
+                // This single line is what makes "analytics is optional" true — otherwise a Supabase
+                // blip takes down a revenue-earning Telegram process.
+                pool.on("error", (err) => {
+                    console.error(`[analytics] idle pool client error (ignored): ${err.message}`);
+                });
+                return pool;
+            };
+        }
+        catch {
+            return null;
+        }
+    }
+    disable(reason) {
+        this.enabled = false;
+        this.disabledReason = reason;
+        this.logger.info(`[analytics] ${reason}`);
+    }
+    // ── recording ────────────────────────────────────────────────────────────────────────────────
+    // Rule 2: all three are synchronous and return void. There is nothing here for a caller to await
+    // and nothing for a caller to catch.
+    recordPromotionSend(row) {
+        this.enqueue({
+            table: "promotion_send",
+            columns: ["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type"],
+            values: [
+                row.ts ?? new Date(this.opts.now()),
+                row.clientId, row.mobile, row.channelId,
+                row.messageKey ?? null, row.messageSource ?? null,
+                row.outcome, row.errorType ?? null,
+            ],
+        });
+    }
+    recordConversion(row) {
+        this.enqueue({
+            table: "conversion_event",
+            columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"],
+            values: [
+                row.ts ?? new Date(this.opts.now()),
+                row.conversionId, row.chatId, row.channelId,
+                row.clientId ?? null, row.weight ?? 1.0, row.kind, row.profile ?? null,
+            ],
+        });
+    }
+    /**
+     * The ROLLUP mirror. `daily_client` is the only long-range history in the system: Mongo's three
+     * *StatsDaily collections carry a 14-day TTL (measured 2026-10-02: exactly 15 days present), so
+     * a day not copied here is gone for good once that TTL fires.
+     *
+     * Written in-process beside the Mongo $inc rather than exported later, which is what removes the
+     * need for any migration or coordinated restart: a process on the old build simply does not
+     * mirror, and Mongo stays correct either way.
+     *
+     * ACCUMULATES. Several mobiles share one clientId and each flush carries a partial delta, so the
+     * conflict clause adds rather than replaces — the same semantics as the Mongo $inc it mirrors.
+     * `revenue` is deliberately absent: userStatsDaily.revenue is measured 3.31x inflated, and the
+     * column stays 0 until it can be sourced from userData.payAmount.
+     */
+    recordDailyClient(row) {
+        const counters = [
+            ["sent", row.sent], ["delivered", row.delivered],
+            ["banned", row.banned], ["failed", row.failed],
+            ["new_users", row.newUsers], ["active_users", row.activeUsers],
+            ["payers", row.payers],
+            ["reactions_success", row.reactionsSuccess],
+            ["reactions_restricted", row.reactionsRestricted],
+            ["reactions_failed", row.reactionsFailed],
+            ["reactions_floods", row.reactionsFloods],
+        ];
+        // Only the counters actually present are written. An all-zero row would still create the
+        // (day, client_id, namespace) key and inflate row counts for a client that did nothing.
+        const present = counters.filter(([, v]) => typeof v === "number" && v !== 0);
+        if (present.length === 0)
+            return;
+        const cols = present.map(([c]) => c);
+        this.enqueue({
+            table: "daily_client",
+            columns: ["day", "client_id", "namespace", ...cols],
+            values: [row.day, row.clientId, row.namespace, ...present.map(([, v]) => v)],
+            conflictKeyCount: 3, // day, client_id, namespace
+            conflict: "ON CONFLICT (day, client_id, namespace) DO UPDATE SET "
+                + cols.map((c) => `${c} = daily_client.${c} + EXCLUDED.${c}`).join(", "),
+        });
+    }
+    recordPayment(row) {
+        this.enqueue({
+            table: "payment_event",
+            columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"],
+            values: [
+                row.ts ?? new Date(this.opts.now()),
+                row.chatId, row.clientId, row.personaId, row.amount,
+                row.balanceAfter ?? null, row.lifetimeAfter ?? null,
+                row.isCheat ?? false, row.source ?? null,
+            ],
+        });
+    }
+    /**
+     * A row that violates a NOT NULL or CHECK constraint does not fail alone. `insertBatch` sends up
+     * to 500 rows as ONE multi-row INSERT, so Postgres rejects the whole statement — and rule 3 drops
+     * a failed batch without retrying, so 499 good rows die with the bad one, silently.
+     *
+     * The call sites make this reachable rather than theoretical: promotion-flow-runner coalesces a
+     * missing clientId/mobile/channelId to `''`, which satisfies NOT NULL but is a meaningless row,
+     * and payment_event has `CHECK (amount <> 0)`.
+     *
+     * So: reject the single bad row here, at enqueue, where it costs one row instead of a batch.
+     * Counted as droppedInvalid, never thrown — a send must not fail because analytics is unhappy.
+     */
+    isValid(row) {
+        // Only the columns the SCHEMA actually declares NOT NULL. conversion_event.client_id is
+        // deliberately nullable — a conversion belongs to a channel and a chat, not to one client —
+        // so rejecting a null there would drop every conversion row. Keyed by table because the same
+        // column name has different nullability in different tables.
+        const required = REQUIRED_COLUMNS[row.table];
+        for (const [i, col] of row.columns.entries()) {
+            const v = row.values[i];
+            if (required?.has(col) && (v === null || v === undefined || v === ""))
+                return false;
+            // payment_event.amount has CHECK (amount <> 0); a zero amount kills the whole batch.
+            if (col === "amount" && row.table === "payment_event" &&
+                (v === null || v === undefined || v === 0))
+                return false;
+        }
+        return true;
+    }
+    /** Rule 4: the buffer is hard-capped and the OLDEST rows are the ones discarded. */
+    enqueue(row) {
+        if (!this.enabled || this.stopped)
+            return;
+        if (!this.isValid(row)) {
+            this.droppedInvalid += 1;
+            return;
+        }
+        this.enqueued += 1;
+        this.buffer.push(row);
+        if (this.buffer.length > this.opts.maxBufferedRows) {
+            const overflow = this.buffer.length - this.opts.maxBufferedRows;
+            this.buffer.splice(0, overflow);
+            this.droppedOverflow += overflow;
+        }
+    }
+    // ── flushing ─────────────────────────────────────────────────────────────────────────────────
+    /** Rules 3 and 5. Resolves always; rejects never. */
+    async flush() {
+        if (!this.enabled || this.flushing || !this.pool)
+            return;
+        if (this.buffer.length === 0)
+            return;
+        if (this.opts.now() < this.backoffUntil)
+            return;
+        this.flushing = true;
+        try {
+            while (this.buffer.length > 0) {
+                // Stop the moment a failure has armed the backoff. Without this the `continue` below would
+                // keep draining the whole buffer one failing batch at a time during an outage — 10,000
+                // rows destroyed in a single flush instead of 500, with the backoff never consulted
+                // because it is only checked on ENTRY to flush().
+                if (this.opts.now() < this.backoffUntil)
+                    break;
+                const batch = this.buffer.splice(0, this.opts.batchSize);
+                const grouped = groupByTable(batch);
+                for (const [, rows] of grouped) {
+                    const table = rows[0].table;
+                    try {
+                        await this.insertBatch(table, rows);
+                        this.written += rows.length;
+                        this.consecutiveFailures = 0;
+                        this.backoffUntil = 0;
+                    }
+                    catch (err) {
+                        // Rule 3: dropped, counted, never rethrown. These rows are gone on purpose — re-queueing
+                        // a batch that a constraint rejects would retry it forever and wedge the buffer.
+                        this.droppedError += rows.length;
+                        this.flushFailures += 1;
+                        this.consecutiveFailures += 1;
+                        this.applyBackoff();
+                        this.logger.warn(`[analytics] flush failed for ${table} (${rows.length} rows dropped): ${describe(err)}`);
+                        // Continue to the next GROUP rather than returning. The batch was already spliced out
+                        // of the buffer, so an early return silently discarded every remaining group in it —
+                        // including promotion_send and payment_event rows that had nothing to do with the
+                        // failure, and without counting them in droppedError. One table's bad statement must
+                        // not take the other tables' rows with it. The remaining groups in THIS batch still
+                        // get their chance; the while-loop above then breaks on the armed backoff.
+                        continue;
+                    }
+                }
+            }
+        }
+        finally {
+            this.flushing = false;
+        }
+    }
+    /** Rule 5: exponential, capped, and it STAYS backed off until the delay elapses. */
+    applyBackoff() {
+        const step = Math.min(this.opts.backoffMaxMs, this.opts.backoffBaseMs * 2 ** Math.min(this.consecutiveFailures - 1, 20));
+        this.backoffUntil = this.opts.now() + step;
+    }
+    async insertBatch(table, rows) {
+        rows = coalesceOnConflictKey(rows);
+        const columns = rows[0].columns;
+        const params = [];
+        const tuples = [];
+        for (const row of rows) {
+            const placeholders = row.values.map((value) => {
+                params.push(value);
+                return `$${params.length}`;
+            });
+            tuples.push(`(${placeholders.join(",")})`);
+        }
+        const conflict = rows[0]?.conflict ? ` ${rows[0].conflict}` : "";
+        const sql = `INSERT INTO ${table} (${columns.join(",")}) VALUES ${tuples.join(",")}${conflict}`;
+        // Bounded even for an injected pool whose query never settles (rule 1: never wedge the process).
+        await withTimeout(Promise.resolve().then(() => this.pool.query(sql, params)), this.opts.queryTimeoutMs, `analytics query timed out after ${this.opts.queryTimeoutMs}ms`);
+    }
+    /** Best-effort drain then close. Like everything else here, it never throws. */
+    async stop() {
+        this.stopped = true;
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
+        }
+        const pool = this.pool;
+        try {
+            // One deadline for drain + close: a hung query or a pool.end() that never resolves must not
+            // hang application shutdown.
+            await withTimeout((async () => {
+                try {
+                    this.backoffUntil = 0;
+                    await this.flush();
+                }
+                catch { /* rule 3 */ }
+                try {
+                    await pool?.end();
+                }
+                catch { /* rule 3 */ }
+            })(), this.opts.stopTimeoutMs, `analytics stop timed out after ${this.opts.stopTimeoutMs}ms`);
+        }
+        catch (err) {
+            this.logger.warn(`[analytics] ${describe(err)} (abandoning pool)`);
+        }
+        this.pool = null;
+        this.enabled = false;
+        this.disabledReason = "stopped";
+    }
+    stats() {
+        return {
+            enabled: this.enabled,
+            disabledReason: this.disabledReason,
+            buffered: this.buffer.length,
+            enqueued: this.enqueued,
+            written: this.written,
+            droppedOverflow: this.droppedOverflow,
+            droppedError: this.droppedError,
+            droppedInvalid: this.droppedInvalid,
+            flushFailures: this.flushFailures,
+            consecutiveFailures: this.consecutiveFailures,
+            backoffUntil: this.backoffUntil,
+        };
+    }
+}
+/**
+ * Groups by table AND by the exact write shape. insertBatch takes its column list and ON CONFLICT
+ * tail from rows[0] and applies them to the whole batch, so two rows may only share a statement if
+ * both match. Keying on the table alone was safe while every table had one shape; daily_client
+ * arrives with a conflict clause, so the key has to carry it or a future second shape for the same
+ * table would be written with the wrong columns.
+ */
+function groupByTable(rows) {
+    const grouped = new Map();
+    for (const row of rows) {
+        const key = `${row.table}\u0000${row.columns.join(",")}\u0000${row.conflict ?? ""}`;
+        const existing = grouped.get(key);
+        if (existing)
+            existing.push(row);
+        else
+            grouped.set(key, [row]);
+    }
+    return grouped;
+}
+/**
+ * Sums rows that share a conflict key, so a multi-row upsert never names the same key twice.
+ *
+ * Postgres fails the ENTIRE statement with SQLSTATE 21000 in that case, which would have dropped
+ * every daily_client batch under real traffic (several mobiles share a clientId, and they land in
+ * the same 5s flush). Reproduced against the live table 2026-10-02 before this existed.
+ *
+ * Only rows carrying a conflict clause are touched; the three append-only event tables want their
+ * duplicates kept and pass straight through. Rows are already grouped by identical column list, so
+ * summing is positional: the key columns come first and the rest are counters.
+ */
+function coalesceOnConflictKey(rows) {
+    const first = rows[0];
+    if (!first?.conflict || rows.length < 2)
+        return rows;
+    const keyLen = first.conflictKeyCount ?? 0;
+    if (keyLen <= 0)
+        return rows;
+    const merged = new Map();
+    for (const row of rows) {
+        const key = row.values.slice(0, keyLen).join("\u0000");
+        const seen = merged.get(key);
+        if (!seen) {
+            // Copy the values: the row in the buffer must not be mutated.
+            merged.set(key, { ...row, values: [...row.values] });
+            continue;
+        }
+        for (let i = keyLen; i < row.values.length; i += 1) {
+            const a = seen.values[i];
+            const b = row.values[i];
+            // Counters only. Anything non-numeric keeps the first value rather than guessing.
+            if (typeof a === "number" && typeof b === "number")
+                seen.values[i] = a + b;
+        }
+    }
+    return [...merged.values()];
+}
+function describe(err) {
+    if (err instanceof Error)
+        return err.message;
+    return String(err);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-analytics/src/analytics.ts"
+/*!****************************************************!*\
+  !*** ../../packages/tg-analytics/src/analytics.ts ***!
+  \****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   __setAnalyticsForTests: () => (/* binding */ __setAnalyticsForTests),
+/* harmony export */   getAnalytics: () => (/* binding */ getAnalytics),
+/* harmony export */   initAnalytics: () => (/* binding */ initAnalytics),
+/* harmony export */   shutdownAnalytics: () => (/* binding */ shutdownAnalytics)
+/* harmony export */ });
+/* harmony import */ var _analytics_sink__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./analytics-sink */ "../../packages/tg-analytics/src/analytics-sink.ts");
+
+/**
+ * The process-wide analytics handle.
+ *
+ * This exists so NO CALL SITE EVER BRANCHES on whether analytics is configured. There is no
+ * `if (analytics)` anywhere in the apps, and no optional-chaining on the recorder. A disabled sink
+ * is a real object whose record* methods are no-ops — the null-object pattern — because the moment
+ * call sites start testing for presence, "optional" leaks into the revenue path and someone
+ * eventually writes `await analytics.record(...)` inside a promotion loop.
+ *
+ * Usage is deliberately dull:
+ *
+ *     await initAnalytics({ connectionString: process.env.ANALYTICS_DB_URL });
+ *     getAnalytics().recordPromotionSend({ ... });   // safe whether or not it is configured
+ */
+let instance = null;
+/** Never throws. Returns true when analytics is actually on, only for logging. */
+async function initAnalytics(options = {}) {
+    // Idempotent. Both apps call this from re-enterable bootstrap paths (tg-aut
+    // startConnectionBootstrap, promote-clients prepareDatabase). A second sink would leak its own
+    // pool and flush timer, and shutdownAnalytics would drain only the newest one.
+    const previous = instance;
+    if (previous && previous.stats().enabled)
+        return true;
+    if (previous) {
+        instance = null;
+        try {
+            await previous.stop();
+        }
+        catch { /* stop() is total; never let it block init */ }
+    }
+    try {
+        const sink = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink(options);
+        const enabled = await sink.start();
+        instance = sink;
+        return enabled;
+    }
+    catch {
+        // Belt and braces: start() is already total, but a disabled sink must be the worst case here.
+        instance = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink({});
+        return false;
+    }
+}
+/** Always returns a usable object, even before init or after a failed init. */
+function getAnalytics() {
+    return instance ?? DISABLED;
+}
+async function shutdownAnalytics() {
+    const sink = instance;
+    instance = null;
+    if (sink)
+        await sink.stop();
+}
+/** Test seam. */
+function __setAnalyticsForTests(sink) {
+    instance = sink;
+}
+const DISABLED = {
+    recordPromotionSend: () => { },
+    recordConversion: () => { },
+    recordPayment: () => { },
+    recordDailyClient: () => { },
+    stats: () => ({
+        enabled: false,
+        disabledReason: "analytics not initialised",
+        buffered: 0, enqueued: 0, written: 0,
+        droppedOverflow: 0, droppedError: 0,
+        droppedInvalid: 0,
+        flushFailures: 0, consecutiveFailures: 0, backoffUntil: 0,
+    }),
+};
+
+
+/***/ },
+
+/***/ "../../packages/tg-analytics/src/index.ts"
+/*!************************************************!*\
+  !*** ../../packages/tg-analytics/src/index.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AnalyticsSink: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink),
+/* harmony export */   __setAnalyticsForTests: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.__setAnalyticsForTests),
+/* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.getAnalytics),
+/* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.initAnalytics),
+/* harmony export */   shutdownAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.shutdownAnalytics)
+/* harmony export */ });
+/* harmony import */ var _analytics_sink__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./analytics-sink */ "../../packages/tg-analytics/src/analytics-sink.ts");
+/* harmony import */ var _analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./analytics */ "../../packages/tg-analytics/src/analytics.ts");
+
+
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts ***!
@@ -14,6 +595,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeAttributionChannelIds: () => (/* binding */ normalizeAttributionChannelIds)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 /**
  * Conversion Attribution Service — common-chat based ROI.
  *
@@ -22,6 +604,7 @@ __webpack_require__.r(__webpack_exports__);
  * per-channel conversion claims; a channel does not need a recent promotion
  * send record to receive attribution credit.
  */
+
 
 class ConversionAttributionService {
     constructor(intelligenceService, tracker) {
@@ -84,6 +667,15 @@ class ConversionAttributionService {
             }
             const attributions = [];
             const failedChannelIds = [];
+            // `attributePaymentConversion` prefixes the id with `payment:`; a DM carries no prefix. The
+            // remainder is `${profile}:${chatId}` (plus `:${dayKey}` on the payment path), so the chat id
+            // is the SECOND segment. Parsed defensively — an unexpected shape must not throw here.
+            const kind = conversionId.startsWith('payment:') ? 'payment' : 'dm';
+            const idParts = (kind === 'payment' ? conversionId.slice('payment:'.length) : conversionId).split(':');
+            const conversionChatId = idParts[1] ?? '';
+            // Segment 0 is the persona. It is recorded instead of a clientId because a profile serves
+            // several clients (10 profiles across 20 clients), so no clientId can be inferred here.
+            const conversionProfile = idParts[0] || null;
             for (const channelId of uniqueChatIds) {
                 const channelClaimId = `${conversionId}:${channelId}`;
                 try {
@@ -91,6 +683,23 @@ class ConversionAttributionService {
                         continue;
                     await this.intelligenceService.recordDMConversion(channelId, normalizedWeight);
                     attributions.push({ channelId, weight: normalizedWeight });
+                    // Mirror into the OPTIONAL analytics store, AFTER the claim succeeded so a retry cannot
+                    // double-count — `claimConversion` is what makes this exactly-once. `conversionId` groups
+                    // the whole fan-out, which is what makes a multi-channel conversion reconstructable later;
+                    // Mongo only keeps the per-channel running total, never the grouping.
+                    // Wrapped: attribution must not break because an optional sink misbehaved.
+                    try {
+                        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_1__.getAnalytics)().recordConversion({
+                            conversionId,
+                            chatId: conversionChatId,
+                            channelId,
+                            clientId: null,
+                            profile: conversionProfile,
+                            weight: normalizedWeight,
+                            kind,
+                        });
+                    }
+                    catch { /* analytics is optional */ }
                 }
                 catch {
                     failedChannelIds.push(channelId);
@@ -557,10 +1166,13 @@ class ChannelIntelligenceService {
                 return true;
             }
             const doc = await this.get(safeChannelId);
-            const entries = Array.isArray(doc?.messagePool) ? doc.messagePool : null;
+            // Narrowed on `doc` itself rather than on `doc?.messagePool`: the guard below already makes
+            // a null doc impossible past this point, but through the optional chain the compiler cannot
+            // see that, and the two buildCurrentDocumentFilter calls further down take a non-null doc.
+            const entries = doc && Array.isArray(doc.messagePool) ? doc.messagePool : null;
             // A malformed pool is left untouched; live learning never replaces unknown data just to make
             // room for a new message.
-            if (!entries || !entries.every(_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry)) {
+            if (!doc || !entries || !entries.every(_pool__WEBPACK_IMPORTED_MODULE_3__.isPoolEntry)) {
                 poolLog.warn('survival-skipped', { chan: safeChannelId, key: verifiedEntry.key, reason: 'invalid-pool' });
                 return false;
             }
@@ -621,8 +1233,11 @@ class ChannelIntelligenceService {
             return;
         for (let attempt = 0; attempt < CONCURRENT_WRITE_RETRY_LIMIT; attempt += 1) {
             const doc = await this.get(safeChannelId);
-            const entries = Array.isArray(doc?.messagePool) ? doc.messagePool : [];
-            if (entries.length === 0)
+            // Narrowed on `doc` rather than `doc?.messagePool` for the same reason as above: a null doc
+            // yields an empty list and returns here, but the compiler cannot see that through the
+            // optional chain, and buildCurrentDocumentFilter below takes a non-null doc.
+            const entries = doc && Array.isArray(doc.messagePool) ? doc.messagePool : [];
+            if (!doc || entries.length === 0)
                 return;
             const pending = entries
                 .filter(hasPoolStateEvidence)
@@ -1282,6 +1897,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.poolOutcomeTotals),
+/* harmony export */   promotionErrorToken: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.promotionErrorToken),
 /* harmony export */   rawScore: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.resolveAccountDailyCap),
@@ -1456,6 +2072,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+
 
 
 
@@ -2089,10 +2707,52 @@ class PromotionFlowRunner {
             };
         }
     }
+    /**
+     * Mirror one send outcome into the OPTIONAL analytics store.
+     *
+     * This is the single site for it, and it lives here rather than in either app's daily-counter
+     * code for one reason: `messageKey` and `messageSource` do not survive the adapter boundary.
+     * `BasePromotionEngine.onSendSuccess`/`onSendFailure` forward only `messageId` and `messageIndex`,
+     * dropping `result.messageText` and `result.messageSource`, so an app-side hook literally cannot
+     * say WHICH message was sent. Here the candidate and the raw result are both still in scope, and
+     * `this.options.account` carries mobile and clientId — everything the row needs.
+     *
+     * It is also ONE site instead of two: tg-aut and promote-clients each have their own counter
+     * code, and both funnel through this runner.
+     *
+     * Safe by construction: `getAnalytics()` always returns a recorder (a no-op one when analytics is
+     * unconfigured), the record call is synchronous and returns void, and it cannot throw. There is
+     * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
+     */
+    recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride) {
+        // WRAPPED ON PURPOSE. The sink's own record* calls are already total, but `getAnalytics()`
+        // returns whatever was installed, and a promotion send must survive even a recorder that
+        // throws. Analytics is optional; a send is not. Nothing is logged here either — a broken sink
+        // must not turn into a log flood on the send path.
+        try {
+            const account = this.options.account;
+            const errorMessage = result?.errorMessage ?? '';
+            (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_11__.getAnalytics)().recordPromotionSend({
+                clientId: account?.clientId ?? '',
+                mobile: account?.mobile ?? '',
+                channelId: channelIdOverride ?? channel?.channelId ?? '',
+                messageKey: candidate?.poolKey ?? null,
+                messageSource: candidate?.poolSource ?? result?.messageSource ?? null,
+                outcome,
+                // The raw error STRING is never stored — only the matched Telegram token, so the column
+                // stays a fixed low-cardinality vocabulary (FLOOD_WAIT, CHAT_WRITE_FORBIDDEN, ...).
+                errorType: (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.promotionErrorToken)(errorMessage),
+            });
+        }
+        catch {
+            /* analytics must never affect a promotion send */
+        }
+    }
     async recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
         const strategy = this.resolveCandidateStrategy(candidate);
         const availableMessageIds = normalizeAvailableMessageIds(channel.availableMsgs);
         const poolSource = this.resolveQueuedPoolSource(result, isFollowUp);
+        this.recordSendAnalytics(channel, candidate, result, 'delivered');
         let durabilityFailure = null;
         await this.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
         if (isValidMessageId(result.messageId)) {
@@ -2188,9 +2848,15 @@ class PromotionFlowRunner {
         }
         await this.callHook('onSendFailure', () => this.adapter.onSendFailure?.(channel, result, isFollowUp));
         if (!attempted) {
+            // No Telegram request was ever made, so there is no SEND to report. Logging it would inflate
+            // the denominator of every delivery/ban rate this store exists to answer.
             this.log('debug', `Promotion preflight rejected candidate without Telegram attempt; ${this.formatChannel(channel)} reason=${this.compact(errorMessage)}`);
             return;
         }
+        // A real attempt that Telegram refused. USER_BANNED_IN_CHANNEL is the account's own spam limit
+        // leaking into the channel and is the platform's headline metric, so it gets its own outcome
+        // rather than being folded into 'failed'.
+        this.recordSendAnalytics(channel, candidate, result, errorMessage.toUpperCase().includes('USER_BANNED_IN_CHANNEL') ? 'banned' : 'failed');
         let intelligenceStatus = 'ok';
         const poolStatus = 'skipped';
         await this.recordExploreFailure(channel.channelId, candidate, result, isFollowUp);
@@ -2216,6 +2882,10 @@ class PromotionFlowRunner {
     }
     async recordDeletion(message, deletionPolicy) {
         const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
+        // A delivered message that the channel later removed. The send itself was already recorded as
+        // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
+        // history Mongo cannot answer (its messagePool counters are overwritten in place).
+        this.recordSendAnalytics(null, { poolSource: message.poolSource }, null, 'deleted', message.channelId);
         this.log('warn', [
             'Promotion deletion recorded',
             `channelId=${message.channelId}`,
@@ -4697,7 +5367,8 @@ const MESSAGE_SAFETY = {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   classifyPoolError: () => (/* binding */ classifyPoolError)
+/* harmony export */   classifyPoolError: () => (/* binding */ classifyPoolError),
+/* harmony export */   promotionErrorToken: () => (/* binding */ promotionErrorToken)
 /* harmony export */ });
 const ACCOUNT_TOKENS = [
     'USER_BANNED_IN_CHANNEL',
@@ -4744,6 +5415,28 @@ function classifyPoolError(errorText) {
     if (DELETION_TOKENS.some((token) => upper.includes(token)))
         return 'deletion';
     return 'neutral';
+}
+/**
+ * The specific Telegram error token, for analytics.
+ *
+ * `classifyPoolError` deliberately collapses everything into four buckets, which is right for pool
+ * accounting but useless for a report: it cannot tell FLOOD_WAIT from USER_BANNED_IN_CHANNEL, and
+ * those call for opposite operator actions. This returns the matched token itself, so the analytics
+ * `error_type` column stays LOW-CARDINALITY (a fixed vocabulary, never a raw error string) while
+ * still naming the actual failure.
+ *
+ * Returns null when nothing matches, so an unrecognised error is stored as NULL rather than as a
+ * misleading bucket.
+ */
+function promotionErrorToken(errorText) {
+    if (typeof errorText !== 'string' || errorText.trim() === '')
+        return null;
+    const upper = errorText.toUpperCase();
+    for (const token of [...ACCOUNT_TOKENS, ...CHANNEL_TOKENS, ...DELETION_TOKENS]) {
+        if (upper.includes(token))
+            return token;
+    }
+    return null;
 }
 
 
@@ -4795,6 +5488,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _pool_message_index__WEBPACK_IMPORTED_MODULE_7__.parsePoolMessageIndex),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _pool_types__WEBPACK_IMPORTED_MODULE_6__.poolEntryKey),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _pool_compaction__WEBPACK_IMPORTED_MODULE_1__.poolOutcomeTotals),
+/* harmony export */   promotionErrorToken: () => (/* reexport safe */ _error_classification__WEBPACK_IMPORTED_MODULE_2__.promotionErrorToken),
 /* harmony export */   rawScore: () => (/* reexport safe */ _scoring__WEBPACK_IMPORTED_MODULE_5__.rawScore),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _account_cap__WEBPACK_IMPORTED_MODULE_3__.resolveAccountDailyCap),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _pool_compaction__WEBPACK_IMPORTED_MODULE_1__.shouldRetainPoolCandidate),
@@ -9202,6 +9896,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals),
 /* harmony export */   processChannelDialog: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.processChannelDialog),
+/* harmony export */   promotionErrorToken: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.promotionErrorToken),
 /* harmony export */   rawScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
@@ -10284,6 +10979,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   removeProxyMapping: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.removeProxyMapping),
 /* harmony export */   reportManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_34__.reportManualSpamBotProbe),
 /* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.requestPhoneCall),
+/* harmony export */   requireProfile: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.requireProfile),
 /* harmony export */   resetMobileIdentity: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.resetMobileIdentity),
 /* harmony export */   resolveEntity: () => (/* reexport safe */ _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__.resolveEntity),
 /* harmony export */   rotateProxy: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.rotateProxy),
@@ -10788,6 +11484,11 @@ async function getParticipantCount(client, channelId, entity) {
                 entity = cached;
             }
         }
+        // On a cache MISS `entity` is still undefined, and it is passed straight to
+        // getFullEntityInfo and getParticipants below. channelId is what the caller resolved from
+        // in the first place and both calls accept it, so it is the correct fallback rather than a
+        // cast — an undefined target here would fail inside the client with a much worse message.
+        const target = entity ?? channelId;
         // OPTIMIZATION 1: Check if entity already has participantsCount (fastest - no API call)
         if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Channel && entity.participantsCount !== undefined && entity.participantsCount !== null) {
             logger.debug(`Using cached participantsCount from entity for ${channelId}: ${entity.participantsCount}`);
@@ -10801,7 +11502,7 @@ async function getParticipantCount(client, channelId, entity) {
         // The channel-vs-group RPC dispatch is shared (getFullEntityInfo); we just read the
         // per-type count field from the returned ChannelFull | ChatFull.
         try {
-            const fullInfo = await (0,_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_3__.getFullEntityInfo)(client, entity, { timeout: 10000, label: channelId });
+            const fullInfo = await (0,_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_3__.getFullEntityInfo)(client, target, { timeout: 10000, label: channelId });
             if (fullInfo instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChannelFull) {
                 const count = fullInfo.participantsCount;
                 if (count !== undefined && count !== null) {
@@ -10832,7 +11533,7 @@ async function getParticipantCount(client, channelId, entity) {
         }
         // FALLBACK: Use getParticipants with limit 0 (slower but more reliable)
         // This is the original method, kept as fallback for edge cases
-        const participants = await client.getParticipants(entity, {
+        const participants = await client.getParticipants(target, {
             limit: 0, // This will return the total count without fetching participants
         });
         if (participants.total !== null && participants.total !== undefined) {
@@ -11950,9 +12651,30 @@ function activeChannelHydrationReasonUpdateExpression(liveReason) {
 function buildActiveChannelUpsertPipeline(setFields, setOnInsert) {
     const defaults = {};
     for (const [key, value] of Object.entries(setOnInsert)) {
-        defaults[key] = { $ifNull: [`$${key}`, value] };
+        defaults[key] = { $ifNull: [`$${key}`, literalizeForPipeline(value)] };
     }
-    return [{ $set: setFields }, { $set: defaults }];
+    const literalSet = {};
+    for (const [key, value] of Object.entries(setFields)) {
+        literalSet[key] = literalizeForPipeline(value);
+    }
+    return [{ $set: literalSet }, { $set: defaults }];
+}
+/**
+ * In an aggregation-pipeline `$set`, a string starting with `$` is a field path / variable
+ * ("$ Crypto" is a path, "$$$ VIP" a variable), so a Telegram title like that is mis-evaluated or
+ * rejects the write. Plain data is therefore wrapped in `$literal`. Intentional expressions (any
+ * plain object with a `$`-prefixed key, see isMongoUpdateExpression) pass through untouched.
+ * Numbers, booleans, null, Dates and other non-string scalars are already literal in a pipeline.
+ */
+function literalizeForPipeline(value) {
+    if (isMongoUpdateExpression(value))
+        return value;
+    if (typeof value === 'string' || Array.isArray(value))
+        return { $literal: value };
+    if (typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype) {
+        return { $literal: value };
+    }
+    return value;
 }
 
 
@@ -13669,6 +14391,68 @@ class BotConfig {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/apiKey.ts"
+/*!**************************************************!*\
+  !*** ../../packages/tg-core/src/utils/apiKey.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LEGACY_API_KEY: () => (/* binding */ LEGACY_API_KEY),
+/* harmony export */   getAcceptedApiKeys: () => (/* binding */ getAcceptedApiKeys),
+/* harmony export */   getApiKey: () => (/* binding */ getApiKey),
+/* harmony export */   isAcceptedApiKey: () => (/* binding */ isAcceptedApiKey)
+/* harmony export */ });
+/**
+ * The shared API key — one place for both sending it and checking it.
+ *
+ * OUTBOUND  getApiKey()          the key this process SENDS to other services.
+ * INBOUND   isAcceptedApiKey()   whether a key presented TO this process is valid
+ *                                (the tg-aut and promote-clients auth middlewares).
+ *
+ * WHY INBOUND IS A SET, NOT A SINGLE VALUE
+ * ---------------------------------------
+ * X_API_KEY reaches process.env from the UMS configuration fetched at boot. If the middleware
+ * accepted only that value, then changing it in the DB would make each process demand the new
+ * key from its next restart onwards, while CMS and every not-yet-restarted process still send
+ * the old one. The fleet restarts on its own 1-3x a day, so a single config edit would spread
+ * 401s across it over ~24h.
+ *
+ * So the legacy key stays accepted unless it is retired EXPLICITLY:
+ *   - X_API_KEYS set (comma-separated)  -> exactly that list is accepted (authoritative)
+ *   - otherwise                         -> the configured key (as getApiKey resolves it) AND
+ *                                          the legacy key
+ *
+ * Rotation is therefore: add the new key -> move every caller to it -> set X_API_KEYS to the
+ * new key alone. There is never a moment where a caller holds a key that is refused.
+ *
+ * Comparison is trimmed and case-insensitive, matching the middlewares this replaces
+ * (`apiKey.trim().toLowerCase() === expectedApiKey`).
+ */
+const LEGACY_API_KEY = "santoor";
+const parseList = (raw) => (raw ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+function getApiKey() {
+    return process.env.X_API_KEY || process.env.API_KEY || LEGACY_API_KEY;
+}
+function getAcceptedApiKeys() {
+    const explicit = parseList(process.env.X_API_KEYS);
+    if (explicit.length > 0)
+        return [...new Set(explicit)];
+    // A blank or missing list is "unset", never "accept nothing".
+    return [...new Set([getApiKey().trim().toLowerCase(), LEGACY_API_KEY])];
+}
+function isAcceptedApiKey(key) {
+    const presented = (key ?? "").trim().toLowerCase();
+    if (!presented)
+        return false;
+    return getAcceptedApiKeys().includes(presented);
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/contains.ts"
 /*!****************************************************!*\
   !*** ../../packages/tg-core/src/utils/contains.ts ***!
@@ -13832,6 +14616,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _apiKey__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+
 
 
 
@@ -13976,7 +14762,7 @@ async function makeBypassRequest(url, options) {
     }, {
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor',
+            'x-api-key': (0,_apiKey__WEBPACK_IMPORTED_MODULE_5__.getApiKey)(),
             ...options.headers
         },
     });
@@ -14093,7 +14879,7 @@ async function fetchWithTimeout(url, options = {}, maxRetries // Kept for backwa
                 timeout: currentTimeout,
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor',
+                    'x-api-key': (0,_apiKey__WEBPACK_IMPORTED_MODULE_5__.getApiKey)(),
                     ...options.headers
                 }
             });
@@ -17244,7 +18030,7 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
     const hours = Math.floor((seconds % (3600 * 24)) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    let result = [];
+    const result = [];
     if (days > 0)
         result.push(`${days}d`);
     if (hours > 0)
@@ -18036,7 +18822,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ownFilter: () => (/* binding */ ownFilter),
 /* harmony export */   ownershipOnInsert: () => (/* binding */ ownershipOnInsert),
 /* harmony export */   personaFilter: () => (/* binding */ personaFilter),
-/* harmony export */   readFilter: () => (/* binding */ readFilter)
+/* harmony export */   readFilter: () => (/* binding */ readFilter),
+/* harmony export */   requireProfile: () => (/* binding */ requireProfile)
 /* harmony export */ });
 /**
  * User-row scoping for `userData`.
@@ -18080,6 +18867,35 @@ function currentScopeIdentity() {
         clientId: process.env.clientId?.trim() || undefined,
         profile: process.env.dbcoll?.trim() || undefined,
     };
+}
+/**
+ * The persona this process serves, for a write that CANNOT proceed without one. Throws when unset.
+ *
+ * WHY THIS THROWS INSTEAD OF DEFAULTING. Three insert-capable upserts in tg-aut's dbservice used to
+ * write `process.env.dbcoll?.trim() || 'default_profile'`. In all three, `profile` is half the
+ * unique key `chatId_Profile` AND lands in `$setOnInsert`, so a missing `dbcoll` did not fail — it
+ * quietly created REAL user rows under a persona that does not exist. Nothing reads those rows back:
+ * every read scopes by the running process's own persona, so the conversation state, the payment
+ * balance and the funnel counters for those users are all stranded. The damage is silent, unbounded
+ * and only visible to someone auditing distinct `profile` values much later.
+ *
+ * A misconfigured process must fail loudly at its first write instead. `dbcoll` is supplied by UMS
+ * on every real boot, so throwing here cannot affect a correctly configured fleet — it can only
+ * catch the case that was already broken.
+ *
+ * Use `currentScopeIdentity().profile` for READS, where absent legitimately means "not known".
+ */
+function requireProfile(identity = currentScopeIdentity()) {
+    // Trim here as well as in currentScopeIdentity: an identity object passed in directly has not
+    // been through the env normalisation, and a whitespace-only persona is just as unwritable as
+    // an absent one.
+    const profile = identity.profile?.trim();
+    if (!profile) {
+        throw new Error('dbcoll (persona) is not set on this process; refusing to write a userData row. '
+            + 'A missing persona previously defaulted to "default_profile", which silently created '
+            + 'unreadable rows. Check the UMS configuration for this client.');
+    }
+    return profile;
 }
 /** PERSONA scope — the exact unique-index key. Safe for upserts; the only shape that can insert. */
 function personaFilter(chatId, identity = currentScopeIdentity()) {
@@ -18415,14 +19231,90 @@ class BaseRepository {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACTIVE_CHANNEL_COUNTER_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_COUNTER_FIELDS),
+/* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* binding */ ACTIVE_CHANNEL_MESSAGE_IDS),
 /* harmony export */   ChannelsRepository: () => (/* binding */ ChannelsRepository),
+/* harmony export */   activeChannelSetOnInsert: () => (/* binding */ activeChannelSetOnInsert),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* binding */ normalizeActiveChannelWrite),
-/* harmony export */   normalizeChannelKey: () => (/* binding */ normalizeChannelKey)
+/* harmony export */   normalizeChannelKey: () => (/* binding */ normalizeChannelKey),
+/* harmony export */   sanitizeAvailableMsgs: () => (/* binding */ sanitizeAvailableMsgs)
 /* harmony export */ });
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/types/activeChannel */ "../../packages/tg-core/src/types/activeChannel.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
+
+/**
+ * Insert-only defaults, so a row created by a partial refresh still has every flag the readers
+ * expect rather than `undefined`. Keys already present in the write are omitted — a default must
+ * never fight the value the caller just supplied.
+ */
+/**
+ * The legacy per-channel counters both apps still $inc. An allow-list, so a typo or a
+ * caller-supplied field name can never reach the update document.
+ */
+const ACTIVE_CHANNEL_COUNTER_FIELDS = [
+    'deletedCount',
+    'successMsgCount',
+    'failureMsgCount',
+    'followupMsgSuccessCount',
+    'followupMsgFailureCount',
+];
+function activeChannelSetOnInsert(channelId, omitFields = []) {
+    const defaults = {
+        channelId,
+        createdAt: new Date(),
+        title: '',
+        username: '',
+        participantsCount: 0,
+        broadcast: false,
+        megagroup: false,
+        canSendMsgs: false,
+        banned: false,
+        bannedAt: null,
+        private: false,
+        forbidden: false,
+        reactRestricted: false,
+    };
+    for (const field of omitFields)
+        delete defaults[field];
+    return defaults;
+}
 /** Fields that must never be overwritten with an empty/zero value by a partial refresh. */
 const PROTECTED_FIELDS = ['participantsCount', 'username', 'accessHash', 'title'];
+/**
+ * The only valid `availableMsgs` ids. Defined identically (and separately) as `defaultMessages` in
+ * both apps' core/utils.ts — verified byte-identical 2026-09-14, "1".."21". Held here so the write
+ * rule and the valid set cannot drift apart the way the three writers did.
+ */
+const ACTIVE_CHANNEL_MESSAGE_IDS = [
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11',
+    '12', '13', '14', '15', '16', '17', '18', '19', '20', '21',
+];
+/**
+ * De-duplicate `availableMsgs` and drop anything that is not a known message id.
+ *
+ * An unsanitized array reaching the fleet-shared row makes every client try to send a message that
+ * does not exist. A caller that supplied a non-empty array of entirely unknown ids gets the full
+ * default set rather than an empty one — an empty array would silently stop that channel being
+ * promoted at all.
+ */
+function sanitizeAvailableMsgs(value) {
+    if (!Array.isArray(value))
+        return [...ACTIVE_CHANNEL_MESSAGE_IDS];
+    const valid = new Set(ACTIVE_CHANNEL_MESSAGE_IDS);
+    const seen = new Set();
+    const sanitized = [];
+    for (const item of value) {
+        const normalized = typeof item === 'string' ? item.trim() : '';
+        if (!normalized || seen.has(normalized) || !valid.has(normalized))
+            continue;
+        seen.add(normalized);
+        sanitized.push(normalized);
+    }
+    if (value.length > 0 && sanitized.length === 0)
+        return [...ACTIVE_CHANNEL_MESSAGE_IDS];
+    return sanitized;
+}
 /** Flags that force canSendMsgs false — a channel in any of these states is not writable. */
 const BLOCKING_FLAGS = ['banned', 'forbidden', 'private', 'broadcast'];
 /**
@@ -18445,6 +19337,35 @@ function normalizeActiveChannelWrite(input) {
         drop('_id', 'immutable');
     if ('channelId' in data)
         drop('channelId', 'filter key, not writable');
+    // IDENTITY FIELDS: trim and validate before they can reach a fleet-shared row. tg-aut did this
+    // (normalizeActiveChannelIdentityFields); promote-clients did NOT, so an untrimmed title or a
+    // malformed username written by promote persisted for every client. A value that fails its
+    // format check is dropped rather than corrected — a wrong username is worse than none, because
+    // readers resolve channels by it.
+    if (typeof data.title === 'string') {
+        const title = data.title.trim();
+        if (title)
+            data.title = title;
+        else
+            drop('title', 'blank after trim');
+    }
+    if (typeof data.username === 'string') {
+        const username = data.username.trim().replace(/^@/, '');
+        if (/^[A-Za-z0-9_]{5,32}$/.test(username))
+            data.username = username;
+        else
+            drop('username', 'not a valid Telegram username');
+    }
+    if (typeof data.accessHash === 'string') {
+        const accessHash = data.accessHash.trim();
+        if (/^-?\d+$/.test(accessHash))
+            data.accessHash = accessHash;
+        else
+            drop('accessHash', 'not a numeric string');
+    }
+    if ('availableMsgs' in data) {
+        data.availableMsgs = sanitizeAvailableMsgs(data.availableMsgs);
+    }
     for (const field of PROTECTED_FIELDS) {
         if (!(field in data))
             continue;
@@ -18468,9 +19389,19 @@ function normalizeActiveChannelWrite(input) {
             data.participantsCount = Math.floor(count);
         }
     }
+    // Coerce flags to REAL booleans FIRST. Every rule below is a strict `=== true` comparison, and
+    // Mongo will happily store the STRING "true" — truthy, but never `=== true`. promote-clients
+    // shipped without this and stringly-typed flags persisted into the shared collection.
+    (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.coerceActiveChannelBooleans)(data);
     // A channel in any blocking state cannot be posted to, regardless of what the caller asserted.
     if (BLOCKING_FLAGS.some((flag) => data[flag] === true)) {
-        data.canSendMsgs = false;
+        // Only overwrite a PLAIN value. When canSendMsgs is already the server-side $cond, replacing
+        // it with a literal false drops the atomic guarantee that a CONCURRENT operator ban still
+        // wins over this refresh. Same resulting value today — the $cond also yields false for a
+        // banned/forbidden doc — but the literal is silently weaker.
+        if (!(0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.isMongoUpdateExpression)(data.canSendMsgs)) {
+            data.canSendMsgs = false;
+        }
     }
     // DURABLE FLAGS: assert-only. A runtime writer may set these true but never back to false.
     if (data.banned === false)
@@ -18487,7 +19418,7 @@ function normalizeActiveChannelWrite(input) {
     }
     return { data, dropped };
 }
-class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = 'activeChannels';
@@ -18510,7 +19441,7 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.B
         const normalizedId = normalizeChannelKey(channelId);
         if (!normalizedId) {
             this.logger.warn(`[activeChannels] update refused unusable channelId=${channelId}`);
-            return false;
+            return null;
         }
         const { data: setFields, dropped } = normalizeActiveChannelWrite(data);
         if (dropped.length > 0) {
@@ -18518,10 +19449,91 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.B
                 + dropped.map((entry) => `${entry.field} (${entry.reason})`).join(', '));
         }
         if (Object.keys(setFields).length === 0) {
+            // Nothing to write is not a failure, but the caller still wants the current row: several
+            // call sites use the returned document as the refreshed channel state.
             this.logger.debug?.(`[activeChannels] ${normalizedId} update skipped: nothing left after normalization`);
-            return true; // nothing to write is success, not failure
+            return this.findActiveChannel(normalizedId);
         }
-        return this.guardWrite(`updateActiveChannel(${normalizedId})`, () => this.collection.updateOne({ channelId: normalizedId }, { $set: { ...setFields, updatedAt: new Date() } }, { upsert: true }));
+        // STRICT WRITE BOUNDARY: whitelist to the canonical persisted keys. A naked spread here is
+        // the exact vector that leaked ~40 raw GramJS entity fields (flags/defaultBannedRights/
+        // gigagroup/className/…) into ~1% of live docs. pickActiveChannelWrite drops anything not in
+        // ACTIVE_CHANNEL_WRITABLE_KEYS, so a raw entity can never persist again.
+        const write = {
+            ...(0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.pickActiveChannelWrite)(setFields),
+            updatedAt: new Date(),
+        };
+        // Re-assert the ban atomically server-side. A plain boolean would let a refresh that raced a
+        // concurrent operator ban clobber it; the $cond re-reads the stored banned/forbidden flags
+        // at write time, so the ban always wins.
+        if (typeof write.canSendMsgs === 'boolean') {
+            write.canSendMsgs = (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.activeChannelCanSendUpdateExpression)(write.canSendMsgs);
+        }
+        const setOnInsert = activeChannelSetOnInsert(normalizedId, Object.keys(write));
+        const updated = await this.guard(`updateActiveChannel(${normalizedId})`, null, () => this.collection.findOneAndUpdate({ channelId: normalizedId }, 
+        // A pipeline, not $set/$setOnInsert: the write carries state-dependent Mongo
+        // expressions ($cond), which normal update operators would persist verbatim.
+        (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.buildActiveChannelUpsertPipeline)(write, setOnInsert), { upsert: true, returnDocument: 'after' }));
+        return updated;
+    }
+    /**
+     * Atomically coerce-then-increment a legacy counter on activeChannels.
+     *
+     * ── THE DIVERGENCE THIS FIXES ──────────────────────────────────────────────────────────────
+     * tg-aut guarded these five counters with `ensureActiveChannelNumericField` (6 call sites);
+     * promote-clients had NO guard at all, while $inc-ing the SAME five fields on the SAME
+     * fleet-shared rows. A `$inc` against a non-numeric value fails the whole write, and a
+     * negative increment can drive a count below zero. So a field tg-aut was carefully
+     * protecting could be corrupted by its twin.
+     *
+     * Measured on production 2026-09-14 BEFORE this change: 0 non-numeric and 0 negative across
+     * deletedCount (329 present), successMsgCount (1919), failureMsgCount (103),
+     * followupMsgSuccessCount (1799), followupMsgFailureCount (71). So this closes a LATENT
+     * hazard — there is no corrupt data to migrate.
+     *
+     * ── WHY A PIPELINE, NOT read-then-write ────────────────────────────────────────────────────
+     * tg-aut's guard did findOne() then updateOne(): two round trips with a race between them, so
+     * a concurrent writer could still land a bad value in the gap. One aggregation pipeline
+     * coerces and increments in a single atomic operation, which is both correct and half the
+     * round trips.
+     *
+     * Coercion rule: a non-numeric or negative stored value is treated as 0 before adding. The
+     * result is floored at 0 so a negative increment can never drive the counter below zero.
+     *
+     * NOTE: these counters were dropped from IChannel during the channelIntelligence
+     * single-source migration, but live callers (PromotionEngine) still increment them on rows
+     * the DB still carries. Do not add new callers.
+     */
+    async incrementChannelCounter(channelId, field, increment = 1, extraSet) {
+        const normalizedId = normalizeChannelKey(channelId);
+        if (!normalizedId)
+            return false;
+        if (!ACTIVE_CHANNEL_COUNTER_FIELDS.includes(field)) {
+            this.logger?.warn?.(`incrementChannelCounter: refusing unknown field ${field}`);
+            return false;
+        }
+        if (!Number.isFinite(increment))
+            return false;
+        // $ifNull catches a missing field; the $cond catches a stored string/object/negative.
+        // $max floors the result so a negative increment cannot push the counter below zero.
+        const coercedCurrent = {
+            $let: {
+                vars: { current: { $ifNull: [`$${field}`, 0] } },
+                in: {
+                    $cond: [
+                        { $and: [{ $isNumber: '$$current' }, { $gte: ['$$current', 0] }] },
+                        '$$current',
+                        0,
+                    ],
+                },
+            },
+        };
+        const write = {
+            [field]: { $max: [0, { $add: [coercedCurrent, increment] }] },
+            updatedAt: new Date(),
+            ...(extraSet ?? {}),
+        };
+        const setOnInsert = activeChannelSetOnInsert(normalizedId, Object.keys(write));
+        return this.guardWrite(`incrementChannelCounter(${normalizedId}.${field})`, () => this.collection.updateOne({ channelId: normalizedId }, (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.buildActiveChannelUpsertPipeline)(write, setOnInsert), { upsert: true }));
     }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(channelId)', () => this.collection.createIndex({ channelId: 1 }, { unique: true, name: 'channelId_1' }));
@@ -18637,16 +19649,35 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* binding */ DAILY_ANALYTICS_TTL_DAYS),
+/* harmony export */   DAILY_CLIENT_FIELD_MAP: () => (/* binding */ DAILY_CLIENT_FIELD_MAP),
 /* harmony export */   DailyStatsRepository: () => (/* binding */ DailyStatsRepository)
 /* harmony export */ });
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
 
 const DAILY_ANALYTICS_TTL_DAYS = 14;
+/**
+ * Mongo field name -> daily_client column, per collection. The names deliberately differ:
+ * promoteStatsDaily calls a delivered send `success`, the table calls it `delivered`; the three
+ * reaction counters all collide with the promo ones, so they are prefixed.
+ *
+ * `revenue` is absent on purpose. userStatsDaily.revenue $inc's on every credit event and is
+ * measured 3.31x inflated, so the column stays 0 until it can come from userData.payAmount.
+ */
+const DAILY_CLIENT_FIELD_MAP = {
+    userStatsDaily: (i) => ({ newUsers: i.newUsers, activeUsers: i.active, payers: i.paid }),
+    promoteStatsDaily: (i) => ({ sent: i.sent, delivered: i.success, banned: i.banned, failed: i.failed }),
+    reactionStatsDaily: (i) => ({
+        reactionsSuccess: i.success, reactionsRestricted: i.restricted,
+        reactionsFailed: i.failed, reactionsFloods: i.floods,
+    }),
+};
 const USER_STATS_DAILY = 'userStatsDaily';
 const PROMOTE_STATS_DAILY = 'promoteStatsDaily';
 const REACTION_STATS_DAILY = 'reactionStatsDaily';
 /** All three collections share one shape, so one repository owns them rather than three near-copies. */
-class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = USER_STATS_DAILY;
@@ -18692,7 +19723,7 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__
             clientId: key.clientId,
             mobile: key.mobile,
         };
-        return this.guardWrite(`record(${collectionName})`, () => this.connection.collection(collectionName).updateOne(filter, {
+        const ok = await this.guardWrite(`record(${collectionName})`, () => this.connection.collection(collectionName).updateOne(filter, {
             $inc: inc,
             $setOnInsert: {
                 ...filter,
@@ -18701,14 +19732,54 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__
                 createdAt: new Date(),
             },
         }, { upsert: true }));
+        // ── Mirror into the OPTIONAL analytics store ────────────────────────────────────────────
+        // Mongo above is authoritative and awaited; this is a copy and nothing waits on it.
+        //
+        // WHY HERE: all three collections funnel through this one method, so this is the single
+        // point that sees every daily counter. Mirroring in-process is also what removes the need
+        // for a migration or a coordinated restart — a process still on the old build simply does
+        // not mirror, and Mongo stays correct either way.
+        //
+        // WHY IT MATTERS: these Mongo rows carry a 14-day TTL. daily_client is the ONLY place a
+        // long-range comparison can come from, so a day not copied is lost when the TTL fires.
+        //
+        // Only mirror a write that actually landed. guardWrite swallows a Mongo failure and
+        // returns false; mirroring anyway would leave Supabase counting increments the
+        // authoritative store does not have, and the drift is invisible and permanent.
+        //
+        // Wrapped and after the write: an optional sink must never affect the authoritative one.
+        if (!ok)
+            return ok;
+        try {
+            (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_0__.getAnalytics)().recordDailyClient({
+                day: key.date,
+                clientId: key.clientId,
+                namespace: key.namespace,
+                ...DAILY_CLIENT_FIELD_MAP[collectionName]?.(inc),
+            });
+        }
+        catch { /* analytics is optional */ }
+        return ok;
     }
-    /** TTL indexes for all three collections. Idempotent. */
+    /**
+     * TTL and daily-key indexes for all three collections. Idempotent.
+     *
+     * Both indexes ALREADY EXIST in production under different names — `expireAt_1` and
+     * `date_1_namespace_1_clientId_1_mobile_1` — created by each app's own
+     * ensureDailyAnalyticsIndexes long before this repository was written. Mongo rejects an
+     * identical key spec under a new name ("Index already exists with a different name"), so
+     * declaring `ttl_expireAt` / `daily_key` logged three errors on every single boot while
+     * changing nothing. Measured in production 2026-09-14.
+     *
+     * The pre-existing names are used, so the call is a genuine no-op where the index is present
+     * and still creates it on a fresh database.
+     */
     async ensureIndexes() {
         for (const name of [USER_STATS_DAILY, PROMOTE_STATS_DAILY, REACTION_STATS_DAILY]) {
             await this.guardWrite(`ensureIndexes(${name})`, async () => {
                 const collection = this.connection.collection(name);
-                await collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'ttl_expireAt' });
-                await collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'daily_key' });
+                await collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' });
+                await collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' });
             });
         }
     }
@@ -18727,44 +19798,6 @@ function toIncrement(fields) {
         inc[field] = value;
     }
     return Object.keys(inc).length > 0 ? inc : null;
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-db/src/collections/events.repository.ts"
-/*!*****************************************************************!*\
-  !*** ../../packages/tg-db/src/collections/events.repository.ts ***!
-  \*****************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   EventsRepository: () => (/* binding */ EventsRepository)
-/* harmony export */ });
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
-
-class EventsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
-    constructor() {
-        super(...arguments);
-        this.collectionName = 'events';
-    }
-    async findForChat(chatId) {
-        if (!chatId?.trim())
-            return [];
-        return this.guard(`findForChat(${chatId})`, [], () => this.collection.find({ chatId }).toArray());
-    }
-    async deleteForChat(chatId) {
-        if (!chatId?.trim()) {
-            this.logger.warn('[events] deleteForChat refused: missing chatId');
-            return false;
-        }
-        return this.guardWrite(`deleteForChat(${chatId})`, () => this.collection.deleteMany({ chatId }));
-    }
-    async ensureIndexes() {
-        await this.guardWrite('ensureIndexes(chatId)', () => this.collection.createIndex({ chatId: 1 }, { name: 'chatId_1' }));
-    }
 }
 
 
@@ -18900,13 +19933,17 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
         const legacy = await this.guardWrite(`setKey(stats.${key})`, () => this.legacyCollection().updateOne(filter, update, { upsert: true }));
         return primary && legacy;
     }
+    /**
+     * No index is created here, deliberately.
+     *
+     * Both collections already carry a UNIQUE index on exactly these three fields, under the name
+     * `chatId_1_profile_1_client_1`. Mongo compares index KEY ORDER, not the key set, so declaring
+     * {chatId, client, profile} created a SECOND index over the same three fields — measured in
+     * production on 2026-09-14 by the first run of ensureAllIndexes, then dropped. It cost write
+     * throughput and storage and served no query the unique index did not already serve.
+     */
     async ensureIndexes() {
-        for (const [name, collection] of [
-            ['stats2', this.collection],
-            ['stats', this.legacyCollection()],
-        ]) {
-            await this.guardWrite(`ensureIndexes(${name})`, () => collection.createIndex({ chatId: 1, client: 1, profile: 1 }, { name: 'chatId_client_profile' }));
-        }
+        return undefined;
     }
 }
 
@@ -18922,14 +19959,19 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
 /* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 /* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
 
 
 
+
+/** How many recent idempotency keys a row remembers. See `creditPayment`. */
+const CREDIT_KEY_HISTORY = 20;
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -18942,7 +19984,10 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      * user with both an owned and a legacy row must deterministically resolve to the owned one.
      */
     async findForClient(chatId, identity) {
-        return this.guard(`findForClient(${chatId})`, null, async () => {
+        // Deliberately NOT `guard` (which degrades a failure to the fallback): null here means
+        // "no such user", and tg-aut's PrivateMessageHandler routes that to the NEW-user flow. A
+        // transient read error must surface as an error, exactly as the raw findOne did before.
+        try {
             const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownFilter)(chatId, identity);
             if (own) {
                 const owned = await this.collection.findOne(own);
@@ -18950,7 +19995,11 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                     return owned;
             }
             return await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
-        });
+        }
+        catch (error) {
+            this.logger.error(`[${this.collectionName}] findForClient(${chatId}) failed: ${(0,_connection__WEBPACK_IMPORTED_MODULE_3__.describeError)(error)}`);
+            throw error;
+        }
     }
     /** Read using the combined scope filter — one round-trip where determinism is not required. */
     async findScoped(chatId, identity) {
@@ -18962,6 +20011,11 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      * The filter is deliberately the PERSONA pair: an $or cannot seed an insert, and a
      * client-scoped filter would insert a SECOND row for a user who already has a persona row,
      * violating chatId_Profile.
+     *
+     * A duplicate key is RESOLVED here (that race is this method's job). Every OTHER error is
+     * logged and RETHROWN, unlike most reads on this base class, which degrade to a fallback. A
+     * failed write is not a missing value: swallowing it would report success to a caller whose
+     * update never landed, and the callers in dbservice depend on the rejection to surface it.
      */
     async upsert(chatId, identity, update) {
         const filter = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity);
@@ -18972,12 +20026,118 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         catch (error) {
             if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__.isDuplicateKeyError)(error)) {
                 this.logger.error(`[userData] upsert(${chatId}) failed: ${String(error)}`);
-                return null;
+                throw error;
             }
             // The winning row now exists, so the same filter resolves as an update.
             this.logger.debug?.(`[userData] upsert(${chatId}) duplicate-key race; retrying as update`);
-            return this.guard(`upsert(${chatId}) retry`, null, write);
+            return this.guardStrict(`upsert(${chatId}) retry`, write);
         }
+    }
+    /**
+     * THE ONE OWNER OF EVERY MONEY WRITE.
+     *
+     * Before this, 18 sites in apps/tg-aut wrote `payAmount`/`highestPayAmount` directly, and the
+     * census (see the design doc) found three structural defects that no call site could fix alone:
+     *
+     *   1. `highestPayAmount` was always `$set`, never `$max`, so a "lifetime peak" could be
+     *      LOWERED — and three sites actively lower it. A peak that can go down is not a peak,
+     *      which is why it is unusable for LTV work.
+     *   2. Eight sites wrote `payAmount` without touching `highestPayAmount` at all, which is the
+     *      direct mechanism behind the 172 live rows where `payAmount > highestPayAmount`.
+     *   3. The genuine credit paths run inside `setTimeout` callbacks whose scheduler does NO
+     *      deduplication, so one payment screenshot re-firing credits twice.
+     *
+     * All three become unrepresentable here:
+     *
+     *   - `lifetimePaid` is raised with `$max` and NEVER lowered. It is a new field rather than a
+     *     repair of `highestPayAmount`, whose history is already corrupted by those downward sets.
+     *   - balance and peak move in ONE atomic write, so they cannot disagree.
+     *   - `key` is required, and a replayed key is a no-op.
+     *
+     * A single aggregation-pipeline update does all of it with no read-then-write race: the
+     * duplicate check reads `$creditKeys` inside the same atomic operation that would modify it.
+     *
+     * NOTE ON SCOPE: this credits a CONFIRMED PAYMENT. It is deliberately NOT the path for
+     * entitlement bookkeeping — the demo/full-show handlers that book ₹50/₹150 with no payment
+     * anywhere in the call chain must keep using the plain update path, because calling them
+     * payments is exactly what makes the revenue figure 3.31x inflated.
+     */
+    async creditPayment(chatId, identity, input) {
+        const amount = Number(input.amount);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return { applied: false, reason: 'invalid-amount' };
+        }
+        const key = String(input.key ?? '').trim();
+        if (!key)
+            return { applied: false, reason: 'invalid-amount' };
+        const now = input.now ?? Date.now();
+        // upsert:false — a credit merges into an EXISTING conversation row. Creating one here would
+        // produce a money row for a user who has never spoken, and the row is always created on
+        // first inbound message anyway (a payment screenshot IS an inbound message).
+        const filter = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity);
+        // `seen` is computed FIRST in the same pipeline stage set, so every later expression can
+        // branch on it. Mongo evaluates $set stages in order, and a later stage sees the earlier
+        // stage's output — which is what makes the no-op branch exact rather than best-effort.
+        // Typed as Document[]: a Mongo aggregation pipeline mixes strings and arrays inside
+        // $ifNull, which infers as `(string | any[])[]` and trips noImplicitAny. This is the
+        // declaration only — the pipeline itself is unchanged and is proven against a real server
+        // by scripts/verify-credit-payment.cjs.
+        const pipeline = [
+            { $set: { __seen: { $in: [key, { $ifNull: ['$creditKeys', []] }] } } },
+            {
+                $set: {
+                    payAmount: {
+                        $cond: ['$__seen', { $ifNull: ['$payAmount', 0] },
+                            { $max: [{ $ifNull: ['$payAmount', 0] }, amount] }],
+                    },
+                    lifetimePaid: {
+                        // $max and nothing else. This is the invariant the whole method exists for.
+                        $cond: ['$__seen', { $ifNull: ['$lifetimePaid', 0] },
+                            { $max: [{ $ifNull: ['$lifetimePaid', 0] }, amount] }],
+                    },
+                    lifetimeCredits: {
+                        $cond: ['$__seen', { $ifNull: ['$lifetimeCredits', 0] },
+                            { $add: [{ $ifNull: ['$lifetimeCredits', 0] }, 1] }],
+                    },
+                    firstPaidAt: { $ifNull: ['$firstPaidAt', now] },
+                    lastPaidAt: { $cond: ['$__seen', { $ifNull: ['$lastPaidAt', now] }, now] },
+                    creditKeys: {
+                        // Bounded with $slice from the END: an unbounded array would grow without
+                        // limit on a long-lived payer and eventually threaten the 16MB doc cap.
+                        // Keeping the most RECENT keys is what matters — a replay arrives close
+                        // behind the original, never 20 credits later.
+                        $cond: ['$__seen', '$creditKeys',
+                            { $slice: [{ $concatArrays: [{ $ifNull: ['$creditKeys', []] }, [key]] },
+                                    -CREDIT_KEY_HISTORY] }],
+                    },
+                },
+            },
+            { $unset: '__seen' },
+        ];
+        return this.guardStrict(`creditPayment(${chatId})`, async () => {
+            const before = await this.collection.findOneAndUpdate(filter, pipeline, {
+                upsert: false,
+                returnDocument: 'before',
+            });
+            if (!before)
+                return { applied: false, reason: 'no-row' };
+            // Decide from the PRE-image, never from a second read: if the key was already present
+            // before this write, this call is the replay.
+            const seen = Array.isArray(before.creditKeys) && before.creditKeys.includes(key);
+            if (seen) {
+                return {
+                    applied: false,
+                    reason: 'duplicate',
+                    balance: before.payAmount ?? 0,
+                    lifetimePaid: before.lifetimePaid ?? 0,
+                };
+            }
+            return {
+                applied: true,
+                balance: Math.max(before.payAmount ?? 0, amount),
+                lifetimePaid: Math.max(before.lifetimePaid ?? 0, amount),
+            };
+        });
     }
     async ensureIndexesForTests() {
         await this.ensureIndexes();
@@ -18991,6 +20151,113 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      */
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(clientId_chatId)', () => this.collection.createIndex({ clientId: 1, chatId: 1 }, { name: 'clientId_chatId' }));
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/user-identity.repository.ts"
+/*!************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/user-identity.repository.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* binding */ ATTRIBUTION_CHANNEL_CAP),
+/* harmony export */   DISPLAY_NAME_HISTORY: () => (/* binding */ DISPLAY_NAME_HISTORY),
+/* harmony export */   UserIdentityRepository: () => (/* binding */ UserIdentityRepository)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/** How many distinct display names one person's row remembers. */
+const DISPLAY_NAME_HISTORY = 10;
+/** Cap on attribution channels, matching the userData field it mirrors. */
+const ATTRIBUTION_CHANNEL_CAP = 25;
+class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'userIdentity';
+    }
+    /**
+     * Record what THIS account currently observes about a person, without clobbering what another
+     * account observed.
+     *
+     * Every field merges rather than overwrites, because two clients write here concurrently for
+     * the same chatId and neither is more authoritative than the other:
+     *   - `displayNames` is a set union, bounded, so the 554 conflicting observations are all kept;
+     *   - `attributionChannelIds` is a set union, so one account's evidence never erases another's;
+     *   - `firstSeenAt` is written once and never moved backwards or forwards;
+     *   - `handle` is only ever SET, never cleared, so an account that could not resolve a username
+     *     cannot delete the one an account that could resolve it already stored.
+     *
+     * Upserts on `chatId`, which is the whole key — there is no persona to get wrong here.
+     */
+    async observe(chatId, input = {}) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return false;
+        const now = input.now ?? Date.now();
+        const displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
+        // 'Unknown' is the fallback chain's last resort, not an observation. Storing it would push a
+        // real name out of the bounded history.
+        const nameIsReal = displayName !== '' && displayName !== 'Unknown';
+        const handle = typeof input.handle === 'string' ? input.handle.trim() : '';
+        const channels = (input.attributionChannelIds ?? [])
+            .map((c) => String(c || '').trim())
+            .filter(Boolean)
+            .slice(0, ATTRIBUTION_CHANNEL_CAP);
+        const pipeline = [
+            {
+                $set: {
+                    chatId: id,
+                    firstSeenAt: { $ifNull: ['$firstSeenAt', now] },
+                    lastSeenAt: now,
+                    ...(handle ? { handle } : {}),
+                    ...(nameIsReal
+                        ? {
+                            displayNames: {
+                                $slice: [
+                                    { $setUnion: [{ $ifNull: ['$displayNames', []] }, [displayName]] },
+                                    -DISPLAY_NAME_HISTORY,
+                                ],
+                            },
+                        }
+                        : {}),
+                    ...(channels.length
+                        ? {
+                            attributionChannelIds: {
+                                $slice: [
+                                    { $setUnion: [{ $ifNull: ['$attributionChannelIds', []] }, channels] },
+                                    -ATTRIBUTION_CHANNEL_CAP,
+                                ],
+                            },
+                            attributionUpdatedAt: now,
+                        }
+                        : {}),
+                },
+            },
+        ];
+        return this.guardWrite(`observe(${id})`, () => this.collection.updateOne({ chatId: id }, pipeline, {
+            upsert: true,
+        }));
+    }
+    /** Read one person. Degrades to null: a missing identity row must never break a conversation. */
+    async find(chatId) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return null;
+        return this.guard(`find(${id})`, null, () => this.collection.findOne({ chatId: id }));
+    }
+    /**
+     * `chatId` is the key, so it is UNIQUE here — unlike in userData, where the unique index is
+     * (chatId, profile). Creating it is safe from this package because the collection is new and
+     * owned entirely by this repository.
+     */
+    async ensureIndexes() {
+        await this.guardWrite('ensureIndexes(chatId)', () => this.collection.createIndex({ chatId: 1 }, { name: 'chatId_unique', unique: true }));
     }
 }
 
@@ -19135,34 +20402,46 @@ function describeError(error) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACTIVE_CHANNEL_COUNTER_FIELDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_COUNTER_FIELDS),
+/* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_MESSAGE_IDS),
+/* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.ATTRIBUTION_CHANNEL_CAP),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
-/* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_5__.ChannelsRepository),
-/* harmony export */   ClientsRepository: () => (/* reexport safe */ _collections_clients_repository__WEBPACK_IMPORTED_MODULE_7__.ClientsRepository),
-/* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_4__.DAILY_ANALYTICS_TTL_DAYS),
+/* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
+/* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
+/* harmony export */   ClientsRepository: () => (/* reexport safe */ _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__.ClientsRepository),
+/* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DAILY_ANALYTICS_TTL_DAYS),
+/* harmony export */   DAILY_CLIENT_FIELD_MAP: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DAILY_CLIENT_FIELD_MAP),
 /* harmony export */   DEFAULT_DATABASE: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_DATABASE),
 /* harmony export */   DEFAULT_MAX_POOL_SIZE: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_MAX_POOL_SIZE),
-/* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_4__.DailyStatsRepository),
+/* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
+/* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   EventsRepository: () => (/* reexport safe */ _collections_events_repository__WEBPACK_IMPORTED_MODULE_9__.EventsRepository),
-/* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_6__.PromoteRepository),
-/* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_8__.StatsRepository),
+/* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.RepositoryContainer),
+/* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
+/* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
+/* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
 /* harmony export */   adoptMongoClient: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.adoptMongoClient),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
-/* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_5__.normalizeActiveChannelWrite),
-/* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_5__.normalizeChannelKey)
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ensureAllIndexes),
+/* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
+/* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
+/* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./collections/user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
-/* harmony import */ var _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./collections/daily-stats.repository */ "../../packages/tg-db/src/collections/daily-stats.repository.ts");
-/* harmony import */ var _collections_channels_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./collections/channels.repository */ "../../packages/tg-db/src/collections/channels.repository.ts");
-/* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
-/* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
-/* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
-/* harmony import */ var _collections_events_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/events.repository */ "../../packages/tg-db/src/collections/events.repository.ts");
+/* harmony import */ var _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./collections/user-identity.repository */ "../../packages/tg-db/src/collections/user-identity.repository.ts");
+/* harmony import */ var _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./collections/daily-stats.repository */ "../../packages/tg-db/src/collections/daily-stats.repository.ts");
+/* harmony import */ var _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/channels.repository */ "../../packages/tg-db/src/collections/channels.repository.ts");
+/* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+/* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
+/* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -19184,7 +20463,8 @@ __webpack_require__.r(__webpack_exports__);
  *   clients, bufferClients, timestamps,
  *     tgautClientStats                                -> ClientsRepository
  *   stats, stats2                                     -> StatsRepository
- *   events                                            -> EventsRepository
+ *   events                                            -> OWNED BY @tg/events (EventStore),
+ *                                                        deliberately NOT here — see repositories.ts
  */
 
 
@@ -19196,6 +20476,132 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/repositories.ts"
+/*!************************************************!*\
+  !*** ../../packages/tg-db/src/repositories.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RepositoryContainer: () => (/* binding */ RepositoryContainer),
+/* harmony export */   createRepositories: () => (/* binding */ createRepositories),
+/* harmony export */   ensureAllIndexes: () => (/* binding */ ensureAllIndexes)
+/* harmony export */ });
+/* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
+/* harmony import */ var _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./collections/user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
+/* harmony import */ var _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./collections/user-identity.repository */ "../../packages/tg-db/src/collections/user-identity.repository.ts");
+/* harmony import */ var _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./collections/daily-stats.repository */ "../../packages/tg-db/src/collections/daily-stats.repository.ts");
+/* harmony import */ var _collections_channels_repository__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./collections/channels.repository */ "../../packages/tg-db/src/collections/channels.repository.ts");
+/* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+/* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
+/* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
+
+
+
+
+
+
+
+
+/**
+ * `events` IS DELIBERATELY ABSENT FROM THIS OBJECT.
+ *
+ * It is owned by `@tg/events` (EventStore), which is already the collection's single writer and is
+ * the better owner: it scopes deletes by {chatId, clientId}, whereas a chatId-only delete would
+ * cancel every SIBLING client's ladder for that chat — all 20 clients share this one collection.
+ * EventStore also owns both live indexes (idx_events_due_by_client, idx_events_by_chat_client) and
+ * the scheduler surface (findDue/reschedule/existsForChat) that a thin repository cannot replace.
+ *
+ * An EventsRepository did exist here briefly and had exactly zero callers. It was removed rather
+ * than wired, because wiring it was the regression. Do not re-add it: to reach `events`, take an
+ * EventStore from @tg/events.
+ */
+/** Build one instance of every repository over an existing connection. */
+function createRepositories(connection, logger) {
+    return {
+        userData: new _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_1__.UserDataRepository(connection, logger),
+        userIdentity: new _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_2__.UserIdentityRepository(connection, logger),
+        dailyStats: new _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_3__.DailyStatsRepository(connection, logger),
+        channels: new _collections_channels_repository__WEBPACK_IMPORTED_MODULE_4__.ChannelsRepository(connection, logger),
+        promote: new _collections_promote_repository__WEBPACK_IMPORTED_MODULE_5__.PromoteRepository(connection, logger),
+        clients: new _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__.ClientsRepository(connection, logger),
+        stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
+    };
+}
+/**
+ * Create every index every repository declares.
+ *
+ * Each repository implements ensureIndexes(), and until now NOTHING called any of them — index
+ * creation was a dead code path across the whole package. Call this once at startup.
+ *
+ * Failures are logged and swallowed: a missing index makes queries slow, but refusing to boot over
+ * one would turn a performance problem into an outage. Every repository's ensureIndexes() already
+ * guards internally; this catch is the backstop for anything that escapes.
+ */
+async function ensureAllIndexes(repositories, logger) {
+    const all = [
+        ['userData', repositories.userData],
+        // userIdentity was MISSING from this list until 2026-09-14. Its ensureIndexes() creates the
+        // UNIQUE chatId index that the entire D4 design rests on — one row per human. Nothing else
+        // in the codebase creates it (grep chatId_unique: one hit, this repository). The collection
+        // did not exist in production yet, so observe()'s first upsert would have created it with no
+        // unique index at all, and duplicate chatId rows would have been accepted silently — the
+        // exact per-person duplication userIdentity exists to eliminate.
+        ['userIdentity', repositories.userIdentity],
+        ['dailyStats', repositories.dailyStats],
+        ['channels', repositories.channels],
+        ['promote', repositories.promote],
+        ['clients', repositories.clients],
+        ['stats', repositories.stats],
+    ];
+    for (const [name, repository] of all) {
+        try {
+            await repository.ensureIndexes();
+        }
+        catch (error) {
+            logger.warn(`[tg-db] ensureIndexes failed for ${name}: ${String(error)}`);
+        }
+    }
+}
+/**
+ * A container that rebuilds its repositories whenever the underlying MongoClient changes.
+ *
+ * Apps hold ONE of these for the process lifetime and call get() per use. They must not cache the
+ * returned Repositories across an await that could span a reconnect — call get() again instead;
+ * it is a field comparison when nothing has changed.
+ */
+class RepositoryContainer {
+    constructor(logger) {
+        this.current = null;
+        this.logger = logger;
+    }
+    /**
+     * Repositories bound to `client`, rebuilt only when the client identity changes.
+     *
+     * Returns null when the app has no client yet, mirroring the Phase 0 behaviour of skipping the
+     * write rather than throwing: analytics and stats writes must never break a send.
+     */
+    get(client) {
+        if (!client)
+            return null;
+        if (this.current?.client === client)
+            return this.current.repositories;
+        const repositories = createRepositories((0,_adopt_connection__WEBPACK_IMPORTED_MODULE_0__.adoptMongoClient)(client, { logger: this.logger }), this.logger);
+        this.current = { client, repositories };
+        return repositories;
+    }
+    /** Drop the cached repositories. The next get() rebuilds. */
+    reset() {
+        this.current = null;
+    }
+}
 
 
 /***/ },
@@ -20116,6 +21522,7 @@ class DialogManager {
         try {
             // Check EntityCacheManager first, then fall back to client.getEntity
             const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(dialogId);
+            // .get() returns `| null`; the `if (!entity)` below covers both.
             let entity = cached;
             if (!entity) {
                 try {
@@ -22042,6 +23449,42 @@ __webpack_require__.r(__webpack_exports__);
 function eventCollectionFrom(client) {
     return client.db(_event_schema__WEBPACK_IMPORTED_MODULE_0__.EVENTS_DB).collection(_event_schema__WEBPACK_IMPORTED_MODULE_0__.EVENTS_COLLECTION);
 }
+/**
+ * The sole owner of the `events` collection. It deliberately does NOT live in @tg/db.
+ *
+ * @tg/db is collection-shaped: thin wrappers whose methods return safe fallbacks so a failed stats
+ * write never kills a message. This class is domain-shaped — a work queue, with findDue/reschedule/
+ * attempts and the ladders and scheduler beside it. Two reasons it stays here:
+ *
+ *   1. SCOPING. deleteByChat filters {chatId, clientId}. All 20 clients share this one collection,
+ *      so a chatId-only delete cancels every SIBLING client's ladder for that chat. An
+ *      EventsRepository in @tg/db did exactly that; it had zero callers and was removed in favour
+ *      of this class rather than wired.
+ *   2. FAILURES MUST THROW HERE. The @tg/db guard swallows errors and returns a fallback, which is
+ *      right for counters and wrong for a queue: a silently-failed deleteById re-fires the event
+ *      forever. These methods throw so the scheduler sees the failure.
+ *
+ * If you are here to move this into @tg/db, both properties above are what you would be giving up.
+ *
+ * ── THIS IS NOT THE ONLY WRITER OF `events` ────────────────────────────────────────────────────
+ * Two other deployables on the same `tgclients` database can write this collection:
+ *
+ *   1. CommonTgService — Mongoose model `Event`
+ *      (src/components/event-manager/schemas/event.schema.ts). Schema-validated; its required
+ *      fields line up with EventDoc.
+ *   2. EventManager — a standalone Express service using the RAW driver, no schema validation
+ *      (src/events/events.service.ts: insertOne, insertMany, updateOne).
+ *
+ * EventManager keys its events by `profile` (the persona), where this store and CommonTgService key
+ * by `clientId`. Since a persona maps to TWO sibling clients, a profile-keyed row cannot say which
+ * of the two it belongs to, and findDue({clientId}) would never return it — the event would sit
+ * undelivered rather than fire twice.
+ *
+ * Measured in production 2026-09-14: 10 events, 10 with clientId, 0 with profile. So EventManager
+ * is not currently writing and the hazard is LATENT, not active. Re-check with
+ * `db.events.countDocuments({profile:{$exists:true}})` before assuming this store is the only
+ * writer — "one writer" here is an operational fact, not something the code enforces.
+ */
 class EventStore {
     constructor(collection) {
         this.collection = collection;
@@ -24873,7 +26316,7 @@ class ReactionService {
                 case 'REACTION_INVALID':
                     await this.rateLimiter.recordFailure();
                     {
-                        const refreshed = await (0,_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.refreshReactionCache)(this.client, chatId).catch(err => {
+                        const refreshed = await (0,_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.refreshReactionCache)(this.client, chatId).catch((err) => {
                             logger.error(`[${this.instanceId}] Failed to refresh reaction cache: ${err}`);
                             return null;
                         });
@@ -25908,6 +27351,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! swagger-ui-express */ "swagger-ui-express");
 /* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_43___default = /*#__PURE__*/__webpack_require__.n(swagger_ui_express__WEBPACK_IMPORTED_MODULE_43__);
 /* harmony import */ var _config_swagger_config__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ./config/swagger.config */ "./src/config/swagger.config.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 
 
 
@@ -25955,6 +27399,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // Swagger setup
+
 
 
 const require = /* createRequire() */ undefined;
@@ -26253,6 +27698,12 @@ async function cleanupResources(signal) {
         if (cloudinaryService) {
             cloudinaryService.cleanup();
         }
+        // Drain whatever analytics rows are still buffered. Best-effort and never throws; a slow or
+        // dead sink must not hold up shutdown.
+        try {
+            await (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_45__.shutdownAnalytics)();
+        }
+        catch { /* analytics is optional */ }
         // Cleanup Redis connection to prevent memory leaks
         try {
             const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
@@ -26570,6 +28021,14 @@ class ExpressServer {
                         throw new Error("Database connection bootstrap failed");
                     }
                 }
+                // The OPTIONAL analytics store. Deliberately NOT awaited for correctness: initAnalytics
+                // never throws and never blocks on a connection, so a missing ANALYTICS_DB_URL, an
+                // unreachable Supabase, or an absent `pg` driver all resolve to "analytics disabled" and
+                // BOOT continues untouched. Placed after the Mongo connect so a failure here can never be
+                // confused with a real database problem.
+                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_45__.initAnalytics)({ connectionString: process.env.ANALYTICS_DB_URL })
+                    .then((enabled) => logger.info(`[analytics] ${enabled ? "enabled" : "disabled"}`))
+                    .catch(() => { });
                 await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_30__["default"].getInstance();
                 await _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.ensureInitialized();
                 await (0,_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_31__.setUpiIds)();
@@ -27354,6 +28813,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 // const { execSync } = require('child_process');
 // try {
 //     execSync(`npm install`, { stdio: 'inherit' });
@@ -27361,6 +28821,7 @@ __webpack_require__.r(__webpack_exports__);
 //     console.error(`Error installing  modules:`, error);
 //     execSync(`refresh`, { stdio: 'inherit' });
 // }
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:core-config');
@@ -27400,7 +28861,7 @@ async function getDataAndSetEnvVariables(url) {
     for (let attempt = 1; attempt <= CONFIG_FETCH_MAX_ATTEMPTS; attempt++) {
         try {
             logger.info(`⚙️ CONFIG fetch | ${process.env.clientId || 'unknown-client'} | attempt ${attempt}/${CONFIG_FETCH_MAX_ATTEMPTS} | ${url}`);
-            const response = await fetch(url, { headers: { 'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor' } });
+            const response = await fetch(url, { headers: { 'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_2__.getApiKey)() } });
             if (!response.ok) {
                 throw new Error(`Runtime configuration request failed with status ${response.status}`);
             }
@@ -27481,6 +28942,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _Config__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./Config */ "./src/core/Config.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 
 
 
@@ -27490,6 +28952,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
  // Added for handling undefined builders
+
 
 
 
@@ -27613,7 +29076,7 @@ async function triggerBufferProfilePhotoRefresh(client, mobile, clientId, profil
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': process.env.X_API_KEY || process.env.API_KEY || 'santoor',
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_27__.getApiKey)(),
         },
         data: {},
         timeout: 15000,
@@ -28521,10 +29984,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 /* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
 /* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
@@ -28535,10 +29999,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:dbservice");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
     totalCount: "totalCount",
+    // D3: totalCount carries two incompatible meanings. `msgCount` is the real inbound-message
+    // counter ($inc only, never $set); `windowCount` is the "treat as established" flag that five
+    // sites were expressing by $set-ing totalCount to the literal 10 — a value that lands inside
+    // live thresholds in respondToMsgs.ts. See the design doc for the measured 2,120-row spike.
+    msgCount: "msgCount",
+    windowCount: "windowCount",
     lastMsgTimeStamp: "lastMsgTimeStamp",
     prfCount: "prfCount",
     paidCount: "paidCount",
@@ -28554,6 +30025,13 @@ const user = Object.freeze({
     videos: 'videos',
     highestPayAmount: 'highestPayAmount',
     cheatCount: "cheatCount",
+    // D2: replaces the `cheatCount = -2` sentinel. -2 meant "accusations forgiven, one more
+    // chance" — expressed as a negative COUNT because every threshold reads `cheatCount > 2`, so a
+    // negative value bought headroom. It conflates two different facts in one field, and
+    // updateCheatCount() (ExistingUserHandler.ts:305) does `cheatCount + 1` with NO floor, so a
+    // fresh accusation against a forgiven user lands at -1 instead of 1 — silently absorbing two
+    // real accusations. Measured 2026-09-14: 5 live rows sitting at -1.
+    graceFlag: "graceFlag",
     fullShow: "fullShow",
     callTime: "callTime",
     attributionChannelIds: "attributionChannelIds",
@@ -28563,6 +30041,7 @@ const USER_DEFAULTS = {
     fullShow: 0,
     callTime: 0,
     cheatCount: 0,
+    graceFlag: false,
     highestPayAmount: 0,
     videos: [],
     picsSent: 0,
@@ -28580,6 +30059,8 @@ const USER_DEFAULTS = {
     accessHash: '',
     username: '',
     totalCount: 0,
+    msgCount: 0,
+    windowCount: 0,
 };
 class UserDataDtoCrud {
     constructor() {
@@ -28589,6 +30070,11 @@ class UserDataDtoCrud {
         this.connectPromise = null;
         this.connectionGeneration = 0;
         this.promotionRedis = null;
+        /**
+         * The @tg/db composition root for this process. Rebuilds its repositories whenever the
+         * MongoClient changes, so a reconnect can never leave a repository wrapping a closed handle.
+         */
+        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_5__.RepositoryContainer(logger);
         /**
          * Lazily build the daily-stats repository over the app's live MongoClient.
          *
@@ -28650,6 +30136,7 @@ class UserDataDtoCrud {
                 this.channelIntelligenceDb = connectedClient.db("tgclients").collection('channelIntelligence');
                 this.promoteStatsDb = connectedClient.db("tgclients").collection('promoteStats');
                 await this.ensureDailyAnalyticsIndexes(connectedClient);
+                await this.ensureSharedLayerIndexes(connectedClient);
                 await this.initializePromotionRuntime();
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Promotion runtime initialized after close was requested; closing stale Mongo/Redis resources');
@@ -28671,7 +30158,7 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
@@ -28684,7 +30171,7 @@ class UserDataDtoCrud {
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error connecting to MongoDB");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error connecting to MongoDB");
                 await this.closeConnection();
                 return false;
             }
@@ -28706,7 +30193,7 @@ class UserDataDtoCrud {
                 .updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating tgaut client stat daysLeft");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating tgaut client stat daysLeft");
         }
     }
     getActiveChannelCollection() {
@@ -28722,7 +30209,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -28769,7 +30256,7 @@ class UserDataDtoCrud {
                 await this.closePromotionRedis();
                 throw error;
             }
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.createPromotionRuntime)({
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.createPromotionRuntime)({
                 channelIntelligenceCollection: this.channelIntelligenceDb,
                 activeChannelCollection: this.activeChannelDb,
                 redis,
@@ -28781,7 +30268,7 @@ class UserDataDtoCrud {
             logger.log('Promotion runtime initialized; collections=channelIntelligence,activeChannels');
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Promotion runtime initialization failed');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Promotion runtime initialization failed');
             await this.closePromotionRedis();
             throw error;
         }
@@ -28795,7 +30282,7 @@ class UserDataDtoCrud {
             redis.disconnect?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Error closing promotion Redis connection', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error closing promotion Redis connection', false);
         }
     }
     async refreshPromotionRuntime() {
@@ -28804,7 +30291,7 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
         await this.ensurePromoteStatsInitialized();
         return true;
@@ -28861,7 +30348,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching texted client count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
     }
@@ -28879,7 +30366,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error checking payment status");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error checking payment status");
         }
         return resp;
     }
@@ -28974,8 +30461,25 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error ensuring daily analytics indexes", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error ensuring daily analytics indexes", false);
         }
+    }
+    /**
+     * Create the indexes every @tg/db repository declares.
+     *
+     * Each repository has implemented ensureIndexes() since the layer was written, and until now
+     * NOTHING called any of them — index creation was a dead code path across the whole package.
+     *
+     * Placed beside ensureDailyAnalyticsIndexes and inside the connect block so it re-runs on every
+     * reconnect, matching the existing pattern. Failures are logged and swallowed by
+     * ensureAllIndexes: a missing index makes queries slow, but refusing to boot over one would
+     * turn a performance problem into an outage.
+     */
+    async ensureSharedLayerIndexes(client) {
+        const repositories = this.repositories.get(client);
+        if (!repositories)
+            return;
+        await (0,_tg_db__WEBPACK_IMPORTED_MODULE_5__.ensureAllIndexes)(repositories, logger);
     }
     todayKey() {
         const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -29141,7 +30645,7 @@ class UserDataDtoCrud {
                     // Store timeout reference and unref to allow process exit if needed
                     const limitTimeout = setTimeout(() => {
                         void this.updateSingleKey(chatId, user.limitTime, Date.now() + (2 * 60 * 60 * 1000))
-                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
+                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
                     }, 20000);
                     limitTimeout.unref();
                 }
@@ -29157,7 +30661,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Creating/updating stats", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Creating/updating stats", false);
         }
     }
     // =========================================================================
@@ -29190,6 +30694,14 @@ class UserDataDtoCrud {
         await this.createOrUpdateStats(chatId, null, payAmount, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
     }
     async updateStatSingleKey(chatId, mykey, value) {
+        // Routed through @tg/db. StatsRepository.setKey dual-writes stats2 + stats via
+        // legacyCollection(), so the two collections cannot drift apart. Raw path below stays for
+        // the pre-connection window.
+        const repositories = this.repositories.get(this.client);
+        if (repositories) {
+            await repositories.stats.setKey(chatId, { client: process.env.clientId, profile: process.env.dbcoll }, mykey, value);
+            return;
+        }
         const filter = { chatId, profile: process.env.dbcoll, client: process.env.clientId };
         await this.statsDb.updateOne(filter, { $set: { [mykey]: value } }, { upsert: true });
         await this.statsDb2.updateOne(filter, { $set: { [mykey]: value } }, { upsert: true });
@@ -29200,6 +30712,13 @@ class UserDataDtoCrud {
      * user with BOTH an owned row and a legacy persona row must deterministically get the owned one.
      */
     async readOwnThenPersona(chatId) {
+        // Routed through @tg/db (B6). UserDataRepository.findForClient runs the same OWN-first
+        // then persona fallback. A failed read THROWS (as the raw findOne did): returning
+        // undefined would send an existing user down the new-user path. Raw path below covers pre-connection.
+        const repositories = this.repositories.get(this.client);
+        if (repositories) {
+            return await repositories.userData.findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)()) ?? undefined;
+        }
         const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownFilter)(chatId);
         if (own) {
             const owned = await this.db.findOne(own);
@@ -29227,7 +30746,7 @@ class UserDataDtoCrud {
             const profile = process.env.dbcoll?.trim();
             if (!normalizedChatId || !profile)
                 return false;
-            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(channelIds);
+            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(channelIds);
             const update = normalizedChannelIds.length > 0
                 ? {
                     $set: { attributionUpdatedAt: Date.now() },
@@ -29240,7 +30759,7 @@ class UserDataDtoCrud {
             return result.acknowledged && result.matchedCount === 1;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
             return false;
         }
     }
@@ -29249,6 +30768,61 @@ class UserDataDtoCrud {
      * credit every stored attribution channel immediately. Empty attribution is
      * left pending for the five-minute reconciler rather than marked complete.
      */
+    /**
+     * C3 — the ONE entry point for a CONFIRMED payment.
+     *
+     * Delegates to UserDataRepository.creditPayment, which raises the balance and the lifetime peak
+     * in a single atomic write and refuses a replayed idempotency key. See that method for why all
+     * three of those properties have to live in one place.
+     *
+     * `paymentKey` must identify the PAYMENT EVENT — the Telegram message id of the screenshot —
+     * not the call. The credit paths run inside `scheduleProcessImageTask` callbacks, and that
+     * helper is a bare `setTimeout` wrapper with NO deduplication, so the same screenshot really
+     * can reach a credit twice.
+     *
+     * Returns false when nothing was credited (a replay, a bad amount, or no conversation row).
+     * Callers treat false as "already handled", never as an error.
+     */
+    async creditPayment(chatId, amount, paymentKey) {
+        const repositories = this.repositories.get(this.client);
+        if (!repositories) {
+            // Pre-connection window. Refusing is correct: crediting through the raw path would skip
+            // the idempotency guard, which is the entire point of routing money through here.
+            logger.warn?.(`creditPayment(${chatId}) skipped: repositories unavailable`);
+            return false;
+        }
+        const result = await repositories.userData.creditPayment(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), {
+            amount,
+            key: paymentKey,
+        });
+        if (!result.applied && result.reason === 'duplicate') {
+            logger.log(`[creditPayment] ${chatId}: replay of ${paymentKey} ignored (balance ${result.balance})`);
+        }
+        return result.applied;
+    }
+    /**
+     * Record person-level identity in `userIdentity` (D4), keyed on chatId alone.
+     *
+     * This is deliberately fire-and-forget and NEVER throws: it is an observation, not part of the
+     * conversation. A person who has spoken to several personas holds several `userData` rows
+     * (8,938 people / 22,715 rows measured 2026-09-14) and the person-level facts drift apart
+     * across them; this collection is the one place they agree.
+     *
+     * `handle` and `displayName` are passed separately on purpose. The caller's `broadcastName` is
+     * the collapsed `username || firstName || 'Unknown'` chain, so by the time it exists you can no
+     * longer tell a real @username from a first name — and 554 people have conflicting values.
+     */
+    async observeIdentity(chatId, input) {
+        const repositories = this.repositories.get(this.client);
+        if (!repositories)
+            return;
+        try {
+            await repositories.userIdentity.observe(chatId, input);
+        }
+        catch (error) {
+            logger.warn?.(`observeIdentity(${chatId}) failed: ${String(error)}`);
+        }
+    }
     async recordPaymentAttribution(chatId, confirmedAmount) {
         const normalizedChatId = String(chatId || '').trim();
         const amount = Number(confirmedAmount);
@@ -29305,19 +30879,54 @@ class UserDataDtoCrud {
                 projection: { dailyPaidCountedAt: 1, dailyRevenueCounted: 1 },
             });
             const countedToday = pre?.dailyPaidCountedAt === dayKey;
+            // Amount this call newly credited in Mongo; 0 means a re-entry for an already-counted
+            // payment (repeat screenshot / full-show), which must not write another payment_event.
+            let creditedNow = 0;
             if (!countedToday) {
+                creditedNow = floorAmount;
                 void this.recordDailyUser(process.env.mobile, { paid: 1, revenue: floorAmount });
             }
             else {
                 const prevCounted = Number(pre?.dailyRevenueCounted);
                 const prev = Number.isFinite(prevCounted) ? prevCounted : 0;
-                if (floorAmount > prev)
+                if (floorAmount > prev) {
+                    creditedNow = floorAmount - prev;
                     void this.recordDailyUser(process.env.mobile, { revenue: floorAmount - prev });
+                }
             }
+            // Mirror into the OPTIONAL analytics store.
+            //
+            // WHAT THIS TABLE MEANS, AND WHAT IT DOES NOT: this is the SCREENSHOT-VERIFIED payment
+            // path, and it is the only place a payment is actually confirmed. The operator-command
+            // credits (`hs` -> payAmount 50, `hsl` -> 150 in handlers/outhandler.ts, and the re-ping
+            // path in core/utils.ts) never reach here — they are ENTITLEMENT GRANTS with no payment
+            // in the call chain, which is precisely the mechanism behind the measured 3.31x
+            // inflation of userStatsDaily.revenue. Recording them as payments would import that
+            // inflation into a store built to be trustworthy, so they are deliberately excluded.
+            //
+            // `amount >= 15` is enforced by the guard at the top of this method, so sub-15 noise
+            // never lands here either.
+            try {
+                if (creditedNow > 0)
+                    (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_6__.getAnalytics)().recordPayment({
+                        chatId: normalizedChatId,
+                        clientId,
+                        personaId: profile,
+                        amount: creditedNow,
+                        // The post-image balance is not read back (projection omits it), so it is unknown.
+                        balanceAfter: null,
+                        lifetimeAfter: null,
+                        // cheatCount is not in scope here; a payment flagged as fake is handled upstream
+                        // in processImage before this is reached.
+                        isCheat: false,
+                        source: 'screenshot',
+                    });
+            }
+            catch { /* analytics is optional and must never affect payment service */ }
         }
         catch (error) {
             // Analytics counting must never block payment service.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
         }
         await this.processPendingPaymentAttributions(normalizedChatId);
     }
@@ -29352,14 +30961,14 @@ class UserDataDtoCrud {
             return summary;
         let attribution;
         try {
-            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.getInstance().attribution;
+            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.getInstance().attribution;
             if (!runtimeAttribution)
                 throw new Error('conversion attribution is disabled');
             attribution = runtimeAttribution;
         }
         catch (error) {
             summary.failed = candidates.length;
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Payment attribution runtime unavailable', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Payment attribution runtime unavailable', false);
             return summary;
         }
         const dayKey = formatAttributionDayKey(Date.now());
@@ -29371,7 +30980,7 @@ class UserDataDtoCrud {
             }
             try {
                 const userData = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.personaFilter)(candidateChatId, { profile }), { projection: { attributionChannelIds: 1 } });
-                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
+                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
                 if (channelIds.length === 0) {
                     summary.awaitingChannels += 1;
                     continue;
@@ -29395,7 +31004,7 @@ class UserDataDtoCrud {
             }
             catch (error) {
                 summary.failed += 1;
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
             }
         }
         logger.log(`Payment attribution reconcile | scanned=${summary.scanned} credited=${summary.credited} awaitingChannels=${summary.awaitingChannels} failed=${summary.failed}`);
@@ -29603,7 +31212,7 @@ class UserDataDtoCrud {
             return updatedDocument;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating promotion stats");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating promotion stats");
         }
     }
     async activatePromotions() {
@@ -29702,7 +31311,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching paid users");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching paid users");
             return ({ total: 0, new: 0 });
         }
     }
@@ -29733,7 +31342,7 @@ class UserDataDtoCrud {
             const result = await this.statsDb.deleteMany({ chatId, profile: process.env.dbcoll, client: process.env.clientId });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error removing single stat");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error removing single stat");
         }
     }
     async readRecentPaidPpl() {
@@ -29816,7 +31425,7 @@ class UserDataDtoCrud {
                 // persisted eligibility result. A bulk refresh must not overwrite
                 // an existing durable ban / forbidden safety stop; the guard stays
                 // in Mongo's atomic update so a concurrent operator ban also wins.
-                const telegramCanSend = doc.canSendMsgs === false ? false : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.computeLiveCanSendMsgs)(doc);
+                const telegramCanSend = doc.canSendMsgs === false ? false : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)(doc);
                 const setFields = {
                     updatedAt: new Date(),
                 };
@@ -29842,7 +31451,7 @@ class UserDataDtoCrud {
                 setFields.lastHydrationStatus = 'success';
                 const liveHydrationReason = telegramCanSend
                     ? 'live_sendable'
-                    : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.evaluateChannelSendability)(doc).reason || 'live_unsendable';
+                    : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.evaluateChannelSendability)(doc).reason || 'live_unsendable';
                 setFields.lastHydrationReason = (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.activeChannelHydrationReasonUpdateExpression)(liveHydrationReason);
                 const identityFields = this.normalizeActiveChannelIdentityFields(doc);
                 Object.assign(setFields, identityFields);
@@ -29865,7 +31474,7 @@ class UserDataDtoCrud {
             logger.log(`Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, Upserts: ${result.upsertedCount}`);
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(e, "Failed to Bulk update Channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(e, "Failed to Bulk update Channels");
         }
     }
     async update(chatId, updates) {
@@ -29875,9 +31484,13 @@ class UserDataDtoCrud {
         }
         // Declared OUTSIDE the try so the duplicate-key retry in the catch can reuse the exact same
         // filter and payload. Rebuilding them there would risk a subtly different write.
-        const profile = process.env.dbcoll?.trim() || 'default_profile';
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
         let setFields = {};
         let setOnInsert = {};
+        // Set once the write is delegated: UserDataRepository.upsert has ALREADY spent the one
+        // E11000 retry and rethrown, so retrying again in the catch would make a sick database
+        // serve three attempts for one row. Only the raw fallback below still needs the local retry.
+        let retriedByRepository = false;
         try {
             const now = Date.now();
             // 1️⃣ Sanitize updates — prevent overwriting system or indexed fields
@@ -29911,17 +31524,33 @@ class UserDataDtoCrud {
             // Same posture as updateSingleKey/createOrUpdate: the filter stays on the
             // (chatId, profile) unique-index pair because an $or cannot seed an insert, and
             // ownership is stamped via $setOnInsert so a row created here is client-owned too.
-            const result = await this.db.findOneAndUpdate({ chatId, profile }, {
-                $set: setFields,
-                $setOnInsert: setOnInsert,
-            }, { upsert: true, returnDocument: 'after' });
+            //
+            // Routed through @tg/db (C1). UserDataRepository.upsert builds that SAME persona
+            // filter from the shared user-scope helpers and carries the identical duplicate-key
+            // retry, so the three hand-rolled copies of that race handling collapse into one. It
+            // RETHROWS a non-duplicate failure rather than swallowing it, so a write that never
+            // landed cannot be reported as success. The `?? await this.read(chatId)` below covers
+            // only the benign case of a write that succeeded but returned no document.
+            const update = { $set: setFields, $setOnInsert: setOnInsert };
+            const repositories = this.repositories.get(this.client);
+            if (repositories) {
+                retriedByRepository = true;
+                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update);
+                return viaRepo ?? await this.read(chatId);
+            }
+            const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
             return result ?? await this.read(chatId);
         }
         catch (error) {
             // A duplicate-key error here is a concurrent-insert race, not a failed write: the
             // caller's update was REJECTED, so returning a plain read would silently drop it.
             // Retry once — the winning row now exists, so the same filter matches an update.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error)) {
+            //
+            // Guarded by retriedByRepository: on the repository path UserDataRepository.upsert has
+            // already performed exactly this retry and rethrown, so running it again would make one
+            // wanted row cost three write attempts against a database that is already failing. The
+            // block stays for the raw fallback above, which still runs pre-connection.
+            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error) && !retriedByRepository) {
                 try {
                     logger.debug(`update: duplicate-key race for ${chatId}; retrying as update`);
                     const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: setFields, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
@@ -29929,16 +31558,22 @@ class UserDataDtoCrud {
                         return retried;
                 }
                 catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(retryError, "Error retrying UserDataDto update after duplicate key", false);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(retryError, "Error retrying UserDataDto update after duplicate key", false);
                 }
                 // E11000 proves the row EXISTS, so this is never a hard failure: log it without
                 // rethrowing and return the current row. Rethrowing here would surface a benign
                 // race to callers as an error.
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Duplicate key on UserDataDto update; resolved by read", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Duplicate key on UserDataDto update; resolved by read", false);
                 return await this.read(chatId);
             }
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating UserDataDto", true);
-            return await this.read(chatId);
+            // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
+            // read. Returning `await this.read(chatId)` here reported a plausible-looking row to a
+            // caller whose update never landed — and once the read itself was routed through
+            // @tg/db (B6), which degrades a failed read to null, even the read's own error was
+            // swallowed, so the failure became completely invisible. The scheduled-retry caller in
+            // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating UserDataDto", true);
+            throw error;
         }
     }
     async updateSingleKey(chatId, key, value) {
@@ -29948,7 +31583,11 @@ class UserDataDtoCrud {
         }
         // Declared OUTSIDE the try so the duplicate-key retry in the catch reuses the identical
         // filter and payload rather than rebuilding a subtly different one.
-        const profile = process.env.dbcoll?.trim() || 'default_profile';
+        // Set once the write is delegated: UserDataRepository.upsert has ALREADY spent the one
+        // E11000 retry and rethrown, so retrying again in the catch would make a sick database
+        // serve three attempts for one row. Only the raw fallback below still needs the local retry.
+        let retriedByRepository = false;
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
         const now = Date.now();
         // UPSERT: the filter must stay on the (chatId, profile) unique-index pair — an $or
         // cannot seed an insert, and a client-scoped filter would insert a SECOND row for a user
@@ -29956,17 +31595,22 @@ class UserDataDtoCrud {
         // $setOnInsert; reads still resolve OWN-first via readFilter/readOwnThenPersona.
         const setOnInsert = { ...USER_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownershipOnInsert)() };
         delete setOnInsert[key];
+        // Routed through @tg/db (C1) — same persona filter, same duplicate-key retry. See update().
+        const update = { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert };
         try {
-            const result = await this.db.findOneAndUpdate({ chatId, profile }, {
-                $set: { [key]: value, lastMsgTimeStamp: now },
-                $setOnInsert: setOnInsert
-            }, { upsert: true, returnDocument: 'after' });
+            const repositories = this.repositories.get(this.client);
+            if (repositories) {
+                retriedByRepository = true;
+                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update);
+                return viaRepo ?? await this.read(chatId);
+            }
+            const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
             return result ?? await this.read(chatId);
         }
         catch (error) {
             // Same concurrent-insert race as update()/createOrUpdate: retry once rather than
             // returning a stale read that silently discards this key's new value.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error)) {
+            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error) && !retriedByRepository) {
                 try {
                     logger.debug(`updateSingleKey: duplicate-key race for ${chatId}; retrying as update`);
                     const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
@@ -29974,14 +31618,20 @@ class UserDataDtoCrud {
                         return retried;
                 }
                 catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(retryError, "Error retrying single-key update after duplicate key", false);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(retryError, "Error retrying single-key update after duplicate key", false);
                 }
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Duplicate key on single-key update; resolved by read", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Duplicate key on single-key update; resolved by read", false);
                 return await this.read(chatId);
             }
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating single key", true);
+            // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
+            // read. Returning `await this.read(chatId)` here reported a plausible-looking row to a
+            // caller whose update never landed — and once the read itself was routed through
+            // @tg/db (B6), which degrades a failed read to null, even the read's own error was
+            // swallowed, so the failure became completely invisible. The scheduled-retry caller in
+            // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating single key", true);
             logger.error(`Error updating single key for chatId: ${chatId}`, error);
-            return await this.read(chatId);
+            throw error;
         }
     }
     async createOrUpdate(chatId, updates = {}) {
@@ -29990,10 +31640,10 @@ class UserDataDtoCrud {
         try {
             const now = Date.now();
             chatId = chatId?.trim() || `fallback_${now}_${Math.random().toString(36).slice(2, 9)}`;
-            const profile = process.env.dbcoll?.trim() || 'default_profile';
+            const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
             const safeUpdates = {};
             Object.entries(updates).forEach(([key, value]) => {
-                if (!['chatId', 'profile', 'totalCount', 'lastMsgTimeStamp'].includes(key)) {
+                if (!['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'].includes(key)) {
                     safeUpdates[key] = value;
                 }
             });
@@ -30008,17 +31658,33 @@ class UserDataDtoCrud {
             // rewritten by normal traffic, and the key is omitted when the process has no clientId.
             const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownershipOnInsert)() };
             for (const [key, value] of Object.entries(USER_DEFAULTS)) {
-                if (key === 'totalCount')
+                // Both counters are $inc-ed below. A key present in BOTH $inc and $setOnInsert is
+                // not merged by Mongo — it is rejected outright with "Updating the path 'x' would
+                // create a conflict at 'x'" (error 40), on EVERY call, insert or not. msgCount was
+                // added to USER_DEFAULTS for D3 but not to this skip list; reproduced against real
+                // Mongo 2026-10-02. $inc creates the field on insert anyway, so skipping is correct.
+                if (key === 'totalCount' || key === 'msgCount')
                     continue; // handled by $inc
                 if (key in safeUpdates)
                     continue; // provided by $set — can't be in both
                 setOnInsert[key] = value;
             }
-            const write = () => this.db.findOneAndUpdate({ chatId, profile }, {
+            // Routed through @tg/db (C1). The repository owns the persona filter and the E11000
+            // retry described below; when it is available the local retry block becomes a no-op
+            // because `write()` has already resolved the race internally. The raw thunk stays as
+            // the pre-connection fallback.
+            const update = {
                 $set: { ...safeUpdates, lastMsgTimeStamp: now },
-                $inc: { totalCount: 1 },
+                // D3 dual-write: msgCount is the honest counter. totalCount keeps being written
+                // unchanged until msgCount is populated everywhere and the readers have moved, so
+                // this step is purely additive and reversible.
+                $inc: { totalCount: 1, msgCount: 1 },
                 $setOnInsert: setOnInsert,
-            }, { upsert: true, returnDocument: 'after' });
+            };
+            const repositories = this.repositories.get(this.client);
+            const write = () => repositories
+                ? repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update)
+                : this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
             // Native driver: `result` is the post-update document (returnDocument: 'after').
             //
             // E11000 RETRY. upsert is atomic but NOT immune to duplicate-key errors: when two
@@ -30051,13 +31717,13 @@ class UserDataDtoCrud {
             return { newUser: wasCreated, userDetails };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error creating or updating UserDataDto");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error creating or updating UserDataDto");
             let fallback;
             try {
                 fallback = await this.read(chatId);
             }
             catch (readError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
             }
             const safeDetails = fallback || existing || (newUser ? { ...newUser, totalCount: 0 } : { ...USER_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() });
             return { newUser: !!newUser, userDetails: safeDetails };
@@ -30098,7 +31764,7 @@ class UserDataDtoCrud {
             return { totalMB, alert };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'logDbSize failed', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'logDbSize failed', false);
             return null;
         }
     }
@@ -30152,12 +31818,19 @@ class UserDataDtoCrud {
      * `?? {}`, so the contract must be a definite value rather than an implicit undefined.
      */
     async getPromoteMsgs() {
+        // Routed through @tg/db (B3). The repository issues the identical
+        // findOne({}, {projection:{_id:0}}) and returns null on failure, so this is a change of
+        // owner, not of behaviour. The raw read below stays as the fallback for the window before
+        // the client is connected, when the container has no repositories to hand out yet.
+        const repositories = this.repositories.get(this.client);
+        if (repositories)
+            return repositories.promote.getPromoteMsgs();
         try {
             const channelDb = this.client.db("tgclients").collection('promoteMsgs');
             return await channelDb.findOne({}, { projection: { _id: 0 } });
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(e, "Error fetching promote messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(e, "Error fetching promote messages");
             return null;
         }
     }
@@ -30167,7 +31840,7 @@ class UserDataDtoCrud {
             return await clientsDb.updateOne(filter, { $set: data });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating Client");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating Client");
         }
     }
     async updateBufferClientAssignment(mobile, update) {
@@ -30177,7 +31850,7 @@ class UserDataDtoCrud {
             await bufferClientsDb.updateOne({ mobile }, { $set: update });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating buffer client persona assignment");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating buffer client persona assignment");
             logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`, error instanceof Error ? error.message : String(error));
         }
     }
@@ -30187,7 +31860,7 @@ class UserDataDtoCrud {
             const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
             const doc = await bufferClientsDb.findOne({ mobile });
             if (doc) {
-                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
+                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
             }
             else {
                 logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
@@ -30195,7 +31868,7 @@ class UserDataDtoCrud {
             return doc;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching buffer client doc");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching buffer client doc");
             logger.error(`[Persona] Failed to load buffer client doc for ${mobile}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -30223,7 +31896,7 @@ class UserDataDtoCrud {
             return pool;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching buffer persona pool");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching buffer persona pool");
             logger.error(`[Persona] Failed to load buffer persona pool for ${clientId}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -30266,7 +31939,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching local persona assignment snapshot", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching local persona assignment snapshot", false);
             logger.warn(`[Persona] Failed to load local assignment snapshot for ${clientId}`, error instanceof Error ? error.message : String(error));
         }
         try {
@@ -30311,7 +31984,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error removing from available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error removing from available messages");
             throw error;
         }
     }
@@ -30330,7 +32003,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: messageId } });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error adding to available messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error adding to available messages");
             throw error;
         }
     }
@@ -30353,7 +32026,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating timestamps");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating timestamps");
         }
     }
     // async getAvgCalculatedChannels() {
@@ -30424,7 +32097,7 @@ class UserDataDtoCrud {
             return signals.size > 0 ? signals : null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Error getting reaction channel signals', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error getting reaction channel signals', false);
             return null;
         }
     }
@@ -30441,7 +32114,7 @@ class UserDataDtoCrud {
             return docs.map((doc) => doc.channelId.toString());
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error getting restricted channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error getting restricted channels");
             // Explicit null, matching promote-clients. ReactionChannelStore accepts
             // `string[] | null | undefined`, so an implicit undefined type-checked — but the two
             // apps returning different falsy values for the same failure is exactly the drift that
@@ -30453,6 +32126,14 @@ class UserDataDtoCrud {
         const normalizedFilter = this.normalizeFilterForDb(filter);
         if (!this.isUsableActiveChannelFilter(normalizedFilter, 'active channel update')) {
             return null;
+        }
+        // B5: one implementation for a FLEET-SHARED collection. activeChannels carries no client
+        // identity — all 20 clients read and write the same 45,274 rows — so three divergent
+        // writers meant three different sets of rules applied to one record. The repository is the
+        // single one; everything below it is the pre-connection raw fallback and must stay.
+        const repositories = this.repositories.get(this.client);
+        if (repositories) {
+            return await repositories.channels.updateActiveChannel(String(normalizedFilter.channelId), data);
         }
         const normalizedData = { ...data };
         if ('_id' in normalizedData)
@@ -30623,7 +32304,7 @@ class UserDataDtoCrud {
             }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "RemoveChannelMsgErr");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "RemoveChannelMsgErr");
             throw error;
         }
     }
@@ -30645,7 +32326,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating success message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating success message count");
             throw error;
         }
     }
@@ -30667,7 +32348,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating failure message count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating failure message count");
             throw error;
         }
     }
@@ -30690,7 +32371,7 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating follow-up success count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating follow-up success count");
             throw error;
         }
     }
@@ -30713,7 +32394,7 @@ class UserDataDtoCrud {
             return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating follow-up failure count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating follow-up failure count");
             throw error;
         }
     }
@@ -30733,7 +32414,7 @@ class UserDataDtoCrud {
      * private copy was already correct — but it is no longer a copy that can drift.
      */
     normalizeChannelIdForDb(channelId) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
     }
     /** Delegates to the shared predicate so both apps gate the SAME collection identically. */
     isValidNormalizedChannelId(channelId) {
@@ -30861,12 +32542,12 @@ class UserDataDtoCrud {
                 logger.log('MongoDB connection closed.');
             }
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
             await this.client?.close();
             this.client = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error closing MongoDB connection");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error closing MongoDB connection");
         }
     }
 }
@@ -31153,6 +32834,13 @@ async function eventPrint(event, allMsg) {
         if (senderJson) {
             broadcastName = senderJson.username || senderJson.firstName || 'Unknown';
             accessHash = (0,_utils__WEBPACK_IMPORTED_MODULE_4__.convertAccessHashToString)(senderJson.accessHash);
+            // D4: record the PERSON before the fallback chain collapses. Once broadcastName exists
+            // a real @username is indistinguishable from a firstName, and `handle` must only ever
+            // carry a real one — it is the field other accounts trust and never clear.
+            void db.observeIdentity(chatId, {
+                handle: senderJson.username || undefined,
+                displayName: senderJson.username || senderJson.firstName || undefined,
+            });
         }
         else {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(new Error('Failed to get sender info'), `getSenderJson returned null for ${chatId} : ${broadcastName}`);
@@ -33905,6 +35593,10 @@ async function executehs(client, chatId, data) {
         cheatCount: Math.max(userDetails.cheatCount - 1, 0),
         limitTime: Date.now(),
         totalCount: 10,
+        // D3: totalCount: 10 is a FLAG, not a count — and 10 lands inside live thresholds in
+        // respondToMsgs.ts (10 % 3 === 1 fires the periodic payment prompt; >= 10 opens the pic
+        // promo). windowCount carries the intent; totalCount is kept only until readers move.
+        windowCount: 1,
         demoGiven: true,
         // A completed demo leaves at most the demo-tier amount active.
         payAmount: Math.min(50, Number(userDetails.payAmount) || 0)
@@ -33964,6 +35656,7 @@ async function executehsl(client, chatId, data) {
         demoGiven: true,
         payAmount: Math.min(150, userDetails.highestPayAmount),
         totalCount: 10,
+        windowCount: 1, // D3 — see the demo path above.
         secondShow: isSecondShow
     };
     if (userDetails.videos.length > 7) {
@@ -34687,7 +36380,6 @@ const TICK_MS = 120000; // 2 minutes between health checks
 const INITIAL_DELAY_MS = 20000; // 20 seconds before first check
 const MAX_FAILURES = 5; // consecutive unhealthy ticks before shutdown
 const PROCESS_ID_TIMEOUT_MS = 15000;
-const DEFAULT_API_KEY = process.env.X_API_KEY || process.env.API_KEY || "santoor";
 function readConnectionState() {
     const instanceExists = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist();
     const inst = instanceExists ? _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance() : null;
@@ -36441,7 +38133,8 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
             if (userDetails.lastMsgTimeStamp < Date.now() - 5 * 24 * 60 * 60 * 1000) {
                 logger.debug(`[EDGE CASE] User inactive for 5 days - chatId: ${chatId}`);
-                await db.update(chatId, { canReply: 1, limitTime: 0, lastMsgTimeStamp: Date.now(), totalCount: 10 });
+                // D3: totalCount: 10 here is the "treat as established" flag, not a message count.
+                await db.update(chatId, { canReply: 1, limitTime: 0, lastMsgTimeStamp: Date.now(), totalCount: 10, windowCount: 1 });
             }
         }
         if (userDetails.totalCount >= 100) {
@@ -36560,8 +38253,12 @@ async function sendCheatResponseMessage(event, userDetails) {
  */
 async function updateCheatCount(chatId, userDetails) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    const newCheatCount = (userDetails.cheatCount ? userDetails.cheatCount : 0) + 1;
-    return await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.cheatCount, newCheatCount);
+    // D2: floor at 0 before incrementing. Without this, a user carrying the grace sentinel (-2) goes
+    // to -1 on a fresh accusation instead of 1 — so the sentinel silently ABSORBS two real
+    // accusations, and every `cheatCount > 2` threshold stays unreachable for four more strikes.
+    // Measured 2026-09-14: 5 live rows sitting at -1, a value no code ever writes deliberately.
+    const current = Math.max(Number(userDetails.cheatCount) || 0, 0);
+    return await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.cheatCount, current + 1);
 }
 /**
  * Apply cheat block (canReply = 0)
@@ -36613,7 +38310,8 @@ async function handleCheatCallInitiation(userDetails, chatId, event) {
                 await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.secondShow, false);
             }
             userDetails.cheatCount = -2;
-            await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.cheatCount, -2);
+            // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
+            await db.update(chatId, { cheatCount: -2, graceFlag: true });
         }
         await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(updatedAmount, userDetails, `Cheat count: ${userDetails.cheatCount}\nCheat-initiated Call:`);
         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
@@ -36641,7 +38339,8 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
                 logger.debug(`[EDGE CASE] Adjusting amount for low videos - chatId: ${chatId}, videos: ${userDetails.videos.length}, oldAmount: ${updatedAmount}, newAmount: 50`);
                 updatedAmount = 50;
                 userDetails.cheatCount = -2;
-                await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.cheatCount, -2);
+                // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
+                await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().update(chatId, { cheatCount: -2, graceFlag: true });
                 await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(updatedAmount, userDetails, `Cheat count:${userDetails.cheatCount}\nCheat-initiated Call - 2:`);
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
             }
@@ -37072,8 +38771,17 @@ function normalizeSenderId(senderId) {
     }
     return null;
 }
+/**
+ * The conversion id is a Redis CLAIM KEY, not a stored value, so a missing persona is degraded
+ * attribution rather than corruption — unlike the userData upserts, which now throw via
+ * requireProfile(). Returning null makes the caller SKIP attribution instead of claiming under a
+ * shared fake persona, which would let two misconfigured processes collide on one key and silently
+ * suppress each other's crediting. A dropped DM attribution is recoverable; a wrong claim is not.
+ */
 function getAttributionConversionId(chatId) {
-    const profile = process.env.dbcoll?.trim() || 'default_profile';
+    const profile = process.env.dbcoll?.trim();
+    if (!profile)
+        return null;
     return `${profile}:${String(chatId).trim()}`;
 }
 async function attributeDirectTgAutDM(event, chatId) {
@@ -37089,6 +38797,10 @@ async function attributeDirectTgAutDM(event, chatId) {
             return;
         }
         const conversionId = getAttributionConversionId(chatId);
+        if (!conversionId) {
+            logger.warn(`[DirectAttribution] ${chatId} skipped: dbcoll (persona) is not set on this process`);
+            return;
+        }
         if (await runtime.tracker.isRoutePending(conversionId)) {
             logger.info(`[DirectAttribution] ${chatId} deferred: promote-clients owns this routed DM`);
             return;
@@ -37411,7 +39123,7 @@ async function OutEventPrint(event) {
                         await event.client.sendMessage(chatId, { message: `${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_3__.payLinks.phonepe3}\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_3__.payLinks.paytm1}\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_3__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false });
                     }, 8000);
                 }, 15000);
-                await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, demoGiven: true, payAmount: 50 });
+                await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, windowCount: 1, demoGiven: true, payAmount: 50 });
                 await db.recordDemoGiven(chatId);
                 await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
             }
@@ -37419,7 +39131,7 @@ async function OutEventPrint(event) {
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
                 await event.client.sendMessage(chatId, { message: `How is it?🙈` });
                 let userDetails = await db.read(chatId);
-                userDetails = await db.update(chatId, { paidReply: true, limitTime: Date.now() + (2 * 60 * 1000), demoGiven: true, payAmount: 150, totalCount: 10, secondShow: true });
+                userDetails = await db.update(chatId, { paidReply: true, limitTime: Date.now() + (2 * 60 * 1000), demoGiven: true, payAmount: 150, totalCount: 10, windowCount: 1, secondShow: true });
                 await db.recordFullShow(chatId);
             }
             else if (text === 'psy') {
@@ -40723,7 +42435,8 @@ async function checkCheatCountCallInitiation(chatId, userDetails, event, initiat
         (updatedAmount >= 100 && userDetails.videos.length < 5);
     if (hasLowVideos) {
         if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
-            const updates = { cheatCount: -2 };
+            // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
+            const updates = { cheatCount: -2, graceFlag: true };
             if (userDetails.highestPayAmount < 100) {
                 updates.demoGiven = false;
             }
@@ -42511,6 +44224,27 @@ async function processImage(event) {
                                         // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
                                         // Read current payAmount from DB to ensure we have the latest value (may have been updated in code paths above)
                                         const currentUserDetails = await db.read(chatId);
+                                        // C3/D1 — the authoritative ledger write. Every valid payment converges here,
+                                        // which is why the credit is taken at this one point rather than at the four
+                                        // scattered sites above.
+                                        //
+                                        // It runs ALONGSIDE the legacy payAmount writes, not instead of them: this step
+                                        // is additive so it can be verified in production before anything starts
+                                        // reading `lifetimePaid`. What it adds that the legacy writes cannot:
+                                        //   - `lifetimePaid` raised with $max, so a peak can never be lowered (three
+                                        //     sites in utils.ts/paidPatterns.ts actively lower `highestPayAmount`);
+                                        //   - idempotency, keyed on the SCREENSHOT MESSAGE. The surrounding credit
+                                        //     paths run inside scheduleProcessImageTask callbacks, and that helper is a
+                                        //     bare setTimeout wrapper with no dedupe, so one screenshot can credit twice.
+                                        if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT) {
+                                            try {
+                                                await db.creditPayment(chatId, amount, `msg:${event.message.id}`);
+                                            }
+                                            catch (creditError) {
+                                                // A ledger failure must never break the payment flow the user is watching.
+                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
+                                            }
+                                        }
                                         if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
                                             // Only update if amount is greater than current payAmount
                                             // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
@@ -44150,6 +45884,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+
 
 
 
@@ -44376,8 +46112,7 @@ function authMiddleware(req, res, next) {
         const origin = extractRealOrigin(req);
         let passedReason = null;
         // ✅ FIXED: Handle empty/whitespace API keys
-        const expectedApiKey = (process.env.X_API_KEY || process.env.API_KEY || 'santoor').toLowerCase();
-        if (apiKey && apiKey.trim().toLowerCase() === expectedApiKey) {
+        if ((0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__.isAcceptedApiKey)(apiKey)) {
             passedReason = 'API key valid';
         }
         else if (clientIp && clientIp !== 'unknown' && ALLOWED_IPS.includes(clientIp)) {
@@ -48730,7 +50465,8 @@ const paidPatterns = [
                                     else {
                                         userDetails = await db.updateSingleKey(context.chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.user.secondShow, false);
                                     }
-                                    userDetails = await db.updateSingleKey(context.chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.user.cheatCount, -2);
+                                    // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
+                                    userDetails = await db.update(context.chatId, { cheatCount: -2, graceFlag: true });
                                 }
                                 await initiateCall(updatedAmount, userDetails, `Cheat count: ${cheatCount}\nCheat-initiated Call:`);
                                 deleteMessagesBeforeId(userDetails.chatId, event.message.id);
@@ -48745,7 +50481,8 @@ const paidPatterns = [
                             cheatCount > 3) {
                             if ((userDetails.videos?.length ?? 0) < 3) {
                                 const updatedAmount = 50;
-                                userDetails = await db.updateSingleKey(context.chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.user.cheatCount, -2);
+                                // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
+                                userDetails = await db.update(context.chatId, { cheatCount: -2, graceFlag: true });
                                 await initiateCall(updatedAmount, userDetails, `Cheat count:${cheatCount}\nCheat-initiated Call - 2:`);
                                 deleteMessagesBeforeId(userDetails.chatId, event.message.id);
                             }
