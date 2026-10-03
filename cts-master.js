@@ -44926,6 +44926,30 @@ __decorate([
     (0, mongoose_1.Prop)({ required: false }),
     __metadata("design:type", Date)
 ], UserData.prototype, "lastActiveTime", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "lifetimePaid", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "lifetimeCredits", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: [String], required: false, default: undefined }),
+    __metadata("design:type", Array)
+], UserData.prototype, "creditKeys", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "firstPaidAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "msgCount", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "windowCount", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
@@ -45415,7 +45439,17 @@ let UserDataService = UserDataService_1 = class UserDataService {
         const twoMonths = Date.now() - 60 * 24 * 60 * 60 * 1000;
         try {
             const result = await this.userDataModel
-                .deleteMany({ lastMsgTimeStamp: { $lt: twoMonths }, payAmount: 0, canReply: 1 })
+                .deleteMany({
+                lastMsgTimeStamp: { $lt: twoMonths },
+                payAmount: 0,
+                canReply: 1,
+                $and: [
+                    { $or: [{ lifetimePaid: { $exists: false } }, { lifetimePaid: { $lte: 0 } }] },
+                    { $or: [{ firstPaidAt: { $exists: false } }, { firstPaidAt: null }] },
+                    { $or: [{ highestPayAmount: { $exists: false } }, { highestPayAmount: { $lte: 0 } }] },
+                    { $or: [{ paidCount: { $exists: false } }, { paidCount: { $lte: 0 } }] },
+                ],
+            })
                 .exec();
             return { deletedCount: result.deletedCount ?? 0 };
         }
