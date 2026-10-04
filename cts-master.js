@@ -17296,7 +17296,9 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ChannelIntelligenceReadService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChannelIntelligenceReadService = exports.SQ_PRIOR_RATE_FALLBACK = exports.PRIOR_RATE_FALLBACK = exports.PRIOR_TTL_MS = exports.SQ_MAX = exports.SQ_MIN = exports.SQ_PRIOR_STRENGTH = exports.WEIGHT_MAX = exports.WEIGHT_MIN = exports.PRIOR_STRENGTH = void 0;
+exports.ChannelIntelligenceReadService = exports.JOIN_MAX_DELETE_RATIO_ENV = exports.DELETE_RATIO_EXCLUDE_V2 = exports.DELETE_RATIO_EXCLUDE_V1 = exports.MIN_CONVERSION_EVIDENCE = exports.JOIN_SCORING_V2_ENV = exports.SQ_PRIOR_RATE_FALLBACK = exports.PRIOR_RATE_FALLBACK = exports.PRIOR_TTL_MS = exports.SQ_MAX = exports.SQ_MIN = exports.SQ_PRIOR_STRENGTH = exports.WEIGHT_MAX = exports.WEIGHT_MIN = exports.PRIOR_STRENGTH = void 0;
+exports.getJoinDeleteRatioLimit = getJoinDeleteRatioLimit;
+exports.isJoinScoringV2Enabled = isJoinScoringV2Enabled;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -17309,6 +17311,19 @@ exports.SQ_MAX = 1.1;
 exports.PRIOR_TTL_MS = 15 * 60 * 1000;
 exports.PRIOR_RATE_FALLBACK = 0.03;
 exports.SQ_PRIOR_RATE_FALLBACK = 0.82;
+exports.JOIN_SCORING_V2_ENV = 'CHANNEL_JOIN_SCORING_V2';
+exports.MIN_CONVERSION_EVIDENCE = 10;
+exports.DELETE_RATIO_EXCLUDE_V1 = 0.5;
+exports.DELETE_RATIO_EXCLUDE_V2 = 0.3;
+exports.JOIN_MAX_DELETE_RATIO_ENV = 'CHANNEL_JOIN_MAX_DELETE_RATIO';
+function getJoinDeleteRatioLimit() {
+    const raw = Number((process.env[exports.JOIN_MAX_DELETE_RATIO_ENV] ?? '').trim());
+    return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : exports.DELETE_RATIO_EXCLUDE_V2;
+}
+function isJoinScoringV2Enabled() {
+    const raw = (process.env[exports.JOIN_SCORING_V2_ENV] ?? '').trim().toLowerCase();
+    return raw === 'true' || raw === '1';
+}
 const EMPTY_OUTCOME_ANALYTICS = {
     messageStats: {
         totalSent: 0,
@@ -17340,7 +17355,8 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
     }
     async getFleetPrior(ttlMs = exports.PRIOR_TTL_MS) {
         const now = Date.now();
-        if (ttlMs > 0 && this._priorCache && now - this._priorCache.at < ttlMs) {
+        const v2 = isJoinScoringV2Enabled();
+        if (ttlMs > 0 && this._priorCache && this._priorCache.v2 === v2 && now - this._priorCache.at < ttlMs) {
             return this._priorCache.value;
         }
         try {
@@ -17349,7 +17365,11 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                 {
                     $group: {
                         _id: null,
-                        totalCredited: { $sum: this.numFromCi('$DMs.credited') },
+                        totalCredited: {
+                            $sum: v2
+                                ? { $min: [this.numFromCi('$DMs.credited'), this.numFromCi('$outcomes.attempted')] }
+                                : this.numFromCi('$DMs.credited'),
+                        },
                         totalAttempted: { $sum: this.numFromCi('$outcomes.attempted') },
                         totalSurvived: { $sum: this.numFromCi('$outcomes.survived') },
                     },
@@ -17361,7 +17381,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                 PRIOR_RATE: totalAttempted > 0 ? (row.totalCredited ?? 0) / totalAttempted : exports.PRIOR_RATE_FALLBACK,
                 SQ_PRIOR_RATE: totalAttempted > 0 ? (row.totalSurvived ?? 0) / totalAttempted : exports.SQ_PRIOR_RATE_FALLBACK,
             };
-            this._priorCache = { value, at: now };
+            this._priorCache = { value, at: now, v2 };
             this.logger.log(`Live fleet prior computed: PRIOR_RATE=${value.PRIOR_RATE.toFixed(5)} SQ_PRIOR_RATE=${value.SQ_PRIOR_RATE.toFixed(5)} (Σattempted=${totalAttempted})`);
             return value;
         }
@@ -17401,7 +17421,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
             return true;
         const attempted = doc.outcomes?.attempted ?? 0;
         const deleted = doc.outcomes?.deleted ?? 0;
-        if (attempted >= 10 && deleted / attempted > 0.5)
+        if (attempted >= 10 && deleted / attempted > getJoinDeleteRatioLimit())
             return true;
         return false;
     }
@@ -17555,6 +17575,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
         return { $convert: { input: fieldRef, to: 'double', onError: 0, onNull: 0 } };
     }
     buildChannelIntelligenceExclusionFlag() {
+        const deleteRatioLimit = getJoinDeleteRatioLimit();
         return {
             $let: {
                 vars: {
@@ -17583,7 +17604,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                                                         0,
                                                     ],
                                                 },
-                                                0.5,
+                                                deleteRatioLimit,
                                             ],
                                         },
                                     ],
@@ -17598,6 +17619,7 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
     buildConversionAwareSortStages(prior) {
         const priorRate = prior?.PRIOR_RATE > 0 ? prior.PRIOR_RATE : exports.PRIOR_RATE_FALLBACK;
         const sqPriorRate = prior?.SQ_PRIOR_RATE > 0 ? prior.SQ_PRIOR_RATE : exports.SQ_PRIOR_RATE_FALLBACK;
+        const v2 = isJoinScoringV2Enabled();
         return [
             {
                 $lookup: {
@@ -17624,14 +17646,18 @@ let ChannelIntelligenceReadService = ChannelIntelligenceReadService_1 = class Ch
                                 $let: {
                                     vars: {
                                         attempted: this.numFromCi('$$ci.outcomes.attempted'),
-                                        credited: this.numFromCi('$$ci.DMs.credited'),
+                                        credited: v2
+                                            ? { $min: [this.numFromCi('$$ci.DMs.credited'), this.numFromCi('$$ci.outcomes.attempted')] }
+                                            : this.numFromCi('$$ci.DMs.credited'),
                                         survived: this.numFromCi('$$ci.outcomes.survived'),
                                     },
                                     in: {
                                         $let: {
                                             vars: {
                                                 conversionWeight: {
-                                                    $min: [exports.WEIGHT_MAX, { $max: [exports.WEIGHT_MIN, {
+                                                    $min: [v2
+                                                            ? { $cond: [{ $lt: ['$$attempted', exports.MIN_CONVERSION_EVIDENCE] }, 1, exports.WEIGHT_MAX] }
+                                                            : exports.WEIGHT_MAX, { $max: [exports.WEIGHT_MIN, {
                                                                     $divide: [
                                                                         { $divide: [
                                                                                 { $add: [{ $multiply: [priorRate, exports.PRIOR_STRENGTH] }, '$$credited'] },
@@ -18087,10 +18113,17 @@ let BotsController = class BotsController {
         return this.botsService.validateAndReplaceBots(options);
     }
     async reconcilePending(limit, category, dryRun, async) {
+        if (category !== undefined && (typeof category !== 'string' || !Object.values(channel_category_enum_1.ChannelCategory).includes(category))) {
+            throw new common_1.BadRequestException(`category must be one of: ${Object.values(channel_category_enum_1.ChannelCategory).join(', ')}`);
+        }
+        const parsedLimit = limit === undefined ? 1 : Number(limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+            throw new common_1.BadRequestException('limit must be a positive integer (max 10)');
+        }
         const options = {
             dryRun: String(dryRun ?? '').toLowerCase() === 'true' || dryRun === '1',
-            pendingLimit: limit ? Number(limit) : 1,
-            pendingCategory: category || undefined,
+            pendingLimit: parsedLimit,
+            pendingCategory: category,
         };
         if (String(async ?? '').toLowerCase() === 'true' || async === '1') {
             void this.botsService.reconcilePendingAdminBotsNow(options).catch(() => undefined);
@@ -19646,7 +19679,11 @@ let BotsService = BotsService_1 = class BotsService {
         const proposedActions = [];
         const now = new Date();
         let stopPrivilegedWork = false;
-        const pendingLimit = Math.min(Math.max(1, Math.floor(options.pendingLimit ?? this.maxPendingAdminRepairsPerRun)), 10);
+        const requested = Number(options.pendingLimit ?? this.maxPendingAdminRepairsPerRun);
+        const pendingLimit = Number.isFinite(requested) ? Math.min(Math.max(1, Math.floor(requested)), 10) : this.maxPendingAdminRepairsPerRun;
+        if (options.pendingCategory !== undefined && typeof options.pendingCategory !== 'string') {
+            throw new Error('pendingCategory must be a string');
+        }
         const pending = await this.botModel
             .find({
             lifecycle: 'pending_admin',
@@ -20035,6 +20072,8 @@ let BotsService = BotsService_1 = class BotsService {
             catch {
                 continue;
             }
+            if (!about)
+                continue;
             for (const m of about.match(/\d{10,13}/g) || [])
                 aboutMobiles.add(m);
             break;
@@ -27891,6 +27930,98 @@ __exportStar(__webpack_require__(/*! ./dto */ "./src/components/collection-insig
 
 /***/ },
 
+/***/ "./src/components/daily-analytics/analytics-pg.reader.ts"
+/*!***************************************************************!*\
+  !*** ./src/components/daily-analytics/analytics-pg.reader.ts ***!
+  \***************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var AnalyticsPgReader_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.AnalyticsPgReader = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const QUERY_TIMEOUT_MS = 10_000;
+const LOG_INTERVAL_MS = 60_000;
+let AnalyticsPgReader = AnalyticsPgReader_1 = class AnalyticsPgReader {
+    constructor() {
+        this.logger = new common_1.Logger(AnalyticsPgReader_1.name);
+        this.lastLogAt = 0;
+    }
+    isEnabled() {
+        return !!process.env.ANALYTICS_DB_URL;
+    }
+    getPool() {
+        const url = process.env.ANALYTICS_DB_URL;
+        if (!url)
+            return undefined;
+        if (this.pool && this.poolUrl === url)
+            return this.pool;
+        try {
+            const { Pool } = __webpack_require__(/*! pg */ "pg");
+            const pool = new Pool({
+                connectionString: url,
+                ssl: { rejectUnauthorized: false },
+                max: 2,
+                connectionTimeoutMillis: QUERY_TIMEOUT_MS,
+                query_timeout: QUERY_TIMEOUT_MS,
+                statement_timeout: QUERY_TIMEOUT_MS,
+                idleTimeoutMillis: 30_000,
+            });
+            pool.on('error', (err) => this.logOnce('pool error', err));
+            const old = this.pool;
+            this.pool = pool;
+            this.poolUrl = url;
+            if (old)
+                old.end().catch(() => undefined);
+            return pool;
+        }
+        catch (err) {
+            this.logOnce('module unavailable', err);
+            return undefined;
+        }
+    }
+    logOnce(what, err) {
+        const now = Date.now();
+        if (now - this.lastLogAt < LOG_INTERVAL_MS)
+            return;
+        this.lastLogAt = now;
+        this.logger.warn(`Analytics Postgres ${what}; falling back to Mongo: ${err?.message ?? err}`);
+    }
+    async query(sql, params = []) {
+        const pool = this.getPool();
+        if (!pool)
+            return undefined;
+        try {
+            const res = await pool.query(sql, params);
+            return res.rows;
+        }
+        catch (err) {
+            this.logOnce('query failed', err);
+            return undefined;
+        }
+    }
+    async onModuleDestroy() {
+        const pool = this.pool;
+        this.pool = undefined;
+        if (pool)
+            await pool.end().catch(() => undefined);
+    }
+};
+exports.AnalyticsPgReader = AnalyticsPgReader;
+exports.AnalyticsPgReader = AnalyticsPgReader = AnalyticsPgReader_1 = __decorate([
+    (0, common_1.Injectable)()
+], AnalyticsPgReader);
+
+
+/***/ },
+
 /***/ "./src/components/daily-analytics/daily-analytics.controller.ts"
 /*!**********************************************************************!*\
   !*** ./src/components/daily-analytics/daily-analytics.controller.ts ***!
@@ -28031,6 +28162,7 @@ exports.DailyAnalyticsModule = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const daily_analytics_service_1 = __webpack_require__(/*! ./daily-analytics.service */ "./src/components/daily-analytics/daily-analytics.service.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const daily_analytics_controller_1 = __webpack_require__(/*! ./daily-analytics.controller */ "./src/components/daily-analytics/daily-analytics.controller.ts");
 const daily_analytics_schema_1 = __webpack_require__(/*! ./schemas/daily-analytics.schema */ "./src/components/daily-analytics/schemas/daily-analytics.schema.ts");
 let DailyAnalyticsModule = class DailyAnalyticsModule {
@@ -28046,7 +28178,7 @@ exports.DailyAnalyticsModule = DailyAnalyticsModule = __decorate([
             ]),
         ],
         controllers: [daily_analytics_controller_1.DailyAnalyticsController],
-        providers: [daily_analytics_service_1.DailyAnalyticsService],
+        providers: [daily_analytics_service_1.DailyAnalyticsService, analytics_pg_reader_1.AnalyticsPgReader],
         exports: [daily_analytics_service_1.DailyAnalyticsService],
     })
 ], DailyAnalyticsModule);
@@ -28074,16 +28206,31 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DailyAnalyticsService = void 0;
+exports.DailyAnalyticsService = exports.MONGO_RETENTION_DAYS = exports.REVENUE_FROM_DAY = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const daily_analytics_schema_1 = __webpack_require__(/*! ./schemas/daily-analytics.schema */ "./src/components/daily-analytics/schemas/daily-analytics.schema.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+exports.REVENUE_FROM_DAY = '2026-10-04';
+const PG_COLUMNS = {
+    promote: { sent: 'sent', success: 'delivered', failed: 'failed', banned: 'banned' },
+    reaction: {
+        success: 'reactions_success',
+        failed: 'reactions_failed',
+        restricted: 'reactions_restricted',
+        floods: 'reactions_floods',
+    },
+    user: { newUsers: 'new_users', active: 'active_users', paid: 'payers' },
+};
+exports.MONGO_RETENTION_DAYS = 13;
+const num = (v) => Number(v) || 0;
 let DailyAnalyticsService = class DailyAnalyticsService {
-    constructor(promoteModel, reactionModel, userModel) {
+    constructor(promoteModel, reactionModel, userModel, pg) {
         this.promoteModel = promoteModel;
         this.reactionModel = reactionModel;
         this.userModel = userModel;
+        this.pg = pg;
     }
     modelFor(metric) {
         if (metric === 'reaction')
@@ -28096,7 +28243,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         if (metric === 'reaction')
             return ['success', 'failed', 'restricted', 'floods'];
         if (metric === 'user')
-            return ['newUsers', 'active', 'paid', 'revenue'];
+            return ['newUsers', 'active', 'paid'];
         return ['sent', 'success', 'failed', 'banned'];
     }
     lastNDates(days) {
@@ -28117,14 +28264,57 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             filter.namespace = namespace;
         if (mobile)
             filter.mobile = mobile;
-        return this.modelFor(metric)
+        const found = await this.modelFor(metric)
             .find(filter, { _id: 0, expireAt: 0, createdAt: 0 })
             .sort({ date: 1, clientId: 1 })
             .lean()
             .exec();
+        return metric === 'user'
+            ? found.map((r) => ({ ...r, revenue: 0, revenueSource: 'unavailable' }))
+            : found;
     }
-    async dailyTotals(metric, days = 14) {
-        const dates = this.lastNDates(days);
+    pgSelect(metric) {
+        return Object.entries(PG_COLUMNS[metric])
+            .map(([key, col]) => `COALESCE(SUM(${col}), 0)::bigint AS "${key}"`)
+            .join(', ');
+    }
+    async pgRevenue(dates) {
+        const from = dates.find((d) => d >= exports.REVENUE_FROM_DAY);
+        const out = new Map();
+        if (!from)
+            return out;
+        const rows = await this.pg.query(`SELECT to_char((ts AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS d, client_id,
+              SUM(amount)::bigint AS amt
+         FROM payment_event
+        WHERE ts >= $1::timestamptz AND NOT is_cheat AND amount > 0
+        GROUP BY 1, 2`, [`${from}T00:00:00+05:30`]);
+        if (!rows)
+            return undefined;
+        const set = new Set(dates);
+        for (const r of rows) {
+            if (!set.has(r.d))
+                continue;
+            if (!out.has(r.d))
+                out.set(r.d, new Map());
+            out.get(r.d).set(r.client_id, num(r.amt));
+        }
+        return out;
+    }
+    windowRevenueSource(dates) {
+        if (dates[0] >= exports.REVENUE_FROM_DAY)
+            return 'payment_event';
+        return dates[dates.length - 1] >= exports.REVENUE_FROM_DAY ? 'payment_event_partial' : 'unavailable';
+    }
+    mongoCutoff() {
+        return this.lastNDates(exports.MONGO_RETENTION_DAYS)[0];
+    }
+    async pgDailyRows(metric, dates) {
+        if (!dates.length)
+            return [];
+        return this.pg.query(`SELECT to_char(day, 'YYYY-MM-DD') AS d, ${this.pgSelect(metric)}
+         FROM daily_client WHERE day = ANY($1::date[]) GROUP BY day`, [dates]);
+    }
+    async mongoDailyTotals(metric, dates) {
         const fields = this.numericFields(metric);
         const group = { _id: '$date' };
         for (const f of fields)
@@ -28132,17 +28322,35 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         const agg = await this.modelFor(metric)
             .aggregate([{ $match: { date: { $in: dates } } }, { $group: group }, { $sort: { _id: 1 } }])
             .exec();
-        const byDate = new Map(agg.map((d) => [d._id, d]));
+        return new Map(agg.map((d) => [d._id, d]));
+    }
+    async hybridDailyTotals(metric, dates) {
+        const cutoff = this.mongoCutoff();
+        const old = dates.filter((d) => d < cutoff);
+        const recent = dates.filter((d) => d >= cutoff);
+        const pgRows = await this.pgDailyRows(metric, old);
+        if (!pgRows)
+            return undefined;
+        const revenue = metric === 'user' ? await this.pgRevenue(dates) : new Map();
+        if (!revenue)
+            return undefined;
+        const pgByDate = new Map(pgRows.map((r) => [String(r.d), r]));
+        const mongoByDate = recent.length ? await this.mongoDailyTotals(metric, recent) : new Map();
+        const fields = this.numericFields(metric);
         return dates.map((date) => {
-            const row = byDate.get(date) || {};
+            const row = (date < cutoff ? pgByDate : mongoByDate).get(date) || {};
             const out = { date };
             for (const f of fields)
-                out[f] = row[f] || 0;
+                out[f] = num(row[f]);
+            if (metric === 'user') {
+                const perClient = revenue.get(date);
+                out.revenue = perClient ? [...perClient.values()].reduce((a, b) => a + b, 0) : 0;
+                out.revenueSource = (date >= exports.REVENUE_FROM_DAY ? 'payment_event' : 'unavailable');
+            }
             return out;
         });
     }
-    async byClient(metric, days = 14, namespace) {
-        const dates = this.lastNDates(days);
+    async mongoByClientRows(metric, dates, namespace) {
         const fields = this.numericFields(metric);
         const match = { date: { $in: dates } };
         if (namespace)
@@ -28153,10 +28361,97 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         const agg = await this.modelFor(metric)
             .aggregate([{ $match: match }, { $group: group }, { $sort: { _id: 1 } }])
             .exec();
+        return agg.map((d) => ({ ...d, client_id: d._id }));
+    }
+    async hybridByClient(metric, dates, namespace) {
+        const cutoff = this.mongoCutoff();
+        const old = dates.filter((d) => d < cutoff);
+        const recent = dates.filter((d) => d >= cutoff);
+        const fields = this.numericFields(metric);
+        let pgRows = [];
+        if (old.length) {
+            const params = [old];
+            let nsClause = '';
+            if (namespace) {
+                params.push(namespace);
+                nsClause = 'AND namespace = $2';
+            }
+            const r = await this.pg.query(`SELECT client_id, ${this.pgSelect(metric)}
+           FROM daily_client WHERE day = ANY($1::date[]) ${nsClause} GROUP BY client_id`, params);
+            if (!r)
+                return undefined;
+            pgRows = r;
+        }
+        const revenueApplies = metric === 'user' && (!namespace || namespace === 'tg-aut');
+        const revenue = revenueApplies ? await this.pgRevenue(dates) : new Map();
+        if (!revenue)
+            return undefined;
+        const perClientRevenue = new Map();
+        for (const m of revenue.values())
+            for (const [c, a] of m)
+                perClientRevenue.set(c, (perClientRevenue.get(c) || 0) + a);
+        const mongoRows = recent.length ? await this.mongoByClientRows(metric, recent, namespace) : [];
+        const totals = new Map();
+        const add = (id, row) => {
+            const key = String(id);
+            const t = totals.get(key) || Object.fromEntries(fields.map((f) => [f, 0]));
+            for (const f of fields)
+                t[f] += num(row?.[f]);
+            totals.set(key, t);
+        };
+        for (const r of pgRows)
+            add(r.client_id, r);
+        for (const r of mongoRows)
+            add(r.client_id, r);
+        for (const c of perClientRevenue.keys())
+            if (!totals.has(c))
+                add(c, {});
+        const source = revenueApplies ? this.windowRevenueSource(dates) : 'unavailable';
+        return [...totals.entries()]
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([clientId, t]) => {
+            const out = { clientId, ...t };
+            if (metric === 'user') {
+                out.revenue = perClientRevenue.get(clientId) || 0;
+                out.revenueSource = source;
+            }
+            return out;
+        });
+    }
+    async dailyTotals(metric, days = 14) {
+        const dates = this.lastNDates(days);
+        const hybrid = await this.hybridDailyTotals(metric, dates);
+        if (hybrid)
+            return hybrid;
+        const fields = this.numericFields(metric);
+        const byDate = await this.mongoDailyTotals(metric, dates);
+        return dates.map((date) => {
+            const row = byDate.get(date) || {};
+            const out = { date };
+            for (const f of fields)
+                out[f] = row[f] || 0;
+            if (metric === 'user') {
+                out.revenue = 0;
+                out.revenueSource = 'unavailable';
+            }
+            return out;
+        });
+    }
+    async byClient(metric, days = 14, namespace) {
+        const dates = this.lastNDates(days);
+        const hybrid = await this.hybridByClient(metric, dates, namespace);
+        if (hybrid)
+            return hybrid;
+        const fields = this.numericFields(metric);
+        const agg = await this.mongoByClientRows(metric, dates, namespace);
         return agg.map((d) => {
             const out = { clientId: d._id };
             for (const f of fields)
                 out[f] = d[f] || 0;
+            if (metric === 'user') {
+                out.revenue = 0;
+                out.revenueSource = 'unavailable';
+            }
             return out;
         });
     }
@@ -28182,6 +28477,10 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             const out = { clientId: d._id.clientId, mobile: d._id.mobile };
             for (const f of fields)
                 out[f] = d[f] || 0;
+            if (metric === 'user') {
+                out.revenue = 0;
+                out.revenueSource = 'unavailable';
+            }
             return out;
         });
     }
@@ -28202,7 +28501,8 @@ exports.DailyAnalyticsService = DailyAnalyticsService = __decorate([
     __param(2, (0, mongoose_1.InjectModel)(daily_analytics_schema_1.UserStatDaily.name)),
     __metadata("design:paramtypes", [mongoose_2.Model,
         mongoose_2.Model,
-        mongoose_2.Model])
+        mongoose_2.Model,
+        analytics_pg_reader_1.AnalyticsPgReader])
 ], DailyAnalyticsService);
 
 
@@ -45009,6 +45309,14 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, required: false }),
     __metadata("design:type", Number)
 ], UserData.prototype, "windowCount", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Boolean, required: false }),
+    __metadata("design:type", Boolean)
+], UserData.prototype, "graceFlag", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "lastPaidAt", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
@@ -45507,6 +45815,8 @@ let UserDataService = UserDataService_1 = class UserDataService {
                     { $or: [{ firstPaidAt: { $exists: false } }, { firstPaidAt: null }] },
                     { $or: [{ highestPayAmount: { $exists: false } }, { highestPayAmount: { $lte: 0 } }] },
                     { $or: [{ paidCount: { $exists: false } }, { paidCount: { $lte: 0 } }] },
+                    { $or: [{ lifetimeCredits: { $exists: false } }, { lifetimeCredits: { $lte: 0 } }] },
+                    { $or: [{ lastPaidAt: { $exists: false } }, { lastPaidAt: null }] },
                 ],
             })
                 .exec();
@@ -53283,6 +53593,16 @@ module.exports = require("node-cache");
 (module) {
 
 module.exports = require("node-schedule-tz");
+
+/***/ },
+
+/***/ "pg"
+/*!*********************!*\
+  !*** external "pg" ***!
+  \*********************/
+(module) {
+
+module.exports = require("pg");
 
 /***/ },
 
