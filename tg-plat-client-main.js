@@ -49,6 +49,7 @@ class AnalyticsSink {
         this.buffer = [];
         this.timer = null;
         this.flushing = false;
+        this.inFlight = null;
         this.stopped = false;
         this.enabled = false;
         this.disabledReason = "not started";
@@ -286,8 +287,24 @@ class AnalyticsSink {
         }
     }
     // ── flushing ─────────────────────────────────────────────────────────────────────────────────
-    /** Rules 3 and 5. Resolves always; rejects never. */
+    /**
+     * Rules 3 and 5. Resolves always; rejects never.
+     *
+     * A call made while a flush is already running JOINS it rather than returning at once. The old
+     * early return let stop() run pool.end() under a timer flush that was still inserting (the
+     * rest of its loop then failed against the ended pool), and let a caller see `buffered === 0`
+     * while a spliced-out batch was still mid-INSERT. The running loop drains rows enqueued after
+     * it started, so awaiting it is enough.
+     */
     async flush() {
+        if (this.inFlight)
+            return this.inFlight;
+        this.inFlight = this.flushOnce().finally(() => {
+            this.inFlight = null;
+        });
+        return this.inFlight;
+    }
+    async flushOnce() {
         if (!this.enabled || this.flushing || !this.pool)
             return;
         if (this.buffer.length === 0)
@@ -377,6 +394,10 @@ class AnalyticsSink {
             // hang application shutdown.
             await withTimeout((async () => {
                 try {
+                    this.backoffUntil = 0;
+                    // The first call may only join a timer flush that started before stop(); the second
+                    // drains anything that flush left behind (e.g. it broke out on an armed backoff).
+                    await this.flush();
                     this.backoffUntil = 0;
                     await this.flush();
                 }
