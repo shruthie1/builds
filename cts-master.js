@@ -49773,13 +49773,13 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
             if (!(0, channel_eligibility_1.isEligibleDiscoveredChannel)(channel))
                 return null;
             const facts = await (0, channel_live_facts_1.getTelegramChannelLiveFacts)({ getEntity: async () => channel }, { channelId: channel.id, entity: channel });
-            if (!facts) {
+            if (!facts || facts.private || facts.left) {
                 return null;
             }
             return {
                 channelId: facts.channelId,
                 canSendMsgs: facts.canSendMsgs,
-                private: facts.private,
+                private: false,
                 forbidden: facts.forbidden,
                 lastHydrationStatus: 'success',
                 lastHydrationReason: facts.canSendMsgs ? 'live_sendable' : 'live_unsendable',
