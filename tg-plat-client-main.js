@@ -9462,6 +9462,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* binding */ PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   classifyTelegramChannelError: () => (/* binding */ classifyTelegramChannelError),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* binding */ computeLiveCanSendMsgs),
+/* harmony export */   deriveSharedChannelVerdict: () => (/* binding */ deriveSharedChannelVerdict),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* binding */ deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* binding */ evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* binding */ evaluateChannelSendability),
@@ -9475,7 +9476,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   participantsCountRecentlyChecked: () => (/* binding */ participantsCountRecentlyChecked),
 /* harmony export */   resolveChannelHydrationNeed: () => (/* binding */ resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* binding */ resolvePromotionFailureAction),
-/* harmony export */   shouldHydrateBeforeFinalReject: () => (/* binding */ shouldHydrateBeforeFinalReject)
+/* harmony export */   shouldHydrateBeforeFinalReject: () => (/* binding */ shouldHydrateBeforeFinalReject),
+/* harmony export */   toLiveChannelObservation: () => (/* binding */ toLiveChannelObservation)
 /* harmony export */ });
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS = 30;
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_MS = DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
@@ -9668,6 +9670,20 @@ function shouldHydrateBeforeFinalReject(doc, policy = {}) {
     const stale = getChannelDocStaleness(doc, policy);
     return stale.stale;
 }
+function deriveSharedChannelVerdict(input) {
+    const facts = deriveTelegramChannelLiveFacts(input);
+    const accountScoped = facts.private === true || facts.left === true;
+    const accountCanSendMsgs = computeLiveCanSendMsgs(facts);
+    if (accountScoped) {
+        return { accountScoped, accountCanSendMsgs, sharedCanSendMsgs: null, reason: 'account_scoped' };
+    }
+    return {
+        accountScoped,
+        accountCanSendMsgs,
+        sharedCanSendMsgs: accountCanSendMsgs,
+        reason: accountCanSendMsgs ? 'live_sendable' : (evaluateChannelSendability(facts).reason || 'live_unsendable'),
+    };
+}
 function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
     const liveFacts = deriveTelegramChannelLiveFacts(liveFactsInput);
     // Only an OPERATOR ban (banned + bannedAt, stamped by the CMS operator path) is durable. A
@@ -9676,18 +9692,17 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
     const banned = existing?.banned === true && existing?.bannedAt != null;
     // `forbidden` is never durable; it only reflects what this observation says.
     const forbidden = liveFacts.forbidden === true;
-    const liveCanSendMsgs = computeLiveCanSendMsgs(liveFacts);
+    const verdict = deriveSharedChannelVerdict(liveFacts);
+    const liveCanSendMsgs = verdict.accountCanSendMsgs;
     // What THIS account may do right now (returned to the caller, never the shared truth).
     const accountCanSendMsgs = !banned && !forbidden && liveCanSendMsgs;
-    // `private` (only ever derived from a ChannelForbidden/ChatForbidden entity: GramJS Channel has no
-    // such field) and `left` describe this account's access, not the channel. Such an observation says
-    // nothing about whether members can send, so the shared sendability keeps its stored value; it
-    // used to persist canSendMsgs:false + private:true and close the channel for every account
-    // (measured 2026-10-04: 342 of 1,700 "private" channels were promoted by other accounts after).
-    const accountScoped = liveFacts.private === true || liveFacts.left === true;
+    // An account-scoped observation (private/left, see deriveSharedChannelVerdict) keeps the stored
+    // shared sendability; it used to persist canSendMsgs:false + private:true and close the channel for
+    // every account (2026-10-04: 342 of 1,700 "private" channels were promoted by others afterwards).
+    const accountScoped = verdict.accountScoped;
     const canSendMsgs = accountScoped
         ? !banned && !forbidden && existing?.canSendMsgs === true
-        : accountCanSendMsgs;
+        : !banned && !forbidden && verdict.sharedCanSendMsgs === true;
     const recoveredSendability = canSendMsgs && (existing?.canSendMsgs === false
         || existing?.private === true);
     const sendability = evaluateChannelSendability({ ...liveFacts, banned, forbidden });
@@ -10135,6 +10150,24 @@ function classification(code, scope, reason, waitSeconds, transient, shouldPersi
         shouldPausePromotionCycle,
     };
 }
+function toLiveChannelObservation(info) {
+    const hasChannelWideFacts = info.sendMessages != null || info.sendPlain != null || info.defaultBannedRights != null
+        || info.restricted != null || info.broadcast != null;
+    const verdict = hasChannelWideFacts
+        ? deriveSharedChannelVerdict(info)
+        : { sharedCanSendMsgs: info.canSendMsgs === true ? true : null, reason: info.canSendMsgs === true ? 'live_sendable' : 'account_scoped' };
+    return {
+        channelId: normalizeChannelId(info.channelId),
+        title: info.title ?? null,
+        username: info.username ?? null,
+        participantsCount: info.participantsCount ?? null,
+        broadcast: info.broadcast ?? null,
+        megagroup: info.megagroup ?? null,
+        accessHash: info.accessHash != null ? String(info.accessHash) : null,
+        sharedCanSendMsgs: verdict.sharedCanSendMsgs,
+        reason: verdict.reason,
+    };
+}
 
 
 /***/ },
@@ -10249,6 +10282,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   classifyTelegramChannelError: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.classifyTelegramChannelError),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.computeLiveCanSendMsgs),
+/* harmony export */   deriveSharedChannelVerdict: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.deriveSharedChannelVerdict),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelSendability),
@@ -10262,7 +10296,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   participantsCountRecentlyChecked: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.participantsCountRecentlyChecked),
 /* harmony export */   resolveChannelHydrationNeed: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.resolvePromotionFailureAction),
-/* harmony export */   shouldHydrateBeforeFinalReject: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.shouldHydrateBeforeFinalReject)
+/* harmony export */   shouldHydrateBeforeFinalReject: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.shouldHydrateBeforeFinalReject),
+/* harmony export */   toLiveChannelObservation: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.toLiveChannelObservation)
 /* harmony export */ });
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-state */ "../../packages/tg-channel-state/src/channel-state/channel-state.ts");
 /* harmony import */ var _hydrate_channel_document__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./hydrate-channel-document */ "../../packages/tg-channel-state/src/channel-state/hydrate-channel-document.ts");
@@ -10350,6 +10385,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createPromotionRuntime: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createPromotionRuntime),
 /* harmony export */   deletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deletionRate),
 /* harmony export */   deriveProvenBySource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deriveProvenBySource),
+/* harmony export */   deriveSharedChannelVerdict: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.deriveSharedChannelVerdict),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.evaluateChannelSendability),
@@ -10402,7 +10438,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shouldMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.shouldMatch),
 /* harmony export */   shouldNotMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.shouldNotMatch),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.shouldRetainPoolCandidate),
-/* harmony export */   survivalRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.survivalRate)
+/* harmony export */   survivalRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.survivalRate),
+/* harmony export */   toLiveChannelObservation: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.toLiveChannelObservation)
 /* harmony export */ });
 /* harmony import */ var _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-message-promotions */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
 /* harmony import */ var _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-message-promotions/promotion-engine/BasePromotionEngine */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/BasePromotionEngine.ts");
@@ -19844,10 +19881,11 @@ class BaseRepository {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ACTIVE_CHANNEL_COUNTER_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_COUNTER_FIELDS),
 /* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* binding */ ACTIVE_CHANNEL_MESSAGE_IDS),
 /* harmony export */   ChannelsRepository: () => (/* binding */ ChannelsRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* binding */ activeChannelSetOnInsert),
+/* harmony export */   availableMsgsUpdateExpression: () => (/* binding */ availableMsgsUpdateExpression),
+/* harmony export */   buildLiveChannelUpsert: () => (/* binding */ buildLiveChannelUpsert),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* binding */ normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* binding */ normalizeChannelKey),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* binding */ sanitizeAvailableMsgs)
@@ -19861,17 +19899,6 @@ __webpack_require__.r(__webpack_exports__);
  * expect rather than `undefined`. Keys already present in the write are omitted — a default must
  * never fight the value the caller just supplied.
  */
-/**
- * The legacy per-channel counters both apps still $inc. An allow-list, so a typo or a
- * caller-supplied field name can never reach the update document.
- */
-const ACTIVE_CHANNEL_COUNTER_FIELDS = [
-    'deletedCount',
-    'successMsgCount',
-    'failureMsgCount',
-    'followupMsgSuccessCount',
-    'followupMsgFailureCount',
-];
 function activeChannelSetOnInsert(channelId, omitFields = []) {
     const defaults = {
         channelId,
@@ -19887,6 +19914,7 @@ function activeChannelSetOnInsert(channelId, omitFields = []) {
         private: false,
         forbidden: false,
         reactRestricted: false,
+        availableMsgs: [...ACTIVE_CHANNEL_MESSAGE_IDS],
     };
     for (const field of omitFields)
         delete defaults[field];
@@ -20085,64 +20113,44 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
         return updated;
     }
     /**
-     * Atomically coerce-then-increment a legacy counter on activeChannels.
-     *
-     * ── THE DIVERGENCE THIS FIXES ──────────────────────────────────────────────────────────────
-     * tg-aut guarded these five counters with `ensureActiveChannelNumericField` (6 call sites);
-     * promote-clients had NO guard at all, while $inc-ing the SAME five fields on the SAME
-     * fleet-shared rows. A `$inc` against a non-numeric value fails the whole write, and a
-     * negative increment can drive a count below zero. So a field tg-aut was carefully
-     * protecting could be corrupted by its twin.
-     *
-     * Measured on production 2026-09-14 BEFORE this change: 0 non-numeric and 0 negative across
-     * deletedCount (329 present), successMsgCount (1919), failureMsgCount (103),
-     * followupMsgSuccessCount (1799), followupMsgFailureCount (71). So this closes a LATENT
-     * hazard — there is no corrupt data to migrate.
-     *
-     * ── WHY A PIPELINE, NOT read-then-write ────────────────────────────────────────────────────
-     * tg-aut's guard did findOne() then updateOne(): two round trips with a race between them, so
-     * a concurrent writer could still land a bad value in the gap. One aggregation pipeline
-     * coerces and increments in a single atomic operation, which is both correct and half the
-     * round trips.
-     *
-     * Coercion rule: a non-numeric or negative stored value is treated as 0 before adding. The
-     * result is floored at 0 so a negative increment can never drive the counter below zero.
-     *
-     * NOTE: these counters were dropped from IChannel during the channelIntelligence
-     * single-source migration, but live callers (PromotionEngine) still increment them on rows
-     * the DB still carries. Do not add new callers.
+     * THE bulk live refresh (dialog lists). Both apps used to build these upserts themselves with
+     * slightly different rules; the shared-vs-account split is decided by @tg/channel-state
+     * (toLiveChannelObservation), this only turns rows into atomic upserts.
      */
-    async incrementChannelCounter(channelId, field, increment = 1, extraSet) {
-        const normalizedId = normalizeChannelKey(channelId);
-        if (!normalizedId)
-            return false;
-        if (!ACTIVE_CHANNEL_COUNTER_FIELDS.includes(field)) {
-            this.logger?.warn?.(`incrementChannelCounter: refusing unknown field ${field}`);
-            return false;
-        }
-        if (!Number.isFinite(increment))
-            return false;
-        // $ifNull catches a missing field; the $cond catches a stored string/object/negative.
-        // $max floors the result so a negative increment cannot push the counter below zero.
-        const coercedCurrent = {
-            $let: {
-                vars: { current: { $ifNull: [`$${field}`, 0] } },
-                in: {
-                    $cond: [
-                        { $and: [{ $isNumber: '$$current' }, { $gte: ['$$current', 0] }] },
-                        '$$current',
-                        0,
-                    ],
-                },
+    async bulkUpsertLiveChannels(rows, now = Date.now()) {
+        const ops = rows
+            .map((row) => buildLiveChannelUpsert(row, now))
+            .filter((op) => op !== null)
+            .map(({ channelId, write, setOnInsert }) => ({
+            updateOne: {
+                filter: { channelId },
+                update: (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.buildActiveChannelUpsertPipeline)(write, setOnInsert),
+                upsert: true,
             },
-        };
-        const write = {
-            [field]: { $max: [0, { $add: [coercedCurrent, increment] }] },
-            updatedAt: new Date(),
-            ...(extraSet ?? {}),
-        };
-        const setOnInsert = activeChannelSetOnInsert(normalizedId, Object.keys(write));
-        return this.guardWrite(`incrementChannelCounter(${normalizedId}.${field})`, () => this.collection.updateOne({ channelId: normalizedId }, (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.buildActiveChannelUpsertPipeline)(write, setOnInsert), { upsert: true }));
+        }));
+        if (ops.length === 0)
+            return { matched: 0, modified: 0, upserted: 0 };
+        return this.guard(`bulkUpsertLiveChannels(${ops.length})`, null, async () => {
+            const result = await this.collection.bulkWrite(ops, { ordered: false });
+            return { matched: result.matchedCount, modified: result.modifiedCount, upserted: result.upsertedCount };
+        });
+    }
+    /** Remove one template id. A missing/non-array field means "all templates", so it is materialized first (atomically). Never upserts. */
+    async removeFromAvailableMsgs(channelId, messageId) {
+        return this.updateAvailableMsgs(channelId, messageId, 'remove');
+    }
+    /** Re-add one known template id (unknown ids are refused). Never upserts. */
+    async addToAvailableMsgs(channelId, messageId) {
+        return this.updateAvailableMsgs(channelId, messageId, 'add');
+    }
+    async updateAvailableMsgs(channelId, messageId, mode) {
+        const normalizedId = normalizeChannelKey(channelId);
+        const id = typeof messageId === 'string' ? messageId.trim() : '';
+        if (!normalizedId || !id)
+            return false;
+        if (mode === 'add' && !ACTIVE_CHANNEL_MESSAGE_IDS.includes(id))
+            return false;
+        return this.guardWrite(`${mode}AvailableMsgs(${normalizedId},${id})`, () => this.collection.updateOne({ channelId: normalizedId }, [{ $set: { availableMsgs: availableMsgsUpdateExpression(id, mode), updatedAt: new Date() } }]));
     }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(channelId)', () => this.collection.createIndex({ channelId: 1 }, { unique: true, name: 'channelId_1' }));
@@ -20163,6 +20171,44 @@ function normalizeChannelKey(value) {
         return null;
     const normalized = raw.replace(/^-100/, '').replace(/^-/, '');
     return normalized.length > 0 && normalized !== '0' ? normalized : null;
+}
+/**
+ * Pure: a live observation -> the atomic upsert parts. Identity fields go through the same
+ * normalizeActiveChannelWrite rules as single writes; sendability through the operator-ban guard.
+ */
+function buildLiveChannelUpsert(row, now) {
+    const channelId = normalizeChannelKey(row.channelId);
+    if (!channelId || !/^\d+$/.test(channelId))
+        return null;
+    const { data } = normalizeActiveChannelWrite({
+        title: row.title,
+        username: row.username,
+        participantsCount: row.participantsCount,
+        accessHash: row.accessHash,
+        broadcast: row.broadcast,
+        megagroup: row.megagroup,
+    });
+    const write = { ...(0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.pickActiveChannelWrite)(data), updatedAt: new Date(now) };
+    if (typeof row.sharedCanSendMsgs === 'boolean') {
+        write.canSendMsgs = (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.activeChannelCanSendUpdateExpression)(row.sharedCanSendMsgs);
+        // A live "members can send" clears stale non-operator banned/forbidden and a stale private.
+        Object.assign(write, (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.activeChannelStaleFlagClearFields)(row.sharedCanSendMsgs));
+        if (row.sharedCanSendMsgs)
+            write.private = false;
+        write.lastHydratedAt = now;
+        write.lastHydrationStatus = 'success';
+        write.lastHydrationReason = (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.activeChannelHydrationReasonUpdateExpression)(row.reason || (row.sharedCanSendMsgs ? 'live_sendable' : 'live_unsendable'));
+    }
+    write.lastLiveCheckedAt = now;
+    return { channelId, write, setOnInsert: activeChannelSetOnInsert(channelId, Object.keys(write)) };
+}
+/** Atomic availableMsgs edit: a missing/non-array value means the full default set. */
+function availableMsgsUpdateExpression(id, mode) {
+    const base = { $cond: [{ $isArray: ['$availableMsgs'] }, '$availableMsgs', { $literal: [...ACTIVE_CHANNEL_MESSAGE_IDS] }] };
+    if (mode === 'remove') {
+        return { $filter: { input: base, as: 'm', cond: { $ne: ['$$m', id] } } };
+    }
+    return { $cond: [{ $in: [id, base] }, base, { $concatArrays: [base, [id]] }] };
 }
 
 
@@ -21011,7 +21057,6 @@ function describeError(error) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ACTIVE_CHANNEL_COUNTER_FIELDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_COUNTER_FIELDS),
 /* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_MESSAGE_IDS),
 /* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.ATTRIBUTION_CHANNEL_CAP),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
@@ -21033,6 +21078,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
 /* harmony export */   adoptMongoClient: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.adoptMongoClient),
+/* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
+/* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ensureAllIndexes),
@@ -30586,18 +30633,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   UserDataDtoCrud: () => (/* binding */ UserDataDtoCrud),
 /* harmony export */   user: () => (/* binding */ user)
 /* harmony export */ });
-/* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
-/* harmony import */ var _tg_core__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core */ "../../packages/tg-core/src/index.ts");
-/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! mongodb */ "mongodb");
-/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
-/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
-/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core */ "../../packages/tg-core/src/index.ts");
+/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! mongodb */ "mongodb");
+/* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
+/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
+/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
@@ -30608,8 +30654,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:dbservice");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
     totalCount: "totalCount",
@@ -30683,7 +30728,7 @@ class UserDataDtoCrud {
          * The @tg/db composition root for this process. Rebuilds its repositories whenever the
          * MongoClient changes, so a reconnect can never leave a repository wrapping a closed handle.
          */
-        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_5__.RepositoryContainer(logger);
+        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_4__.RepositoryContainer(logger);
         /**
          * Lazily build the daily-stats repository over the app's live MongoClient.
          *
@@ -30729,7 +30774,7 @@ class UserDataDtoCrud {
         if (!this.client) {
             logger.log('trying to connect to DB......');
             try {
-                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_2__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
+                const connectedClient = await mongodb__WEBPACK_IMPORTED_MODULE_1__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
                 if (generation !== this.connectionGeneration) {
                     logger.warn('Mongo connection completed after close was requested; closing stale connected client');
                     await connectedClient.close();
@@ -30767,7 +30812,7 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
@@ -30780,7 +30825,7 @@ class UserDataDtoCrud {
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error connecting to MongoDB");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error connecting to MongoDB");
                 await this.closeConnection();
                 return false;
             }
@@ -30802,7 +30847,7 @@ class UserDataDtoCrud {
                 .updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating tgaut client stat daysLeft");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating tgaut client stat daysLeft");
         }
     }
     getActiveChannelCollection() {
@@ -30818,7 +30863,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -30865,7 +30910,7 @@ class UserDataDtoCrud {
                 await this.closePromotionRedis();
                 throw error;
             }
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.createPromotionRuntime)({
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.createPromotionRuntime)({
                 channelIntelligenceCollection: this.channelIntelligenceDb,
                 activeChannelCollection: this.activeChannelDb,
                 redis,
@@ -30877,7 +30922,7 @@ class UserDataDtoCrud {
             logger.log('Promotion runtime initialized; collections=channelIntelligence,activeChannels');
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Promotion runtime initialization failed');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Promotion runtime initialization failed');
             await this.closePromotionRedis();
             throw error;
         }
@@ -30891,7 +30936,7 @@ class UserDataDtoCrud {
             redis.disconnect?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error closing promotion Redis connection', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Error closing promotion Redis connection', false);
         }
     }
     async refreshPromotionRuntime() {
@@ -30900,7 +30945,7 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
         await this.ensurePromoteStatsInitialized();
         return true;
@@ -30908,7 +30953,7 @@ class UserDataDtoCrud {
     async checkIfUserAlreadyExists(chatId) {
         // Scoped: an unqualified { chatId } matched ANY persona's row, so a user who had only ever
         // talked to a different persona was reported as already-existing to this one.
-        const document = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.readFilter)(chatId));
+        const document = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.readFilter)(chatId));
         if (document) {
             return true;
         }
@@ -30922,7 +30967,7 @@ class UserDataDtoCrud {
             // OTHERS scope. This previously filtered `client: { $ne: clientId }`, but userData has
             // no `client` field — so $ne matched every row, including this client's own. Scope by
             // persona, which is the identity userData actually stores.
-            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.othersFilter)(chatId)).toArray();
+            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.othersFilter)(chatId)).toArray();
             // Preprocess list extraction once
             const profiles = [];
             const lastDayProfiles = [];
@@ -30957,14 +31002,14 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching texted client count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
     }
     async checkIfPaidToOthers(chatId) {
         const resp = { paid: '', demoGiven: '' };
         try {
-            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.othersFilter)(chatId)).toArray();
+            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.othersFilter)(chatId)).toArray();
             for (const doc of documents) {
                 if (doc.payAmount >= 10) {
                     resp.paid = resp.paid + `@${this.clients[doc.profile]?.username}` + ", ";
@@ -30975,7 +31020,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error checking payment status");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error checking payment status");
         }
         return resp;
     }
@@ -31070,7 +31115,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error ensuring daily analytics indexes", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error ensuring daily analytics indexes", false);
         }
     }
     /**
@@ -31088,7 +31133,7 @@ class UserDataDtoCrud {
         const repositories = this.repositories.get(client);
         if (!repositories)
             return;
-        await (0,_tg_db__WEBPACK_IMPORTED_MODULE_5__.ensureAllIndexes)(repositories, logger);
+        await (0,_tg_db__WEBPACK_IMPORTED_MODULE_4__.ensureAllIndexes)(repositories, logger);
     }
     todayKey() {
         const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -31159,7 +31204,7 @@ class UserDataDtoCrud {
             return null;
         if (this.dailyStats?.client === this.client)
             return this.dailyStats.repository;
-        const repository = new _tg_db__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository((0,_tg_db__WEBPACK_IMPORTED_MODULE_5__.adoptMongoClient)(this.client, { logger }), logger);
+        const repository = new _tg_db__WEBPACK_IMPORTED_MODULE_4__.DailyStatsRepository((0,_tg_db__WEBPACK_IMPORTED_MODULE_4__.adoptMongoClient)(this.client, { logger }), logger);
         this.dailyStats = { client: this.client, repository };
         return repository;
     }
@@ -31254,7 +31299,7 @@ class UserDataDtoCrud {
                     // Store timeout reference and unref to allow process exit if needed
                     const limitTimeout = setTimeout(() => {
                         void this.updateSingleKey(chatId, user.limitTime, Date.now() + (2 * 60 * 60 * 1000))
-                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
+                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
                     }, 20000);
                     limitTimeout.unref();
                 }
@@ -31270,7 +31315,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Creating/updating stats", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Creating/updating stats", false);
         }
     }
     // =========================================================================
@@ -31326,18 +31371,18 @@ class UserDataDtoCrud {
         // undefined would send an existing user down the new-user path. Raw path below covers pre-connection.
         const repositories = this.repositories.get(this.client);
         if (repositories) {
-            return await repositories.userData.findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)()) ?? undefined;
+            return await repositories.userData.findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)()) ?? undefined;
         }
-        const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownFilter)(chatId);
+        const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.ownFilter)(chatId);
         if (own) {
             const owned = await this.db.findOne(own);
             if (owned)
                 return owned;
         }
-        return (await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.personaFilter)(chatId))) ?? undefined;
+        return (await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(chatId))) ?? undefined;
     }
     async delete(chatId) {
-        const result = await this.db.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.personaFilter)(chatId));
+        const result = await this.db.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(chatId));
     }
     async read(chatId) {
         const result = await this.readOwnThenPersona(chatId);
@@ -31355,7 +31400,7 @@ class UserDataDtoCrud {
             const profile = process.env.dbcoll?.trim();
             if (!normalizedChatId || !profile)
                 return false;
-            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(channelIds);
+            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(channelIds);
             const update = normalizedChannelIds.length > 0
                 ? {
                     $set: { attributionUpdatedAt: Date.now() },
@@ -31364,11 +31409,11 @@ class UserDataDtoCrud {
                 : { $set: { attributionUpdatedAt: Date.now() } };
             // upsert:false — merges into an EXISTING conversation row only, so the persona-index
             // shape is correct here and cannot create a duplicate.
-            const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.personaFilter)(normalizedChatId, { profile }), update, { upsert: false });
+            const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(normalizedChatId, { profile }), update, { upsert: false });
             return result.acknowledged && result.matchedCount === 1;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
             return false;
         }
     }
@@ -31400,7 +31445,7 @@ class UserDataDtoCrud {
             logger.warn?.(`creditPayment(${chatId}) skipped: repositories unavailable`);
             return false;
         }
-        const result = await repositories.userData.creditPayment(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), {
+        const result = await repositories.userData.creditPayment(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)(), {
             amount,
             key: paymentKey,
         });
@@ -31517,7 +31562,7 @@ class UserDataDtoCrud {
             // never lands here either.
             try {
                 if (creditedNow > 0)
-                    (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_6__.getAnalytics)().recordPayment({
+                    (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_5__.getAnalytics)().recordPayment({
                         chatId: normalizedChatId,
                         clientId,
                         personaId: profile,
@@ -31535,7 +31580,7 @@ class UserDataDtoCrud {
         }
         catch (error) {
             // Analytics counting must never block payment service.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
         }
         await this.processPendingPaymentAttributions(normalizedChatId);
     }
@@ -31570,14 +31615,14 @@ class UserDataDtoCrud {
             return summary;
         let attribution;
         try {
-            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.getInstance().attribution;
+            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.getInstance().attribution;
             if (!runtimeAttribution)
                 throw new Error('conversion attribution is disabled');
             attribution = runtimeAttribution;
         }
         catch (error) {
             summary.failed = candidates.length;
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Payment attribution runtime unavailable', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Payment attribution runtime unavailable', false);
             return summary;
         }
         const dayKey = formatAttributionDayKey(Date.now());
@@ -31588,8 +31633,8 @@ class UserDataDtoCrud {
                 continue;
             }
             try {
-                const userData = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.personaFilter)(candidateChatId, { profile }), { projection: { attributionChannelIds: 1 } });
-                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
+                const userData = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(candidateChatId, { profile }), { projection: { attributionChannelIds: 1 } });
+                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
                 if (channelIds.length === 0) {
                     summary.awaitingChannels += 1;
                     continue;
@@ -31613,7 +31658,7 @@ class UserDataDtoCrud {
             }
             catch (error) {
                 summary.failed += 1;
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
             }
         }
         logger.log(`Payment attribution reconcile | scanned=${summary.scanned} credited=${summary.credited} awaitingChannels=${summary.awaitingChannels} failed=${summary.failed}`);
@@ -31821,7 +31866,7 @@ class UserDataDtoCrud {
             return updatedDocument;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating promotion stats");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating promotion stats");
         }
     }
     async activatePromotions() {
@@ -31920,7 +31965,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching paid users");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching paid users");
             return ({ total: 0, new: 0 });
         }
     }
@@ -31951,7 +31996,7 @@ class UserDataDtoCrud {
             const result = await this.statsDb.deleteMany({ chatId, profile: process.env.dbcoll, client: process.env.clientId });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error removing single stat");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error removing single stat");
         }
     }
     async readRecentPaidPpl() {
@@ -31985,7 +32030,7 @@ class UserDataDtoCrud {
         let ppl = '';
         // MINE-scoped: this feeds an operator's own /paid listing. Unscoped it ranked the ENTIRE
         // fleet's payers, so one client's command surfaced other clients' users.
-        const result = await this.db.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.mineFilter)(), payAmount: { $gt: 26 } }).sort({ lastMsgTimeStamp: -1 }).limit(25).toArray();
+        const result = await this.db.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)(), payAmount: { $gt: 26 } }).sort({ lastMsgTimeStamp: -1 }).limit(25).toArray();
         if (result) {
             result.forEach((element) => {
                 ppl = ppl + '\n ' + element?.username + ' : ' + element?.paidCount + "|" + element?.payAmount;
@@ -31999,7 +32044,7 @@ class UserDataDtoCrud {
     async getPaidListIds() {
         let ppl = [];
         // MINE-scoped for the same reason as getPaidList above.
-        const result = await this.db.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.mineFilter)(), payAmount: { $gt: 26 } }).sort({ lastMsgTimeStamp: -1 }).limit(25).toArray();
+        const result = await this.db.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)(), payAmount: { $gt: 26 } }).sort({ lastMsgTimeStamp: -1 }).limit(25).toArray();
         if (result) {
             for (const element of result) {
                 const username = typeof element?.username === 'string' ? element.username : '';
@@ -32012,81 +32057,19 @@ class UserDataDtoCrud {
             return undefined;
         }
     }
+    /** Live dialog refresh -> the ONE bulk writer (tg-db ChannelsRepository.bulkUpsertLiveChannels). */
     async bulkUpdateChannels(newData) {
-        try {
-            if (!Array.isArray(newData) || newData.length === 0) {
-                logger.debug('No channels to bulk update');
-                return;
-            }
-            const validChannelData = newData.filter((doc) => {
-                if (doc?.channelId == null)
-                    return false;
-                const channelId = this.normalizeChannelIdForDb(doc.channelId);
-                return this.isValidNormalizedChannelId(channelId);
-            });
-            if (validChannelData.length === 0) {
-                logger.debug('No valid channels to bulk update');
-                return;
-            }
-            const bulkOps = validChannelData.map(doc => {
-                const channelId = this.normalizeChannelIdForDb(doc.channelId);
-                // Collapse Telegram's overlapping live permission flags into one
-                // persisted eligibility result. A bulk refresh must not overwrite
-                // an existing durable ban / forbidden safety stop; the guard stays
-                // in Mongo's atomic update so a concurrent operator ban also wins.
-                const telegramCanSend = doc.canSendMsgs === false ? false : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)(doc);
-                const setFields = {
-                    updatedAt: new Date(),
-                };
-                if (typeof doc.broadcast === 'boolean')
-                    setFields.broadcast = doc.broadcast;
-                if (typeof doc.megagroup === 'boolean')
-                    setFields.megagroup = doc.megagroup;
-                setFields.canSendMsgs = (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.activeChannelCanSendUpdateExpression)(telegramCanSend);
-                // A live "members can send" dialog clears a stale non-operator banned/forbidden.
-                Object.assign(setFields, (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.activeChannelStaleFlagClearFields)(telegramCanSend));
-                const liveDoc = doc;
-                // `private` is a live Telegram fact. A freshly sendable
-                // dialog conclusively clears a stale private marker; a
-                // non-sendable source may explicitly assert it.
-                // `private` is only ever this account's view (a Forbidden entity), so a runtime refresh
-                // never asserts it on the shared doc; a sendable dialog does clear a stale one.
-                if (telegramCanSend)
-                    setFields.private = false;
-                if (!telegramCanSend) {
-                    if (typeof liveDoc.forbidden === 'boolean')
-                        setFields.forbidden = liveDoc.forbidden;
-                }
-                setFields.lastHydratedAt = Date.now();
-                setFields.lastLiveCheckedAt = Date.now();
-                setFields.lastHydrationStatus = 'success';
-                const liveHydrationReason = telegramCanSend
-                    ? 'live_sendable'
-                    : (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.evaluateChannelSendability)(doc).reason || 'live_unsendable';
-                setFields.lastHydrationReason = (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.activeChannelHydrationReasonUpdateExpression)(liveHydrationReason);
-                const identityFields = this.normalizeActiveChannelIdentityFields(doc);
-                Object.assign(setFields, identityFields);
-                if (doc.participantsCount != null) {
-                    const participantsCount = this.normalizeNonNegativeNumber(doc.participantsCount);
-                    if (participantsCount != null && participantsCount > 0) {
-                        setFields.participantsCount = Math.floor(participantsCount);
-                    }
-                }
-                const setOnInsert = this.activeChannelSetOnInsert(channelId, Object.keys(setFields));
-                return {
-                    updateOne: {
-                        filter: { channelId },
-                        update: (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.buildActiveChannelUpsertPipeline)(setFields, setOnInsert),
-                        upsert: true,
-                    },
-                };
-            });
-            const result = await this.activeChannelDb.bulkWrite(bulkOps, { ordered: false });
-            logger.log(`Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, Upserts: ${result.upsertedCount}`);
+        if (!Array.isArray(newData) || newData.length === 0)
+            return null;
+        const channels = this.repositories.get(this.client)?.channels;
+        if (!channels) {
+            logger.warn('Skipping bulk channel refresh: database not connected');
+            return null;
         }
-        catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(e, "Failed to Bulk update Channels");
-        }
+        const result = await channels.bulkUpsertLiveChannels(newData.map((doc) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.toLiveChannelObservation)(doc)));
+        if (result)
+            logger.log(`Matched: ${result.matched}, Modified: ${result.modified}, Upserts: ${result.upserted}`);
+        return result;
     }
     async update(chatId, updates) {
         if (!chatId || !updates) {
@@ -32095,7 +32078,7 @@ class UserDataDtoCrud {
         }
         // Declared OUTSIDE the try so the duplicate-key retry in the catch can reuse the exact same
         // filter and payload. Rebuilding them there would risk a subtly different write.
-        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.requireProfile)();
         let setFields = {};
         let setOnInsert = {};
         // Set once the write is delegated: UserDataRepository.upsert has ALREADY spent the one
@@ -32130,7 +32113,7 @@ class UserDataDtoCrud {
             // Stamp ownership AFTER the conflict strip: `clientId` is never a caller-supplied
             // update, so it cannot collide, and adding it before the loop would risk it being
             // stripped by a future caller that does pass one.
-            Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownershipOnInsert)());
+            Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.ownershipOnInsert)());
             // 4️⃣ Perform upsert safely.
             // Same posture as updateSingleKey/createOrUpdate: the filter stays on the
             // (chatId, profile) unique-index pair because an $or cannot seed an insert, and
@@ -32146,7 +32129,7 @@ class UserDataDtoCrud {
             const repositories = this.repositories.get(this.client);
             if (repositories) {
                 retriedByRepository = true;
-                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update);
+                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)(), update);
                 return viaRepo ?? await this.read(chatId);
             }
             const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
@@ -32161,7 +32144,7 @@ class UserDataDtoCrud {
             // already performed exactly this retry and rethrown, so running it again would make one
             // wanted row cost three write attempts against a database that is already failing. The
             // block stays for the raw fallback above, which still runs pre-connection.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error) && !retriedByRepository) {
+            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_3__.isDuplicateKeyError)(error) && !retriedByRepository) {
                 try {
                     logger.debug(`update: duplicate-key race for ${chatId}; retrying as update`);
                     const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: setFields, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
@@ -32169,12 +32152,12 @@ class UserDataDtoCrud {
                         return retried;
                 }
                 catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(retryError, "Error retrying UserDataDto update after duplicate key", false);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(retryError, "Error retrying UserDataDto update after duplicate key", false);
                 }
                 // E11000 proves the row EXISTS, so this is never a hard failure: log it without
                 // rethrowing and return the current row. Rethrowing here would surface a benign
                 // race to callers as an error.
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Duplicate key on UserDataDto update; resolved by read", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Duplicate key on UserDataDto update; resolved by read", false);
                 return await this.read(chatId);
             }
             // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
@@ -32183,7 +32166,7 @@ class UserDataDtoCrud {
             // @tg/db (B6), which degrades a failed read to null, even the read's own error was
             // swallowed, so the failure became completely invisible. The scheduled-retry caller in
             // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating UserDataDto", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating UserDataDto", true);
             throw error;
         }
     }
@@ -32198,13 +32181,13 @@ class UserDataDtoCrud {
         // E11000 retry and rethrown, so retrying again in the catch would make a sick database
         // serve three attempts for one row. Only the raw fallback below still needs the local retry.
         let retriedByRepository = false;
-        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.requireProfile)();
         const now = Date.now();
         // UPSERT: the filter must stay on the (chatId, profile) unique-index pair — an $or
         // cannot seed an insert, and a client-scoped filter would insert a SECOND row for a user
         // who already has a persona row, violating chatId_Profile. Ownership is recorded via
         // $setOnInsert; reads still resolve OWN-first via readFilter/readOwnThenPersona.
-        const setOnInsert = { ...USER_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownershipOnInsert)() };
+        const setOnInsert = { ...USER_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.ownershipOnInsert)() };
         delete setOnInsert[key];
         // Routed through @tg/db (C1) — same persona filter, same duplicate-key retry. See update().
         const update = { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert };
@@ -32212,7 +32195,7 @@ class UserDataDtoCrud {
             const repositories = this.repositories.get(this.client);
             if (repositories) {
                 retriedByRepository = true;
-                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update);
+                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)(), update);
                 return viaRepo ?? await this.read(chatId);
             }
             const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
@@ -32221,7 +32204,7 @@ class UserDataDtoCrud {
         catch (error) {
             // Same concurrent-insert race as update()/createOrUpdate: retry once rather than
             // returning a stale read that silently discards this key's new value.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(error) && !retriedByRepository) {
+            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_3__.isDuplicateKeyError)(error) && !retriedByRepository) {
                 try {
                     logger.debug(`updateSingleKey: duplicate-key race for ${chatId}; retrying as update`);
                     const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
@@ -32229,9 +32212,9 @@ class UserDataDtoCrud {
                         return retried;
                 }
                 catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(retryError, "Error retrying single-key update after duplicate key", false);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(retryError, "Error retrying single-key update after duplicate key", false);
                 }
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Duplicate key on single-key update; resolved by read", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Duplicate key on single-key update; resolved by read", false);
                 return await this.read(chatId);
             }
             // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
@@ -32240,7 +32223,7 @@ class UserDataDtoCrud {
             // @tg/db (B6), which degrades a failed read to null, even the read's own error was
             // swallowed, so the failure became completely invisible. The scheduled-retry caller in
             // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating single key", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating single key", true);
             logger.error(`Error updating single key for chatId: ${chatId}`, error);
             throw error;
         }
@@ -32251,7 +32234,7 @@ class UserDataDtoCrud {
         try {
             const now = Date.now();
             chatId = chatId?.trim() || `fallback_${now}_${Math.random().toString(36).slice(2, 9)}`;
-            const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.requireProfile)();
+            const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.requireProfile)();
             const safeUpdates = {};
             Object.entries(updates).forEach(([key, value]) => {
                 if (!['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'].includes(key)) {
@@ -32267,7 +32250,7 @@ class UserDataDtoCrud {
             // drop any USER_DEFAULTS key that safeUpdates already provides.
             // Ownership is stamped on INSERT only (see user-scope.ts): existing rows are never
             // rewritten by normal traffic, and the key is omitted when the process has no clientId.
-            const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.ownershipOnInsert)() };
+            const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.ownershipOnInsert)() };
             for (const [key, value] of Object.entries(USER_DEFAULTS)) {
                 // Both counters are $inc-ed below. A key present in BOTH $inc and $setOnInsert is
                 // not merged by Mongo — it is rejected outright with "Updating the path 'x' would
@@ -32294,7 +32277,7 @@ class UserDataDtoCrud {
             };
             const repositories = this.repositories.get(this.client);
             const write = () => repositories
-                ? repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.currentScopeIdentity)(), update)
+                ? repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)(), update)
                 : this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
             // Native driver: `result` is the post-update document (returnDocument: 'after').
             //
@@ -32314,7 +32297,7 @@ class UserDataDtoCrud {
                 result = await write();
             }
             catch (writeError) {
-                if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_4__.isDuplicateKeyError)(writeError))
+                if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_3__.isDuplicateKeyError)(writeError))
                     throw writeError;
                 logger.debug(`createOrUpdate: duplicate-key race for ${chatId}; retrying as update`);
                 result = await write();
@@ -32328,20 +32311,20 @@ class UserDataDtoCrud {
             return { newUser: wasCreated, userDetails };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error creating or updating UserDataDto");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error creating or updating UserDataDto");
             let fallback;
             try {
                 fallback = await this.read(chatId);
             }
             catch (readError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
             }
             const safeDetails = fallback || existing || (newUser ? { ...newUser, totalCount: 0 } : { ...USER_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() });
             return { newUser: !!newUser, userDetails: safeDetails };
         }
     }
     async resetUnpaid() {
-        const result = await this.db.updateMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.mineFilter)(), lastMsgTimeStamp: { $lt: Date.now() - 30 * 24 * 60 * 60 * 1000 }, paidCount: { $gt: 0 }, payAmount: 0 }, { $set: { paidCount: 0 } });
+        const result = await this.db.updateMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)(), lastMsgTimeStamp: { $lt: Date.now() - 30 * 24 * 60 * 60 * 1000 }, paidCount: { $gt: 0 }, payAmount: 0 }, { $set: { paidCount: 0 } });
         return result;
     }
     /**
@@ -32375,7 +32358,7 @@ class UserDataDtoCrud {
             return { totalMB, alert };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'logDbSize failed', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'logDbSize failed', false);
             return null;
         }
     }
@@ -32391,18 +32374,18 @@ class UserDataDtoCrud {
         // `$gt: 0` guarantees a real positive numeric anchor (BSON orders null/missing/strings below
         // numbers, so they never satisfy $gt:0) — docs without a genuine lastMsgTimeStamp are never matched.
         const result = await this.db.deleteMany({
-            ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.mineFilter)(),
+            ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)(),
             lastMsgTimeStamp: { $gt: 0, $lt: cutoff },
         });
         logger.log(`sweepStaleUserData: deleted ${result.deletedCount ?? 0} userData docs inactive > ${ttlDays}d`);
         return { deleted: result.deletedCount ?? 0, ttlDays };
     }
     async resetPpl() {
-        const result = await this.db.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.mineFilter)(), { $set: { paidReply: true } });
+        const result = await this.db.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)(), { $set: { paidReply: true } });
         return result;
     }
     async getSingleKey(chatId, key) {
-        const result = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.readFilter)(chatId), { projection: { [key]: 1 } });
+        const result = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.readFilter)(chatId), { projection: { [key]: 1 } });
         if (result) {
             return result[key];
         }
@@ -32411,7 +32394,7 @@ class UserDataDtoCrud {
         }
     }
     async updateVideos(chatId, video) {
-        const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_3__.readFilter)(chatId), {
+        const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.readFilter)(chatId), {
             $addToSet: { videos: video }, // ✅ Ensures uniqueness
             $set: { callTime: Date.now() - 5 * 60000 }
         });
@@ -32441,7 +32424,7 @@ class UserDataDtoCrud {
             return await channelDb.findOne({}, { projection: { _id: 0 } });
         }
         catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(e, "Error fetching promote messages");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(e, "Error fetching promote messages");
             return null;
         }
     }
@@ -32451,7 +32434,7 @@ class UserDataDtoCrud {
             return await clientsDb.updateOne(filter, { $set: data });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating Client");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating Client");
         }
     }
     async updateBufferClientAssignment(mobile, update) {
@@ -32461,7 +32444,7 @@ class UserDataDtoCrud {
             await bufferClientsDb.updateOne({ mobile }, { $set: update });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating buffer client persona assignment");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating buffer client persona assignment");
             logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`, error instanceof Error ? error.message : String(error));
         }
     }
@@ -32471,7 +32454,7 @@ class UserDataDtoCrud {
             const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
             const doc = await bufferClientsDb.findOne({ mobile });
             if (doc) {
-                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
+                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
             }
             else {
                 logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
@@ -32479,7 +32462,7 @@ class UserDataDtoCrud {
             return doc;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching buffer client doc");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching buffer client doc");
             logger.error(`[Persona] Failed to load buffer client doc for ${mobile}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -32507,7 +32490,7 @@ class UserDataDtoCrud {
             return pool;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching buffer persona pool");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching buffer persona pool");
             logger.error(`[Persona] Failed to load buffer persona pool for ${clientId}`, error instanceof Error ? error.message : String(error));
             return null;
         }
@@ -32550,7 +32533,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error fetching local persona assignment snapshot", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error fetching local persona assignment snapshot", false);
             logger.warn(`[Persona] Failed to load local assignment snapshot for ${clientId}`, error instanceof Error ? error.message : String(error));
         }
         try {
@@ -32583,50 +32566,18 @@ class UserDataDtoCrud {
         return localAssignments;
     }
     async removeFromAvailableMsgs(filter, valueToRemove) {
-        try {
-            const messageId = typeof valueToRemove === 'string' ? valueToRemove.trim() : '';
-            if (!messageId)
-                return;
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "available message removal")) {
-                return null;
-            }
-            await this.ensureActiveChannelArrayField(normalizedFilter, "availableMsgs", _utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages);
-            return await this.activeChannelDb.updateOne(normalizedFilter, { $pull: { availableMsgs: messageId } });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error removing from available messages");
-            throw error;
-        }
+        const normalizedFilter = this.normalizeFilterForDb(filter);
+        if (!this.isUsableActiveChannelFilter(normalizedFilter, 'available messages update'))
+            return false;
+        const channels = this.repositories.get(this.client)?.channels;
+        return channels ? channels.removeFromAvailableMsgs(String(normalizedFilter.channelId), valueToRemove) : false;
     }
     async addToAvailableMsgs(filter, valueToAdd) {
-        try {
-            const messageId = typeof valueToAdd === 'string' ? valueToAdd.trim() : '';
-            if (!messageId)
-                return;
-            if (!_utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages.includes(messageId))
-                return;
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "available message add")) {
-                return null;
-            }
-            await this.ensureActiveChannelArrayField(normalizedFilter, "availableMsgs", _utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages);
-            return await this.activeChannelDb.updateOne(normalizedFilter, { $addToSet: { availableMsgs: messageId } });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error adding to available messages");
-            throw error;
-        }
-    }
-    async ensureActiveChannelArrayField(filter, field, fallback) {
-        await this.activeChannelDb.updateOne({
-            ...filter,
-            $or: [
-                { [field]: null },
-                { [field]: { $exists: false } },
-                { [field]: { $not: { $type: "array" } } },
-            ],
-        }, { $set: { [field]: fallback } });
+        const normalizedFilter = this.normalizeFilterForDb(filter);
+        if (!this.isUsableActiveChannelFilter(normalizedFilter, 'available messages update'))
+            return false;
+        const channels = this.repositories.get(this.client)?.channels;
+        return channels ? channels.addToAvailableMsgs(String(normalizedFilter.channelId), valueToAdd) : false;
     }
     async updateTimestamps() {
         try {
@@ -32637,7 +32588,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating timestamps");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error updating timestamps");
         }
     }
     // async getAvgCalculatedChannels() {
@@ -32686,7 +32637,7 @@ class UserDataDtoCrud {
         try {
             const normalized = [...new Set((channelIds || [])
                     .map((id) => this.normalizeChannelIdForDb(id))
-                    .filter((id) => (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.isUsableActiveChannelId)(id)))];
+                    .filter((id) => (0,_tg_core__WEBPACK_IMPORTED_MODULE_0__.isUsableActiveChannelId)(id)))];
             if (normalized.length === 0)
                 return null;
             const signals = new Map();
@@ -32708,7 +32659,7 @@ class UserDataDtoCrud {
             return signals.size > 0 ? signals : null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, 'Error getting reaction channel signals', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Error getting reaction channel signals', false);
             return null;
         }
     }
@@ -32725,7 +32676,7 @@ class UserDataDtoCrud {
             return docs.map((doc) => doc.channelId.toString());
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error getting restricted channels");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error getting restricted channels");
             // Explicit null, matching promote-clients. ReactionChannelStore accepts
             // `string[] | null | undefined`, so an implicit undefined type-checked — but the two
             // apps returning different falsy values for the same failure is exactly the drift that
@@ -32733,275 +32684,17 @@ class UserDataDtoCrud {
             return null;
         }
     }
+    /** Single-channel write -> the ONE writer (tg-db ChannelsRepository.updateActiveChannel). */
     async updateActiveChannel(filter, data) {
         const normalizedFilter = this.normalizeFilterForDb(filter);
-        if (!this.isUsableActiveChannelFilter(normalizedFilter, 'active channel update')) {
+        if (!this.isUsableActiveChannelFilter(normalizedFilter, 'active channel update'))
+            return null;
+        const channels = this.repositories.get(this.client)?.channels;
+        if (!channels) {
+            logger.warn('Skipping active channel update: database not connected');
             return null;
         }
-        // B5: one implementation for a FLEET-SHARED collection. activeChannels carries no client
-        // identity — all 20 clients read and write the same 45,274 rows — so three divergent
-        // writers meant three different sets of rules applied to one record. The repository is the
-        // single one; everything below it is the pre-connection raw fallback and must stay.
-        const repositories = this.repositories.get(this.client);
-        if (repositories) {
-            return await repositories.channels.updateActiveChannel(String(normalizedFilter.channelId), data);
-        }
-        const normalizedData = { ...data };
-        if ('_id' in normalizedData)
-            delete normalizedData["_id"];
-        if ('channelId' in normalizedData) {
-            delete normalizedData.channelId;
-        }
-        // Strip null/undefined/empty values for fields that should never overwrite valid data
-        const PROTECTED_FIELDS = ['participantsCount', 'username', 'accessHash', 'title'];
-        for (const field of PROTECTED_FIELDS) {
-            if (field in normalizedData && (normalizedData[field] == null || normalizedData[field] === '' || normalizedData[field] === 0)) {
-                delete normalizedData[field];
-            }
-        }
-        for (const [key, value] of Object.entries(normalizedData)) {
-            if (value == null && key !== 'bannedAt') {
-                delete normalizedData[key];
-            }
-        }
-        const normalizedIdentityFields = this.normalizeActiveChannelIdentityFields(normalizedData);
-        for (const field of ['title', 'username', 'accessHash']) {
-            if (field in normalizedData && !(field in normalizedIdentityFields)) {
-                delete normalizedData[field];
-            }
-        }
-        Object.assign(normalizedData, normalizedIdentityFields);
-        if ('availableMsgs' in normalizedData) {
-            normalizedData.availableMsgs = this.sanitizeAvailableMsgsForDb(normalizedData.availableMsgs);
-        }
-        const numericFields = [
-            'participantsCount',
-        ];
-        for (const field of numericFields) {
-            if (!(field in normalizedData))
-                continue;
-            const normalizedNumber = this.normalizeNonNegativeNumber(normalizedData[field]);
-            if (normalizedNumber == null || (field === 'participantsCount' && normalizedNumber <= 0)) {
-                delete normalizedData[field];
-                continue;
-            }
-            normalizedData[field] = Math.floor(normalizedNumber);
-        }
-        // Shared with promote-clients (same collection, same rules) — see coerceActiveChannelBooleans.
-        (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.coerceActiveChannelBooleans)(normalizedData);
-        if (normalizedData.banned === true ||
-            normalizedData.forbidden === true ||
-            normalizedData.private === true ||
-            normalizedData.broadcast === true) {
-            normalizedData.canSendMsgs = false;
-        }
-        // Runtime `false` = verified live clearance; an operator ban (banned + bannedAt) still
-        // wins atomically in Mongo (@tg/core activeChannel).
-        (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.applyChannelFlagClearRules)(normalizedData);
-        // Stamp reactRestrictedAt when reactRestricted is set — the auto-heal system clears
-        // reactRestricted after a window based on this timestamp. Without it the channel is stuck.
-        if (normalizedData.reactRestricted === true && !normalizedData.reactRestrictedAt) {
-            normalizedData.reactRestrictedAt = new Date();
-        }
-        const setFields = {
-            ...(0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.pickActiveChannelWrite)(normalizedData),
-            updatedAt: new Date(),
-        };
-        if (typeof setFields.canSendMsgs === 'boolean') {
-            setFields.canSendMsgs = (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.activeChannelCanSendUpdateExpression)(setFields.canSendMsgs);
-        }
-        const setOnInsert = this.activeChannelSetOnInsert(String(normalizedFilter.channelId));
-        for (const key of Object.keys(setFields)) {
-            delete setOnInsert[key];
-        }
-        const result = await this.activeChannelDb.findOneAndUpdate(normalizedFilter, 
-        // STRICT WRITE BOUNDARY: whitelist to canonical persisted keys so unknown/raw-entity
-        // keys can never persist (see @tg/core ACTIVE_CHANNEL_WRITABLE_KEYS).
-        (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.buildActiveChannelUpsertPipeline)(setFields, setOnInsert), { upsert: true, returnDocument: 'after' });
-        return result;
-    }
-    sanitizeAvailableMsgsForDb(value) {
-        if (!Array.isArray(value)) {
-            return [..._utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages];
-        }
-        const validMessageIds = new Set(_utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages);
-        const seen = new Set();
-        const sanitized = [];
-        for (const item of value) {
-            const normalized = typeof item === 'string' ? item.trim() : '';
-            if (!normalized || seen.has(normalized) || !validMessageIds.has(normalized))
-                continue;
-            seen.add(normalized);
-            sanitized.push(normalized);
-        }
-        if (value.length > 0 && sanitized.length === 0) {
-            return [..._utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages];
-        }
-        return sanitized;
-    }
-    normalizeActiveChannelIdentityFields(data) {
-        const normalized = {};
-        if (typeof data.title === 'string') {
-            const title = data.title.trim();
-            if (title)
-                normalized.title = title;
-        }
-        if (typeof data.username === 'string') {
-            const username = data.username.trim().replace(/^@/, '');
-            if (/^[A-Za-z0-9_]{5,32}$/.test(username))
-                normalized.username = username;
-        }
-        if (typeof data.accessHash === 'string') {
-            const accessHash = data.accessHash.trim();
-            if (/^-?\d+$/.test(accessHash))
-                normalized.accessHash = accessHash;
-        }
-        return normalized;
-    }
-    activeChannelSetOnInsert(channelId, omitFields = []) {
-        const setOnInsert = {
-            channelId,
-            createdAt: new Date(),
-            availableMsgs: _utils__WEBPACK_IMPORTED_MODULE_0__.defaultMessages,
-            banned: false,
-            bannedAt: null,
-            forbidden: false,
-            private: false,
-            reactRestricted: false,
-            broadcast: false,
-            megagroup: false,
-            canSendMsgs: false,
-            participantsCount: 0,
-            title: '',
-            username: '',
-        };
-        for (const field of omitFields) {
-            delete setOnInsert[field];
-        }
-        return setOnInsert;
-    }
-    async ensureActiveChannelNumericField(filter, field) {
-        const existingDocument = await this.activeChannelDb.findOne(filter, { projection: { [field]: 1 } });
-        if (!existingDocument)
-            return;
-        const currentValue = existingDocument[field];
-        const normalizedValue = this.normalizeNonNegativeNumber(currentValue);
-        if (normalizedValue != null && normalizedValue === currentValue)
-            return;
-        await this.activeChannelDb.updateOne(filter, { $set: { [field]: normalizedValue ?? 0 } });
-    }
-    async updateDeletedMessageCount(filter, increment = 1) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "deleted message count update")) {
-                return null;
-            }
-            // NOTE: deletedCount/successMsgCount/failureMsgCount/followupMsg*Count/message are no
-            // longer part of IChannel (dropped as part of the channelIntelligence single-source
-            // migration) but this writer still has live callers (PromotionEngine.ts) that increment
-            // a legacy activeChannels field the DB still has on existing docs. The update document is
-            // intentionally loosened (not the collection type) so this dead-field write still compiles
-            // without re-widening IChannel. Do not add new callers of this method.
-            await this.ensureActiveChannelNumericField(normalizedFilter, "deletedCount");
-            return await this.activeChannelDb.updateOne(normalizedFilter, {
-                $inc: { deletedCount: increment },
-                $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ["deletedCount"]),
-            }, { upsert: true });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "RemoveChannelMsgErr");
-            throw error;
-        }
-    }
-    async updateSuccessMsgCount(filter, increment = 1) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "success message count update")) {
-                return null;
-            }
-            // NOTE: successMsgCount dropped from IChannel; see comment on updateDeletedMessageCount above.
-            await this.ensureActiveChannelNumericField(normalizedFilter, "successMsgCount");
-            const result = await this.activeChannelDb.updateOne(normalizedFilter, {
-                $inc: { successMsgCount: increment },
-                $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ["successMsgCount"]),
-            }, { upsert: true });
-            if (increment < 0) {
-                await this.activeChannelDb.updateOne(normalizedFilter, { $max: { successMsgCount: 0 } });
-            }
-            return result;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating success message count");
-            throw error;
-        }
-    }
-    async updateFailureMsgCount(filter, message, increment = 1) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "failure message count update")) {
-                return null;
-            }
-            // NOTE: failureMsgCount/message dropped from IChannel; see comment on updateDeletedMessageCount above.
-            await this.ensureActiveChannelNumericField(normalizedFilter, "failureMsgCount");
-            const updateQuery = {
-                $inc: { failureMsgCount: increment },
-                $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ["failureMsgCount"]),
-            };
-            if (message) {
-                updateQuery.$set = { message };
-            }
-            return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating failure message count");
-            throw error;
-        }
-    }
-    async updateFollowupSuccessCount(filter, increment = 1) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "follow-up success count update")) {
-                return null;
-            }
-            // NOTE: followupMsgSuccessCount dropped from IChannel (no channelIntelligence replacement);
-            // see comment on updateDeletedMessageCount above.
-            await this.ensureActiveChannelNumericField(normalizedFilter, "followupMsgSuccessCount");
-            const result = await this.activeChannelDb.updateOne(normalizedFilter, {
-                $inc: { followupMsgSuccessCount: increment },
-                $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ["followupMsgSuccessCount"]),
-            }, { upsert: true });
-            if (increment < 0) {
-                await this.activeChannelDb.updateOne(normalizedFilter, { $max: { followupMsgSuccessCount: 0 } });
-            }
-            return result;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating follow-up success count");
-            throw error;
-        }
-    }
-    async updateFollowupFailureCount(filter, message, increment = 1) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            if (!this.isUsableActiveChannelFilter(normalizedFilter, "follow-up failure count update")) {
-                return null;
-            }
-            // NOTE: followupMsgFailureCount/message dropped from IChannel (no channelIntelligence
-            // replacement); see comment on updateDeletedMessageCount above.
-            await this.ensureActiveChannelNumericField(normalizedFilter, "followupMsgFailureCount");
-            const updateQuery = {
-                $inc: { followupMsgFailureCount: increment },
-                $setOnInsert: this.activeChannelSetOnInsert(String(normalizedFilter.channelId), ["followupMsgFailureCount"]),
-            };
-            if (message) {
-                updateQuery.$set = { message };
-            }
-            return await this.activeChannelDb.updateOne(normalizedFilter, updateQuery, { upsert: true });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error updating follow-up failure count");
-            throw error;
-        }
+        return await channels.updateActiveChannel(String(normalizedFilter.channelId), data);
     }
     async getChannel(filter) {
         const channelDb = this.client.db("tgclients").collection('channels');
@@ -33019,11 +32712,11 @@ class UserDataDtoCrud {
      * private copy was already correct — but it is no longer a copy that can drift.
      */
     normalizeChannelIdForDb(channelId) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
     }
     /** Delegates to the shared predicate so both apps gate the SAME collection identically. */
     isValidNormalizedChannelId(channelId) {
-        return (0,_tg_core__WEBPACK_IMPORTED_MODULE_1__.isUsableActiveChannelId)(channelId);
+        return (0,_tg_core__WEBPACK_IMPORTED_MODULE_0__.isUsableActiveChannelId)(channelId);
     }
     /**
      * Normalizes filter object for DB operations
@@ -33147,12 +32840,12 @@ class UserDataDtoCrud {
                 logger.log('MongoDB connection closed.');
             }
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
             await this.client?.close();
             this.client = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error closing MongoDB connection");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error closing MongoDB connection");
         }
     }
 }
