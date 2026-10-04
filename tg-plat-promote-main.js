@@ -19206,7 +19206,31 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
             return false;
         if (mode === 'add' && !ACTIVE_CHANNEL_MESSAGE_IDS.includes(id))
             return false;
-        return this.guardWrite(`${mode}AvailableMsgs(${normalizedId},${id})`, () => this.collection.updateOne({ channelId: normalizedId }, [{ $set: { availableMsgs: availableMsgsUpdateExpression(id, mode), updatedAt: new Date() } }]));
+        // true only when a channel row matched: there is no upsert, so an unknown channel is a no-op.
+        return this.guard(`${mode}AvailableMsgs(${normalizedId},${id})`, false, async () => {
+            const result = await this.collection.updateOne({ channelId: normalizedId }, [{ $set: { availableMsgs: availableMsgsUpdateExpression(id, mode), updatedAt: new Date() } }]);
+            return result.matchedCount > 0;
+        });
+    }
+    /**
+     * Repair a stored availableMsgs array (junk ids, duplicates) by COMPARE-AND-SET: the write
+     * applies only while the stored value is still exactly `observed`. A whole-array write without
+     * that check would undo an add/remove another account made between our read and this write.
+     * Returns true when the repair was written, false when nothing needed repair, the row changed
+     * underneath (the next read repairs it), or the id is unusable.
+     */
+    async repairAvailableMsgs(channelId, observed) {
+        const normalizedId = usableChannelId(channelId);
+        if (!normalizedId)
+            return false;
+        const repaired = sanitizeAvailableMsgs(observed);
+        if (Array.isArray(observed) && JSON.stringify(observed) === JSON.stringify(repaired))
+            return false;
+        const unchanged = observed === undefined ? { $exists: false } : observed;
+        return this.guard(`repairAvailableMsgs(${normalizedId})`, false, async () => {
+            const result = await this.collection.updateOne({ channelId: normalizedId, availableMsgs: unchanged }, { $set: { availableMsgs: repaired, updatedAt: new Date() } });
+            return result.matchedCount > 0;
+        });
     }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(channelId)', () => this.collection.createIndex({ channelId: 1 }, { unique: true, name: 'channelId_1' }));
@@ -19266,13 +19290,21 @@ function availableMsgsUpdateExpression(id, mode) {
     }
     return { $cond: [{ $in: [id, base] }, base, { $concatArrays: [base, [id]] }] };
 }
-function createChannelsStore(resolve) {
+function createChannelsStore(resolve, logger) {
+    // Writes say so when the database is not connected; reads return their empty value quietly.
+    const writer = (operation) => {
+        const channels = resolve()?.channels ?? null;
+        if (!channels)
+            logger?.warn(`[activeChannels] ${operation} skipped: database not connected`);
+        return channels;
+    };
     return {
         findActiveChannel: async (channelId) => (await resolve()?.channels.findActiveChannel(channelId)) ?? null,
-        updateActiveChannel: async (channelId, data) => (await resolve()?.channels.updateActiveChannel(channelId, data)) ?? null,
-        bulkUpsertLiveChannels: async (rows, now) => (await resolve()?.channels.bulkUpsertLiveChannels(rows, now)) ?? null,
-        addToAvailableMsgs: async (channelId, messageId) => (await resolve()?.channels.addToAvailableMsgs(channelId, messageId)) ?? false,
-        removeFromAvailableMsgs: async (channelId, messageId) => (await resolve()?.channels.removeFromAvailableMsgs(channelId, messageId)) ?? false,
+        updateActiveChannel: async (channelId, data) => (await writer('updateActiveChannel')?.updateActiveChannel(channelId, data)) ?? null,
+        bulkUpsertLiveChannels: async (rows, now) => (await writer('bulkUpsertLiveChannels')?.bulkUpsertLiveChannels(rows, now)) ?? null,
+        addToAvailableMsgs: async (channelId, messageId) => (await writer('addToAvailableMsgs')?.addToAvailableMsgs(channelId, messageId)) ?? false,
+        removeFromAvailableMsgs: async (channelId, messageId) => (await writer('removeFromAvailableMsgs')?.removeFromAvailableMsgs(channelId, messageId)) ?? false,
+        repairAvailableMsgs: async (channelId, observed) => (await writer('repairAvailableMsgs')?.repairAvailableMsgs(channelId, observed)) ?? false,
         reactionChannelSignals: async (channelIds) => (await resolve()?.channels.reactionChannelSignals(channelIds)) ?? null,
         reactRestrictedChannelIds: async (withinMs) => (await resolve()?.channels.reactRestrictedChannelIds(withinMs)) ?? null,
     };
@@ -29483,6 +29515,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
 /* harmony import */ var _dbservice__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
 
 
 /**
@@ -29496,7 +29530,7 @@ function getRepositories() {
     return _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().getRepositories();
 }
 /** Channel access for injected shared code (promotion engine, reactions); resolved per call. */
-const channelsStore = (0,_tg_db__WEBPACK_IMPORTED_MODULE_0__.createChannelsStore)(getRepositories);
+const channelsStore = (0,_tg_db__WEBPACK_IMPORTED_MODULE_0__.createChannelsStore)(getRepositories, new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('channels-store'));
 
 
 /***/ },
@@ -34987,7 +35021,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // best-effort persistence failure turn a completed Telegram send
             // into a retry that could duplicate the message.
             try {
-                await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.updateActiveChannel(channelInfo.channelId, { private: false, canSendMsgs: true });
+                await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.updateActiveChannel(channelInfo.channelId, { private: false, canSendMsgs: true });
             }
             catch (persistError) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(persistError, `[${this.mobile}] Failed to persist private-channel recovery for ${channelInfo.channelId}`, false);
@@ -35050,7 +35084,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // remaining consumer) — this used to stamp a message cursor on activeChannels that
             // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
             if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.isPoolMessageIndex)(messageIndex)) {
-                await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.addToAvailableMsgs(messageItem.channelId, messageIndex);
+                await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.addToAvailableMsgs(messageItem.channelId, messageIndex);
             }
         }
         catch (error) {
@@ -35063,7 +35097,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
         const messageIndex = typeof messageItem.messageIndex === 'string' ? messageItem.messageIndex.trim() : '';
         try {
             logger.debug(`[${this.mobile}] 🗑️ Message ${messageId} DELETED from ${channelId}, index ${messageIndex} | isFollowUp ${messageItem.isFollowUp}`);
-            const channelInfo = (await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.findActiveChannel(channelId)) ?? null;
+            const channelInfo = await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.findActiveChannel(channelId);
             if (!channelInfo) {
                 logger.warn(`[${this.mobile}] Channel ${channelId} not found in DB during deleted handling`);
                 return;
@@ -35086,7 +35120,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             const finalActions = this.resolveDeletionPolicy(messageIndex, availableMsgs.length, providedDeletionPolicy).actions;
             if (finalActions.includes('ban_no_available_messages')) {
                 try {
-                    await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.removeFromAvailableMsgs(channelId, messageIndex);
+                    await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.removeFromAvailableMsgs(channelId, messageIndex);
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to remove deleted index ${messageIndex} before ban for ${channelId}`, false);
@@ -35099,7 +35133,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // freeform/follow-up breakdown in outcomes; no legacy activeChannels write needed here.
             if (finalActions.includes('remove_message_index')) {
                 try {
-                    await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.removeFromAvailableMsgs(channelId, messageIndex);
+                    await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.removeFromAvailableMsgs(channelId, messageIndex);
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to remove deleted index ${messageIndex} for ${channelId}`, false);
@@ -35238,12 +35272,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
         if (channelInfo.availableMsgs)
             return channelInfo;
         // availableMsgs repair: the stored doc has no template list.
-        const repaired = (await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.updateActiveChannel(channelInfo.channelId, { availableMsgs: _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages })) ?? null;
+        const repaired = (await _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.updateActiveChannel(channelInfo.channelId, { availableMsgs: _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages })) ?? null;
         if (repaired)
             repaired.availableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
         return repaired;
     }
-    /** Live dialog refresh -> the ONE bulk writer (tg-db ChannelsRepository.bulkUpsertLiveChannels). */
     getChannelStore() {
         return {
             findActiveChannel: (channelId) => _core_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.findActiveChannel(channelId),
