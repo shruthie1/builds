@@ -295,6 +295,9 @@ class AnalyticsSink {
         if (this.opts.now() < this.backoffUntil)
             return;
         this.flushing = true;
+        // A later group succeeding in the SAME flush must not clear the backoff a failing group armed
+        // (e.g. conversion_event OK while daily_client times out) — that would hammer the failing table.
+        let failedThisFlush = false;
         try {
             while (this.buffer.length > 0) {
                 // Stop the moment a failure has armed the backoff. Without this the `continue` below would
@@ -310,12 +313,15 @@ class AnalyticsSink {
                     try {
                         await this.insertBatch(table, rows);
                         this.written += rows.length;
-                        this.consecutiveFailures = 0;
-                        this.backoffUntil = 0;
+                        if (!failedThisFlush) {
+                            this.consecutiveFailures = 0;
+                            this.backoffUntil = 0;
+                        }
                     }
                     catch (err) {
                         // Rule 3: dropped, counted, never rethrown. These rows are gone on purpose — re-queueing
                         // a batch that a constraint rejects would retry it forever and wedge the buffer.
+                        failedThisFlush = true;
                         this.droppedError += rows.length;
                         this.flushFailures += 1;
                         this.consecutiveFailures += 1;
@@ -499,8 +505,17 @@ __webpack_require__.r(__webpack_exports__);
  *     getAnalytics().recordPromotionSend({ ... });   // safe whether or not it is configured
  */
 let instance = null;
+let initInFlight = null;
 /** Never throws. Returns true when analytics is actually on, only for logging. */
-async function initAnalytics(options = {}) {
+function initAnalytics(options = {}) {
+    // Both apps call this fire-and-forget from re-enterable bootstrap paths. Overlapping calls share
+    // ONE in-flight init, so two sinks (two pools, two flush timers) can never be built.
+    if (initInFlight)
+        return initInFlight;
+    initInFlight = initAnalyticsOnce(options).finally(() => { initInFlight = null; });
+    return initInFlight;
+}
+async function initAnalyticsOnce(options) {
     // Idempotent. Both apps call this from re-enterable bootstrap paths (tg-aut
     // startConnectionBootstrap, promote-clients prepareDatabase). A second sink would leak its own
     // pool and flush timer, and shutdownAnalytics would drain only the newest one.
@@ -13349,8 +13364,14 @@ const ChannelCategory = Object.freeze({
 // (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
 const RETIRED_BOT_LIFECYCLES = new Set(['dead_token', 'pending_admin', 'manual_attention']);
 function isRetiredBot(doc) {
-    return doc.status === 'inactive'
-        || (typeof doc.lifecycle === 'string' && RETIRED_BOT_LIFECYCLES.has(doc.lifecycle));
+    // lifecycle is CMS's authoritative eligibility field; legacy `status` decides only when absent.
+    if (typeof doc.lifecycle === 'string')
+        return RETIRED_BOT_LIFECYCLES.has(doc.lifecycle);
+    return doc.status === 'inactive';
+}
+function isUsableBot(doc) {
+    return typeof doc.token === 'string' && doc.token.trim() !== ''
+        && typeof doc.channelId === 'string' && doc.channelId.trim() !== '';
 }
 class BotConfig {
     constructor() {
@@ -13585,7 +13606,7 @@ class BotConfig {
         const grouped = new Map();
         // Use only non-retired bots for a category that has at least one; a category whose bots are
         // ALL retired keeps every bot (the previous behaviour) so it never goes dark.
-        const hasActive = new Set(docs.filter(d => !isRetiredBot(d)).map(d => String(d.category)));
+        const hasActive = new Set(docs.filter(d => !isRetiredBot(d) && isUsableBot(d)).map(d => String(d.category)));
         docs = docs.filter(d => !isRetiredBot(d) || !hasActive.has(String(d.category)));
         for (const doc of docs) {
             const category = this.getExactCategory(doc.category);
