@@ -19980,27 +19980,26 @@ let BotsService = BotsService_1 = class BotsService {
                 continue;
             }
         }
-        const healthy = await this.getHealthyAccounts();
-        const byMobile = new Map(healthy.map(u => [u.mobile, u]));
-        try {
-            for (const viewer of viewers) {
-                let about = '';
-                try {
-                    about = await this.telegramService.getChannelAbout(viewer, channelId);
-                }
-                catch {
-                    continue;
-                }
-                if (!about)
-                    continue;
-                for (const m of about.match(/\d{10,13}/g) || []) {
-                    if (byMobile.has(m))
-                        return m;
-                }
-                break;
+        const aboutMobiles = new Set();
+        for (const viewer of viewers) {
+            let about = '';
+            try {
+                about = await this.telegramService.getChannelAbout(viewer, channelId);
             }
+            catch {
+                continue;
+            }
+            for (const m of about.match(/\d{10,13}/g) || [])
+                aboutMobiles.add(m);
+            break;
         }
-        catch { }
+        const adminTgIds = (admins || []).map((a) => String(a?.userId ?? a?.id ?? '')).filter(Boolean);
+        const healthy = await this.findHealthyAccountsByIdentity([...aboutMobiles], adminTgIds);
+        const byMobile = new Map(healthy.map(u => [u.mobile, u]));
+        for (const m of aboutMobiles) {
+            if (byMobile.has(m))
+                return m;
+        }
         if (!admins)
             return null;
         const byTgId = new Map(healthy.filter(u => u.tgId).map(u => [String(u.tgId), u]));
@@ -20050,6 +20049,20 @@ let BotsService = BotsService_1 = class BotsService {
             [a[i], a[j]] = [a[j], a[i]];
         }
         return a;
+    }
+    async findHealthyAccountsByIdentity(mobiles, tgIds) {
+        const found = [];
+        try {
+            if (mobiles.length)
+                found.push(...await this.usersService.search({ mobile: { $in: mobiles }, expired: false }));
+            if (tgIds.length)
+                found.push(...await this.usersService.search({ tgId: { $in: tgIds }, expired: false }));
+        }
+        catch {
+            return [];
+        }
+        const seen = new Set();
+        return found.filter(u => u?.session && String(u.session).trim() && u.mobile && !seen.has(u.mobile) && seen.add(u.mobile));
     }
     async getHealthyAccounts() {
         const users = await this.usersService.search({ expired: false });
