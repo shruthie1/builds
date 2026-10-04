@@ -9677,7 +9677,17 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
     // `forbidden` is never durable; it only reflects what this observation says.
     const forbidden = liveFacts.forbidden === true;
     const liveCanSendMsgs = computeLiveCanSendMsgs(liveFacts);
-    const canSendMsgs = !banned && !forbidden && liveCanSendMsgs;
+    // What THIS account may do right now (returned to the caller, never the shared truth).
+    const accountCanSendMsgs = !banned && !forbidden && liveCanSendMsgs;
+    // `private` (only ever derived from a ChannelForbidden/ChatForbidden entity: GramJS Channel has no
+    // such field) and `left` describe this account's access, not the channel. Such an observation says
+    // nothing about whether members can send, so the shared sendability keeps its stored value; it
+    // used to persist canSendMsgs:false + private:true and close the channel for every account
+    // (measured 2026-10-04: 342 of 1,700 "private" channels were promoted by other accounts after).
+    const accountScoped = liveFacts.private === true || liveFacts.left === true;
+    const canSendMsgs = accountScoped
+        ? !banned && !forbidden && existing?.canSendMsgs === true
+        : accountCanSendMsgs;
     const recoveredSendability = canSendMsgs && (existing?.canSendMsgs === false
         || existing?.private === true);
     const sendability = evaluateChannelSendability({ ...liveFacts, banned, forbidden });
@@ -9687,7 +9697,8 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
         username: liveFacts.username ?? existing?.username ?? null,
         participantsCount: safeNumber(liveFacts.participantsCount, existing?.participantsCount ?? 0),
         broadcast: liveFacts.broadcast,
-        private: liveCanSendMsgs ? false : liveFacts.private,
+        // Never asserted from a runtime observation; an account-scoped one leaves the stored value.
+        private: accountScoped ? existing?.private === true : false,
         forbidden,
         canSendMsgs,
         // Normalize to a real boolean, never null. A basic group (Api.Chat) has NO `megagroup` property,
@@ -9701,9 +9712,11 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
         lastHydratedAt: now,
         lastLiveCheckedAt: now,
         lastHydrationStatus: 'success',
-        lastHydrationReason: canSendMsgs ? 'live_sendable' : sendability.reason,
+        lastHydrationReason: canSendMsgs
+            ? 'live_sendable'
+            : accountScoped ? (existing?.lastHydrationReason ?? 'account_scoped') : sendability.reason,
     };
-    return { patch, canSendMsgs, recoveredSendability };
+    return { patch, canSendMsgs, accountCanSendMsgs, recoveredSendability };
 }
 /** How long an unresolved participantsCount lookup is remembered before it may be retried. */
 const PARTICIPANTS_COUNT_RECHECK_DAYS = 30;
@@ -10145,8 +10158,9 @@ async function hydrateChannelDocument(ports, liveFromCaller) {
     // The caller already holds fresh live facts (e.g. from its dialog list): merge, no Telegram call.
     if (liveFromCaller) {
         const doc = ports.merge(existing, liveFromCaller);
-        await ports.persist(doc);
-        return { status: 'ready', doc, hydrated: false, recoveredSendability: false, missing: [] };
+        await persistChanges(ports, existing, doc);
+        const view = accountView(doc, (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeHydratedChannelFacts)(existing, liveFromCaller).accountCanSendMsgs);
+        return { status: 'ready', doc: view, hydrated: false, recoveredSendability: false, missing: [] };
     }
     const need = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.resolveChannelHydrationNeed)(existing, ports.shouldHydrate, now());
     if (!need.needed) {
@@ -10175,13 +10189,40 @@ async function hydrateChannelDocument(ports, liveFromCaller) {
         }
         return { status: 'unavailable', missing: need.missing };
     }
-    const recoveredSendability = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeHydratedChannelFacts)(existing, live).recoveredSendability;
+    const facts = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeHydratedChannelFacts)(existing, live);
+    const recoveredSendability = facts.recoveredSendability;
     const merged = ports.merge(existing, live);
     const doc = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.hasUsableParticipantsCount)(merged)
         ? merged
         : { ...merged, participantsCountCheckedAt: now() };
-    await ports.persist(doc);
-    return { status: 'ready', doc, hydrated: true, recoveredSendability, missing: need.missing };
+    await persistChanges(ports, existing, doc);
+    return { status: 'ready', doc: accountView(doc, facts.accountCanSendMsgs), hydrated: true, recoveredSendability, missing: need.missing };
+}
+/**
+ * Write only what the merge changed. Writing the whole merged doc re-applied every field read at
+ * load() time, so a concurrent write landing during the Telegram call (an availableMsgs $pull, an
+ * operator unban) was silently reverted to the stale value.
+ */
+async function persistChanges(ports, existing, doc) {
+    if (!existing) {
+        await ports.persist(doc);
+        return;
+    }
+    const before = existing;
+    const after = doc;
+    const patch = {};
+    for (const key of Object.keys(after)) {
+        if (key === '_id')
+            continue;
+        if (JSON.stringify(after[key]) !== JSON.stringify(before[key]))
+            patch[key] = after[key];
+    }
+    if (Object.keys(patch).length > 0)
+        await ports.persist(patch);
+}
+/** The doc as THIS account must act on it: shared truth, closed when only this account is blocked. Not persisted. */
+function accountView(doc, accountCanSendMsgs) {
+    return accountCanSendMsgs || doc.canSendMsgs !== true ? doc : { ...doc, canSendMsgs: false };
 }
 
 
@@ -32008,10 +32049,10 @@ class UserDataDtoCrud {
                 // `private` is a live Telegram fact. A freshly sendable
                 // dialog conclusively clears a stale private marker; a
                 // non-sendable source may explicitly assert it.
+                // `private` is only ever this account's view (a Forbidden entity), so a runtime refresh
+                // never asserts it on the shared doc; a sendable dialog does clear a stale one.
                 if (telegramCanSend)
                     setFields.private = false;
-                else if (liveDoc.private === true)
-                    setFields.private = true;
                 if (!telegramCanSend) {
                     if (typeof liveDoc.forbidden === 'boolean')
                         setFields.forbidden = liveDoc.forbidden;
