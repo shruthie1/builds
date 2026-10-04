@@ -16840,15 +16840,12 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 cleanDto.lastHydrationStatus = 'needs_hydration';
                 cleanDto.lastHydrationReason = 'operator_unbanned';
             }
-            else if ((existing?.banned === true || existing?.forbidden === true)
-                && cleanDto.canSendMsgs === true) {
+            else if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && cleanDto.canSendMsgs === true) {
                 cleanDto.canSendMsgs = false;
             }
             if (cleanDto.private === true || cleanDto.forbidden === true || cleanDto.broadcast === true) {
                 cleanDto.canSendMsgs = false;
             }
-            if (existing?.forbidden === true && cleanDto.forbidden === false)
-                delete cleanDto.forbidden;
             const updatedChannel = await this.activeChannelModel
                 .findOneAndUpdate({ channelId: this.channelKey(channelId) }, {
                 $set: { ...cleanDto, updatedAt: new Date() },
@@ -22194,6 +22191,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     async update(mobile, updateClientDto) {
         const canonicalMobile = this.canonicalMobile(mobile);
         const updateData = { ...updateClientDto };
+        if (typeof updateData.channels === 'number') {
+            updateData.channels = Number.isFinite(updateData.channels) ? Math.max(0, Math.floor(updateData.channels)) : 0;
+        }
         const normalizedSession = this.normalizeSessionForWrite(updateData.session);
         if (normalizedSession) {
             updateData.session = normalizedSession;
@@ -24520,14 +24520,11 @@ let ChannelsService = class ChannelsService {
         const existing = await this.ChannelModel.findOne({ channelId: this.channelKey(channelId) }).lean().exec();
         const update = Object.fromEntries(Object.entries(updateChannelDto)
             .filter(([key]) => this.writableFields.has(key)));
-        if ((existing?.banned === true || existing?.forbidden === true)
-            && update.canSendMsgs === true) {
+        if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && update.canSendMsgs === true) {
             update.canSendMsgs = false;
         }
-        if (existing?.banned === true && update.banned === false)
+        if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && update.banned === false)
             delete update.banned;
-        if (existing?.forbidden === true && update.forbidden === false)
-            delete update.forbidden;
         if (update.private === true || update.forbidden === true || update.banned === true) {
             update.canSendMsgs = false;
         }
@@ -35315,6 +35312,9 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     async update(mobile, updateClientDto) {
         const canonicalMobile = this.canonicalMobile(mobile);
         const updateData = { ...updateClientDto };
+        if (typeof updateData.channels === 'number') {
+            updateData.channels = Number.isFinite(updateData.channels) ? Math.max(0, Math.floor(updateData.channels)) : 0;
+        }
         const normalizedSession = this.normalizeSessionForWrite(updateData.session);
         if (normalizedSession) {
             updateData.session = normalizedSession;
@@ -53029,7 +53029,7 @@ async function getTelegramChannelLiveFacts(client, input) {
         restricted: readBoolean(entity, 'restricted'),
         left: readBoolean(entity, 'left'),
         private: readBoolean(entity, 'private') || forbiddenEntity,
-        forbidden: readBoolean(entity, 'forbidden') || forbiddenEntity,
+        forbidden: readBoolean(entity, 'forbidden'),
         megagroup: readBoolean(entity, 'megagroup'),
         sendMessages,
         sendPlain,
@@ -53232,8 +53232,15 @@ function isChannelOrGroupEntity(entity) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isOperatorBan = isOperatorBan;
 exports.buildDurableChannelUpsertPipeline = buildDurableChannelUpsertPipeline;
 const literal = (value) => ({ $literal: value });
+const OPERATOR_BAN = {
+    $and: [{ $eq: [{ $ifNull: ['$banned', false] }, true] }, { $ne: [{ $ifNull: ['$bannedAt', null] }, null] }],
+};
+function isOperatorBan(doc) {
+    return doc?.banned === true && doc?.bannedAt != null;
+}
 function buildDurableChannelUpsertPipeline(setFields, defaults, incoming) {
     const hasSetField = (field) => Object.prototype.hasOwnProperty.call(setFields, field);
     const currentOrDefault = (field) => {
@@ -53245,22 +53252,36 @@ function buildDurableChannelUpsertPipeline(setFields, defaults, incoming) {
     for (const field of new Set([...Object.keys(defaults), ...Object.keys(setFields)])) {
         fields[field] = currentOrDefault(field);
     }
-    const persistedBanned = { $eq: [{ $ifNull: ['$banned', false] }, true] };
-    const persistedForbidden = { $eq: [{ $ifNull: ['$forbidden', false] }, true] };
+    const liveSendable = incoming.canSendMsgs === true;
+    const keepIfOperator = (field, cleared) => ({
+        $cond: [OPERATOR_BAN, `$${field}`, literal(cleared)],
+    });
+    if (incoming.banned === true) {
+        fields.banned = literal(true);
+    }
+    else if (liveSendable) {
+        fields.banned = keepIfOperator('banned', false);
+        fields.bannedAt = keepIfOperator('bannedAt', null);
+    }
+    else {
+        fields.banned = { $ifNull: ['$banned', literal(defaults.banned ?? false)] };
+    }
+    if (incoming.forbidden === true) {
+        fields.forbidden = literal(true);
+    }
+    else if (liveSendable) {
+        fields.forbidden = literal(false);
+    }
+    else {
+        fields.forbidden = { $ifNull: ['$forbidden', literal(defaults.forbidden ?? false)] };
+    }
     const effectivePrivate = { $eq: [currentOrDefault('private'), true] };
     const effectiveBroadcast = { $eq: [currentOrDefault('broadcast'), true] };
-    fields.banned = incoming.banned === true
-        ? literal(true)
-        : { $ifNull: ['$banned', literal(defaults.banned ?? false)] };
-    fields.forbidden = incoming.forbidden === true
-        ? literal(true)
-        : { $ifNull: ['$forbidden', literal(defaults.forbidden ?? false)] };
     fields.canSendMsgs = {
         $cond: [
             {
                 $or: [
-                    persistedBanned,
-                    persistedForbidden,
+                    OPERATOR_BAN,
                     incoming.banned === true,
                     incoming.forbidden === true,
                     effectivePrivate,
