@@ -18086,6 +18086,18 @@ let BotsController = class BotsController {
         }
         return this.botsService.validateAndReplaceBots(options);
     }
+    async reconcilePending(limit, category, dryRun, async) {
+        const options = {
+            dryRun: String(dryRun ?? '').toLowerCase() === 'true' || dryRun === '1',
+            pendingLimit: limit ? Number(limit) : 1,
+            pendingCategory: category || undefined,
+        };
+        if (String(async ?? '').toLowerCase() === 'true' || async === '1') {
+            void this.botsService.reconcilePendingAdminBotsNow(options).catch(() => undefined);
+            return { started: true, mode: 'async', ...options };
+        }
+        return this.botsService.reconcilePendingAdminBotsNow(options);
+    }
     async getBots(category) {
         return this.botsService.getBots(category);
     }
@@ -18215,6 +18227,21 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], BotsController.prototype, "validateAndReplace", null);
+__decorate([
+    (0, common_1.Post)('reconcile-pending'),
+    (0, swagger_1.ApiOperation)({ summary: 'Promote existing pending-admin bots to channel admin (no BotFather creation)', description: 'Bounded (limit ≤ 10), human-paced, aborts on flood signals. ?category= restricts to one category; ?dryRun=true only lists; ?async=true runs in the background (check CMS logs).' }),
+    (0, swagger_1.ApiQuery)({ name: 'limit', required: false }),
+    (0, swagger_1.ApiQuery)({ name: 'category', required: false }),
+    (0, swagger_1.ApiQuery)({ name: 'dryRun', required: false }),
+    (0, swagger_1.ApiQuery)({ name: 'async', required: false }),
+    __param(0, (0, common_1.Query)('limit')),
+    __param(1, (0, common_1.Query)('category')),
+    __param(2, (0, common_1.Query)('dryRun')),
+    __param(3, (0, common_1.Query)('async')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, String, String]),
+    __metadata("design:returntype", Promise)
+], BotsController.prototype, "reconcilePending", null);
 __decorate([
     (0, common_1.Get)(),
     (0, swagger_1.ApiOperation)({
@@ -19600,15 +19627,34 @@ let BotsService = BotsService_1 = class BotsService {
             this.replaceInProgress = false;
         }
     }
+    async reconcilePendingAdminBotsNow(options = {}) {
+        if (this.replaceInProgress) {
+            return { failures: ['already running (this pod)'], proposedActions: [], dryRun: Boolean(options.dryRun) };
+        }
+        this.replaceInProgress = true;
+        try {
+            const res = await this.reconcilePendingAdminBots(options, new Map());
+            console.log(`[BotHealth] reconcile-pending done dryRun=${Boolean(options.dryRun)} actions=${JSON.stringify(res.proposedActions)} failures=${JSON.stringify(res.failures)}`);
+            return { failures: res.failures, proposedActions: res.proposedActions, dryRun: Boolean(options.dryRun) };
+        }
+        finally {
+            this.replaceInProgress = false;
+        }
+    }
     async reconcilePendingAdminBots(options, controllability) {
         const failures = [];
         const proposedActions = [];
         const now = new Date();
         let stopPrivilegedWork = false;
+        const pendingLimit = Math.min(Math.max(1, Math.floor(options.pendingLimit ?? this.maxPendingAdminRepairsPerRun)), 10);
         const pending = await this.botModel
-            .find({ lifecycle: 'pending_admin', $or: [{ nextRepairAt: { $exists: false } }, { nextRepairAt: { $lte: now } }] })
+            .find({
+            lifecycle: 'pending_admin',
+            ...(options.pendingCategory ? { category: options.pendingCategory } : {}),
+            $or: [{ nextRepairAt: { $exists: false } }, { nextRepairAt: { $lte: now } }],
+        })
             .sort({ nextRepairAt: 1, createdAt: 1 })
-            .limit(this.maxPendingAdminRepairsPerRun)
+            .limit(pendingLimit)
             .lean()
             .exec();
         for (const bot of pending) {
