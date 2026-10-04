@@ -19939,14 +19939,104 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
         super(...arguments);
         this.collectionName = 'activeChannels';
     }
+    // ── READS ───────────────────────────────────────────────────────────────────────────────────
+    // Point reads RETHROW on a database error: a caller must never mistake "the database is down"
+    // for "no such channel" (hydration would then rebuild the doc from scratch and reset its
+    // availableMsgs). List/report reads return their stated empty value instead.
+    /** One channel by id; null when absent or the id is unusable. Throws on a database error. */
     async findActiveChannel(channelId) {
         const normalized = normalizeChannelKey(channelId);
-        if (!normalized) {
+        if (!normalized || !/^\d+$/.test(normalized)) {
             this.logger.warn(`[activeChannels] findActiveChannel refused unusable channelId=${channelId}`);
             return null;
         }
-        return this.guard(`findActiveChannel(${normalized})`, null, () => this.collection.findOne({ channelId: normalized }));
+        return this.guardStrict(`findActiveChannel(${normalized})`, () => this.collection.findOne({ channelId: normalized }));
     }
+    /** One channel by public username (with or without @). Throws on a database error. */
+    async findActiveChannelByUsername(username) {
+        const name = typeof username === 'string' ? username.trim().replace(/^@/, '') : '';
+        if (!/^[A-Za-z0-9_]{5,32}$/.test(name))
+            return null;
+        return this.guardStrict(`findActiveChannelByUsername(${name})`, () => this.collection.findOne({ username: name }));
+    }
+    /** Every channel (admin/reporting only: ~46k docs). */
+    async listActiveChannels() {
+        return this.guard('listActiveChannels', [], () => this.collection.find({}).toArray());
+    }
+    /** Largest channels by participantsCount; limit clamped to 1..300. */
+    async topActiveChannels(limit = 50) {
+        const safeLimit = Math.max(1, Math.min(Math.floor(Number(limit)) || 50, 300));
+        return this.guard(`topActiveChannels(${safeLimit})`, [], () => this.collection.find({}).sort({ participantsCount: -1 }).limit(safeLimit).toArray());
+    }
+    /** Flag counts for diagnostics. */
+    async activeChannelBreakdown() {
+        const empty = { total: 0, banned: 0, forbidden: 0, private: 0, unsendable: 0, restricted: 0, reactRestricted: 0, sendable: 0 };
+        return this.guard('activeChannelBreakdown', empty, async () => {
+            const [agg] = await this.collection.aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        banned: { $sum: { $cond: [{ $eq: ['$banned', true] }, 1, 0] } },
+                        forbidden: { $sum: { $cond: [{ $eq: ['$forbidden', true] }, 1, 0] } },
+                        private: { $sum: { $cond: [{ $eq: ['$private', true] }, 1, 0] } },
+                        unsendable: { $sum: { $cond: [{ $ne: ['$canSendMsgs', true] }, 1, 0] } },
+                        reactRestricted: { $sum: { $cond: [{ $eq: ['$reactRestricted', true] }, 1, 0] } },
+                        sendable: { $sum: { $cond: [{ $eq: ['$canSendMsgs', true] }, 1, 0] } },
+                    },
+                },
+            ]).toArray();
+            return {
+                total: agg?.total || 0,
+                banned: agg?.banned || 0,
+                forbidden: agg?.forbidden || 0,
+                private: agg?.private || 0,
+                unsendable: agg?.unsendable || 0,
+                restricted: agg?.unsendable || 0,
+                reactRestricted: agg?.reactRestricted || 0,
+                sendable: agg?.sendable || 0,
+            };
+        });
+    }
+    /**
+     * Channels with reactions switched off channel-wide, restricted within `withinMs` (default 7 days:
+     * a genuinely disabled channel re-persists on its next probe, so stale flags age out). null on error.
+     */
+    async reactRestrictedChannelIds(withinMs = 7 * 24 * 60 * 60 * 1000) {
+        const since = new Date(Date.now() - withinMs);
+        return this.guard('reactRestrictedChannelIds', null, async () => {
+            const docs = await this.collection.find({ reactRestricted: true, reactRestrictedAt: { $gte: since } }, { projection: { channelId: 1, _id: 0 } }).toArray();
+            return docs.map((doc) => String(doc.channelId));
+        });
+    }
+    /**
+     * Reaction-pool ranking signals: participantsCount (activeChannels) + DMs credited
+     * (channelIntelligence, read-only here). null when nothing is known or on error.
+     */
+    async reactionChannelSignals(channelIds) {
+        const ids = [...new Set((channelIds || []).map((id) => normalizeChannelKey(id)).filter((id) => !!id && /^\d+$/.test(id)))];
+        if (ids.length === 0)
+            return null;
+        return this.guard('reactionChannelSignals', null, async () => {
+            const signals = new Map();
+            const activeRows = await this.collection.find({ channelId: { $in: ids } }, { projection: { channelId: 1, participantsCount: 1, _id: 0 } }).toArray();
+            for (const row of activeRows) {
+                const count = Number(row.participantsCount);
+                if (Number.isFinite(count) && count > 0)
+                    signals.set(String(row.channelId), { participantsCount: count });
+            }
+            const intelRows = await this.connection.collection('channelIntelligence').find({ channelId: { $in: ids } }, { projection: { channelId: 1, 'DMs.credited': 1, _id: 0 } }).toArray();
+            for (const row of intelRows) {
+                const credited = Number(row.DMs?.credited);
+                if (!Number.isFinite(credited) || credited <= 0)
+                    continue;
+                const key = String(row.channelId);
+                signals.set(key, { ...(signals.get(key) ?? {}), dmsCredited: credited });
+            }
+            return signals.size > 0 ? signals : null;
+        });
+    }
+    // ── WRITES ──────────────────────────────────────────────────────────────────────────────────
     /**
      * Update one active channel, applying the shared write rules.
      *
@@ -19968,7 +20058,7 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
             // Nothing to write is not a failure, but the caller still wants the current row: several
             // call sites use the returned document as the refreshed channel state.
             this.logger.debug?.(`[activeChannels] ${normalizedId} update skipped: nothing left after normalization`);
-            return this.findActiveChannel(normalizedId);
+            return this.findActiveChannel(normalizedId).catch(() => null);
         }
         // STRICT WRITE BOUNDARY: whitelist to the canonical persisted keys. A naked spread here is
         // the exact vector that leaked ~40 raw GramJS entity fields (flags/defaultBannedRights/
@@ -30389,12 +30479,6 @@ class UserDataDtoCrud {
         logger.info('MongoConnection Already Existing');
         return true;
     }
-    getActiveChannelCollection() {
-        return this.activeChannelDb;
-    }
-    getChannelIntelligenceCollection() {
-        return this.channelIntelligenceDb;
-    }
     getPromotionRedisStatus() {
         const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.readPromotionFeatureFlags)(process.env);
         const configured = Boolean(process.env.REDIS_URI?.trim() ||
@@ -30695,25 +30779,16 @@ class UserDataDtoCrud {
         }
         return await channels.updateActiveChannel(String(normalizedFilter.channelId), data);
     }
-    async getChannel(filter) {
-        try {
-            const channelDb = this.client.db("tgclients").collection('channels');
-            return await channelDb.findOne(filter);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting channel");
-            return null;
-        }
-    }
+    /** Point read by channelId or username. Throws on a database error (never "missing" by accident). */
     async getActiveChannel(filter) {
-        try {
-            const normalizedFilter = this.normalizeFilterForDb(filter);
-            return await this.activeChannelDb.findOne(normalizedFilter);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting active channel");
+        const channels = this.repositories.get(this.client)?.channels;
+        if (!channels || !filter)
             return null;
-        }
+        if (filter.channelId != null)
+            return await channels.findActiveChannel(String(filter.channelId));
+        if (filter.username != null)
+            return await channels.findActiveChannelByUsername(String(filter.username));
+        return null;
     }
     async getPromoteMsgs() {
         // Routed through @tg/db (B3). This app used find().toArray()[0] where tg-aut used findOne();
@@ -30765,59 +30840,11 @@ class UserDataDtoCrud {
         const channels = this.repositories.get(this.client)?.channels;
         return channels ? channels.addToAvailableMsgs(String(normalizedFilter.channelId), valueToAdd) : false;
     }
-    /**
-     * Ranking signals for the reaction channel pool, keyed by normalized channelId.
-     *
-     * Reactions used to select channels in raw dialog order (~recency of activity), which tracks
-     * neither audience size nor value. This supplies the two signals the pool mixes on:
-     * `participantsCount` from activeChannels (present on ~86% of rows) and `dmsCredited` from
-     * channelIntelligence. Best-effort: a failure returns null and the caller keeps dialog order.
-     */
     async getReactionChannelSignals(channelIds) {
-        try {
-            const normalized = [...new Set((channelIds || [])
-                    .map((id) => this.normalizeChannelIdForDb(id))
-                    .filter((id) => (0,_tg_core__WEBPACK_IMPORTED_MODULE_4__.isUsableActiveChannelId)(id)))];
-            if (normalized.length === 0)
-                return null;
-            const signals = new Map();
-            const activeRows = await this.activeChannelDb.find({ channelId: { $in: normalized } }, { projection: { channelId: 1, participantsCount: 1, _id: 0 } }).toArray();
-            for (const row of activeRows) {
-                const count = Number(row.participantsCount);
-                if (Number.isFinite(count) && count > 0) {
-                    signals.set(String(row.channelId), { participantsCount: count });
-                }
-            }
-            const intelRows = await this.channelIntelligenceDb.find({ channelId: { $in: normalized } }, { projection: { channelId: 1, 'DMs.credited': 1, _id: 0 } }).toArray();
-            for (const row of intelRows) {
-                const credited = Number(row.DMs?.credited);
-                if (!Number.isFinite(credited) || credited <= 0)
-                    continue;
-                const key = String(row.channelId);
-                signals.set(key, { ...(signals.get(key) ?? {}), dmsCredited: credited });
-            }
-            return signals.size > 0 ? signals : null;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, 'Error getting reaction channel signals', false);
-            return null;
-        }
+        return (await this.repositories.get(this.client)?.channels.reactionChannelSignals(channelIds)) ?? null;
     }
     async getRestrictedChannels() {
-        try {
-            // reactRestricted is CHANNEL-WIDE reactions-off only (account bans stay in-memory). 7-day
-            // lookback self-heals: a genuinely disabled channel re-persists on next probe.
-            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-            const docs = await this.activeChannelDb.find({
-                reactRestricted: true,
-                reactRestrictedAt: { $gte: sevenDaysAgo },
-            }, { projection: { channelId: 1, _id: 0 } }).toArray();
-            return docs.map((doc) => doc.channelId.toString());
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting restricted channels");
-            return null;
-        }
+        return (await this.repositories.get(this.client)?.channels.reactRestrictedChannelIds()) ?? null;
     }
     async updateClient(filter, data) {
         try {
