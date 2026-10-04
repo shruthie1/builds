@@ -5855,9 +5855,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var ___WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
 /* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+/* harmony import */ var _telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../telegram-client/getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
+/* harmony import */ var _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../policy/deletion-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/deletion-policy.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./shared-engine-ops */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+
+
+
+
 
 
 
@@ -5874,7 +5882,7 @@ __webpack_require__.r(__webpack_exports__);
 
 /** Shared post-send liveness window used by both tg-aut and promote-clients. */
 const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
-const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_12__.PromoLogger("intelligence");
+const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_16__.PromoLogger("intelligence");
 /**
  * Shared, app-agnostic core of the promotion engine. Holds all infrastructure that
  * is identical (verified) between apps/tg-aut and apps/promote-clients:
@@ -5939,11 +5947,97 @@ class BasePromotionEngine {
         this.MAX_TELEGRAM_PROMOTION_MESSAGE_LENGTH = 4096;
         this.HELPER_CHANNEL_LOOP_DELAY_MS = this.resolveHelperChannelLoopDelayMs();
         this.CHANNEL_REHYDRATION_DEBOUNCE_MS = this.resolveChannelRehydrationDebounceMs();
+        /**
+         * promote-clients merges the live facts it already holds from its dialog list; tg-aut does not
+         * (its bulkUpdateChannels already persisted them, so it re-reads the stored doc).
+         */
+        this.mergeCallerLiveFacts = true;
+        this.runtimeRecovery = { requested: false };
         this.client = client;
         this.dialogManager = dialogManager;
         this.clientId = clientId;
         this.mobile = mobile;
         this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
+    }
+    mergeLiveChannelInfo(existing, live) {
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_10__.mergeLiveChannelDocument)(existing, live, {
+            normalizeChannelId: (id) => this.normalizeChannelId(id),
+            defaultAvailableMsgs: this.defaultAvailableMsgs,
+            mergeFacts: _channel_state__WEBPACK_IMPORTED_MODULE_10__.mergeHydratedChannelFacts,
+        });
+    }
+    /**
+     * The ONE channel load -> hydrate -> intelligence-merge flow both apps use. Hydration itself is
+     * the shared hydrateChannelDocument (decision rule, merge, debounce, stamp); apps only supply
+     * `finalizeChannelInfo` and the two knobs above.
+     */
+    async getChannelInfo(channelId, liveChannelInfo) {
+        const store = this.getChannelStore();
+        const normalizedChannelId = this.normalizeChannelId(channelId);
+        if (!this.isValidNormalizedChannelId(normalizedChannelId)) {
+            this.logRunnerMessage('warn', `[${this.mobile}] Skipping promotion channel with invalid channelId: ${channelId}`);
+            return null;
+        }
+        try {
+            const outcome = await (0,_channel_state__WEBPACK_IMPORTED_MODULE_10__.hydrateChannelDocument)({
+                load: () => store.getActiveChannel({ channelId: normalizedChannelId }),
+                persist: async (patch) => { await store.updateActiveChannel({ channelId: normalizedChannelId }, patch); },
+                fetchLive: () => (0,_telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_11__.getChannelFromTg)(this.client, normalizedChannelId),
+                claim: () => this.claimChannelHydrationAttempt(normalizedChannelId),
+                merge: (existing, live) => this.mergeLiveChannelInfo(existing, live),
+                shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_10__.shouldHydrateBeforeFinalReject,
+            }, this.mergeCallerLiveFacts ? liveChannelInfo : undefined);
+            if (outcome.status === 'debounced') {
+                this.logRunnerMessage('debug', `[${this.mobile}] ⏳ PROMO hydrate debounced | ${normalizedChannelId} | skip stale DB decision for ${Math.round(this.CHANNEL_REHYDRATION_DEBOUNCE_MS / 1000)}s window`);
+                return null;
+            }
+            if (outcome.status === 'unavailable') {
+                this.logRunnerMessage('error', `[${this.mobile}] Could not get channel info for ${channelId}`);
+                return null;
+            }
+            let channelInfo = outcome.doc;
+            if (outcome.recoveredSendability) {
+                this.logRunnerMessage('info', `[${this.mobile}] ♻️ PROMO stale doc repaired | ${normalizedChannelId} | ${channelInfo.lastHydrationReason || 'hydrated'}`);
+            }
+            const migratedDoc = await this.ensureChannelIntelligence(channelInfo);
+            if (migratedDoc)
+                channelInfo = this.mergePromotionHealthSignals(channelInfo, migratedDoc);
+            return await this.finalizeChannelInfo(channelInfo);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `[${this.mobile}] Error getting channel info for ${channelId}`, false);
+            return null;
+        }
+    }
+    /** Runner's getChannel(): the app's single-channel resolution. */
+    async getChannelForRunner(channelId) {
+        return this.getChannelInfo(channelId);
+    }
+    async getIntelligenceDocsForRunner(channelIds) {
+        const account = this.promotionContext ?? this.refreshPromotionContext();
+        return account.intelligence.batchGet(channelIds);
+    }
+    async getIntelligenceDocForRunner(channelId) {
+        const account = this.promotionContext ?? this.refreshPromotionContext();
+        return account.intelligence.get(channelId);
+    }
+    /** Adapter extras identical for both apps (percentile source + scoring on). */
+    buildRunnerAdapterExtras(_account) {
+        return {
+            adapter: { getPercentiles: () => this.percentileEngineOrNull() },
+            runnerOptions: { scoringEnabled: true },
+        };
+    }
+    /** Runtime functions handed to the pure shared ops (kept injectable for every consumer's tests). */
+    engineOpsDeps() {
+        return { parseError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError, resolveFailureAction: _channel_state__WEBPACK_IMPORTED_MODULE_10__.resolvePromotionFailureAction, contains: _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_13__.contains, evaluateDeletionPolicy: _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_12__.evaluateDeletionPolicy };
+    }
+    /** Shared merge of the runner's deletion policy with the local one (see resolveDeletionPolicy). */
+    resolveDeletionPolicy(messageIndex, availableCount, provided) {
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.resolveDeletionPolicy)(this.engineOpsDeps(), messageIndex, availableCount, provided);
+    }
+    async triggerTelegramRuntimeRecovery(error) {
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.requestTelegramRuntimeRecovery)(this.engineOpsDeps(), this.runtimeRecovery, this.onTelegramRuntimeFailure, error, this.mobile);
     }
     /**
      * Build the bounded hydration working set through the same shared priority
@@ -5963,7 +6057,7 @@ class BasePromotionEngine {
             this.logRunnerMessage('warn', `Hydration priority intelligence load failed; pausing this cycle safely: ${error}`);
             return [];
         }
-        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_11__.selectPromotionChannels)({
+        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_15__.selectPromotionChannels)({
             channels,
             intelligenceDocs,
             batchTarget: Math.min(Math.floor(limit), channels.length),
@@ -6101,6 +6195,11 @@ class BasePromotionEngine {
             ...(Array.isArray(doc.messagePool) ? { messagePool: doc.messagePool } : {}),
             ...(doc.outcomes ? { outcomes: doc.outcomes } : {}),
         };
+    }
+    async loadPromotionMessages() {
+        const messages = await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.loadPromoteMessagesFromStore)(this.engineOpsDeps(), this.getChannelStore(), this.mobile, (level, message) => this.logRunnerMessage(level, message));
+        if (messages)
+            this.promoteMsgs = messages;
     }
     // =================================================================
     //  PERIODIC CLEANUP
@@ -6433,7 +6532,7 @@ class BasePromotionEngine {
      * Length is validated AFTER sanitization so we measure what is actually sent.
      */
     assertSendablePromotionText(text) {
-        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_13__.sanitizePromotionRendering)(text);
+        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_17__.sanitizePromotionRendering)(text);
         if (!sanitized) {
             throw this.createPromotionPreflightError('MSG_EMPTY_AFTER_SANITIZE', {
                 length: Array.from(text).length,
@@ -6450,6 +6549,10 @@ class BasePromotionEngine {
     }
     isSendErrorUncheckable(error) {
         return Boolean(error && typeof error === "object" && error.checkableByChannelId === false);
+    }
+    /** Whether an error message string should be treated as a terminal missing-entity case. */
+    errorMessageIndicatesMissingEntity(errorMessage) {
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.errorIndicatesMissingEntity)(this.engineOpsDeps(), errorMessage);
     }
     /** Send-path log hooks; default no-op (promote), tg-aut overrides for rich logs. */
     onSendAttempt(_request) { }
@@ -6518,8 +6621,14 @@ class BasePromotionEngine {
             return { status: 'unknown' };
         }
     }
+    /** Load the stored channel doc used to resolve the entity for a message check. */
+    async loadStoredChannelForCheck(messageItem) {
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.loadStoredChannelForMessageCheck)(this.engineOpsDeps(), this.getChannelStore(), messageItem.channelId, this.mobile);
+    }
     /** Message-check log hooks; default no-op (promote provides its own simpler logging via overrides). */
-    onCheckEntityNotFound(_messageItem) { }
+    onCheckEntityNotFound(messageItem) {
+        this.logRunnerMessage('warn', `[${this.mobile}] ⚠️ PROMO message check | ${messageItem.channelId} | msg ${messageItem.messageId} | entity_not_found | removing from queue`);
+    }
     onCheckMissing(_messageItem, _status) { }
     onCheckTerminalFailure(_messageItem, _parsed) { }
     // =================================================================
@@ -6570,6 +6679,12 @@ class BasePromotionEngine {
                 return maybeMessage;
         }
         return undefined;
+    }
+    // =================================================================
+    //  HOOK SUPPORT: SHARED FAILURE-STATE PERSISTENCE
+    // =================================================================
+    async applyPromotionFailureState(channelId, errorMsg) {
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_14__.persistPromotionFailureState)(this.engineOpsDeps(), this.getChannelStore(), channelId, errorMsg, this.mobile, (level, message) => this.logRunnerMessage(level, message));
     }
     // =================================================================
     //  DELAY / SLEEP
@@ -6798,6 +6913,100 @@ function normalizePoolMessageText(value) {
         return undefined;
     const normalized = value.trim();
     return normalized.length > 0 ? normalized : undefined;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   errorIndicatesMissingEntity: () => (/* binding */ errorIndicatesMissingEntity),
+/* harmony export */   loadPromoteMessagesFromStore: () => (/* binding */ loadPromoteMessagesFromStore),
+/* harmony export */   loadStoredChannelForMessageCheck: () => (/* binding */ loadStoredChannelForMessageCheck),
+/* harmony export */   persistPromotionFailureState: () => (/* binding */ persistPromotionFailureState),
+/* harmony export */   requestTelegramRuntimeRecovery: () => (/* binding */ requestTelegramRuntimeRecovery),
+/* harmony export */   resolveDeletionPolicy: () => (/* binding */ resolveDeletionPolicy)
+/* harmony export */ });
+async function loadPromoteMessagesFromStore(deps, store, mobile, log) {
+    try {
+        const messages = (await store.getPromoteMsgs()) ?? {};
+        log('info', `[${mobile}] Loaded ${Object.keys(messages).length} promotion messages`);
+        return messages;
+    }
+    catch (error) {
+        deps.parseError(error, `[${mobile}] Failed to load promotion messages`, false);
+        return null;
+    }
+}
+async function loadStoredChannelForMessageCheck(deps, store, channelId, mobile) {
+    try {
+        return await store.getActiveChannel({ channelId });
+    }
+    catch (error) {
+        deps.parseError(error, `[${mobile}] Failed to load stored channel info for message check ${channelId}`, false);
+        return null;
+    }
+}
+/**
+ * Applies a send failure to the SHARED channel doc, but only what resolvePromotionFailureAction says
+ * is a channel-wide fact. Account-scoped failures (write_forbidden, private, banned in channel) are
+ * recorded in the per-mobile block elsewhere and never reach this doc.
+ */
+async function persistPromotionFailureState(deps, store, channelId, errorMsg, mobile, log) {
+    const action = deps.resolveFailureAction({ error: errorMsg, channelId });
+    if (action.skipPersist || !action.channelUpdate) {
+        log('debug', `[${mobile}] PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
+        return;
+    }
+    try {
+        await store.updateActiveChannel({ channelId }, action.channelUpdate);
+        log('debug', `[${mobile}] PROMO failure persisted | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
+    }
+    catch (error) {
+        deps.parseError(error, `[${mobile}] Failed to persist promotion failure state for ${channelId}`, false);
+    }
+}
+function errorIndicatesMissingEntity(deps, errorMessage) {
+    return deps.contains(errorMessage, ['Telegram entity not found']);
+}
+/** One-shot request to the owner to recover a broken Telegram runtime; never throws. */
+async function requestTelegramRuntimeRecovery(deps, state, handler, error, mobile) {
+    if (!handler || state.requested)
+        return;
+    state.requested = true;
+    try {
+        await handler(error);
+    }
+    catch (recoveryError) {
+        deps.parseError(recoveryError, `[${mobile}] Promotion runtime recovery request failed`, false);
+    }
+}
+/**
+ * Deletion actions for one deleted promotion message: the runner's policy (if any) merged with the
+ * local policy. `ai` messages never remove a template index (they bump the word restriction), and a
+ * deleted default template `0` never bans the channel while other templates remain.
+ */
+function resolveDeletionPolicy(deps, messageIndex, availableCount, provided) {
+    const local = deps.evaluateDeletionPolicy(messageIndex, availableCount);
+    const isAi = messageIndex === 'ai';
+    const localActions = isAi
+        ? [...local.actions.filter((a) => a !== 'remove_message_index'), 'increment_word_restriction']
+        : local.actions;
+    const providedActions = isAi ? provided?.actions.filter((a) => a !== 'remove_message_index') : provided?.actions;
+    const merged = provided
+        ? Array.from(new Set([...(providedActions ?? []), ...localActions]))
+        : localActions;
+    const suppressFallbackBan = messageIndex === '0' && availableCount > 0;
+    return {
+        strategy: provided?.strategy ?? local.strategy,
+        actions: suppressFallbackBan ? merged.filter((a) => a !== 'ban_no_available_messages') : merged,
+    };
 }
 
 
@@ -9143,15 +9352,21 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS: () => (/* binding */ DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS: () => (/* binding */ DEFAULT_CHANNEL_PROBE_MIN_SUCCESS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT),
+/* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* binding */ PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   classifyTelegramChannelError: () => (/* binding */ classifyTelegramChannelError),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* binding */ computeLiveCanSendMsgs),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* binding */ deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* binding */ evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* binding */ evaluateChannelSendability),
 /* harmony export */   getChannelDocStaleness: () => (/* binding */ getChannelDocStaleness),
+/* harmony export */   getMissingPromotabilityFields: () => (/* binding */ getMissingPromotabilityFields),
+/* harmony export */   hasUsableParticipantsCount: () => (/* binding */ hasUsableParticipantsCount),
 /* harmony export */   isUsableChannelIdForSend: () => (/* binding */ isUsableChannelIdForSend),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* binding */ mergeHydratedChannelFacts),
+/* harmony export */   mergeLiveChannelDocument: () => (/* binding */ mergeLiveChannelDocument),
 /* harmony export */   normalizeChannelId: () => (/* binding */ normalizeChannelId),
+/* harmony export */   participantsCountRecentlyChecked: () => (/* binding */ participantsCountRecentlyChecked),
+/* harmony export */   resolveChannelHydrationNeed: () => (/* binding */ resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* binding */ resolvePromotionFailureAction),
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* binding */ shouldHydrateBeforeFinalReject)
 /* harmony export */ });
@@ -9348,12 +9563,12 @@ function shouldHydrateBeforeFinalReject(doc, policy = {}) {
 }
 function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
     const liveFacts = deriveTelegramChannelLiveFacts(liveFactsInput);
-    // `banned` is a durable operator/global decision. A different Telegram
-    // account being able to send is not authority to clear it.
-    const banned = existing?.banned === true;
-    // `forbidden` is a durable safety stop. `private`, by contrast, is a live
-    // Telegram accessibility fact and may clear after a verified observation.
-    const forbidden = existing?.forbidden === true || liveFacts.forbidden === true;
+    // Only an OPERATOR ban (banned + bannedAt, stamped by the CMS operator path) is durable. A
+    // `banned`/`forbidden` without that provenance came from one account's view (legacy writes,
+    // ChannelForbidden) and is superseded by this live observation.
+    const banned = existing?.banned === true && existing?.bannedAt != null;
+    // `forbidden` is never durable; it only reflects what this observation says.
+    const forbidden = liveFacts.forbidden === true;
     const liveCanSendMsgs = computeLiveCanSendMsgs(liveFacts);
     const canSendMsgs = !banned && !forbidden && liveCanSendMsgs;
     const recoveredSendability = canSendMsgs && (existing?.canSendMsgs === false
@@ -9382,6 +9597,88 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
         lastHydrationReason: canSendMsgs ? 'live_sendable' : sendability.reason,
     };
     return { patch, canSendMsgs, recoveredSendability };
+}
+/** How long an unresolved participantsCount lookup is remembered before it may be retried. */
+const PARTICIPANTS_COUNT_RECHECK_DAYS = 30;
+/** True when the doc carries a positive participantsCount. */
+function hasUsableParticipantsCount(doc) {
+    const count = Number(doc?.participantsCount);
+    return Number.isFinite(count) && count > 0;
+}
+/** True when a hydration already tried to resolve the count within the recheck window. */
+function participantsCountRecentlyChecked(doc, now = Date.now()) {
+    const last = toTimestamp(doc?.participantsCountCheckedAt);
+    return last !== null && now - last < PARTICIPANTS_COUNT_RECHECK_DAYS * 24 * 60 * 60 * 1000;
+}
+/**
+ * Fields a stored channel doc must have before a promotion decision may rely on it. ONE rule for
+ * tg-aut and promote-clients (they used to differ: tg-aut hydrated on a missing count, promote did
+ * not, so the count was never filled on promote accounts and ~4.5k channels stayed uncountable).
+ *
+ * `participantsCount` is missing only if it is unusable AND no hydration already tried within
+ * PARTICIPANTS_COUNT_RECHECK_DAYS: without that memory every encounter re-hydrated the same
+ * unresolvable channel. (It is still NOT a "critical field" of getChannelDocStaleness: that would
+ * mass-hydrate the whole pool. This only applies to a channel about to be promoted.)
+ */
+function getMissingPromotabilityFields(doc, now = Date.now()) {
+    if (!doc)
+        return [];
+    const missing = [];
+    if (!hasUsableParticipantsCount(doc) && !participantsCountRecentlyChecked(doc, now))
+        missing.push('participantsCount');
+    if (doc.canSendMsgs == null)
+        missing.push('canSendMsgs');
+    if (doc.broadcast == null)
+        missing.push('broadcast');
+    return missing;
+}
+function resolveChannelHydrationNeed(doc, shouldHydrate = shouldHydrateBeforeFinalReject, now = Date.now()) {
+    if (!doc)
+        return { needed: true, blocking: true, missing: [] };
+    const missing = getMissingPromotabilityFields(doc, now);
+    const blocking = missing.some((field) => field !== 'participantsCount') || shouldHydrate(doc);
+    return { needed: blocking || missing.length > 0, blocking, missing };
+}
+/**
+ * Builds the persisted channel doc from the stored doc plus live Telegram facts. Shared by
+ * tg-aut and promote-clients (two near-identical private copies existed). Returns the loose record
+ * shape both apps cast to their IChannel.
+ */
+function mergeLiveChannelDocument(existing, live, options) {
+    const hydrated = (options.mergeFacts ?? mergeHydratedChannelFacts)(existing, live);
+    // messageId/messageIndex/freeformDeletedCount/followUpDeletedCount/deletedCount/lastMessageTime
+    // are dropped from IChannel (channelIntelligence.outcomes is the source of truth). Carry legacy
+    // values through so pre-cleanup DB rows are not clobbered by this in-memory snapshot.
+    const legacy = {
+        messageId: existing?.messageId ?? null,
+        messageIndex: existing?.messageIndex ?? null,
+        freeformDeletedCount: existing?.freeformDeletedCount ?? 0,
+        followUpDeletedCount: existing?.followUpDeletedCount ?? 0,
+        deletedCount: existing?.deletedCount ?? 0,
+        lastMessageTime: existing?.lastMessageTime ?? 0,
+    };
+    const liveCount = Number(live.participantsCount);
+    return {
+        ...legacy,
+        channelId: options.normalizeChannelId(live.channelId),
+        title: live.title,
+        // A live 0/null means "unknown", never "empty": keep the stored count.
+        participantsCount: Number.isFinite(liveCount) && liveCount > 0 ? liveCount : (existing?.participantsCount ?? 0),
+        username: live.username ?? existing?.username ?? '',
+        broadcast: hydrated.patch.broadcast === true,
+        megagroup: live.megagroup,
+        canSendMsgs: hydrated.canSendMsgs,
+        availableMsgs: existing?.availableMsgs ?? options.defaultAvailableMsgs,
+        banned: hydrated.patch.banned === true,
+        forbidden: hydrated.patch.forbidden === true,
+        private: hydrated.patch.private === true,
+        reactRestricted: existing?.reactRestricted ?? false,
+        reactRestrictedAt: existing?.reactRestrictedAt ?? null,
+        lastHydratedAt: hydrated.patch.lastHydratedAt,
+        lastLiveCheckedAt: hydrated.patch.lastLiveCheckedAt,
+        lastHydrationStatus: String(hydrated.patch.lastHydrationStatus || 'success'),
+        lastHydrationReason: String(hydrated.patch.lastHydrationReason || 'unknown'),
+    };
 }
 function evaluateChannelPromotionHealth(input, options = {}) {
     const channel = isRecord(input) ? input : {};
@@ -9500,21 +9797,15 @@ function resolvePromotionFailureAction(input) {
             skipPersist: false,
         };
     }
-    if (classified.reason === 'private') {
-        return {
-            ...base,
-            channelUpdate: { ...canonicalRestrictionUpdate(classified.reason, actionInput.now), private: true },
-            skipPersist: false,
-        };
+    // write_forbidden / private are what THIS ACCOUNT saw (muted, kicked, no access). They are
+    // recorded in the per-mobile Redis block by the flow runner, never on the shared channel doc:
+    // persisting them globally closed channels for every account (see activeChannel flag rules).
+    if (classified.reason === 'private' || classified.code === 'CHAT_WRITE_FORBIDDEN') {
+        return { ...base, channelUpdate: null, skipPersist: true };
     }
-    if (classified.reason === 'invalid') {
-        return {
-            ...base,
-            channelUpdate: { ...canonicalRestrictionUpdate(classified.reason, actionInput.now), forbidden: true },
-            skipPersist: false,
-        };
-    }
-    if (classified.code === 'CHAT_WRITE_FORBIDDEN' || classified.shouldPersistGlobal) {
+    // Only a channel that is gone for everyone is a shared fact, and it stays non-sticky: any
+    // account that later observes it as sendable restores it.
+    if (classified.reason === 'invalid' || classified.shouldPersistGlobal) {
         return { ...base, channelUpdate: canonicalRestrictionUpdate(classified.reason, actionInput.now), skipPersist: false };
     }
     return { ...base, channelUpdate: null, skipPersist: false };
@@ -9535,10 +9826,10 @@ function classifyTelegramChannelError(error) {
         return classification('ALLOW_PAYMENT_REQUIRED', 'account_channel', 'allow_payment_required', null, false, false, true, false, false, false);
     }
     if (message.includes('CHAT_WRITE_FORBIDDEN') || message.includes('CHANNEL_RESTRICTED:WRITE_FORBIDDEN')) {
-        return classification('CHAT_WRITE_FORBIDDEN', 'global', 'write_forbidden', null, false, true, false, false, true, false);
+        return classification('CHAT_WRITE_FORBIDDEN', 'account_channel', 'write_forbidden', null, false, false, true, false, true, false);
     }
     if (message.includes('CHANNEL_PRIVATE') || message.includes('CHANNEL_RESTRICTED:PRIVATE')) {
-        return classification('CHANNEL_PRIVATE', 'global', 'private', null, false, true, false, false, true, false);
+        return classification('CHANNEL_PRIVATE', 'account_channel', 'private', null, false, false, true, false, true, false);
     }
     if (message.includes('TELEGRAM ENTITY NOT FOUND') || message.includes('ENTITY NOT FOUND')) {
         return classification('CHANNEL_INVALID', 'global', 'invalid', null, false, true, false, false, true, false);
@@ -9728,6 +10019,66 @@ function classification(code, scope, reason, waitSeconds, transient, shouldPersi
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-state/hydrate-channel-document.ts"
+/*!*************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-state/hydrate-channel-document.ts ***!
+  \*************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   hydrateChannelDocument: () => (/* binding */ hydrateChannelDocument)
+/* harmony export */ });
+/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-state */ "../../packages/tg-channel-state/src/channel-state/channel-state.ts");
+
+async function hydrateChannelDocument(ports, liveFromCaller) {
+    const now = ports.now ?? Date.now;
+    const existing = await ports.load();
+    // The caller already holds fresh live facts (e.g. from its dialog list): merge, no Telegram call.
+    if (liveFromCaller) {
+        const doc = ports.merge(existing, liveFromCaller);
+        await ports.persist(doc);
+        return { status: 'ready', doc, hydrated: false, recoveredSendability: false, missing: [] };
+    }
+    const need = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.resolveChannelHydrationNeed)(existing, ports.shouldHydrate, now());
+    if (!need.needed) {
+        return { status: 'ready', doc: existing, hydrated: false, recoveredSendability: false, missing: need.missing };
+    }
+    // Debounced re-hydration: a blocking need must wait (skip this round), a count-only need must not.
+    if (existing && !ports.claim()) {
+        return need.blocking
+            ? { status: 'debounced', missing: need.missing }
+            : { status: 'ready', doc: existing, hydrated: false, recoveredSendability: false, missing: need.missing };
+    }
+    let live = null;
+    try {
+        live = await ports.fetchLive();
+    }
+    catch (error) {
+        if (need.blocking || !existing)
+            throw error;
+    }
+    if (!live) {
+        if (existing && !need.blocking) {
+            // Only the count was wanted and Telegram would not give it: remember, never block the send.
+            const stamp = { participantsCountCheckedAt: now() };
+            await ports.persist(stamp);
+            return { status: 'ready', doc: { ...existing, ...stamp }, hydrated: false, recoveredSendability: false, missing: need.missing };
+        }
+        return { status: 'unavailable', missing: need.missing };
+    }
+    const recoveredSendability = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeHydratedChannelFacts)(existing, live).recoveredSendability;
+    const merged = ports.merge(existing, live);
+    const doc = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.hasUsableParticipantsCount)(merged)
+        ? merged
+        : { ...merged, participantsCountCheckedAt: now() };
+    await ports.persist(doc);
+    return { status: 'ready', doc, hydrated: true, recoveredSendability, missing: need.missing };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-state/index.ts"
 /*!******************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-state/index.ts ***!
@@ -9745,18 +10096,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_PROBE_MIN_SUCCESS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT),
+/* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   classifyTelegramChannelError: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.classifyTelegramChannelError),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.computeLiveCanSendMsgs),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelSendability),
 /* harmony export */   getChannelDocStaleness: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.getChannelDocStaleness),
+/* harmony export */   getMissingPromotabilityFields: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.getMissingPromotabilityFields),
+/* harmony export */   hasUsableParticipantsCount: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.hasUsableParticipantsCount),
+/* harmony export */   hydrateChannelDocument: () => (/* reexport safe */ _hydrate_channel_document__WEBPACK_IMPORTED_MODULE_1__.hydrateChannelDocument),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeHydratedChannelFacts),
+/* harmony export */   mergeLiveChannelDocument: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.mergeLiveChannelDocument),
 /* harmony export */   normalizeChannelId: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId),
+/* harmony export */   participantsCountRecentlyChecked: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.participantsCountRecentlyChecked),
+/* harmony export */   resolveChannelHydrationNeed: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.resolvePromotionFailureAction),
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_0__.shouldHydrateBeforeFinalReject)
 /* harmony export */ });
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./channel-state */ "../../packages/tg-channel-state/src/channel-state/channel-state.ts");
+/* harmony import */ var _hydrate_channel_document__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./hydrate-channel-document */ "../../packages/tg-channel-state/src/channel-state/hydrate-channel-document.ts");
+
 
 
 
@@ -9797,6 +10157,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DelayCalculator: () => (/* reexport safe */ _channel_message_promotions_promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_3__.DelayCalculator),
 /* harmony export */   MESSAGE_SAFETY: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY),
 /* harmony export */   MESSAGE_SOURCES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SOURCES),
+/* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   POOL: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.POOL),
 /* harmony export */   PROMOTION_LIMITS: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.PROMOTION_LIMITS),
 /* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.PROMOTION_MESSAGE_CHECK_DELAY_MS),
@@ -9852,11 +10213,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   generateGreeting: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.generateGreeting),
 /* harmony export */   getChannelDocStaleness: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.getChannelDocStaleness),
 /* harmony export */   getChannelFromTg: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getChannelFromTg),
+/* harmony export */   getMissingPromotabilityFields: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.getMissingPromotabilityFields),
+/* harmony export */   getParticipantsCountFromTg: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getParticipantsCountFromTg),
 /* harmony export */   getTelegramChannelLiveFacts: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getTelegramChannelLiveFacts),
 /* harmony export */   getTelegramChannelMessageStats: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getTelegramChannelMessageStats),
 /* harmony export */   getTelegramCommonChatIds: () => (/* reexport safe */ _telegram_client__WEBPACK_IMPORTED_MODULE_2__.getTelegramCommonChatIds),
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasFailureRateEvidence),
+/* harmony export */   hasUsableParticipantsCount: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.hasUsableParticipantsCount),
+/* harmony export */   hydrateChannelDocument: () => (/* reexport safe */ _channel_state_hydrate_channel_document__WEBPACK_IMPORTED_MODULE_6__.hydrateChannelDocument),
 /* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence),
 /* harmony export */   isLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.isLimitReached),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageSource),
@@ -9864,11 +10229,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolMessageIndex),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeHydratedChannelFacts),
+/* harmony export */   mergeLiveChannelDocument: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.mergeLiveChannelDocument),
 /* harmony export */   messageIndexToStrategy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy),
 /* harmony export */   normalizeAttributionChannelIds: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizeAttributionChannelIds),
 /* harmony export */   normalizeChannelId: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.normalizeChannelId),
 /* harmony export */   normalizePoolMessageText: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.normalizePoolMessageText),
 /* harmony export */   parsePoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.parsePoolMessageIndex),
+/* harmony export */   participantsCountRecentlyChecked: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.participantsCountRecentlyChecked),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals),
 /* harmony export */   processChannelDialog: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__.processChannelDialog),
@@ -9876,6 +10243,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   rawScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
+/* harmony export */   resolveChannelHydrationNeed: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_5__.resolvePromotionFailureAction),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionChannels),
 /* harmony export */   selectPromotionMessageCandidates: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.selectPromotionMessageCandidates),
@@ -9891,6 +10259,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_message_promotions_promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./channel-message-promotions/promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
 /* harmony import */ var _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./channel-message-promotions/promotion-message-helpers */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-message-helpers/index.ts");
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _channel_state_hydrate_channel_document__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./channel-state/hydrate-channel-document */ "../../packages/tg-channel-state/src/channel-state/hydrate-channel-document.ts");
+
 
 
 
@@ -9911,7 +10281,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   getChannelFromTg: () => (/* binding */ getChannelFromTg)
 /* harmony export */ });
-/* harmony import */ var _tg_core_telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/telegram-utils/getParticipants */ "../../packages/tg-core/src/telegram-utils/getParticipants.ts");
+/* harmony import */ var _participants_count_fill__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./participants-count-fill */ "../../packages/tg-channel-state/src/telegram-client/participants-count-fill.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _telegram_channel__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./telegram-channel */ "../../packages/tg-channel-state/src/telegram-client/telegram-channel.ts");
 
@@ -9927,7 +10297,9 @@ async function getChannelFromTg(client, channelId) {
         // Do not use an entity-cache hit here: the whole point is to verify
         // current Telegram accessibility before a promotion decision.
         const entity = await client.getEntity(channelEnt);
-        const participantsCount = await (0,_tg_core_telegram_utils_getParticipants__WEBPACK_IMPORTED_MODULE_0__.getParticipantCount)(client, channelId, entity);
+        // Bounded: the entity's own count, else ONE GetFullChannel. The old getParticipantCount fell
+        // back to enumerating participants when that failed, a heavy call on every unresolvable channel.
+        const participantsCount = await (0,_participants_count_fill__WEBPACK_IMPORTED_MODULE_0__.getParticipantsCountFromTg)(client, channelId, entity);
         const liveFacts = await (0,_telegram_channel__WEBPACK_IMPORTED_MODULE_2__.getTelegramChannelLiveFacts)(client, {
             channelId,
             entity,
@@ -9973,6 +10345,7 @@ async function getChannelFromTg(client, channelId) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   getChannelFromTg: () => (/* reexport safe */ _getChannelFromTg__WEBPACK_IMPORTED_MODULE_3__.getChannelFromTg),
+/* harmony export */   getParticipantsCountFromTg: () => (/* reexport safe */ _participants_count_fill__WEBPACK_IMPORTED_MODULE_4__.getParticipantsCountFromTg),
 /* harmony export */   getTelegramChannelLiveFacts: () => (/* reexport safe */ _telegram_channel__WEBPACK_IMPORTED_MODULE_1__.getTelegramChannelLiveFacts),
 /* harmony export */   getTelegramChannelMessageStats: () => (/* reexport safe */ _telegram_message_stats__WEBPACK_IMPORTED_MODULE_0__.getTelegramChannelMessageStats),
 /* harmony export */   getTelegramCommonChatIds: () => (/* reexport safe */ _telegram_common_chats__WEBPACK_IMPORTED_MODULE_2__.getTelegramCommonChatIds)
@@ -9981,10 +10354,68 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./telegram-channel */ "../../packages/tg-channel-state/src/telegram-client/telegram-channel.ts");
 /* harmony import */ var _telegram_common_chats__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./telegram-common-chats */ "../../packages/tg-channel-state/src/telegram-client/telegram-common-chats.ts");
 /* harmony import */ var _getChannelFromTg__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
+/* harmony import */ var _participants_count_fill__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./participants-count-fill */ "../../packages/tg-channel-state/src/telegram-client/participants-count-fill.ts");
 
 
 
 
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/telegram-client/participants-count-fill.ts"
+/*!**************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/telegram-client/participants-count-fill.ts ***!
+  \**************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getParticipantsCountFromTg: () => (/* binding */ getParticipantsCountFromTg)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/getFullEntityInfo */ "../../packages/tg-core/src/telegram-utils/getFullEntityInfo.ts");
+/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+
+
+
+
+/**
+ * Single-shot participant count, used by the shared hydration (getChannelFromTg): the entity's own count if it has one (no API
+ * call), otherwise ONE GetFullChannel/GetFullChat. Unlike getParticipantCount it never falls back to
+ * enumerating participants, so the worst case is one cheap request. Returns null when unresolvable.
+ */
+async function getParticipantsCountFromTg(client, channelId, knownEntity) {
+    const id = (0,_channel_state__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+    if (!id || !/^\d+$/.test(id) || id === "0")
+        return null;
+    try {
+        await client.connect(); // no-op when connected; matches the old getParticipantCount behaviour
+        const entity = knownEntity ?? await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_1__.EntityCacheManager.getInstance().getEntity(`-100${id}`, client) ?? `-100${id}`;
+        if ((entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Channel || entity instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) && positive(entity.participantsCount)) {
+            return Math.floor(Number(entity.participantsCount));
+        }
+        const full = await (0,_tg_core_telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_2__.getFullEntityInfo)(client, entity, { timeout: 10000, label: id });
+        if (full instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChannelFull && positive(full.participantsCount))
+            return Math.floor(Number(full.participantsCount));
+        if (full instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatFull && full.participants instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatParticipants) {
+            const n = full.participants.participants?.length;
+            if (positive(n))
+                return n;
+        }
+    }
+    catch {
+        // best-effort: the caller records the attempt so this is not retried for 30 days
+    }
+    return null;
+}
+function positive(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0;
+}
 
 
 /***/ },
@@ -10020,7 +10451,10 @@ async function getTelegramChannelLiveFacts(client, input) {
         broadcast: entity['broadcast'] === true,
         left: entity['left'] === true,
         private: entity['private'] === true || forbiddenEntity,
-        forbidden: entity['forbidden'] === true || forbiddenEntity,
+        // A ChannelForbidden/ChatForbidden entity means THIS ACCOUNT has no access (kicked, restricted,
+        // stale access hash). That is an account fact, not a channel fact: it still makes `private`
+        // true (so this account will not send) but must not mark the SHARED channel forbidden.
+        forbidden: entity['forbidden'] === true,
         defaultBannedRights: extractDefaultBannedRights(entity['defaultBannedRights']),
         megagroup: entity['megagroup'] === true,
         accessHash: stringOrNull(entity['accessHash']),
@@ -10838,8 +11272,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.acceptPhoneCall),
 /* harmony export */   activeChannelCanSendUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelCanSendUpdateExpression),
 /* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelHydrationReasonUpdateExpression),
+/* harmony export */   activeChannelStaleFlagClearFields: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelStaleFlagClearFields),
 /* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_39__.aggregateHealthStatus),
 /* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.analyzeText),
+/* harmony export */   applyChannelFlagClearRules: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.applyChannelFlagClearRules),
 /* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverse),
 /* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverseFuzzy),
 /* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.batchGetEntities),
@@ -10914,6 +11350,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isHealthCheckActionable: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_39__.isHealthCheckActionable),
 /* harmony export */   isHealthyDaysLeft: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_33__.isHealthyDaysLeft),
 /* harmony export */   isMongoUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isMongoUpdateExpression),
+/* harmony export */   isOperatorBan: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isOperatorBan),
 /* harmony export */   isPeerFlood: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isPeerFlood),
 /* harmony export */   isPermanentEntityError: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isPermanentEntityError),
 /* harmony export */   isPermanentError: () => (/* reexport safe */ _telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_35__["default"]),
@@ -12435,9 +12872,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* binding */ ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   activeChannelCanSendUpdateExpression: () => (/* binding */ activeChannelCanSendUpdateExpression),
 /* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* binding */ activeChannelHydrationReasonUpdateExpression),
+/* harmony export */   activeChannelStaleFlagClearFields: () => (/* binding */ activeChannelStaleFlagClearFields),
+/* harmony export */   applyChannelFlagClearRules: () => (/* binding */ applyChannelFlagClearRules),
 /* harmony export */   buildActiveChannelUpsertPipeline: () => (/* binding */ buildActiveChannelUpsertPipeline),
 /* harmony export */   coerceActiveChannelBooleans: () => (/* binding */ coerceActiveChannelBooleans),
 /* harmony export */   isMongoUpdateExpression: () => (/* binding */ isMongoUpdateExpression),
+/* harmony export */   isOperatorBan: () => (/* binding */ isOperatorBan),
 /* harmony export */   isUsableActiveChannelId: () => (/* binding */ isUsableActiveChannelId),
 /* harmony export */   normalizeActiveChannelBoolean: () => (/* binding */ normalizeActiveChannelBoolean),
 /* harmony export */   pickActiveChannelWrite: () => (/* binding */ pickActiveChannelWrite)
@@ -12452,7 +12892,7 @@ const ACTIVE_CHANNEL_WRITABLE_KEYS = [
     'banned', 'private', 'forbidden', 'reactRestricted', 'availableMsgs', 'megagroup',
     'accessHash', 'bannedAt', 'reactRestrictedAt',
     'createdAt', 'updatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
-    'lastHydrationStatus', 'lastHydrationReason',
+    'lastHydrationStatus', 'lastHydrationReason', 'participantsCountCheckedAt',
 ];
 /**
  * Legacy Telegram permission snapshots that used to be persisted independently.
@@ -12569,30 +13009,57 @@ function pickActiveChannelWrite(data) {
     return out;
 }
 /**
- * Mongo expression for a live sendability refresh. `banned` and `forbidden`
- * are durable safety decisions, so an observed sendable dialog cannot make
- * either document sendable again. This must run inside an update pipeline.
+ * CHANNEL FLAG RULES (single definition, used by every activeChannels writer in tg-aut and
+ * promote-clients; CMS mirrors them in durable-channel-upsert.ts).
+ *
+ * ROOT CAUSE these fix: `forbidden`/`banned` on the SHARED doc were written from ONE account's view
+ * (a ChannelForbidden entity, CHAT_WRITE_FORBIDDEN, a legacy USER_BANNED write) and were then sticky
+ * for every account, forever. Measured 2026-10-04: 608 of 1,108 strong channels closed, and 14/14
+ * "forbidden" ones allow members to send.
+ *
+ *  - Account-scoped facts never reach the shared doc (they live in the per-mobile Redis block).
+ *  - `forbidden` is never durable. `banned` is durable ONLY with operator provenance
+ *    (banned === true AND bannedAt set, which only the CMS operator path stamps).
+ *  - A verified live "members can send" observation clears non-operator `banned`/`forbidden`.
  */
+/** Mongo predicate: this doc carries an operator ban (the only durable stop). */
+const OPERATOR_BAN_EXPR = {
+    $and: [{ $eq: ['$banned', true] }, { $ne: [{ $ifNull: ['$bannedAt', null] }, null] }],
+};
+/** In-memory twin of OPERATOR_BAN_EXPR for already-loaded docs. */
+function isOperatorBan(doc) {
+    return doc?.banned === true && doc?.bannedAt != null;
+}
+/** Mongo expression for a live sendability refresh: only an operator ban forces false. Pipeline-only. */
 function activeChannelCanSendUpdateExpression(liveCanSendMsgs) {
-    return {
-        $cond: [
-            { $or: [{ $eq: ['$banned', true] }, { $eq: ['$forbidden', true] }] },
-            false,
-            liveCanSendMsgs,
-        ],
-    };
+    return { $cond: [OPERATOR_BAN_EXPR, false, liveCanSendMsgs] };
 }
 /** Keep hydration diagnostics consistent with the persisted durable state. */
 function activeChannelHydrationReasonUpdateExpression(liveReason) {
+    return { $cond: [OPERATOR_BAN_EXPR, 'banned', liveReason] };
+}
+/**
+ * Fields to add to a write carrying a verified live "members can send" observation: clears a
+ * non-operator `banned`/`forbidden` (and the matching `bannedAt`) atomically in Mongo.
+ */
+function activeChannelStaleFlagClearFields(liveCanSendMsgs) {
+    if (liveCanSendMsgs !== true)
+        return {};
     return {
-        $switch: {
-            branches: [
-                { case: { $eq: ['$banned', true] }, then: 'banned' },
-                { case: { $eq: ['$forbidden', true] }, then: 'forbidden' },
-            ],
-            default: liveReason,
-        },
+        banned: { $cond: [OPERATOR_BAN_EXPR, true, false] },
+        bannedAt: { $cond: [OPERATOR_BAN_EXPR, '$bannedAt', null] },
+        forbidden: false,
     };
+}
+/**
+ * A runtime `banned:false` is a verified live clearance, guarded so an operator ban still wins
+ * atomically. Mutates `data`. (`forbidden:false` is simply kept.)
+ */
+function applyChannelFlagClearRules(data) {
+    if (data.banned === false) {
+        data.banned = { $cond: [OPERATOR_BAN_EXPR, true, false] };
+        data.bannedAt = { $cond: [OPERATOR_BAN_EXPR, '$bannedAt', null] };
+    }
 }
 /**
  * Converts a normal `$set` + `$setOnInsert` intent into an aggregation update
@@ -19340,13 +19807,9 @@ function normalizeActiveChannelWrite(input) {
         }
     }
     // DURABLE FLAGS: assert-only. A runtime writer may set these true but never back to false.
-    if (data.banned === false)
-        drop('banned', 'durable flag — runtime may assert but never clear');
-    if (data.banned !== true && 'bannedAt' in data) {
-        drop('bannedAt', 'meaningless without banned=true');
-    }
-    if (data.forbidden === false)
-        drop('forbidden', 'durable flag — runtime may assert but never clear');
+    // A runtime `false` is a verified live clearance; only an operator ban (banned + bannedAt)
+    // survives it, enforced atomically in Mongo. See @tg/core activeChannel.
+    (0,_tg_core_types_activeChannel__WEBPACK_IMPORTED_MODULE_0__.applyChannelFlagClearRules)(data);
     // reactRestricted drives a timed auto-heal keyed on reactRestrictedAt. Without the stamp the
     // channel stays restricted forever, so set it whenever the flag is raised.
     if (data.reactRestricted === true && !data.reactRestrictedAt) {
@@ -30079,6 +30542,8 @@ class UserDataDtoCrud {
                 // on the document. Keep this guard inside Mongo's atomic update so
                 // a concurrent operator ban wins over this refresh too.
                 setFields.canSendMsgs = (0,_tg_core__WEBPACK_IMPORTED_MODULE_4__.activeChannelCanSendUpdateExpression)(telegramCanSend);
+                // A live "members can send" dialog clears a stale non-operator banned/forbidden.
+                Object.assign(setFields, (0,_tg_core__WEBPACK_IMPORTED_MODULE_4__.activeChannelStaleFlagClearFields)(telegramCanSend));
                 const liveDoc = doc;
                 // `private` is a live Telegram fact. A freshly sendable
                 // dialog conclusively clears a stale private marker; a
@@ -30171,15 +30636,9 @@ class UserDataDtoCrud {
                 data.canSendMsgs = false;
             }
         }
-        // Runtime refresh/hydration can never unban a globally disabled channel.
-        if (data.banned === false)
-            delete data.banned;
-        if (data.banned !== true)
-            delete data.bannedAt;
-        // `private` is refreshed from verified Telegram facts. `forbidden`
-        // remains durable: runtime may assert it but cannot clear it.
-        if (data.forbidden === false)
-            delete data.forbidden;
+        // Runtime `false` = verified live clearance; an operator ban (banned + bannedAt) still
+        // wins atomically in Mongo (@tg/core activeChannel).
+        (0,_tg_core__WEBPACK_IMPORTED_MODULE_4__.applyChannelFlagClearRules)(data);
     }
     /** Delegates to the shared predicate so both apps gate the SAME collection identically. */
     isUsableActiveChannelFilter(filter) {
@@ -35491,11 +35950,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
 /* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
@@ -35513,8 +35972,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("PromotionEngine");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("PromotionEngine");
 /**
  * Promote-flavored promotion engine.
  *
@@ -35523,7 +35981,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("P
  * the private-channel send fallback. One instance PER MOBILE
  * (promote runs N telegram clients per process); all state is per-instance.
  */
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.BasePromotionEngine {
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || dialogManager.instanceName || process.env.clientId || "defaultClient", options.instanceId || dialogManager.instanceId || process.env.mobile || "defaultMobile");
         // --- Public mutable fields preserved from the old Promotion API ---
@@ -35531,26 +35989,13 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         this.messageCount = 0;
         this.converted = 0;
         this.previousSuccessfulMessages = [];
-        this.runtimeRecoveryRequested = false;
         this.MAX_SUCCESS_MESSAGES = 30;
+        this.defaultAvailableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages;
         this.refreshPromotionContext();
         this.onTelegramRuntimeFailure = options.onTelegramRuntimeFailure;
         logger.log(`[${this.mobile}] 🚀 PromotionEngine created; helperChannelLoopDelay=${this.formatDuration(this.HELPER_CHANNEL_LOOP_DELAY_MS)}`);
         this.startPeriodicCleanup();
         this.promoteMsgsPromise = this.loadPromotionMessages();
-    }
-    // =================================================================
-    //  RUNTIME CONTEXT / MESSAGES / CLEANUP
-    // =================================================================
-    async loadPromotionMessages() {
-        try {
-            const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-            this.promoteMsgs = (await db.getPromoteMsgs()) ?? {};
-            logger.log(`[${this.mobile}] Loaded ${Object.keys(this.promoteMsgs).length} promotion messages`);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to load promotion messages`, false);
-        }
     }
     performPeriodicCleanup() {
         if (this.channels.length > this.MAX_CHANNELS_CACHE) {
@@ -35572,13 +36017,10 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateCustomMessage)(_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateCustomMessage)(_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateFollowupMsg)(),
         };
-    }
-    errorMessageIndicatesMissingEntity(errorMessage) {
-        return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(errorMessage, ['Telegram entity not found']);
     }
     adapterShouldContinue() {
         return this.promotionActive;
@@ -35592,34 +36034,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     getChannelSelectionMode() {
         return 'source_order';
     }
-    buildRunnerAdapterExtras(account) {
-        void account;
-        return {
-            adapter: {
-                getPercentiles: () => this.percentileEngineOrNull(),
-            },
-            runnerOptions: { scoringEnabled: true },
-        };
-    }
-    async getIntelligenceDocsForRunner(channelIds) {
-        const account = this.promotionContext ?? this.refreshPromotionContext();
-        return account.intelligence.batchGet(channelIds);
-    }
-    async getIntelligenceDocForRunner(channelId) {
-        const account = this.promotionContext ?? this.refreshPromotionContext();
-        return account.intelligence.get(channelId);
-    }
-    async loadStoredChannelForCheck(messageItem) {
-        return _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
-            .getActiveChannel({ channelId: messageItem.channelId })
-            .catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to load stored channel info for message check ${messageItem.channelId}`, false);
-            return null;
-        });
-    }
-    onCheckEntityNotFound(messageItem) {
-        logger.warn(`[${this.mobile}] ⚠️ PROMO message check | ${messageItem.channelId} | msg ${messageItem.messageId} | entity_not_found | removing`);
-    }
     onCheckTerminalFailure(messageItem, parsed) {
         logger.warn(`[${this.mobile}] ⚠️ PROMO message check failed | ${messageItem.channelId} | msg ${messageItem.messageId} | ${this.promotionErrorMessage(parsed)} | removing`);
     }
@@ -35627,17 +36041,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_6__.isTelegramRuntimeFailure)(error))
             void this.triggerTelegramRuntimeRecovery(error);
         return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed send to ${request.channel.title} (@${request.channel.username})`, false);
-    }
-    async triggerTelegramRuntimeRecovery(error) {
-        if (!this.onTelegramRuntimeFailure || this.runtimeRecoveryRequested)
-            return;
-        this.runtimeRecoveryRequested = true;
-        try {
-            await this.onTelegramRuntimeFailure(error);
-        }
-        catch (recoveryError) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(recoveryError, `[${this.mobile}] Promotion runtime recovery request failed`, false);
-        }
     }
     // =================================================================
     //  START / RESTART
@@ -35673,11 +36076,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
                 logger.warn(`[${this.mobile}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, entity, { message: validatedOutgoing });
+            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeoutOrThrow)(this.client, entity, { message: validatedOutgoing });
             return { message: sentMessage, checkableByChannelId: true };
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__.parseTelegramError)(error, channelInfo.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, channelInfo.channelId);
             switch (parsed.type) {
                 case 'CHANNEL_RESTRICTED':
                     if (parsed.reason === 'banned') {
@@ -35719,7 +36122,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
             logger.log(`[${this.mobile}] Retrying private channel via @${username}`);
             const finalText = (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
             const validatedFinalText = this.assertSendablePromotionText(finalText);
-            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
+            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
             // A verified username send is fresh evidence that this channel is
             // reachable. Repair the stale private flag, but never let a
             // best-effort persistence failure turn a completed Telegram send
@@ -35778,20 +36181,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         }
         logger.warn(`[${this.mobile}] ❌ PROMO ${isFollowUp ? 'follow-up failed' : 'failed'} | ${channelId} | @${channelInfo.username} | failed ${this.stats.totalFailed} | streak ${this.stats.failStreak} | ${cleanErrorMessage}`);
     }
-    async applyPromotionFailureState(channelId, errorMsg) {
-        const action = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
-        if (action.skipPersist || !action.channelUpdate) {
-            logger.debug(`[${this.mobile}] PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason}`);
-            return;
-        }
-        try {
-            await _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().updateActiveChannel({ channelId }, action.channelUpdate);
-            logger.debug(`[${this.mobile}] PROMO failure persisted | ${channelId} | ${action.code} | ${action.reason}`);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Failed to persist promotion failure state for ${channelId}`, false);
-        }
-    }
     async handleExistingMessage(messageItem) {
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
         try {
@@ -35801,7 +36190,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
             // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
             // remaining consumer) — this used to stamp a message cursor on activeChannels that
             // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.isPoolMessageIndex)(messageIndex)) {
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.isPoolMessageIndex)(messageIndex)) {
                 await db.addToAvailableMsgs({ channelId: messageItem.channelId }, messageIndex);
             }
         }
@@ -35827,7 +36216,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
             this.stats.deletedCount++;
             await this.sendPromotionLog({
                 title: "Promote message deleted",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.WARNING,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
                 summary: `Deleted promotion message observed in @${channelInfo.username}.`,
                 fields: [
                     { label: "Message Index", value: messageIndex },
@@ -35835,24 +36224,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
                 ],
                 tags: ["promote", "deleted-message"],
             }, `Failed to send deleted-message notification for ${channelId}`);
-            // Deletion policy from shared engine, combined with promote's local policy.
-            const localDeletionPolicy = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.evaluateDeletionPolicy)(messageIndex, availableMsgs.length);
-            const localDeletionActions = messageIndex === 'ai'
-                ? [
-                    ...localDeletionPolicy.actions.filter((action) => action !== 'remove_message_index'),
-                    'increment_word_restriction',
-                ]
-                : localDeletionPolicy.actions;
-            const providedDeletionActions = messageIndex === 'ai'
-                ? providedDeletionPolicy?.actions.filter((action) => action !== 'remove_message_index')
-                : providedDeletionPolicy?.actions;
-            const deletionActions = providedDeletionPolicy
-                ? Array.from(new Set([...(providedDeletionActions ?? []), ...localDeletionActions]))
-                : localDeletionActions;
-            const suppressFallbackBan = messageIndex === '0' && availableMsgs.length > 0;
-            const finalActions = suppressFallbackBan
-                ? deletionActions.filter((action) => action !== 'ban_no_available_messages')
-                : deletionActions;
+            const finalActions = this.resolveDeletionPolicy(messageIndex, availableMsgs.length, providedDeletionPolicy).actions;
             if (finalActions.includes('ban_no_available_messages')) {
                 try {
                     await db.removeFromAvailableMsgs({ channelId }, messageIndex);
@@ -35875,7 +36247,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
                 }
                 void this.sendPromotionLog({
                     title: "Promote message index removed",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.WARNING,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
                     summary: `Removed message index ${messageIndex} from @${channelInfo.username}.`,
                     tags: ["promote", "message-index", "cleanup"],
                 }, `Failed to send removed-message notification for ${channelId}`);
@@ -35887,7 +36259,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
     }
     async sendPromotionLog(notification, context) {
         try {
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.PROM_LOGS1, notification);
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.PROM_LOGS1, notification);
             if (sent === false) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(new Error("Promotion log notification returned false"), `[${this.mobile}] ${context}`, false);
             }
@@ -35947,9 +36319,6 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         logger.info(`[${this.mobile}] 🎯 PROMO channels | fetched ${fetchedChannels.length} | hydrated ${channels.length} | unavailable ${unavailable} | noInfo ${nullInfo} | conc ${concurrency} | hydrateMs ${Date.now() - hydrateStart}`);
         return channels;
     }
-    async getChannelForRunner(channelId) {
-        return this.getChannelInfo(channelId);
-    }
     async fetchDialogs() {
         let channelDetails = [];
         try {
@@ -36006,87 +36375,17 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.Ba
         }
         return shortlist;
     }
-    mergeLiveChannelInfo(existing, liveChannelInfo) {
-        const hydrated = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.mergeHydratedChannelFacts)(existing, liveChannelInfo);
-        // NOTE: messageId/messageIndex/freeformDeletedCount/followUpDeletedCount/deletedCount/
-        // lastMessageTime are dropped from IChannel (channelIntelligence.outcomes is now the source
-        // of truth for the outcome counters; the rest were dead-on-read). Carry legacy values through
-        // via an untyped merge so any remaining pre-cleanup DB rows aren't clobbered by this in-memory
-        // snapshot, without re-widening the canonical type.
-        const legacyExisting = existing;
-        const legacy = {
-            messageId: legacyExisting?.messageId ?? null,
-            messageIndex: legacyExisting?.messageIndex ?? null,
-            freeformDeletedCount: legacyExisting?.freeformDeletedCount ?? 0,
-            followUpDeletedCount: legacyExisting?.followUpDeletedCount ?? 0,
-            deletedCount: legacyExisting?.deletedCount ?? 0,
-            lastMessageTime: legacyExisting?.lastMessageTime ?? 0,
-        };
-        return {
-            ...legacy,
-            channelId: this.normalizeChannelId(liveChannelInfo.channelId),
-            title: liveChannelInfo.title,
-            participantsCount: liveChannelInfo.participantsCount ?? existing?.participantsCount ?? 0,
-            username: liveChannelInfo.username ?? existing?.username ?? "",
-            broadcast: hydrated.patch.broadcast === true,
-            megagroup: liveChannelInfo.megagroup,
-            canSendMsgs: hydrated.canSendMsgs,
-            availableMsgs: existing?.availableMsgs ?? _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages,
-            banned: hydrated.patch.banned === true,
-            forbidden: hydrated.patch.forbidden === true,
-            private: hydrated.patch.private === true,
-            reactRestricted: existing?.reactRestricted ?? false,
-            lastHydratedAt: hydrated.patch.lastHydratedAt,
-            lastLiveCheckedAt: hydrated.patch.lastLiveCheckedAt,
-            lastHydrationStatus: String(hydrated.patch.lastHydrationStatus || 'success'),
-            lastHydrationReason: String(hydrated.patch.lastHydrationReason || 'unknown'),
-        };
-    }
-    async getChannelInfo(channelId, liveChannelInfo) {
-        const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-        const normalizedChannelId = this.normalizeChannelId(channelId);
-        if (!this.isValidNormalizedChannelId(normalizedChannelId)) {
-            return null;
-        }
-        try {
-            let channelInfo = await db.getActiveChannel({ channelId: normalizedChannelId });
-            const needsHydration = !channelInfo || (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.shouldHydrateBeforeFinalReject)(channelInfo);
-            if (liveChannelInfo) {
-                channelInfo = this.mergeLiveChannelInfo(channelInfo, liveChannelInfo);
-                await db.updateActiveChannel({ channelId: normalizedChannelId }, channelInfo);
-            }
-            else if (needsHydration) {
-                if (!this.claimChannelHydrationAttempt(normalizedChannelId) && channelInfo) {
-                    return null;
-                }
-                const channelInfoFromTg = await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_12__.getChannelFromTg)(this.client, normalizedChannelId);
-                if (!channelInfoFromTg) {
-                    return null;
-                }
-                channelInfo = this.mergeLiveChannelInfo(channelInfo, channelInfoFromTg);
-                await db.updateActiveChannel({ channelId: normalizedChannelId }, channelInfo);
-            }
-            const migratedDoc = await this.ensureChannelIntelligence(channelInfo);
-            if (channelInfo && migratedDoc) {
-                channelInfo = this.mergePromotionHealthSignals(channelInfo, migratedDoc);
-            }
-            if (!channelInfo.availableMsgs) {
-                // followUpDeletedCount/freeformDeletedCount are dropped from IChannel — this repair
-                // used to also re-seed them to 0 alongside availableMsgs, which pickActiveChannelWrite
-                // would silently drop from the $set anyway now. Only the functional intent (repairing
-                // availableMsgs) remains.
-                channelInfo = await db.updateActiveChannel({ channelId: normalizedChannelId }, {
-                    availableMsgs: _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages,
-                });
-                if (channelInfo)
-                    channelInfo.availableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages;
-            }
+    async finalizeChannelInfo(channelInfo) {
+        if (channelInfo.availableMsgs)
             return channelInfo;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[${this.mobile}] Error getting channel info for ${channelId}`, false);
-            return null;
-        }
+        // availableMsgs repair: the stored doc has no template list.
+        const repaired = await _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().updateActiveChannel({ channelId: channelInfo.channelId }, { availableMsgs: _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages });
+        if (repaired)
+            repaired.availableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages;
+        return repaired;
+    }
+    getChannelStore() {
+        return _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     }
     // =================================================================
     //  CLEANUP
