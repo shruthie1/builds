@@ -13431,6 +13431,14 @@ const ChannelCategory = Object.freeze({
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
 });
+// CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
+// that was never made channel admin (pending_admin — its sends fail), or one parked for a human
+// (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
+const RETIRED_BOT_LIFECYCLES = new Set(['dead_token', 'pending_admin', 'manual_attention']);
+function isRetiredBot(doc) {
+    return doc.status === 'inactive'
+        || (typeof doc.lifecycle === 'string' && RETIRED_BOT_LIFECYCLES.has(doc.lifecycle));
+}
 class BotConfig {
     constructor() {
         this.categoryMap = new Map();
@@ -13662,6 +13670,10 @@ class BotConfig {
     mergeMongoBotDocs(categoryMap, docs) {
         let loadedBots = 0;
         const grouped = new Map();
+        // Use only non-retired bots for a category that has at least one; a category whose bots are
+        // ALL retired keeps every bot (the previous behaviour) so it never goes dark.
+        const hasActive = new Set(docs.filter(d => !isRetiredBot(d)).map(d => String(d.category)));
+        docs = docs.filter(d => !isRetiredBot(d) || !hasActive.has(String(d.category)));
         for (const doc of docs) {
             const category = this.getExactCategory(doc.category);
             const channelId = typeof doc.channelId === 'string' ? doc.channelId.trim() : '';
