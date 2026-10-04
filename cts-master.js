@@ -28206,7 +28206,8 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DailyAnalyticsService = exports.MONGO_RETENTION_DAYS = exports.REVENUE_FROM_DAY = void 0;
+exports.DailyAnalyticsService = exports.DAILY_ANALYTICS_SOURCE_ENV = exports.MONGO_RETENTION_DAYS = exports.REVENUE_FROM_DAY = void 0;
+exports.dailyAnalyticsSource = dailyAnalyticsSource;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -28224,6 +28225,11 @@ const PG_COLUMNS = {
     user: { newUsers: 'new_users', active: 'active_users', paid: 'payers' },
 };
 exports.MONGO_RETENTION_DAYS = 13;
+exports.DAILY_ANALYTICS_SOURCE_ENV = 'DAILY_ANALYTICS_SOURCE';
+function dailyAnalyticsSource() {
+    return (process.env[exports.DAILY_ANALYTICS_SOURCE_ENV] || '').trim().toLowerCase() === 'pg' ? 'pg' : 'hybrid';
+}
+const ALL_DAYS_FROM_PG = '9999-12-31';
 const num = (v) => Number(v) || 0;
 let DailyAnalyticsService = class DailyAnalyticsService {
     constructor(promoteModel, reactionModel, userModel, pg) {
@@ -28306,6 +28312,8 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         return dates[dates.length - 1] >= exports.REVENUE_FROM_DAY ? 'payment_event_partial' : 'unavailable';
     }
     mongoCutoff() {
+        if (dailyAnalyticsSource() === 'pg')
+            return ALL_DAYS_FROM_PG;
         return this.lastNDates(exports.MONGO_RETENTION_DAYS)[0];
     }
     async pgDailyRows(metric, dates) {
@@ -28458,6 +28466,11 @@ let DailyAnalyticsService = class DailyAnalyticsService {
     async byMobile(metric, days = 14, clientId, namespace) {
         const dates = this.lastNDates(days);
         const fields = this.numericFields(metric);
+        if (metric === 'promote' && dailyAnalyticsSource() === 'pg') {
+            const pg = await this.pgPromoteByMobile(dates, clientId);
+            if (pg)
+                return pg;
+        }
         const match = { date: { $in: dates } };
         if (clientId)
             match.clientId = clientId;
@@ -28483,6 +28496,33 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             }
             return out;
         });
+    }
+    async pgPromoteByMobile(dates, clientId) {
+        const params = [`${dates[0]}T00:00:00+05:30`];
+        let clientClause = '';
+        if (clientId) {
+            params.push(clientId);
+            clientClause = 'AND client_id = $2';
+        }
+        const rows = await this.pg.query(`SELECT client_id, mobile,
+              count(*) FILTER (WHERE outcome <> 'deleted')              AS sent,
+              count(*) FILTER (WHERE outcome = 'delivered')             AS success,
+              count(*) FILTER (WHERE outcome IN ('banned', 'failed'))   AS failed,
+              count(*) FILTER (WHERE outcome = 'banned')                AS banned
+         FROM promotion_send
+        WHERE ts >= $1::timestamptz ${clientClause}
+        GROUP BY client_id, mobile
+        ORDER BY client_id, mobile`, params);
+        if (!rows)
+            return undefined;
+        return rows.map((r) => ({
+            clientId: String(r.client_id),
+            mobile: String(r.mobile),
+            sent: num(r.sent),
+            success: num(r.success),
+            failed: num(r.failed),
+            banned: num(r.banned),
+        }));
     }
     async overview(days = 14) {
         const [promote, reaction, user] = await Promise.all([
