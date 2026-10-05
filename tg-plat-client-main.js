@@ -1890,13 +1890,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionMessageQueue: () => (/* reexport safe */ _orchestrator__WEBPACK_IMPORTED_MODULE_4__.PromotionMessageQueue),
 /* harmony export */   PromotionRunnerSupervisor: () => (/* reexport safe */ _orchestrator__WEBPACK_IMPORTED_MODULE_4__.PromotionRunnerSupervisor),
 /* harmony export */   PromotionRuntime: () => (/* reexport safe */ _runtime__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime),
+/* harmony export */   RESTRICT_AFTER_UNPROVEN_BANS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RESTRICT_AFTER_UNPROVEN_BANS),
 /* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountChannelBlock),
+/* harmony export */   RedisAccountExploration: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountExploration),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisAccountSendCap),
 /* harmony export */   RedisPromotionTracker: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker),
 /* harmony export */   RedisPromotionVerificationQueue: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionVerificationQueue),
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.TEMP_BLOCK_TTL_SECONDS),
+/* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.addPoolOutcomeTotals),
 /* harmony export */   buildInsertIfAbsentUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.buildInsertIfAbsentUpdate),
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.buildOutcomeUpdate),
@@ -2297,8 +2300,10 @@ class PromotionFlowRunner {
                     this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
                     return;
                 }
-                selectedChannels = channels
-                    .filter((channel) => !blockedChannelIds.has(channel.channelId))
+                const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
+                const exploreDenied = await this.explorationDenied(unblocked);
+                selectedChannels = unblocked
+                    .filter((channel) => !exploreDenied.has(channel.channelId))
                     .slice(0, batchTarget);
                 this.log('info', [
                     'Promotion selection ready',
@@ -2307,6 +2312,7 @@ class PromotionFlowRunner {
                     `batchTarget=${batchTarget}`,
                     `selected=${selectedChannels.length}`,
                     `blocked=${blockedChannelIds.size}`,
+                    `exploreDenied=${exploreDenied.size}`,
                     `stats=${this.formatStats(stats)}`,
                 ].join('; '));
             }
@@ -2335,7 +2341,8 @@ class PromotionFlowRunner {
                     blockedChannelIds,
                 });
                 const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
-                selectedChannels = selection.selected;
+                const exploreDenied = await this.explorationDenied(selection.selected);
+                selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
                 this.log('info', [
                     'Promotion selection ready',
                     'mode=ranked',
@@ -2343,13 +2350,14 @@ class PromotionFlowRunner {
                     `intelDocs=${intelligenceDocs.length}`,
                     `batchTarget=${batchTarget}`,
                     `policyLimit=${batchPolicy.limit}`,
-                    `selected=${selection.selected.length}`,
+                    `selected=${selectedChannels.length}`,
                     `proven=${selection.proven.length}`,
                     `untested=${selection.untested.length}`,
                     `skipped=${selection.skipped.length}`,
                     `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
                     `explorePct=${selection.explorePercent.toFixed(2)}`,
                     `blocked=${blockedChannelIds.size}`,
+                    `exploreDenied=${exploreDenied.size}`,
                     `stats=${this.formatStats(stats)}`,
                 ].join('; '));
                 if (selectionDiagnostics.selectedSample !== 'none') {
@@ -3212,6 +3220,22 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion sleep failed; using default timer fallback delayMs=${delayMs} error=${this.normalizeError(error)}`);
             await defaultSleep(delayMs);
+        }
+    }
+    /**
+     * Unproven channels this mobile must skip this round (it keeps getting banned in new channels).
+     * Optional on the account (older contexts/stubs lack it) and always fails open.
+     */
+    async explorationDenied(channels) {
+        const account = this.options.account;
+        if (typeof account.explorationDeniedForMobile !== 'function' || channels.length === 0)
+            return new Set();
+        try {
+            return await account.explorationDeniedForMobile(channels.map((channel) => channel.channelId));
+        }
+        catch (error) {
+            this.log('warn', `Promotion exploration budget lookup failed; not limiting this round; error=${this.normalizeError(error)}`);
+            return new Set();
         }
     }
     async sleepAfterChannel(outcome) {
@@ -7717,19 +7741,24 @@ class DelayCalculator {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PROMOTION_VERIFICATION_TTL_SECONDS: () => (/* reexport safe */ _redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_3__.PROMOTION_VERIFICATION_TTL_SECONDS),
+/* harmony export */   RESTRICT_AFTER_UNPROVEN_BANS: () => (/* reexport safe */ _redis_account_exploration__WEBPACK_IMPORTED_MODULE_5__.RESTRICT_AFTER_UNPROVEN_BANS),
 /* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_2__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _redis_account_channel_block__WEBPACK_IMPORTED_MODULE_4__.RedisAccountChannelBlock),
+/* harmony export */   RedisAccountExploration: () => (/* reexport safe */ _redis_account_exploration__WEBPACK_IMPORTED_MODULE_5__.RedisAccountExploration),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _redis_account_health_store__WEBPACK_IMPORTED_MODULE_1__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _redis_account_send_cap__WEBPACK_IMPORTED_MODULE_0__.RedisAccountSendCap),
 /* harmony export */   RedisPromotionTracker: () => (/* reexport safe */ _redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_2__.RedisPromotionTracker),
 /* harmony export */   RedisPromotionVerificationQueue: () => (/* reexport safe */ _redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_3__.RedisPromotionVerificationQueue),
-/* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _redis_account_channel_block__WEBPACK_IMPORTED_MODULE_4__.TEMP_BLOCK_TTL_SECONDS)
+/* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _redis_account_channel_block__WEBPACK_IMPORTED_MODULE_4__.TEMP_BLOCK_TTL_SECONDS),
+/* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _redis_account_exploration__WEBPACK_IMPORTED_MODULE_5__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED)
 /* harmony export */ });
 /* harmony import */ var _redis_account_send_cap__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./redis-account-send-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-send-cap.ts");
 /* harmony import */ var _redis_account_health_store__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./redis-account-health-store */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-health-store.ts");
 /* harmony import */ var _redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
 /* harmony import */ var _redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
 /* harmony import */ var _redis_account_channel_block__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./redis-account-channel-block */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-channel-block.ts");
+/* harmony import */ var _redis_account_exploration__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./redis-account-exploration */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-exploration.ts");
+
 
 
 
@@ -7748,12 +7777,15 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   EXTENDED_STRIKE_TTL_SECONDS: () => (/* binding */ EXTENDED_STRIKE_TTL_SECONDS),
+/* harmony export */   EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS: () => (/* binding */ EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS),
 /* harmony export */   MAX_TEMP_BLOCK_TTL_SECONDS: () => (/* binding */ MAX_TEMP_BLOCK_TTL_SECONDS),
 /* harmony export */   PERM_BLOCK_TTL_SECONDS: () => (/* binding */ PERM_BLOCK_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* binding */ RedisAccountChannelBlock),
 /* harmony export */   STRIKE_TTL_SECONDS: () => (/* binding */ STRIKE_TTL_SECONDS),
 /* harmony export */   TEMP_BLOCK_TTL_LADDER_SECONDS: () => (/* binding */ TEMP_BLOCK_TTL_LADDER_SECONDS),
-/* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* binding */ TEMP_BLOCK_TTL_SECONDS)
+/* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* binding */ TEMP_BLOCK_TTL_SECONDS),
+/* harmony export */   isExtendedBanLadderEnabled: () => (/* binding */ isExtendedBanLadderEnabled)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /**
@@ -7804,6 +7836,27 @@ const TEMP_BLOCK_TTL_LADDER_SECONDS = [
 const MAX_TEMP_BLOCK_TTL_SECONDS = 24 * 60 * 60;
 /** How long the ban-strike counter itself survives; must outlive the longest ladder rung. */
 const STRIKE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+/**
+ * EXTENDED ladder: the DEFAULT since 2026-10-05 (no flag to maintain). The legacy ladder above is
+ * kept only as an emergency rollback: env PROMOTION_BAN_LADDER=legacy.
+ *
+ * Measured 2026-10-05 over 10-03..10-05 promotion_send: a retry of an already-banned
+ * (mobile, channel) pair delivered 0 of ~14,000 times for spam-limited and mid accounts, and for
+ * healthy accounts 4.4% at +3-6h, 2.5% at +6-12h, 0% after 12h. The 1-day ceiling therefore buys
+ * ~1 futile attempt per pair per day. The first rung stays 3h (keeps the healthy 4.4%), later
+ * rungs back off to a week. A delivery on the pair clears its strikes (clearStrikes), so a
+ * recovered pair starts again at 3h.
+ */
+const EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS = [
+    3 * 60 * 60, // 1st ban  — 3h
+    24 * 60 * 60, // 2nd ban  — 1d
+    3 * 24 * 60 * 60, // 3rd ban  — 3d
+    7 * 24 * 60 * 60, // 4th+ ban — 7d (ceiling)
+];
+const EXTENDED_STRIKE_TTL_SECONDS = 14 * 24 * 60 * 60; // must outlive the 7d rung
+function isExtendedBanLadderEnabled(env = process.env) {
+    return String(env.PROMOTION_BAN_LADDER ?? '').trim().toLowerCase() !== 'legacy';
+}
 class RedisAccountChannelBlock {
     constructor(redis) {
         if (!isRedisLike(redis)) {
@@ -7854,6 +7907,7 @@ class RedisAccountChannelBlock {
         const strikeKey = this.strikeKey(mobile, channelId);
         if (!key || !strikeKey)
             return;
+        const extended = isExtendedBanLadderEnabled();
         // Count this ban, then pick the ladder rung. INCR returns the post-increment value, so the
         // first ban yields 1 -> index 0 -> 3h. A Redis hiccup on the counter must never escalate
         // wrongly, so fall back to the conservative first rung.
@@ -7868,18 +7922,19 @@ class RedisAccountChannelBlock {
                     strikes = parsed;
                 // Refresh the counter window on every ban so an actively-banned pair keeps its history.
                 if (typeof this.redis.expire === 'function') {
-                    await this.redis.expire(strikeKey, STRIKE_TTL_SECONDS);
+                    await this.redis.expire(strikeKey, extended ? EXTENDED_STRIKE_TTL_SECONDS : STRIKE_TTL_SECONDS);
                 }
             }
             catch {
                 strikes = 1;
             }
         }
-        const rung = Math.min(strikes, TEMP_BLOCK_TTL_LADDER_SECONDS.length) - 1;
-        const laddered = TEMP_BLOCK_TTL_LADDER_SECONDS[rung] ?? TEMP_BLOCK_TTL_SECONDS;
-        // Clamp defensively: a ban-driven block must never exceed one day regardless of how the
-        // ladder is edited later, because the ban belongs to the ACCOUNT and clears on its own.
-        const ttl = Math.min(laddered, MAX_TEMP_BLOCK_TTL_SECONDS);
+        const ladder = extended ? EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS : TEMP_BLOCK_TTL_LADDER_SECONDS;
+        const ceiling = extended ? EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS[EXTENDED_TEMP_BLOCK_TTL_LADDER_SECONDS.length - 1] : MAX_TEMP_BLOCK_TTL_SECONDS;
+        const rung = Math.min(strikes, ladder.length) - 1;
+        const laddered = ladder[rung] ?? TEMP_BLOCK_TTL_SECONDS;
+        // Clamp defensively so an edited ladder can never exceed its own ceiling.
+        const ttl = Math.min(laddered, ceiling);
         await this.redis.set(key, 'temp', 'EX', ttl);
     }
     /** True if this channel is currently blocked for this mobile (permanent, or temp still within TTL). */
@@ -7889,6 +7944,19 @@ class RedisAccountChannelBlock {
             return false;
         const result = await this.redis.exists(key);
         return result === 1 || result === '1' || result === true;
+    }
+    /**
+     * A delivery on this pair proves the account can post there again: drop its strike history so a
+     * later ban starts back at the first (3h) rung and the pair leaves probation. Not done under the
+     * legacy rollback ladder, which keeps its strikes as before.
+     */
+    async clearStrikes(mobile, channelId) {
+        if (!isExtendedBanLadderEnabled() || typeof this.redis.del !== 'function')
+            return;
+        const strikeKey = this.strikeKey(mobile, channelId);
+        if (!strikeKey)
+            return;
+        await this.redis.del(strikeKey);
     }
     /** Batch check — returns the set of channelIds blocked for this mobile (for pre-flight filtering). */
     async filterBlocked(mobile, channelIds) {
@@ -7919,6 +7987,163 @@ function isRedisLike(value) {
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['exists'] === 'function';
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-exploration.ts"
+/*!*********************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-exploration.ts ***!
+  \*********************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   EXPLORE_STREAK_TTL_SECONDS: () => (/* binding */ EXPLORE_STREAK_TTL_SECONDS),
+/* harmony export */   PROVEN_PAIR_TTL_SECONDS: () => (/* binding */ PROVEN_PAIR_TTL_SECONDS),
+/* harmony export */   RESTRICT_AFTER_UNPROVEN_BANS: () => (/* binding */ RESTRICT_AFTER_UNPROVEN_BANS),
+/* harmony export */   RedisAccountExploration: () => (/* binding */ RedisAccountExploration),
+/* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* binding */ UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
+/* harmony export */   isExplorationBudgetEnabled: () => (/* binding */ isExplorationBudgetEnabled)
+/* harmony export */ });
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/**
+ * Per-mobile exploration budget: how many UNPROVEN channels an account may try right now.
+ *
+ * A channel is PROVEN for a mobile once that mobile delivered a message there. Everything else
+ * (never tried, or tried and banned) is unproven. Measured on promotion_send 2026-10-04 10:43Z ..
+ * 2026-10-05 (97 accounts, 45.8k attempts):
+ *   - spam-limited accounts: first tries on new channels delivered 1.2% (8,957 attempts), retries
+ *     of banned pairs 0% (7,306), but channels they had delivered to before delivered 84%.
+ *   - healthy accounts: first tries delivered 83%.
+ * So a limited account keeps working in its proven channels while every new channel bans it.
+ *
+ * Rule (self-learning, no flags): count consecutive bans on unproven channels per mobile. Once the
+ * streak reaches RESTRICT_AFTER_UNPROVEN_BANS the account may try only UNPROVEN_PER_HOUR_WHEN_RESTRICTED
+ * unproven channels per clock hour; proven channels are never limited. Any delivery on an unproven
+ * channel resets the streak, so a recovered account opens up on its own. Replay of the window
+ * above: 73% of all bans avoided (limited 88%, healthy 5%) for 1.2% of deliveries (healthy 0.1%),
+ * an upper bound because the replay never lets a restricted account find new channels later.
+ *
+ * Keys (all with TTLs):
+ *   promote:chanok:{mobile}:{channelId}          "1", 30d, refreshed on each delivery
+ *   promote:explore:streak:{mobile}              consecutive unproven bans, 7d
+ *   promote:explore:used:{mobile}:{hourBucket}   unproven channels let through this hour, 2h
+ *
+ * Emergency rollback only: env PROMOTION_EXPLORATION_BUDGET=off.
+ */
+
+const RESTRICT_AFTER_UNPROVEN_BANS = 10;
+const UNPROVEN_PER_HOUR_WHEN_RESTRICTED = 5;
+const PROVEN_PAIR_TTL_SECONDS = 30 * 24 * 60 * 60;
+const EXPLORE_STREAK_TTL_SECONDS = 7 * 24 * 60 * 60;
+const USED_BUCKET_TTL_SECONDS = 2 * 60 * 60;
+function isExplorationBudgetEnabled(env = process.env) {
+    return String(env.PROMOTION_EXPLORATION_BUDGET ?? '').trim().toLowerCase() !== 'off';
+}
+class RedisAccountExploration {
+    constructor(redis, now = Date.now) {
+        if (!redis || typeof redis.get !== 'function' || typeof redis.set !== 'function') {
+            throw new Error('RedisAccountExploration redis client is required');
+        }
+        this.redis = redis;
+        this.now = now;
+    }
+    static init(redis, options = {}) {
+        if (!RedisAccountExploration.instance || options.replace === true) {
+            RedisAccountExploration.instance = new RedisAccountExploration(redis);
+        }
+        return RedisAccountExploration.instance;
+    }
+    static reset() {
+        RedisAccountExploration.instance = undefined;
+    }
+    /** A delivery proves the pair; a delivery on a pair that was unproven also ends the ban streak. */
+    async recordDelivery(mobile, channelId) {
+        const keys = this.pairKeys(mobile, channelId);
+        if (!keys)
+            return;
+        const wasProven = await this.isProvenKey(keys.proven);
+        await this.redis.set(keys.proven, '1', 'EX', PROVEN_PAIR_TTL_SECONDS);
+        if (!wasProven && typeof this.redis.del === 'function')
+            await this.redis.del(keys.streak);
+    }
+    /** USER_BANNED_IN_CHANNEL on this pair. Only bans on unproven pairs extend the streak. */
+    async recordBan(mobile, channelId) {
+        const keys = this.pairKeys(mobile, channelId);
+        if (!keys || typeof this.redis.incr !== 'function')
+            return;
+        if (await this.isProvenKey(keys.proven))
+            return;
+        await this.redis.incr(keys.streak);
+        if (typeof this.redis.expire === 'function')
+            await this.redis.expire(keys.streak, EXPLORE_STREAK_TTL_SECONDS);
+    }
+    /**
+     * Given candidate channelIds in priority order, return the unproven ones this account must skip
+     * this round. Proven channels always pass. Unrestricted accounts get an empty set. Channels let
+     * through are charged to the current hour when they are selected, so an interrupted round
+     * under-uses the budget instead of overrunning it. Any Redis error fails open (empty set).
+     */
+    async deniedChannels(mobile, orderedChannelIds) {
+        const denied = new Set();
+        const safeMobile = normalizeKeyPart(mobile);
+        if (!isExplorationBudgetEnabled() || !safeMobile || orderedChannelIds.length === 0)
+            return denied;
+        try {
+            const streak = toCount(await this.redis.get(`promote:explore:streak:${safeMobile}`));
+            if (streak < RESTRICT_AFTER_UNPROVEN_BANS)
+                return denied;
+            const usedKey = `promote:explore:used:${safeMobile}:${Math.floor(this.now() / 3600000)}`;
+            const used = toCount(await this.redis.get(usedKey));
+            let remaining = Math.max(0, UNPROVEN_PER_HOUR_WHEN_RESTRICTED - used);
+            let charged = 0;
+            for (const channelId of orderedChannelIds) {
+                const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
+                if (!safeChannelId || denied.has(safeChannelId))
+                    continue;
+                if (await this.isProvenKey(`promote:chanok:${safeMobile}:${safeChannelId}`))
+                    continue;
+                if (remaining > 0) {
+                    remaining -= 1;
+                    charged += 1;
+                    continue;
+                }
+                denied.add(safeChannelId);
+            }
+            // One process owns a mobile's promotion loop, so read-then-set cannot race with itself.
+            if (charged > 0)
+                await this.redis.set(usedKey, String(used + charged), 'EX', USED_BUCKET_TTL_SECONDS);
+            return denied;
+        }
+        catch {
+            return new Set();
+        }
+    }
+    pairKeys(mobile, channelId) {
+        const safeMobile = normalizeKeyPart(mobile);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
+        if (!safeMobile || !safeChannelId)
+            return null;
+        return { proven: `promote:chanok:${safeMobile}:${safeChannelId}`, streak: `promote:explore:streak:${safeMobile}` };
+    }
+    async isProvenKey(key) {
+        const raw = await this.redis.get(key);
+        return raw !== null && raw !== undefined;
+    }
+}
+function toCount(raw) {
+    const n = raw === null || raw === undefined ? 0 : Number.parseInt(String(raw), 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function normalizeKeyPart(value) {
+    // Same normalization as RedisAccountChannelBlock so both stores key a mobile identically.
+    if (typeof value !== 'string')
+        return null;
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : null;
 }
 
 
@@ -8758,9 +8983,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../redis/redis-account-health-store */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-health-store.ts");
 /* harmony import */ var _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../redis/redis-account-send-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-send-cap.ts");
 /* harmony import */ var _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../redis/redis-account-channel-block */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-channel-block.ts");
-/* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
-/* harmony import */ var _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../redis/redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _redis_redis_account_exploration__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../redis/redis-account-exploration */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-exploration.ts");
+/* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
+/* harmony import */ var _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../redis/redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+
 
 
 
@@ -8781,7 +9008,7 @@ class PromotionAccountContext {
         return this.runtime.intelligence;
     }
     async recordSend(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (this.runtime.tracker && safeChannelId) {
             await this.runtime.tracker.recordSend(safeChannelId, this.mobile, this.clientId);
         }
@@ -8797,6 +9024,9 @@ class PromotionAccountContext {
         if (this.runtime.channelBlock) {
             await this.runtime.channelBlock.blockTemporary(this.mobile, channelId);
         }
+        if (this.runtime.exploration) {
+            await this.runtime.exploration.recordBan(this.mobile, channelId).catch(() => undefined);
+        }
     }
     /** Which of these channelIds are currently blocked for THIS mobile (pre-flight filter). */
     async blockedChannelsForMobile(channelIds) {
@@ -8804,17 +9034,33 @@ class PromotionAccountContext {
             return new Set();
         return this.runtime.channelBlock.filterBlocked(this.mobile, channelIds);
     }
+    /**
+     * Of these candidates (priority order), the unproven channels THIS mobile must skip this round
+     * because it keeps getting banned in new channels (RedisAccountExploration). Fails open.
+     */
+    async explorationDeniedForMobile(channelIds) {
+        if (!this.runtime.exploration)
+            return new Set();
+        return this.runtime.exploration.deniedChannels(this.mobile, channelIds).catch(() => new Set());
+    }
     async recordSuccess(channelId, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
+        if (this.runtime.channelBlock) {
+            // A delivery ends this pair's ban history (no-op under the PROMOTION_BAN_LADDER=legacy rollback).
+            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch(() => undefined);
+        }
+        if (this.runtime.exploration) {
+            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch(() => undefined);
+        }
         if (this.runtime.accountHealth) {
             await this.runtime.accountHealth.recordLanded(this.mobile);
         }
     }
     async recordDeletion(channelId, survivalMs, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordDeletion(safeChannelId, survivalMs, isFollowup);
@@ -8823,7 +9069,7 @@ class PromotionAccountContext {
         }
     }
     async recordFailure(channelId, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordFailure(safeChannelId, errorType);
@@ -8835,7 +9081,7 @@ class PromotionAccountContext {
         }
     }
     async recordSurvival(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         let failure;
@@ -8856,32 +9102,32 @@ class PromotionAccountContext {
             throw failure;
     }
     async ensurePoolEntry(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.ensureDoc(safeChannelId);
         await this.runtime.intelligence.insertPoolEntryIfAbsent(safeChannelId, entry);
     }
     async recordPoolEntrySent(channelId, entryKey, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
         return this.runtime.intelligence.recordPoolEntrySent(safeChannelId, entryKey, nowMs);
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordPoolEntryOutcome(safeChannelId, entryKey, outcome, nowMs);
     }
     async recordSurvivingPoolEntry(channelId, entry, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
         return this.runtime.intelligence.recordSurvivingPoolEntry(safeChannelId, entry, nowMs);
     }
     async recordExploreOutcome(channelId, outcome) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordExploreOutcome(safeChannelId, outcome);
@@ -8903,7 +9149,7 @@ class PromotionAccountContext {
     }
     createVerificationQueue(maxSize) {
         return this.runtime.verificationRedis
-            ? new _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionVerificationQueue(this.runtime.verificationRedis, this.mobile, maxSize)
+            ? new _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__.RedisPromotionVerificationQueue(this.runtime.verificationRedis, this.mobile, maxSize)
             : null;
     }
     async resolveAccountHealth() {
@@ -8924,6 +9170,7 @@ class PromotionRuntime {
         this.accountHealth = params.accountHealth;
         this.accountCap = params.accountCap;
         this.channelBlock = params.channelBlock;
+        this.exploration = params.exploration ?? null;
         this.tracker = params.tracker;
         this.attribution = params.attribution;
         this.verificationRedis = params.verificationRedis;
@@ -8977,9 +9224,12 @@ class PromotionRuntime {
         const channelBlock = useLocks && lockRedis
             ? _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.init(lockRedis, { replace })
             : (_redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.reset(), null);
+        const exploration = useLocks && lockRedis
+            ? _redis_redis_account_exploration__WEBPACK_IMPORTED_MODULE_7__.RedisAccountExploration.init(lockRedis, { replace })
+            : (_redis_redis_account_exploration__WEBPACK_IMPORTED_MODULE_7__.RedisAccountExploration.reset(), null);
         const tracker = useAttribution
-            ? _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.init(trackerRedis, { replace })
-            : (_redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.reset(), null);
+            ? _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.init(trackerRedis, { replace })
+            : (_redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.reset(), null);
         const attribution = tracker
             ? _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.init(intelligence, tracker, { replace })
             : (_attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.reset(), null);
@@ -8992,6 +9242,7 @@ class PromotionRuntime {
             accountHealth,
             accountCap,
             channelBlock,
+            exploration,
             tracker,
             attribution,
             verificationRedis: useDurableVerification ? verificationRedis : null,
@@ -9012,7 +9263,8 @@ class PromotionRuntime {
         _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_4__.RedisAccountHealthStore.reset();
         _redis_redis_account_send_cap__WEBPACK_IMPORTED_MODULE_5__.RedisAccountSendCap.reset();
         _redis_redis_account_channel_block__WEBPACK_IMPORTED_MODULE_6__.RedisAccountChannelBlock.reset();
-        _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_7__.RedisPromotionTracker.reset();
+        _redis_redis_account_exploration__WEBPACK_IMPORTED_MODULE_7__.RedisAccountExploration.reset();
+        _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__.RedisPromotionTracker.reset();
         _attribution_conversion_attribution__WEBPACK_IMPORTED_MODULE_2__.ConversionAttributionService.reset();
     }
     createAccountContext(options) {
@@ -10374,13 +10626,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionMessageQueue: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionMessageQueue),
 /* harmony export */   PromotionRunnerSupervisor: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionRunnerSupervisor),
 /* harmony export */   PromotionRuntime: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionRuntime),
+/* harmony export */   RESTRICT_AFTER_UNPROVEN_BANS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RESTRICT_AFTER_UNPROVEN_BANS),
 /* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisAccountChannelBlock: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountChannelBlock),
+/* harmony export */   RedisAccountExploration: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountExploration),
 /* harmony export */   RedisAccountHealthStore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountHealthStore),
 /* harmony export */   RedisAccountSendCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisAccountSendCap),
 /* harmony export */   RedisPromotionTracker: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisPromotionTracker),
 /* harmony export */   RedisPromotionVerificationQueue: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.RedisPromotionVerificationQueue),
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.TEMP_BLOCK_TTL_SECONDS),
+/* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.addPoolOutcomeTotals),
 /* harmony export */   buildInsertIfAbsentUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildInsertIfAbsentUpdate),
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildOutcomeUpdate),
