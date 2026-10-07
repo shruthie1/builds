@@ -2284,7 +2284,7 @@ class PromotionFlowRunner {
                     return;
                 }
                 const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
-                const exploreDenied = await this.explorationDenied(unblocked);
+                const exploreDenied = await this.explorationDenied(unblocked, false);
                 selectedChannels = unblocked
                     .filter((channel) => !exploreDenied.has(channel.channelId))
                     .slice(0, batchTarget);
@@ -2324,7 +2324,7 @@ class PromotionFlowRunner {
                     blockedChannelIds,
                 });
                 const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
-                const exploreDenied = await this.explorationDenied(selection.selected);
+                const exploreDenied = await this.explorationDenied(selection.selected, false);
                 selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
                 this.log('info', [
                     'Promotion selection ready',
@@ -2351,6 +2351,7 @@ class PromotionFlowRunner {
                 }
             }
             const cycleTally = { sent: 0, not_sent: 0, skipped: 0, budget: 0, chans: 0 };
+            let exploreSkipped = 0;
             for (const channel of selectedChannels) {
                 if (this.startedByStart && !this.running) {
                     this.log('debug', `Promotion cycle interrupted before channel; ${this.formatChannel(channel)}`);
@@ -2358,6 +2359,12 @@ class PromotionFlowRunner {
                 }
                 if (!(await this.shouldProcessNextChannel(channel)))
                     break;
+                // The account may have become restricted mid-round (new bans on unproven channels), so the
+                // exploration budget is re-checked and spent per send, not only at selection.
+                if ((await this.explorationDenied([channel], true)).has(channel.channelId)) {
+                    exploreSkipped += 1;
+                    continue;
+                }
                 // Selection can sit in a paced batch for minutes. Reload the durable
                 // channel state immediately before planning so an operator ban or a
                 // restriction written after loadChannels() cannot receive a stale send.
@@ -2376,6 +2383,9 @@ class PromotionFlowRunner {
                     break;
                 }
                 await this.sleepAfterChannel(outcome);
+            }
+            if (exploreSkipped > 0) {
+                this.log('info', `Promotion exploration budget skipped ${exploreSkipped} unproven channel(s) mid-round`);
             }
             // Best-effort daily-cap snapshot reused for both the cap-reason on this summary and the
             // per-mobile heartbeat below — no new Redis reads beyond what getDailySendBudgetStatus already does.
@@ -3209,12 +3219,12 @@ class PromotionFlowRunner {
      * Unproven channels this mobile must skip this round (it keeps getting banned in new channels).
      * Optional on the account (older contexts/stubs lack it) and always fails open.
      */
-    async explorationDenied(channels) {
+    async explorationDenied(channels, charge) {
         const account = this.options.account;
         if (typeof account.explorationDeniedForMobile !== 'function' || channels.length === 0)
             return new Set();
         try {
-            return await account.explorationDeniedForMobile(channels.map((channel) => channel.channelId));
+            return await account.explorationDeniedForMobile(channels.map((channel) => channel.channelId), { charge });
         }
         catch (error) {
             this.log('warn', `Promotion exploration budget lookup failed; not limiting this round; error=${this.normalizeError(error)}`);
@@ -8033,11 +8043,17 @@ class RedisAccountExploration {
     }
     /**
      * Given candidate channelIds in priority order, return the unproven ones this account must skip
-     * this round. Proven channels always pass. Unrestricted accounts get an empty set. Channels let
-     * through are charged to the current hour when they are selected, so an interrupted round
-     * under-uses the budget instead of overrunning it. Any Redis error fails open (empty set).
+     * now. Proven channels always pass. Unrestricted accounts get an empty set. Any Redis error fails
+     * open (empty set).
+     *
+     * `charge: false` only peeks (round selection, so proven channels can fill the batch); the runner
+     * then calls with `charge: true` right before each send, which spends the hour's budget. Checking
+     * per send matters: a freshly swapped-in limited account starts with streak 0, and a
+     * selection-only check let its whole first round (~150-190 channels, 98% banned) through
+     * (measured 2026-10-07 on tg-aut).
      */
-    async deniedChannels(mobile, orderedChannelIds) {
+    async deniedChannels(mobile, orderedChannelIds, options = {}) {
+        const charge = options.charge !== false;
         const denied = new Set();
         const safeMobile = normalizeKeyPart(mobile);
         if (!isExplorationBudgetEnabled() || !safeMobile || orderedChannelIds.length === 0)
@@ -8064,7 +8080,7 @@ class RedisAccountExploration {
                 denied.add(safeChannelId);
             }
             // One process owns a mobile's promotion loop, so read-then-set cannot race with itself.
-            if (charged > 0)
+            if (charge && charged > 0)
                 await this.redis.set(usedKey, String(used + charged), 'EX', USED_BUCKET_TTL_SECONDS);
             return denied;
         }
@@ -8982,10 +8998,10 @@ class PromotionAccountContext {
      * Of these candidates (priority order), the unproven channels THIS mobile must skip this round
      * because it keeps getting banned in new channels (RedisAccountExploration). Fails open.
      */
-    async explorationDeniedForMobile(channelIds) {
+    async explorationDeniedForMobile(channelIds, options = {}) {
         if (!this.runtime.exploration)
             return new Set();
-        return this.runtime.exploration.deniedChannels(this.mobile, channelIds).catch(() => new Set());
+        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch(() => new Set());
     }
     async recordSuccess(channelId, isFollowup) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
