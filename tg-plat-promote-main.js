@@ -2140,6 +2140,7 @@ class PromotionFlowRunner {
             lastErrorAt: null,
             lastError: null,
             lastCycleBudgetExhausted: false,
+            sleepUntil: null,
             totalCycles: 0,
             totalCycleFailures: 0,
             totalQueueChecks: 0,
@@ -3219,12 +3220,18 @@ class PromotionFlowRunner {
     }
     async sleep(ms) {
         const delayMs = safeDelayMs(ms, 0);
+        // Declare the deliberate sleep so the supervisor watchdog doesn't mistake a long post-send rest
+        // (12-20 min) for a hung runner.
+        this.health.sleepUntil = Date.now() + delayMs;
         try {
             await (this.adapter.sleep || defaultSleep)(delayMs);
         }
         catch (error) {
             this.log('warn', `Promotion sleep failed; using default timer fallback delayMs=${delayMs} error=${this.normalizeError(error)}`);
             await defaultSleep(delayMs);
+        }
+        finally {
+            this.health.sleepUntil = null;
         }
     }
     /**
@@ -4013,6 +4020,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _promotion_flow_runner__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./promotion-flow-runner */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-flow-runner.ts");
 
+const SLEEP_GRACE_MS = 2 * 60 * 1000;
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 class PromotionRunnerSupervisor {
     constructor(options) {
@@ -4182,9 +4190,14 @@ class PromotionRunnerSupervisor {
         const lastActivityAt = lastSendProgressAt ?? cyclesTurning;
         if (lastActivityAt === null || Date.now() - lastActivityAt < stuckAfterMs)
             return;
+        // A runner inside a declared deliberate sleep (post-send rest) is resting, not hung. Grace covers
+        // timer jitter and the channel reload right after waking.
+        if (typeof health.sleepUntil === 'number' && Date.now() < health.sleepUntil + SLEEP_GRACE_MS)
+            return;
+        // Stuck detection is a warning-level restart, not an error: it must not feed
+        // consecutiveRunnerFailures/backoff or the onError (error-level) channel.
         this.lastStuckAt = Date.now();
         this.currentRunnerStoppedAsStuck = true;
-        this.recordError(`runner stuck for ${Date.now() - lastActivityAt}ms`);
         await this.callHook('onStuck', () => this.options.onStuck?.(this.getHealth()));
         runner.stop();
     }
@@ -6383,7 +6396,7 @@ class BasePromotionEngine {
             },
             onStuck: (health) => {
                 const runner = health.runner;
-                this.logRunnerMessage('warn', `[${this.mobile}] Promotion helper runner appears stuck; stopping current runner for restart. lastCycle=${runner?.lastCycleFinishedAt ?? 'n/a'} lastQueue=${runner?.lastQueueCheckFinishedAt ?? 'n/a'}`);
+                this.logRunnerMessage('warn', `[${this.mobile}] Promotion helper runner appears stuck (no send progress and no active sleep); stopping current runner for restart. lastCycle=${runner?.lastCycleFinishedAt ?? 'n/a'} lastQueue=${runner?.lastQueueCheckFinishedAt ?? 'n/a'}`);
             },
             onError: (error) => {
                 this.logRunnerMessage('error', `[${this.mobile}] Promotion helper supervisor error: ${error}`);
@@ -6391,7 +6404,7 @@ class BasePromotionEngine {
             sleep: async (ms) => { await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(ms); },
             minRestartDelayMs: 1000,
             maxRestartDelayMs: 60000,
-            stuckAfterMs: 20 * 60 * 1000,
+            stuckAfterMs: 45 * 60 * 1000,
             healthCheckIntervalMs: 60000,
         });
         this.promotionSupervisor = supervisor;
@@ -13435,6 +13448,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-core:telegram-bots-config');
+const initWarnedTokens = new Set();
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -14397,7 +14411,15 @@ class BotConfig {
                         logger.info(`Successfully initialized bot for ${category}`);
                     }
                     catch (error) {
-                        (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Failed to initialize bot for ${category}:`, false);
+                        // Transient (getMe timeouts ~20/day/process): warn once per token per process.
+                        if (!initWarnedTokens.has(token)) {
+                            initWarnedTokens.add(token);
+                            const reason = error instanceof Error ? error.message : String(error);
+                            logger.warn(`Failed to initialize bot for ${category}: ${reason.split(token).join('<token>')}`);
+                        }
+                        else {
+                            logger.debug(`Bot init still failing for ${category}`);
+                        }
                     }
                 })();
                 initPromises.push(promise);
@@ -20787,13 +20809,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   StatsRepository: () => (/* binding */ StatsRepository)
 /* harmony export */ });
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
 
 const UNCREDITED_ATTRIBUTION = [
     { paymentAttributionCreditedAt: { $exists: false } },
     { paymentAttributionCreditedAt: null },
 ];
-class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = 'stats2';
@@ -20846,17 +20870,36 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
         const legacy = this.legacyCollection();
         const chat = await legacy.findOne(filter);
         const chat2 = await this.collection.findOne(filter);
+        const existingUpdate = { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } };
+        // A duplicate-key on insert means a concurrent event created the row between our find and
+        // insert; fall back to the same update the "row exists" branch performs. Legacy and stats2
+        // are handled independently so a duplicate on one never skips the other.
         if (chat) {
-            await legacy.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+            await legacy.updateOne(filter, existingUpdate);
         }
         else {
-            await legacy.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
+            try {
+                await legacy.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
+            }
+            catch (error) {
+                if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__.isDuplicateKeyError)(error))
+                    throw error;
+                await legacy.updateOne(filter, existingUpdate);
+            }
         }
         if (chat2) {
-            await this.collection.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+            await this.collection.updateOne(filter, existingUpdate);
             return { insertedPrimary: false };
         }
-        await this.collection.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
+        try {
+            await this.collection.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
+        }
+        catch (error) {
+            if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__.isDuplicateKeyError)(error))
+                throw error;
+            await this.collection.updateOne(filter, existingUpdate);
+            return { insertedPrimary: false };
+        }
         return { insertedPrimary: true };
     }
     /**
@@ -26439,7 +26482,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_11__);
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 
 
 
@@ -26463,7 +26505,6 @@ function selectRandomElements(array, n) {
         return [];
     }
 }
-
 
 
 
@@ -26498,6 +26539,12 @@ class ReactionService {
     constructor(client, dialogManager, config) {
         this.config = CONFIG;
         this.channels = [];
+        /**
+         * Full dialog entities (with accessHash) for the current reaction pool, keyed by bare dialog id.
+         * Deliberately private: the shared EntityCacheManager is also keyed by bare ids for USERS (the
+         * replier looks DMs up there), so seeding channels into it could hand a reply the wrong peer.
+         */
+        this.dialogEntities = new Map();
         this.restrictedChannelIds = new Set();
         this.dbRestrictedChannelIds = new Set();
         /**
@@ -26899,8 +26946,11 @@ class ReactionService {
         const chatId = this.normalizeChannelId(channel.id);
         const chatLabel = this.getDialogLogLabel(channel);
         try {
-            const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_14__.EntityCacheManager.getInstance();
-            const channelEntity = await entityCache.getEntity(channel.id, this.client) || channel.id;
+            // Never pass the bare dialog id: it has no -100 prefix, so GramJS resolves it as a PeerUser
+            // ("Could not find the input entity for PeerUser"). Use this pool's own dialog entity, else
+            // the typed peer built from it. The shared EntityCacheManager is not consulted: its bare-id
+            // keys also hold users, so a numeric collision could return a user instead of the channel.
+            const channelEntity = this.dialogEntities.get(channel.id) ?? channel.peer;
             messages = await (0,_tg_core_telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_5__.getMessages)(this.client, channelEntity, {
                 limit: this.config.MESSAGES_PER_FETCH,
                 useCache: false,
@@ -27168,6 +27218,7 @@ class ReactionService {
         this.lastChannelUpdate = now;
         try {
             const allDialogs = [];
+            const scannedEntities = new Map();
             const maxDialogs = 300;
             for await (const dialog of this.client.iterDialogs({
                 limit: maxDialogs,
@@ -27213,6 +27264,8 @@ class ReactionService {
                         peer
                     };
                     allDialogs.push(dialogInfo);
+                    if (dialog.entity)
+                        scannedEntities.set(dialogId, dialog.entity);
                     if (allDialogs.length >= maxDialogs) {
                         break;
                     }
@@ -27250,6 +27303,7 @@ class ReactionService {
                 logger.warn(`[LIMIT] Channels trimmed from ${unrestricted.length} to ${maxChannels} (MAX_CHANNELS=${this.MAX_CHANNELS})`);
             }
             this.channels = await this.buildReactionPool(unrestricted, maxChannels);
+            this.dialogEntities = scannedEntities;
             // Reset round-robin index
             this.channelRoundRobinIndex = 0;
             if (oldChannels && oldChannels !== this.channels) {
@@ -27294,14 +27348,17 @@ class ReactionService {
             throw new Error('Invalid dialog entity');
         }
         const entityId = big_integer__WEBPACK_IMPORTED_MODULE_11___default()(entity.id);
-        if (dialog.isUser) {
-            return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
+        // Decide by entity class, not dialog flags: GramJS sets isGroup for megagroups too, so checking
+        // isGroup first turned every supergroup (a Channel) into a PeerChat with the channel's id.
+        const className = entity.className;
+        if (className === 'Channel' || className === 'ChannelForbidden' || (className === undefined && dialog.isChannel)) {
+            return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
         }
-        else if (dialog.isGroup) {
+        else if (className === 'Chat' || className === 'ChatForbidden' || (className === undefined && dialog.isGroup)) {
             return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat({ chatId: entityId });
         }
-        else if (dialog.isChannel) {
-            return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
+        else if (className === 'User' || dialog.isUser) {
+            return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
         }
         else {
             throw new Error('Unknown dialog type');
@@ -31244,9 +31301,13 @@ class UserDataDtoCrud {
     }
     async closeStaleMongoClient() {
         try {
+            const closingClient = this.client;
+            this.isConnected = false;
+            this.client = null;
+            this.repositories.reset();
             await this.closePromotionRedis();
             _tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.PromotionRuntime.reset();
-            await this.client?.close();
+            await closingClient?.close();
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error closing stale MongoDB connection", false);
@@ -31327,11 +31388,14 @@ class UserDataDtoCrud {
     async closeConnection() {
         try {
             if (this.client) {
-                await this.closePromotionRedis();
-                _tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.PromotionRuntime.reset();
-                await this.client.close();
+                // Detach first so no accessor hands out repositories bound to the closing client.
+                const closingClient = this.client;
                 this.isConnected = false;
                 this.client = null;
+                this.repositories.reset();
+                await this.closePromotionRedis();
+                _tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.PromotionRuntime.reset();
+                await closingClient.close();
                 logger.info('MongoDB connection closed.');
                 return true;
             }
@@ -31471,7 +31535,9 @@ class UserDataDtoCrud {
     }
     async fetchExistingPromoteAssignments(clientId) {
         logger.debug(`[Persona] Fetching existing promote assignments for ${clientId}`);
-        const repositories = this.repositories.get(this.client);
+        const repositories = this.getRepositories();
+        if (!repositories)
+            throw new Error('Mongo client not connected; persona assignments unavailable');
         const [localPromoteAssignments, localBufferAssignments] = await Promise.all([
             repositories.promote.findPersonaAssignments(clientId),
             repositories.clients.findBufferPersonaAssignments(clientId),
@@ -36391,7 +36457,7 @@ const trackLastRequestMiddleware = async (req, res, next) => {
             await db.updateTimestamps();
         }
         else {
-            logger.error("Database instance does not exist.");
+            logger.debug("Database instance does not exist.");
         }
     }
     catch (error) {
