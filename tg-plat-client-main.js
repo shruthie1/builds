@@ -2288,6 +2288,7 @@ class PromotionFlowRunner {
             });
             const batchTarget = safeBatchTarget(this.options.batchTarget, batchPolicy.limit);
             let selectedChannels;
+            let selectionExploreDenied = 0;
             if (this.options.channelSelectionMode === 'source_order') {
                 // The adapter has already applied its bounded membership policy (promote-clients uses
                 // participant-count descending plus a Fisher-Yates shuffle). Preserve that source order;
@@ -2302,6 +2303,7 @@ class PromotionFlowRunner {
                 }
                 const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
                 const exploreDenied = await this.explorationDenied(unblocked, false);
+                selectionExploreDenied = exploreDenied.size;
                 selectedChannels = unblocked
                     .filter((channel) => !exploreDenied.has(channel.channelId))
                     .slice(0, batchTarget);
@@ -2342,6 +2344,7 @@ class PromotionFlowRunner {
                 });
                 const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
                 const exploreDenied = await this.explorationDenied(selection.selected, false);
+                selectionExploreDenied = exploreDenied.size;
                 selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
                 this.log('info', [
                     'Promotion selection ready',
@@ -2376,16 +2379,14 @@ class PromotionFlowRunner {
                 }
                 if (!(await this.shouldProcessNextChannel(channel)))
                     break;
-                // The account may have become restricted mid-round (new bans on unproven channels), so the
-                // exploration budget is re-checked and spent per send, not only at selection.
-                if ((await this.explorationDenied([channel], true)).has(channel.channelId)) {
-                    exploreSkipped += 1;
-                    continue;
-                }
                 // Selection can sit in a paced batch for minutes. Reload the durable
                 // channel state immediately before planning so an operator ban or a
                 // restriction written after loadChannels() cannot receive a stale send.
                 const outcome = await this.processChannel(channel, false, true);
+                if (outcome === 'explore_denied') {
+                    exploreSkipped += 1;
+                    continue;
+                }
                 cycleTally.chans += 1;
                 if (outcome === 'sent')
                     cycleTally.sent += 1;
@@ -2437,7 +2438,11 @@ class PromotionFlowRunner {
             ].join(' | '));
             // Remember if this cycle produced no sends purely because the daily send cap was hit — the
             // health monitor uses this to avoid restarting a healthy-but-capped engine.
-            this.health.lastCycleBudgetExhausted = cycleTally.sent === 0 && cycleTally.budget > 0;
+            // A round held back by the exploration budget is a deliberate quiet state like a capped one:
+            // restarting the runner cannot help (the budget lives in Redis) and only churns it (review
+            // 2026-10-08: ~100 "appears stuck" runner restarts in the live logs).
+            this.health.lastCycleBudgetExhausted = cycleTally.sent === 0
+                && (cycleTally.budget > 0 || exploreSkipped > 0 || selectionExploreDenied > 0);
         }
         finally {
             this.health.totalCycles += 1;
@@ -2520,6 +2525,13 @@ class PromotionFlowRunner {
             else {
                 poolLog.debug('explore', { chan: channel.channelId, src: head.kind });
             }
+        }
+        // Exploration budget for main sends, checked and spent here: after the channel reload and
+        // eligibility checks (so a channel skipped for another reason never burns an hourly slot) and
+        // before the daily-send reservation (so a denial never leaks one). It is re-checked per send
+        // because the account can become restricted mid-round.
+        if (!isFollowUp && (await this.explorationDenied([planningChannel], true)).has(planningChannel.channelId)) {
+            return 'explore_denied';
         }
         for (const candidate of candidates) {
             if (this.shouldAbortStartedRunnerWork()) {
@@ -9063,7 +9075,8 @@ class PromotionAccountContext {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
-        await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
+        // Per-mobile delivery state first and fail-safe, so an intelligence write error below cannot
+        // leave a delivered pair unproven or its ban strikes in place.
         if (this.runtime.channelBlock) {
             // A delivery ends this pair's ban history (no-op under the PROMOTION_BAN_LADDER=legacy rollback).
             await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch(() => undefined);
@@ -9071,6 +9084,7 @@ class PromotionAccountContext {
         if (this.runtime.exploration) {
             await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch(() => undefined);
         }
+        await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
         if (this.runtime.accountHealth) {
             await this.runtime.accountHealth.recordLanded(this.mobile);
         }
@@ -21857,6 +21871,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.RepositoryContainer),
@@ -21939,6 +21954,7 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* binding */ ERROR_ALERT_WINDOW_MS),
 /* harmony export */   RepositoryContainer: () => (/* binding */ RepositoryContainer),
 /* harmony export */   createRepositories: () => (/* binding */ createRepositories),
 /* harmony export */   ensureAllIndexes: () => (/* binding */ ensureAllIndexes),
@@ -22025,14 +22041,34 @@ async function ensureAllIndexes(repositories, logger) {
  * the Telegram error alert). The dbservice methods moved into these repositories used to call
  * parseError(error, "...") with alerting on; without this, their DB failures would only be logged.
  * tg-db stays free of app/core imports: the reporter is injected.
+ *
+ * Deduplicated: every failure is logged, but each "[collection] operation" alerts at most once per
+ * `windowMs`. Hot per-message paths (userData upsert, identity, daily stats) would otherwise send
+ * one Telegram alert per message during a Mongo outage, and parseError has no rate limit.
  */
-function withErrorReporter(logger, report) {
+const ERROR_ALERT_WINDOW_MS = 10 * 60 * 1000;
+const MAX_ALERT_KEYS = 500;
+function withErrorReporter(logger, report, options = {}) {
+    const windowMs = options.windowMs ?? ERROR_ALERT_WINDOW_MS;
+    const now = options.now ?? Date.now;
+    const lastAlertAt = new Map();
+    const alertKey = (message) => (/^\[[^\]]+\]\s+\S+/.exec(message)?.[0] ?? message.slice(0, 80));
     return {
         log: (message, ...args) => logger.log(message, ...args),
         info: (message, ...args) => (logger.info ?? logger.log).call(logger, message, ...args),
         warn: (message, ...args) => logger.warn(message, ...args),
         debug: (message, ...args) => logger.debug?.(message, ...args),
         error: (message, ...args) => {
+            const key = alertKey(message);
+            const at = now();
+            const last = lastAlertAt.get(key);
+            if (last !== undefined && at - last < windowMs) {
+                logger.error(message, ...args);
+                return;
+            }
+            if (lastAlertAt.size >= MAX_ALERT_KEYS)
+                lastAlertAt.clear();
+            lastAlertAt.set(key, at);
             try {
                 report(message);
             }
