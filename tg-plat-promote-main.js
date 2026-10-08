@@ -18010,6 +18010,216 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/runtime-config.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/runtime-config.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   applyRuntimeConfig: () => (/* binding */ applyRuntimeConfig),
+/* harmony export */   describeRuntimeConfigBoot: () => (/* binding */ describeRuntimeConfigBoot),
+/* harmony export */   loadRuntimeConfig: () => (/* binding */ loadRuntimeConfig),
+/* harmony export */   runtimeConfigBases: () => (/* binding */ runtimeConfigBases),
+/* harmony export */   runtimeConfigCacheDir: () => (/* binding */ runtimeConfigCacheDir),
+/* harmony export */   startRuntimeConfigRefresh: () => (/* binding */ startRuntimeConfigRefresh)
+/* harmony export */ });
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:os */ "node:os");
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! node:path */ "node:path");
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_2__);
+
+
+
+const MINUTE = 60000;
+const DEFAULTS = {
+    liveDeadlineMs: 10 * MINUTE,
+    cachedDeadlineMs: 90000,
+    baseDelayMs: 5000,
+    maxDelayMs: 60000,
+    requestTimeoutMs: 15000,
+    cacheMaxAgeMs: 7 * 24 * 60 * MINUTE,
+};
+/**
+ * Ordered, de-duplicated config bases.
+ *
+ * `cms` is the only base PM2 itself provides (ecosystem env), so it is what keeps a restart
+ * working when the loader's own config fetch failed and tgcms/tgmanager were never set.
+ * tgcms precedes tgmanager: the /forward relay drops auth headers on some endpoints.
+ * CONFIG_FALLBACK_URL is an optional independent mirror (e.g. an edge worker) serving the same
+ * two endpoints, so a single origin outage cannot take config down.
+ */
+function runtimeConfigBases(env = process.env) {
+    const candidates = [env.RUNTIME_CONFIG_BASE, env.tgcms, env.cms, env.tgmanager, env.CONFIG_FALLBACK_URL];
+    const bases = [];
+    for (const candidate of candidates) {
+        const base = (candidate || '').trim().replace(/\/$/, '');
+        if (base && !bases.includes(base))
+            bases.push(base);
+    }
+    return bases;
+}
+function runtimeConfigCacheDir(env = process.env) {
+    return env.RUNTIME_CONFIG_CACHE_DIR || node_path__WEBPACK_IMPORTED_MODULE_2___default().join(node_os__WEBPACK_IMPORTED_MODULE_1___default().homedir(), '.tg-runtime');
+}
+function cacheFile(dir, service, clientId) {
+    return node_path__WEBPACK_IMPORTED_MODULE_2___default().join(dir, `${service}-${clientId}.json`);
+}
+function outageFile(dir, service, clientId) {
+    return node_path__WEBPACK_IMPORTED_MODULE_2___default().join(dir, `${service}-${clientId}.outage.json`);
+}
+function readJson(file) {
+    try {
+        return JSON.parse(node_fs__WEBPACK_IMPORTED_MODULE_0___default().readFileSync(file, 'utf8'));
+    }
+    catch {
+        return null;
+    }
+}
+/** Atomic, owner-only write: the payload carries secrets. */
+function writeSecretJson(file, value) {
+    node_fs__WEBPACK_IMPORTED_MODULE_0___default().mkdirSync(node_path__WEBPACK_IMPORTED_MODULE_2___default().dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    node_fs__WEBPACK_IMPORTED_MODULE_0___default().writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 });
+    node_fs__WEBPACK_IMPORTED_MODULE_0___default().renameSync(tmp, file);
+}
+function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+async function fetchJson(fetchImpl, url, apiKey, timeoutMs) {
+    const response = await fetchImpl(url, {
+        headers: { 'x-api-key': apiKey },
+        signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status} from ${url}`);
+    const body = await response.json();
+    if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
+        throw new Error(`empty config from ${url}`);
+    }
+    return body;
+}
+/** Client config first, shared config second — shared keys win, matching the previous boot order. */
+async function fetchFromBase(fetchImpl, base, clientId, apiKey, timeoutMs) {
+    const clientConfig = await fetchJson(fetchImpl, `${base}/clients/${clientId}`, apiKey, timeoutMs);
+    const sharedConfig = await fetchJson(fetchImpl, `${base}/configuration`, apiKey, timeoutMs);
+    return { ...clientConfig, ...sharedConfig };
+}
+async function loadRuntimeConfig(options) {
+    const env = options.env ?? process.env;
+    const fetchImpl = options.fetchImpl ?? fetch;
+    const now = options.now ?? Date.now;
+    const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const log = options.log ?? (() => undefined);
+    const settings = { ...DEFAULTS, ...Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined)) };
+    const { service, clientId, apiKey } = options;
+    if (!clientId)
+        throw new Error('Missing clientId for runtime configuration fetch');
+    const bases = runtimeConfigBases(env);
+    const dir = options.cacheDir ?? runtimeConfigCacheDir(env);
+    const cachePath = cacheFile(dir, service, clientId);
+    const outagePath = outageFile(dir, service, clientId);
+    const cached = readJson(cachePath);
+    const cacheUsable = !!cached?.config && Object.keys(cached.config).length > 0
+        && now() - cached.savedAt <= settings.cacheMaxAgeMs;
+    const deadline = now() + (cacheUsable ? settings.cachedDeadlineMs : settings.liveDeadlineMs);
+    let attempts = 0;
+    let lastError = bases.length ? null : new Error('no runtime config base (RUNTIME_CONFIG_BASE/tgcms/cms/tgmanager)');
+    let delay = settings.baseDelayMs;
+    while (bases.length) {
+        for (const base of bases) {
+            attempts++;
+            try {
+                const config = await fetchFromBase(fetchImpl, base, clientId, apiKey, settings.requestTimeoutMs);
+                const recoveredOutage = readJson(outagePath) ?? undefined;
+                try {
+                    writeSecretJson(cachePath, { savedAt: now(), config });
+                    if (recoveredOutage)
+                        node_fs__WEBPACK_IMPORTED_MODULE_0___default().rmSync(outagePath, { force: true });
+                }
+                catch (error) {
+                    log(`config cache write failed (${errorMessage(error)}); continuing with live config`);
+                }
+                return { source: 'live', base, config, attempts, recoveredOutage };
+            }
+            catch (error) {
+                lastError = error;
+                log(`config attempt ${attempts} via ${base} failed: ${errorMessage(error)}`);
+            }
+        }
+        if (now() + delay > deadline)
+            break;
+        await sleep(delay);
+        delay = Math.min(delay * 2, settings.maxDelayMs);
+    }
+    if (cacheUsable && cached) {
+        log(`config service unreachable after ${attempts} attempts; booting from cached config saved ${new Date(cached.savedAt).toISOString()}`);
+        return { source: 'cache', base: null, config: cached.config, attempts, cacheSavedAt: cached.savedAt };
+    }
+    const previous = options.recordOutage === false ? null : readJson(outagePath);
+    if (options.recordOutage !== false)
+        try {
+            writeSecretJson(outagePath, {
+                firstFailureAt: previous?.firstFailureAt ?? now(),
+                failedBoots: (previous?.failedBoots ?? 0) + 1,
+                lastError: errorMessage(lastError),
+            });
+        }
+        catch {
+            // Best effort: the outage report is a convenience, the throw below is what matters.
+        }
+    throw new Error(`Runtime config unavailable after ${attempts} attempts and no usable cache: ${errorMessage(lastError)}`);
+}
+function applyRuntimeConfig(config, env = process.env) {
+    for (const [key, value] of Object.entries(config))
+        env[key] = value;
+}
+/** Operator alert text for a boot that is not a plain live fetch, or null when there is nothing to say. */
+function describeRuntimeConfigBoot(result, service, clientId, now = Date.now()) {
+    const minutes = (ms) => Math.max(1, Math.round(ms / MINUTE));
+    if (result.source === 'cache') {
+        return `⚠️ ${service} ${clientId}: config service unreachable after ${result.attempts} attempts — booted on cached config `
+            + `from ${minutes(now - (result.cacheSavedAt ?? now))} min ago. Retrying live config in the background.`;
+    }
+    if (result.recoveredOutage) {
+        const outage = result.recoveredOutage;
+        return `✅ ${service} ${clientId}: config service reachable again after ~${minutes(now - outage.firstFailureAt)} min `
+            + `(${outage.failedBoots} failed boot${outage.failedBoots === 1 ? '' : 's'}; last error: ${outage.lastError}).`;
+    }
+    return null;
+}
+/**
+ * After a cache boot, keep trying the live service so the cache is refreshed and operators learn
+ * the outage ended. The process keeps running on the cached values; it does not restart itself.
+ */
+function startRuntimeConfigRefresh(options, onRecovered, intervalMs = 5 * MINUTE) {
+    let stopped = false;
+    const timer = setInterval(() => {
+        if (stopped)
+            return;
+        void loadRuntimeConfig({ ...options, cachedDeadlineMs: 0, liveDeadlineMs: 0, recordOutage: false })
+            .then((result) => {
+            if (result.source !== 'live' || stopped)
+                return;
+            stopped = true;
+            clearInterval(timer);
+            onRecovered(result);
+        })
+            .catch(() => undefined);
+    }, intervalMs);
+    timer.unref?.();
+    return () => {
+        stopped = true;
+        clearInterval(timer);
+    };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts"
 /*!**********************************************************************!*\
   !*** ../../packages/tg-core/src/utils/sanitizePromotionRendering.ts ***!
@@ -39328,6 +39538,36 @@ module.exports = require("node:crypto");
 
 /***/ },
 
+/***/ "node:fs"
+/*!**************************!*\
+  !*** external "node:fs" ***!
+  \**************************/
+(module) {
+
+module.exports = require("node:fs");
+
+/***/ },
+
+/***/ "node:os"
+/*!**************************!*\
+  !*** external "node:os" ***!
+  \**************************/
+(module) {
+
+module.exports = require("node:os");
+
+/***/ },
+
+/***/ "node:path"
+/*!****************************!*\
+  !*** external "node:path" ***!
+  \****************************/
+(module) {
+
+module.exports = require("node:path");
+
+/***/ },
+
 /***/ "url"
 /*!**********************!*\
   !*** external "url" ***!
@@ -39452,7 +39692,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   buildClientConfigUrl: () => (/* binding */ buildClientConfigUrl),
 /* harmony export */   buildSharedConfigUrl: () => (/* binding */ buildSharedConfigUrl),
-/* harmony export */   getDataAndSetEnvVariables: () => (/* binding */ getDataAndSetEnvVariables),
 /* harmony export */   getRuntimeConfigBase: () => (/* binding */ getRuntimeConfigBase),
 /* harmony export */   installPackage: () => (/* binding */ installPackage),
 /* harmony export */   modifyPackageJson: () => (/* binding */ modifyPackageJson),
@@ -39472,6 +39711,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var url__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_4__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
+
+
 
 
 
@@ -39579,9 +39822,9 @@ async function installPackage() {
     // await new Promise((resolve) => installProcess.on('close', resolve));
 }
 function getRuntimeConfigBase() {
-    const base = (process.env.RUNTIME_CONFIG_BASE || process.env.tgmanager || process.env.tgcms || '').trim().replace(/\/$/, '');
+    const [base] = (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigBases)();
     if (!base) {
-        throw new Error('Missing runtime config base. Set RUNTIME_CONFIG_BASE or tgmanager/tgcms.');
+        throw new Error('Missing runtime config base. Set RUNTIME_CONFIG_BASE, tgcms, cms or tgmanager.');
     }
     return base;
 }
@@ -39594,38 +39837,50 @@ function buildClientConfigUrl(clientId = process.env.clientId) {
 function buildSharedConfigUrl() {
     return `${getRuntimeConfigBase()}/configuration`;
 }
-async function getDataAndSetEnvVariables(url) {
+const SERVICE_NAME = 'promote-clients';
+function runtimeConfigOptions() {
+    return {
+        service: SERVICE_NAME,
+        clientId: process.env.clientId,
+        apiKey: (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_6__.getApiKey)(),
+        log: (message) => logger.warn(`[runtime-config] ${message}`),
+    };
+}
+async function alertOperators(text) {
     try {
-        const response = await fetch(url, { headers: { 'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_6__.getApiKey)() } });
-        if (!response.ok) {
-            throw new Error(`Runtime configuration request failed with status ${response.status}`);
-        }
-        const jsonData = await response.json();
-        for (const key in jsonData) {
-            process.env[key] = jsonData[key];
-            logger.info('setting key: ', key);
-        }
-        logger.info('Environment variables set successfully!');
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.CLIENT_UPDATES, text);
     }
     catch (error) {
-        logger.error('Error retrieving data or setting environment variables:', error);
+        logger.error('Failed to send runtime-config alert:', error);
     }
 }
+/**
+ * Load runtime config (live, else last-known-good cache) and start the service.
+ * Rejects when no config can be obtained — the caller must exit so PM2 retries; a process that
+ * stays alive without config never starts promoting and still looks "online".
+ */
 async function setEnv() {
-    // await getDataAndSetEnvVariables(`https://checker-production-c3c0.up.railway.app/forward/clients/${process.env.clientId}`);
-    // await getDataAndSetEnvVariables(`https://mychatgpt-xk3y.onrender.com/forward/configuration`);
-    // await getDataAndSetEnvVariables(`https://api.npoint.io/cc57d60feea67e47b6c4`);
-    await getDataAndSetEnvVariables(buildClientConfigUrl());
-    await getDataAndSetEnvVariables(buildSharedConfigUrl());
-    // await getDataAndSetEnvVariables(`https://mychatgpt-xk3y.onrender.com/forward/clients/${process.env.clientId}`);
-    // await getDataAndSetEnvVariables(`https://api.npoint.io/7c2682f37bb93ef486ba/${process.env.clientId}`);
-    // await getDataAndSetEnvVariables(`https://ums.paidgirls.site/configuration`);
+    const options = runtimeConfigOptions();
+    const result = await (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.loadRuntimeConfig)(options);
+    (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.applyRuntimeConfig)(result.config);
+    logger.info(`Runtime config applied from ${result.source}${result.base ? ` (${result.base})` : ''}; ${Object.keys(result.config).length} keys`);
     logger.info("Env Mobile : ", process.env.mobile);
+    const notice = (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.describeRuntimeConfigBoot)(result, SERVICE_NAME, String(options.clientId));
+    if (notice)
+        void alertOperators(notice);
+    if (result.source === 'cache') {
+        (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.startRuntimeConfigRefresh)(options, () => {
+            void alertOperators(`✅ ${SERVICE_NAME} ${options.clientId}: config service reachable again; cached config refreshed.`);
+        });
+    }
     await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./express */ "./src/express.ts"));
 }
-setEnv().catch((error) => {
-    logger.error('Failed to initialize environment:', error);
-});
+if (true) {
+    setEnv().catch((error) => {
+        logger.error(`Failed to initialize environment; exiting so PM2 retries: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+    });
+}
 
 })();
 
