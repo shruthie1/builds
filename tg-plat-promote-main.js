@@ -19310,6 +19310,17 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
         super(...arguments);
         this.collectionName = 'activeChannels';
     }
+    /**
+     * The two collections @tg/channel-state's promotion runtime reads and writes itself (scoring,
+     * locks, attribution). The runtime is their owner for those operations; this is the one place
+     * the apps obtain the handles, so no app opens a collection by name.
+     */
+    promotionRuntimeCollections() {
+        return {
+            activeChannels: this.connection.collection('activeChannels'),
+            channelIntelligence: this.connection.collection('channelIntelligence'),
+        };
+    }
     // ── READS ───────────────────────────────────────────────────────────────────────────────────
     // Point reads RETHROW on a database error: a caller must never mistake "the database is down"
     // for "no such channel" (hydration would then rebuild the doc from scratch and reset its
@@ -19608,6 +19619,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ClientsRepository: () => (/* binding */ ClientsRepository)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _promote_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+
 
 /** Fields stripped from every masked read. */
 const SECRET_FIELDS = ['session', 'password'];
@@ -19631,11 +19644,83 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
             return client ? maskClient(client) : null;
         });
     }
-    async listMasked() {
-        return this.guard('listMasked', [], async () => {
-            const clients = await this.collection.find({}).toArray();
-            return clients.map(maskClient);
+    /**
+     * Every client, secrets stripped. `strict` rethrows instead of returning [] — for callers where
+     * an empty list would silently disable a check (tg-aut's payment-ownership name lists).
+     */
+    async listMasked(options = {}) {
+        const run = async () => (await this.collection.find({}).toArray()).map(maskClient);
+        return options.strict ? this.guardStrict('listMasked', run) : this.guard('listMasked', [], run);
+    }
+    /** $set display fields on one client. Returns false on failure; never throws. */
+    async updateProfile(clientId, update) {
+        if (!clientId?.trim())
+            return false;
+        return this.guardWrite(`updateProfile(${clientId})`, () => this.collection.updateOne({ clientId }, { $set: update }));
+    }
+    /**
+     * The client's persona pool for one fleet, or null when the client is missing, every list is
+     * empty, or the read failed. dbcoll is lowercased.
+     */
+    async findPersonaPool(clientId, kind) {
+        if (!clientId?.trim())
+            return null;
+        const lastNamesField = kind === 'buffer' ? 'bufferLastNames' : 'promoteLastNames';
+        return this.guard(`findPersonaPool(${clientId},${kind})`, null, async () => {
+            const doc = await this.collection.findOne({ clientId }, { projection: { firstNames: 1, [lastNamesField]: 1, bios: 1, profilePics: 1, dbcoll: 1 } });
+            if (!doc)
+                return null;
+            const pool = {
+                firstNames: doc.firstNames || [],
+                lastNames: doc[lastNamesField] || [],
+                bios: doc.bios || [],
+                profilePics: doc.profilePics || [],
+                dbcoll: (doc.dbcoll || '').toLowerCase(),
+            };
+            const empty = !pool.firstNames.length && !pool.lastNames.length && !pool.bios.length && !pool.profilePics.length;
+            return empty ? null : pool;
         });
+    }
+    // ── bufferClients ───────────────────────────────────────────────────────────────────────────
+    async findBufferClient(mobile) {
+        if (!mobile?.trim())
+            return null;
+        return this.guard(`bufferClients.findByMobile(${mobile})`, null, () => this.bufferClients.findOne({ mobile }));
+    }
+    async updateBufferClientAssignment(mobile, update) {
+        if (!mobile?.trim())
+            return false;
+        return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, () => this.bufferClients.updateOne({ mobile }, { $set: update }));
+    }
+    /**
+     * Active buffer accounts of `clientId` that already hold a persona. Strict: callers merge this
+     * with other sources and must know when it failed rather than see an empty list.
+     */
+    async findBufferPersonaAssignments(clientId) {
+        return this.guardStrict('bufferClients.findPersonaAssignments', () => this.bufferClients
+            .find((0,_promote_repository__WEBPACK_IMPORTED_MODULE_1__.personaAssignmentFilter)(clientId), { projection: _promote_repository__WEBPACK_IMPORTED_MODULE_1__.PERSONA_ASSIGNMENT_PROJECTION })
+            .toArray());
+    }
+    // ── timestamps / tgautClientStats ───────────────────────────────────────────────────────────
+    /** Stamp `key` = now on the single heartbeat document. */
+    async touchHeartbeat(key, now = Date.now()) {
+        if (!key?.trim())
+            return false;
+        return this.guardWrite(`timestamps.touch(${key})`, () => this.timestamps.updateOne({}, { $set: { [key]: now } }, { upsert: true }));
+    }
+    async setTgautDaysLeft(clientId, daysLeft) {
+        if (!clientId?.trim())
+            return false;
+        return this.guardWrite(`tgautClientStats.setDaysLeft(${clientId})`, () => this.tgautClientStats.updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true }));
+    }
+    get bufferClients() {
+        return this.connection.collection('bufferClients');
+    }
+    get timestamps() {
+        return this.connection.collection('timestamps');
+    }
+    get tgautClientStats() {
+        return this.connection.collection('tgautClientStats');
     }
     /**
      * Full client document INCLUDING session and password.
@@ -19812,11 +19897,10 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
      */
     async ensureIndexes() {
         for (const name of [USER_STATS_DAILY, PROMOTE_STATS_DAILY, REACTION_STATS_DAILY]) {
-            await this.guardWrite(`ensureIndexes(${name})`, async () => {
-                const collection = this.connection.collection(name);
-                await collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' });
-                await collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' });
-            });
+            const collection = this.connection.collection(name);
+            // Guarded separately: a conflict on one index must not skip the other.
+            await this.guardWrite(`ensureIndexes(${name}.expireAt_1)`, () => collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' }));
+            await this.guardWrite(`ensureIndexes(${name}.daily_key)`, () => collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' }));
         }
     }
 }
@@ -19839,6 +19923,77 @@ function toIncrement(fields) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/promote-stats.normalize.ts"
+/*!***********************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/promote-stats.normalize.ts ***!
+  \***********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   normalizeFiniteNumber: () => (/* binding */ normalizeFiniteNumber),
+/* harmony export */   normalizeNonNegativeNumber: () => (/* binding */ normalizeNonNegativeNumber),
+/* harmony export */   normalizePositiveTimestamp: () => (/* binding */ normalizePositiveTimestamp),
+/* harmony export */   normalizePromoteStatsChannelKey: () => (/* binding */ normalizePromoteStatsChannelKey),
+/* harmony export */   normalizePromoteStatsData: () => (/* binding */ normalizePromoteStatsData)
+/* harmony export */ });
+/**
+ * Pure repair helpers for `promoteStats` rows (moved verbatim from tg-aut's dbservice, step 5a).
+ * Old rows carry strings, NaN, negative counts and channel keys with `.`/`$` that Mongo cannot
+ * $inc into; these coerce them so the counters keep working.
+ */
+function normalizeFiniteNumber(value) {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+function normalizeNonNegativeNumber(value) {
+    const parsed = normalizeFiniteNumber(value);
+    return parsed != null && parsed >= 0 ? parsed : null;
+}
+function normalizePositiveTimestamp(value) {
+    const parsed = normalizeFiniteNumber(value);
+    return parsed != null && parsed > 0 ? parsed : null;
+}
+/** Mongo field-safe channel key: `.`, `$`, NUL -> `_`; prototype names get a `channel_` prefix. */
+function normalizePromoteStatsChannelKey(channelName) {
+    const normalized = (channelName || "null").trim().replace(/[.$\0]/g, "_") || "null";
+    return ['prototype'].includes(normalized) || normalized in Object.prototype
+        ? `channel_${normalized}`
+        : normalized;
+}
+function normalizePromoteStatsData(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return { data: {}, changed: true };
+    }
+    let changed = false;
+    const normalized = {};
+    for (const [key, value] of Object.entries(data)) {
+        const numericValue = normalizeNonNegativeNumber(value);
+        if (numericValue != null) {
+            const safeKey = normalizePromoteStatsChannelKey(key);
+            const existingValue = Object.prototype.hasOwnProperty.call(normalized, safeKey)
+                ? normalized[safeKey]
+                : 0;
+            normalized[safeKey] = existingValue + numericValue;
+            if (safeKey !== key || numericValue !== value)
+                changed = true;
+        }
+        else {
+            changed = true;
+        }
+    }
+    return { data: normalized, changed };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/promote.repository.ts"
 /*!******************************************************************!*\
   !*** ../../packages/tg-db/src/collections/promote.repository.ts ***!
@@ -19855,6 +20010,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
+
 
 
 const PROMOTE_RUNTIME_CHANNEL_FLOOR = 230;
@@ -20259,6 +20416,147 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             .find(personaAssignmentFilter(clientId), { projection: PERSONA_ASSIGNMENT_PROJECTION })
             .toArray();
     }
+    // ── promoteStats (tg-aut only) ──────────────────────────────────────────────────────────────
+    // Moved verbatim from tg-aut's dbservice (step 5a). Failure behaviour is unchanged: every
+    // method THROWS except updatePromoteStats, which logs/alerts and returns undefined.
+    get promoteStats() {
+        return this.connection.collection('promoteStats');
+    }
+    /** Create the row if missing, else repair malformed fields in place. */
+    async ensurePromoteStatsInitialized(client) {
+        const now = Date.now();
+        const filter = { client };
+        const existingDocument = await this.promoteStats.findOne(filter);
+        if (existingDocument) {
+            const defaults = {};
+            const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsData)(existingDocument.data);
+            const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.count);
+            const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+            const normalizedUniqueChannels = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.uniqueChannels);
+            const normalizedLastUpdated = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePositiveTimestamp)(existingDocument.lastUpdatedTimeStamp);
+            const normalizedReleaseDay = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePositiveTimestamp)(existingDocument.releaseDay);
+            if (normalizedCount == null)
+                defaults.count = 0;
+            else if (normalizedCount !== existingDocument.count)
+                defaults.count = normalizedCount;
+            if (normalizedTotalCount == null)
+                defaults.totalCount = 0;
+            else if (normalizedTotalCount !== existingDocument.totalCount)
+                defaults.totalCount = normalizedTotalCount;
+            if (normalizedData.changed)
+                defaults.data = normalizedData.data;
+            const uniqueChannelCount = Object.keys(normalizedData.data).length;
+            if (normalizedUniqueChannels == null || normalizedUniqueChannels !== uniqueChannelCount) {
+                defaults.uniqueChannels = uniqueChannelCount;
+            }
+            else if (normalizedUniqueChannels !== existingDocument.uniqueChannels) {
+                defaults.uniqueChannels = normalizedUniqueChannels;
+            }
+            if (normalizedLastUpdated == null)
+                defaults.lastUpdatedTimeStamp = now;
+            else if (normalizedLastUpdated !== existingDocument.lastUpdatedTimeStamp)
+                defaults.lastUpdatedTimeStamp = normalizedLastUpdated;
+            if (normalizedReleaseDay == null)
+                defaults.releaseDay = now;
+            else if (normalizedReleaseDay !== existingDocument.releaseDay)
+                defaults.releaseDay = normalizedReleaseDay;
+            if (typeof existingDocument.isActive !== 'boolean') {
+                if (existingDocument.isActive == null) {
+                    defaults.isActive = true;
+                }
+                else {
+                    const activeValue = String(existingDocument.isActive).trim().toLowerCase();
+                    defaults.isActive = ['true', '1', 'yes', 'active', 'on'].includes(activeValue);
+                }
+            }
+            if (Object.keys(defaults).length > 0) {
+                await this.promoteStats.updateOne(filter, { $set: defaults });
+            }
+            return;
+        }
+        await this.promoteStats.updateOne(filter, {
+            $setOnInsert: {
+                client,
+                count: 0,
+                totalCount: 0,
+                data: {},
+                uniqueChannels: 0,
+                lastUpdatedTimeStamp: now,
+                releaseDay: now,
+                isActive: true,
+            },
+        }, { upsert: true });
+    }
+    /** Boot stamp: a swapped-in mobile gets a fresh grace window. Throws. */
+    async stampPromoteStatsTime(client, now = Date.now()) {
+        await this.promoteStats.updateOne({ client }, { $set: { lastUpdatedTimeStamp: now } });
+    }
+    /** Count one send to `channelName`. Never throws: logs/alerts and returns undefined. */
+    async updatePromoteStats(client, channelName) {
+        const channelKey = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsChannelKey)(channelName);
+        return this.guard('promoteStats.update', undefined, async () => {
+            const filter = { client };
+            const now = Date.now();
+            const existingDocument = await this.promoteStats.findOne(filter);
+            if (existingDocument) {
+                const repairs = {};
+                const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsData)(existingDocument.data);
+                const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.count);
+                const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+                if (normalizedCount == null)
+                    repairs.count = 0;
+                else if (normalizedCount !== existingDocument.count)
+                    repairs.count = normalizedCount;
+                if (normalizedTotalCount == null)
+                    repairs.totalCount = 0;
+                else if (normalizedTotalCount !== existingDocument.totalCount)
+                    repairs.totalCount = normalizedTotalCount;
+                if (normalizedData.changed) {
+                    normalizedData.data[channelKey] = normalizedData.data[channelKey] ?? 0;
+                    repairs.data = normalizedData.data;
+                }
+                else if (typeof normalizedData.data[channelKey] !== 'number' || !Number.isFinite(normalizedData.data[channelKey])) {
+                    repairs[`data.${channelKey}`] = 0;
+                }
+                if (Object.keys(repairs).length > 0) {
+                    await this.promoteStats.updateOne(filter, { $set: repairs });
+                }
+            }
+            await this.promoteStats.updateOne(filter, {
+                $inc: { count: 1, totalCount: 1, [`data.${channelKey}`]: 1 },
+                $set: { lastUpdatedTimeStamp: now, releaseDay: now },
+                $setOnInsert: { client, isActive: true },
+            }, { upsert: true });
+            const updatedDocument = await this.promoteStats.findOne(filter);
+            const uniqueChannels = Object.keys(updatedDocument?.data || {}).length;
+            await this.promoteStats.updateOne(filter, { $set: { uniqueChannels } });
+            return updatedDocument;
+        });
+    }
+    async activatePromotions(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        const now = Date.now();
+        await this.promoteStats.updateOne({ client }, {
+            $set: { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true },
+            $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0 },
+        }, { upsert: true });
+    }
+    async deactivatePromotions(client, day = Date.now()) {
+        await this.ensurePromoteStatsInitialized(client);
+        const now = Date.now();
+        await this.promoteStats.updateOne({ client }, {
+            $set: { releaseDay: day, isActive: false },
+            $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0, lastUpdatedTimeStamp: now },
+        }, { upsert: true });
+    }
+    async readPromoteStats(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        return this.promoteStats.findOne({ client });
+    }
+    async readPromoteStatsTime(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        return this.promoteStats.findOne({ client }, { projection: { client: 1, totalCount: 1, lastUpdatedTimeStamp: 1, isActive: 1, _id: 0 } });
+    }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(promoteClientStats.clientId)', () => this.connection
             .collection('promoteClientStats')
@@ -20281,6 +20579,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
+const UNCREDITED_ATTRIBUTION = [
+    { paymentAttributionCreditedAt: { $exists: false } },
+    { paymentAttributionCreditedAt: null },
+];
 class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -20319,6 +20621,99 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
         const legacy = await this.guardWrite(`setKey(stats.${key})`, () => this.legacyCollection().updateOne(filter, update, { upsert: true }));
         return primary && legacy;
     }
+    // ── moved from tg-aut dbservice (step 5b) ──────────────────────────────────────────────────
+    // Same filters, update shapes and options as the raw code. Methods THROW unless noted; the
+    // caller's try/catch (or lack of one) is unchanged.
+    /**
+     * One funnel event: in BOTH collections, $inc count + $set the funnel state on an existing row,
+     * else insert a fresh row. Find-then-insert is not atomic; the unique
+     * chatId_1_profile_1_client_1 index rejects the losing insert. Returns whether the stats2 row
+     * was inserted (the caller runs first-contact side effects only then).
+     */
+    async recordFunnelEvent(chatId, scope, fields) {
+        const filter = { chatId, client: scope.client, profile: scope.profile };
+        const { name, payAmount, newUser, demoGiven, paidReply, secondShow } = fields;
+        const legacy = this.legacyCollection();
+        const chat = await legacy.findOne(filter);
+        const chat2 = await this.collection.findOne(filter);
+        if (chat) {
+            await legacy.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+        }
+        else {
+            await legacy.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
+        }
+        if (chat2) {
+            await this.collection.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+            return { insertedPrimary: false };
+        }
+        await this.collection.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
+        return { insertedPrimary: true };
+    }
+    /**
+     * Atomically ratchet stats2.payAmount and stamp today's paid marker; returns the PRE-image
+     * (null when no row). upsert:false on purpose — see recordPaymentAttribution in tg-aut.
+     */
+    async markDailyPaid(chatId, scope, dayKey, roundedAmount, floorAmount) {
+        return this.collection.findOneAndUpdate({ chatId, profile: scope.profile, client: scope.client }, [
+            {
+                $set: {
+                    payAmount: { $max: [{ $ifNull: ['$payAmount', 0] }, roundedAmount] },
+                    dailyPaidCountedAt: dayKey,
+                    dailyRevenueCounted: {
+                        // First count today -> floorAmount; same-day upgrade -> max(prev, floor).
+                        $cond: [
+                            { $eq: ['$dailyPaidCountedAt', dayKey] },
+                            { $max: [{ $ifNull: ['$dailyRevenueCounted', 0] }, floorAmount] },
+                            floorAmount,
+                        ],
+                    },
+                },
+            },
+        ], {
+            upsert: false,
+            returnDocument: 'before',
+            projection: { dailyPaidCountedAt: 1, dailyRevenueCounted: 1 },
+        });
+    }
+    /** stats2 payers (payAmount >= 15) not yet attribution-credited; optionally one chatId. */
+    async findUncreditedPayers(scope, chatId) {
+        const query = {
+            profile: scope.profile,
+            client: scope.client,
+            payAmount: { $gte: 15 },
+            $or: UNCREDITED_ATTRIBUTION,
+        };
+        if (chatId)
+            query.chatId = chatId;
+        return this.collection.find(query, { projection: { chatId: 1, newUser: 1 } }).toArray();
+    }
+    /** Set paymentAttributionCreditedAt once; modifiedCount 0 means another run already did. */
+    async markAttributionCredited(chatId, scope, now = Date.now()) {
+        return this.collection.updateOne({ chatId, profile: scope.profile, client: scope.client, $or: UNCREDITED_ATTRIBUTION }, { $set: { paymentAttributionCreditedAt: now } });
+    }
+    /** Every row of `client`, newUser first. `legacy` reads `stats`, else `stats2`. */
+    async listByClient(client, options = {}) {
+        const collection = options.legacy ? this.legacyCollection() : this.collection;
+        return collection.find({ client }).sort({ newUser: -1 }).toArray();
+    }
+    /** Recent payers: `stats` rows with payAmount > 26, or `stats2` rows with payAmount >= 15. */
+    async listRecentPayers(client, options = {}) {
+        if (options.legacy) {
+            return this.legacyCollection().find({ client, payAmount: { $gt: 26 } }).toArray();
+        }
+        return this.collection.find({ client, payAmount: { $gte: 15 } }).toArray();
+    }
+    /** stats2 rows with payAmount > 10: total and newUser count. Never throws: {0,0} on failure. */
+    async countPaidUsers(client) {
+        return this.guard('countPaidUsers', { total: 0, new: 0 }, async () => {
+            const rows = await this.collection.find({ client, payAmount: { $gt: 10 } }).toArray();
+            return { total: rows.length, new: rows.filter((row) => row.newUser).length };
+        });
+    }
+    /** Delete the user's `stats` rows (stats only, NOT stats2). Never throws. */
+    async removeLegacyRows(chatId, scope) {
+        return this.guardWrite('removeLegacyRows', () => this.legacyCollection().deleteMany({ chatId, profile: scope.profile, client: scope.client }));
+    }
     /**
      * No index is created here, deliberately.
      *
@@ -20345,6 +20740,7 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
+/* harmony export */   USER_DATA_DEFAULTS: () => (/* binding */ USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
@@ -20355,6 +20751,34 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+/** Seeded via $setOnInsert when a row is created (minus any key the same write $sets/$incs). */
+const USER_DATA_DEFAULTS = {
+    fullShow: 0,
+    callTime: 0,
+    cheatCount: 0,
+    graceFlag: false,
+    highestPayAmount: 0,
+    videos: [],
+    picsSent: 0,
+    attributionChannelIds: [],
+    attributionUpdatedAt: 0,
+    picCount: 0,
+    limitTime: 0,
+    paidCount: 0,
+    prfCount: 0,
+    canReply: 1,
+    payAmount: 0,
+    paidReply: true,
+    demoGiven: false,
+    secondShow: false,
+    accessHash: '',
+    username: '',
+    totalCount: 0,
+    msgCount: 0,
+    windowCount: 0,
+};
+/** Keys createOrUpdate/recordInbound never accept from callers ($inc-ed or identity). */
+const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'];
 /** How many recent idempotency keys a row remembers. See `creditPayment`. */
 const CREDIT_KEY_HISTORY = 20;
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
@@ -20523,6 +20947,132 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                 lifetimePaid: Math.max(before.lifetimePaid ?? 0, amount),
             };
         });
+    }
+    // ── writers moved from tg-aut dbservice (step 6) ────────────────────────────────────────────
+    // Each builds the exact update the app built, then goes through upsert() (persona filter +
+    // one duplicate-key retry; non-duplicate failures rethrow).
+    /** $set `updates` (+ lastMsgTimeStamp); seed USER_DATA_DEFAULTS on insert. */
+    async updateFields(chatId, identity, updates, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        // Caller-provided lastMsgTimeStamp takes precedence.
+        const setFields = { lastMsgTimeStamp: now, ...safeUpdates };
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile };
+        for (const key of Object.keys(setFields))
+            delete setOnInsert[key];
+        // Ownership after the conflict strip, so a caller-supplied key can never remove it.
+        Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
+        return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
+    }
+    /** $set one key (+ lastMsgTimeStamp); seed defaults minus that key on insert. */
+    async setField(chatId, identity, key, value, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
+        delete setOnInsert[key];
+        return this.upsert(chatId, identity, {
+            $set: { [key]: value, lastMsgTimeStamp: now },
+            $setOnInsert: setOnInsert,
+        });
+    }
+    /**
+     * One inbound message: $set `updates`, $inc totalCount + msgCount (D3 dual-write), seed defaults
+     * on insert. totalCount/msgCount are never in $setOnInsert: a key in both $inc and $setOnInsert
+     * is rejected by Mongo with error 40 on every call. The caller detects creation by totalCount===1.
+     */
+    async recordInbound(chatId, identity, updates, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = {};
+        for (const [key, value] of Object.entries(updates)) {
+            if (!INBOUND_FORBIDDEN_KEYS.includes(key))
+                safeUpdates[key] = value;
+        }
+        const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
+        for (const [key, value] of Object.entries(USER_DATA_DEFAULTS)) {
+            if (key === 'totalCount' || key === 'msgCount')
+                continue;
+            if (key in safeUpdates)
+                continue;
+            setOnInsert[key] = value;
+        }
+        return this.upsert(chatId, identity, {
+            $set: { ...safeUpdates, lastMsgTimeStamp: now },
+            $inc: { totalCount: 1, msgCount: 1 },
+            $setOnInsert: setOnInsert,
+        });
+    }
+    /** $addToSet a video and backdate callTime 5 min, on the client-first read scope. No upsert. Throws. */
+    async addVideo(chatId, identity, video, now = Date.now()) {
+        return this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), {
+            $addToSet: { videos: video },
+            $set: { callTime: now - 5 * 60000 },
+        });
+    }
+    /**
+     * Merge common-chat channel ids into an EXISTING persona row (upsert:false, never creates).
+     * True when exactly one row matched. Throws; callers catch.
+     */
+    async mergeAttributionChannelIds(chatId, profile, channelIds, now = Date.now()) {
+        const update = channelIds.length > 0
+            ? { $set: { attributionUpdatedAt: now }, $addToSet: { attributionChannelIds: { $each: channelIds } } }
+            : { $set: { attributionUpdatedAt: now } };
+        const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), update, { upsert: false });
+        return result.acknowledged && result.matchedCount === 1;
+    }
+    /** Delete the persona row(s) of chatId. Throws. */
+    async deleteForPersona(chatId, identity) {
+        return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    }
+    // ── bulk maintenance (MINE scope = this persona) ────────────────────────────────────────────
+    /** paidCount -> 0 on rows idle > 30 days that never paid. Throws. */
+    async resetStalePaidCount(identity, now = Date.now()) {
+        return this.collection.updateMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $lt: now - 30 * 24 * 60 * 60 * 1000 }, paidCount: { $gt: 0 }, payAmount: 0 }, { $set: { paidCount: 0 } });
+    }
+    /**
+     * Delete rows whose real numeric lastMsgTimeStamp is older than `cutoff`. `$gt: 0` never matches
+     * null/missing/strings (BSON orders them below numbers), so unanchored rows are kept. Throws.
+     */
+    async deleteInactiveBefore(identity, cutoff) {
+        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff } });
+    }
+    /** paidReply -> true on every row of this persona. Throws. */
+    async enablePaidReplyForAll(identity) {
+        return this.collection.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), { $set: { paidReply: true } });
+    }
+    // ── reads ───────────────────────────────────────────────────────────────────────────────────
+    /** Does this client/persona hold a row for chatId (client-first scope). Throws. */
+    async exists(chatId, identity) {
+        return !!(await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity)));
+    }
+    /** One field of the client-first row, or undefined. Throws. */
+    async findField(chatId, identity, key) {
+        const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { projection: { [key]: 1 } });
+        return row ? row[key] : undefined;
+    }
+    /** chatId's rows under OTHER personas (full docs). Throws. */
+    async findInOtherPersonas(chatId, identity) {
+        return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
+    }
+    /** The persona row's attributionChannelIds projection, or null. Throws. */
+    async findAttributionChannelIds(chatId, identity) {
+        return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { projection: { attributionChannelIds: 1 } });
+    }
+    /** The persona row (persona scope only, no client-first preference). Throws. */
+    async findForPersona(chatId, identity) {
+        return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    }
+    /** Up to 25 rows of this persona with payAmount > 26, most recent first. Throws. */
+    async listTopPayers(identity, limit = 25) {
+        return this.collection
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), payAmount: { $gt: 26 } })
+            .sort({ lastMsgTimeStamp: -1 })
+            .limit(limit)
+            .toArray();
+    }
+    /** Rows of `profile` among chatIds that have messaged at least once (totalCount > 0). Throws. */
+    async findReachedRecords(profile, chatIds) {
+        return this.collection.find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
     }
     async ensureIndexesForTests() {
         await this.ensureIndexes();
@@ -20776,6 +21326,30 @@ function describeError(error) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/database-info.ts"
+/*!*************************************************!*\
+  !*** ../../packages/tg-db/src/database-info.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   readDatabaseSize: () => (/* binding */ readDatabaseSize)
+/* harmony export */ });
+/* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
+
+/**
+ * Size of the tgclients database. A database-level read that belongs to no collection, so it is a
+ * function rather than a repository. Throws on failure; the caller decides whether that matters.
+ */
+async function readDatabaseSize(client) {
+    const stats = await (0,_adopt_connection__WEBPACK_IMPORTED_MODULE_0__.adoptMongoClient)(client).rawDb().stats({ scale: 1024 * 1024 });
+    return { dataSizeMB: stats.dataSize, indexSizeMB: stats.indexSize, objects: stats.objects };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/index.ts"
 /*!*****************************************!*\
   !*** ../../packages/tg-db/src/index.ts ***!
@@ -20798,11 +21372,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ERROR_ALERT_WINDOW_MS),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
-/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.RepositoryContainer),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
+/* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
 /* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
@@ -20810,17 +21385,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
-/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.createRepositories),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
-/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ensureAllIndexes),
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
+/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_10__.readDatabaseSize),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
-/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.withErrorReporter)
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -20832,7 +21408,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
-/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
+/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -20857,6 +21434,7 @@ __webpack_require__.r(__webpack_exports__);
  *   events                                            -> OWNED BY @tg/events (EventStore),
  *                                                        deliberately NOT here — see repositories.ts
  */
+
 
 
 
@@ -20978,7 +21556,9 @@ function withErrorReporter(logger, report, options = {}) {
     const windowMs = options.windowMs ?? ERROR_ALERT_WINDOW_MS;
     const now = options.now ?? Date.now;
     const lastAlertAt = new Map();
-    const alertKey = (message) => (/^\[[^\]]+\]\s+\S+/.exec(message)?.[0] ?? message.slice(0, 80));
+    // Key on "[collection] operation" WITHOUT its arguments: op names embed a chatId/mobile
+    // (`upsert(12345)`), and keying on that made every chat its own alert during an outage.
+    const alertKey = (message) => (/^\[[^\]]+\]\s+[^\s(]+/.exec(message)?.[0] ?? message.slice(0, 80));
     return {
         log: (message, ...args) => logger.log(message, ...args),
         info: (message, ...args) => (logger.info ?? logger.log).call(logger, message, ...args),
@@ -30254,9 +30834,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
-
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 
 
 
@@ -30306,10 +30884,6 @@ class UserDataDtoCrud {
                 this.client = await mongodb__WEBPACK_IMPORTED_MODULE_0__.MongoClient.connect(process.env.mongodburi, { maxPoolSize: 5 });
                 logger.info('Connected to MongoDB');
                 this.isConnected = true;
-                this.activeChannelDb = this.client.db("tgclients").collection('activeChannels');
-                this.promoteStatsDb = this.client.db("tgclients").collection('promoteStats');
-                this.channelIntelligenceDb = this.client.db("tgclients").collection('channelIntelligence');
-                await this.ensureDailyAnalyticsIndexes();
                 // Strict (throwing) index creation: a failure here must abort connect, as before.
                 const promote = this.repositories.get(this.client).promote;
                 await promote.createClientStatsIndex();
@@ -30425,9 +30999,13 @@ class UserDataDtoCrud {
                 await this.closePromotionRedis();
                 throw error;
             }
+            const runtimeRepositories = this.repositories.get(this.client);
+            if (!runtimeRepositories)
+                throw new Error('Mongo client not connected; promotion runtime needs its collections');
+            const runtimeCollections = runtimeRepositories.channels.promotionRuntimeCollections();
             await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.createPromotionRuntime)({
-                channelIntelligenceCollection: this.channelIntelligenceDb,
-                activeChannelCollection: this.activeChannelDb,
+                channelIntelligenceCollection: runtimeCollections.channelIntelligence,
+                activeChannelCollection: runtimeCollections.activeChannels,
                 redis,
                 enableLocks: promotionFlags.redisChannelLock,
                 enableAttribution: promotionFlags.conversionAttribution,
@@ -30496,8 +31074,10 @@ class UserDataDtoCrud {
      */
     async getUserData(chatId) {
         try {
-            const userDataCollection = this.client.db("tgclients").collection('userData');
-            return await userDataCollection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(chatId));
+            const userData = this.repositories.get(this.client)?.userData;
+            if (!userData)
+                throw new Error('Mongo client not connected; userData unavailable');
+            return await userData.findForPersona(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.currentScopeIdentity)());
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting user data");
@@ -30512,17 +31092,11 @@ class UserDataDtoCrud {
             if (!normalizedChatId || !profile)
                 return false;
             const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.normalizeAttributionChannelIds)(channelIds);
-            const update = normalizedChannelIds.length > 0
-                ? {
-                    $set: { attributionUpdatedAt: Date.now() },
-                    $addToSet: { attributionChannelIds: { $each: normalizedChannelIds } },
-                }
-                : { $set: { attributionUpdatedAt: Date.now() } };
-            // upsert:false — merges into an EXISTING conversation row created by tg-aut, so the
-            // persona shape is correct and cannot create a duplicate. Expressed through the shared
-            // model rather than a literal so the identity rule stays in one place.
-            const result = await this.client.db("tgclients").collection('userData').updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.personaFilter)(normalizedChatId, { profile }), update, { upsert: false });
-            return result.acknowledged && result.matchedCount === 1;
+            const userData = this.repositories.get(this.client)?.userData;
+            if (!userData)
+                throw new Error('Mongo client not connected; userData unavailable');
+            // upsert:false — merges into an EXISTING conversation row created by tg-aut.
+            return await userData.mergeAttributionChannelIds(normalizedChatId, profile, normalizedChannelIds);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, `Error recording routed attribution channels for ${chatId}`, false);
@@ -30530,36 +31104,15 @@ class UserDataDtoCrud {
         }
     }
     async getClients() {
-        // Routed through @tg/db (B2). listMasked() strips `session` and `password`, which is a
-        // deliberate NARROWING of this method: the rows are cached in `this.clients` (private,
-        // keyed by persona), and nothing anywhere reads a secret back off that cache — verified by
-        // grep across both apps. Holding live Telegram sessions in a long-lived map for no reason
-        // was the risk. Anything that genuinely needs them must call
-        // findWithSecretsForTelegramConnection(), whose name makes the access reviewable.
-        const repositories = this.repositories.get(this.client);
-        if (repositories) {
-            const masked = await repositories.clients.listMasked();
-            // listMasked() reports failure as [] where this method's contract is null. Only an
-            // empty result is ambiguous, and there are always 20 clients in practice, so an empty
-            // list here means the read failed.
-            if (masked.length === 0)
-                return null;
-            masked.forEach((clt) => {
-                this.clients[clt.dbcoll] = clt;
-            });
-            return masked;
-        }
-        try {
-            const clients = await this.client.db("tgclients").collection('clients').find({}).toArray();
-            clients.forEach((clt) => {
-                this.clients[clt.dbcoll] = clt;
-            });
-            return clients;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting clients");
+        // Masked (no session/password): nothing reads a secret back off `this.clients`. listMasked()
+        // reports failure as [], and there are always ~20 clients, so empty means the read failed.
+        const masked = (await this.repositories.get(this.client)?.clients.listMasked()) ?? [];
+        if (masked.length === 0)
             return null;
-        }
+        masked.forEach((clt) => {
+            this.clients[clt.dbcoll] = clt;
+        });
+        return masked;
     }
     async closeConnection() {
         try {
@@ -30579,50 +31132,16 @@ class UserDataDtoCrud {
             return false;
         }
     }
-    async updateClient(filter, data) {
-        try {
-            const clientsDb = this.client.db("tgclients").collection('clients');
-            return await clientsDb.updateOne(filter, { $set: data });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error updating client");
-            return null;
-        }
-    }
-    async getClient(filter) {
-        try {
-            return await this.client.db("tgclients").collection('clients').findOne(filter);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting client");
-            return null;
-        }
+    /** The current client's document, secrets stripped (callers read username/repl/name only). */
+    async getClient(clientId) {
+        return (await this.repositories.get(this.client)?.clients.findMasked(clientId ?? '')) ?? null;
     }
     async getPromotePersonaPool(clientId) {
-        try {
-            logger.debug(`[Persona] Loading promote persona pool from Mongo for ${clientId}`);
-            const clientDoc = await this.client.db("tgclients").collection('clients').findOne({ clientId }, { projection: { firstNames: 1, promoteLastNames: 1, bios: 1, profilePics: 1, dbcoll: 1 } });
-            if (!clientDoc) {
-                logger.warn(`[Persona] Promote persona pool not found in Mongo for ${clientId}`);
-                return null;
-            }
-            const pool = {
-                firstNames: clientDoc.firstNames || [],
-                lastNames: clientDoc.promoteLastNames || [],
-                bios: clientDoc.bios || [],
-                profilePics: clientDoc.profilePics || [],
-                dbcoll: (clientDoc.dbcoll || '').toLowerCase(),
-            };
-            if (!pool.firstNames.length && !pool.lastNames.length && !pool.bios.length && !pool.profilePics.length) {
-                logger.debug(`[Persona] Promote persona pool empty for ${clientId}`);
-                return null;
-            }
-            return pool;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting promote persona pool");
-            return null;
-        }
+        logger.debug(`[Persona] Loading promote persona pool from Mongo for ${clientId}`);
+        const pool = (await this.repositories.get(this.client)?.clients.findPersonaPool(clientId, 'promote')) ?? null;
+        if (!pool)
+            logger.debug(`[Persona] Promote persona pool missing or empty for ${clientId}`);
+        return pool;
     }
     /**
      * Returns which routed chatIds reached the main account (userData.totalCount > 0) for this
@@ -30639,13 +31158,12 @@ class UserDataDtoCrud {
             }
             if (chatIds.length === 0)
                 return [];
-            const userDataCollection = this.client.db("tgclients").collection('userData');
-            const docs = await userDataCollection
-                .find(
-            // Persona-scoped for the same reason as getUserData above: a routed user may
-            // have landed on either client of the persona, and legacy rows carry no clientId.
-            { ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_2__.mineFilter)({ profile }), chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } })
-                .toArray();
+            const userData = this.repositories.get(this.client)?.userData;
+            if (!userData)
+                throw new Error('Mongo client not connected; userData unavailable');
+            // Persona-scoped for the same reason as getUserData above: a routed user may have
+            // landed on either client of the persona, and legacy rows carry no clientId.
+            const docs = await userData.findReachedRecords(profile, chatIds);
             return docs
                 .map((doc) => ({
                 chatId: String(doc.chatId ?? ''),
@@ -30658,63 +31176,37 @@ class UserDataDtoCrud {
             return null;
         }
     }
-    async ensureDailyAnalyticsIndexes() {
-        try {
-            const ttlSeconds = UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60;
-            for (const name of UserDataDtoCrud.DAILY_COLLECTIONS) {
-                const coll = this.client.db("tgclients").collection(name);
-                // TTL index: Mongo deletes docs once expireAt is older than now.
-                await coll.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }).catch(() => undefined);
-                // One doc per day per namespace per client per mobile. Old {date,clientId} unique
-                // index (pre-mobile) is superseded by this compound key; createIndex on a conflicting
-                // spec throws on an existing differently-shaped index of the same name/keys — caught
-                // and ignored here exactly like the TTL index above, matching the existing pattern.
-                await coll.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true }).catch(() => undefined);
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error ensuring daily analytics indexes", false);
-        }
-    }
     /** Today's date key in IST (matches the fleet's Asia/Kolkata timezone), e.g. "2026-07-14". */
     todayKey() {
         const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
         return ist.toISOString().slice(0, 10);
     }
     /**
-     * Live $inc upsert into a daily analytics collection for {today, namespace, clientId, mobile}.
-     * Sets expireAt on insert so the doc auto-deletes 14 days later. Best-effort: never throws into
-     * the caller. `mobile` MUST be passed in by the caller — promote-clients runs many mobiles per
-     * clientId in one process, so `process.env.mobile` is ambiguous here and is never read.
+     * Daily $inc upsert for {today, namespace, clientId, mobile} via DailyStatsRepository (same
+     * filter, $setOnInsert incl. 14-day expireAt, and analytics mirror as before). Never throws.
+     * `mobile` MUST be passed in: promote-clients runs many mobiles per clientId, so
+     * `process.env.mobile` is ambiguous here and is never read.
      */
     async recordDaily(collection, mobile, inc) {
-        try {
-            const clientId = process.env.clientId;
-            if (!clientId || !mobile)
-                return;
-            const namespace = UserDataDtoCrud.DAILY_ANALYTICS_NAMESPACE;
-            const date = this.todayKey();
-            const expireAt = new Date(Date.now() + UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60 * 1000);
-            await this.client.db("tgclients").collection(collection).updateOne({ date, namespace, clientId, mobile }, {
-                $inc: inc,
-                $setOnInsert: { date, namespace, clientId, mobile, profile: process.env.dbcoll, expireAt, createdAt: new Date() },
-            }, { upsert: true });
-            // Mirror into the OPTIONAL analytics store, only after the Mongo write succeeded (a
-            // throw above skips this). Same field mapping as tg-aut's DailyStatsRepository;
-            // `revenue` is not in the map on purpose. Must never affect the authoritative write.
-            try {
-                (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_7__.getAnalytics)().recordDailyClient({
-                    day: date,
-                    clientId,
-                    namespace,
-                    ..._tg_db__WEBPACK_IMPORTED_MODULE_6__.DAILY_CLIENT_FIELD_MAP[collection]?.(inc),
-                });
-            }
-            catch { /* analytics is optional */ }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, `Error recording daily analytics (${collection})`, false);
-        }
+        const clientId = process.env.clientId;
+        if (!clientId || !mobile)
+            return;
+        const repository = this.repositories.get(this.client)?.dailyStats;
+        if (!repository)
+            return;
+        const key = {
+            date: this.todayKey(),
+            namespace: UserDataDtoCrud.DAILY_ANALYTICS_NAMESPACE,
+            clientId,
+            mobile,
+            profile: process.env.dbcoll,
+        };
+        if (collection === 'promoteStatsDaily')
+            await repository.recordPromo(key, inc);
+        else if (collection === 'reactionStatsDaily')
+            await repository.recordReaction(key, inc);
+        else
+            await repository.recordUser(key, inc);
     }
     /** Daily promotion outcome (sent/success/failed/banned), scoped to the mobile that produced it. */
     async recordDailyPromo(mobile, fields) {
@@ -30763,25 +31255,16 @@ class UserDataDtoCrud {
         // disconnect, this.client is undefined -> ".db() of undefined" threw every tick. Skip
         // quietly until the connection is (re)established rather than error-spamming.
         if (!this.isConnected || !this.client) {
-            return null;
+            return false;
         }
-        try {
-            const collection = this.client.db("tgclients").collection('timestamps');
-            return await collection.updateOne({}, { $set: { [`${process.env.clientId}_prom`]: Date.now() } }, { upsert: true });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error updating timestamps");
-            return null;
-        }
+        return (await this.repositories.get(this.client)?.clients.touchHeartbeat(`${process.env.clientId}_prom`)) ?? false;
     }
     async fetchExistingPromoteAssignments(clientId) {
         logger.debug(`[Persona] Fetching existing promote assignments for ${clientId}`);
-        const assignmentFilter = (0,_tg_db__WEBPACK_IMPORTED_MODULE_6__.personaAssignmentFilter)(clientId);
-        const promote = this.repositories.get(this.client).promote;
-        // promoteClients half via the repository (step 3); bufferClients stays here until step 4.
+        const repositories = this.repositories.get(this.client);
         const [localPromoteAssignments, localBufferAssignments] = await Promise.all([
-            promote.findPersonaAssignments(clientId),
-            this.client.db("tgclients").collection('bufferClients').find(assignmentFilter, { projection: _tg_db__WEBPACK_IMPORTED_MODULE_6__.PERSONA_ASSIGNMENT_PROJECTION }).toArray(),
+            repositories.promote.findPersonaAssignments(clientId),
+            repositories.clients.findBufferPersonaAssignments(clientId),
         ]);
         const localAssignments = [];
         const localMobiles = new Set();
@@ -30802,7 +31285,7 @@ class UserDataDtoCrud {
             if (tgcms) {
                 logger.debug(`[Persona] Fetching CMS assignment snapshot for ${clientId}`, { tgcms });
                 const response = await axios__WEBPACK_IMPORTED_MODULE_3___default().get(`${tgcms}/clients/${clientId}/existing-assignments?scope=all`, {
-                    headers: { 'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_8__.getApiKey)() },
+                    headers: { 'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_7__.getApiKey)() },
                     timeout: 10000,
                 });
                 const apiAssignments = response.data?.assignments || [];
@@ -30834,8 +31317,6 @@ class UserDataDtoCrud {
 // ===================================================================
 /** Hardcoded per-app namespace constant — distinguishes promote-clients rows from tg-aut rows. */
 UserDataDtoCrud.DAILY_ANALYTICS_NAMESPACE = 'promote-clients';
-UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS = 14;
-UserDataDtoCrud.DAILY_COLLECTIONS = ['promoteStatsDaily', 'reactionStatsDaily', 'userStatsDaily'];
 
 
 /***/ },
@@ -31078,9 +31559,7 @@ class HealthMonitor {
     }
     async readClientDataForHealthCheck() {
         try {
-            const clientData = await _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().getClient({
-                clientId: process.env.clientId
-            });
+            const clientData = await _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().getClient(process.env.clientId);
             if (!clientData) {
                 logger.warn("Client metadata unavailable during health check; using in-memory client details");
             }
@@ -32423,9 +32902,7 @@ class InactiveMobileScraper {
             let username = fallbackUsername;
             try {
                 const db = _dbservice__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
-                const clientData = await db.getClient({
-                    clientId: process.env.clientId
-                });
+                const clientData = await db.getClient(process.env.clientId);
                 username = clientData?.username || fallbackUsername;
                 logger.info(`📋 Retrieved username from DB: ${username} for mobile: ${mobile}`);
             }
@@ -32962,7 +33439,7 @@ class MobileManager {
         let failed = 0;
         try {
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-            const client = await db.getClient({ clientId: process.env.clientId });
+            const client = await db.getClient(process.env.clientId);
             if (!client) {
                 throw new Error(`Client not found for ${process.env.clientId}`);
             }
