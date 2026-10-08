@@ -20901,11 +20901,76 @@ function toIncrement(fields) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PromoteRepository: () => (/* binding */ PromoteRepository)
+/* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PromoteRepository: () => (/* binding */ PromoteRepository),
+/* harmony export */   emptyPromoteAvailability: () => (/* binding */ emptyPromoteAvailability),
+/* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* binding */ getPromoteRuntimeEligibilityFilter),
+/* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter)
 /* harmony export */ });
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
-class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+
+const PROMOTE_RUNTIME_CHANNEL_FLOOR = 230;
+const PROMOTE_RUNTIME_PHASE = 'session_rotated';
+/**
+ * Runtime selection is deliberately stricter than warmup progress: only accounts with the terminal
+ * lifecycle phase and the promotion channel floor can start a Telegram client. There is no legacy
+ * fallback.
+ */
+const getPromoteRuntimeEligibilityFilter = () => ({
+    status: 'active',
+    channels: { $gte: PROMOTE_RUNTIME_CHANNEL_FLOOR },
+    warmupPhase: PROMOTE_RUNTIME_PHASE,
+});
+/**
+ * Filter for "accounts of this client that already hold a persona assignment". Shared by the
+ * promoteClients read below and by the apps' bufferClients read (step 4 of the dbservice removal),
+ * so the two halves of the assignment snapshot cannot drift apart.
+ */
+const personaAssignmentFilter = (clientId) => ({
+    clientId,
+    status: 'active',
+    $or: [
+        { assignedFirstName: { $ne: null } },
+        { assignedLastName: { $ne: null } },
+        { assignedBio: { $ne: null } },
+        { 'assignedProfilePics.0': { $exists: true } },
+    ],
+});
+const PERSONA_ASSIGNMENT_PROJECTION = {
+    mobile: 1,
+    assignedFirstName: 1,
+    assignedLastName: 1,
+    assignedBio: 1,
+    assignedProfilePics: 1,
+};
+/** The summary getTotalAvailablePromoteClients yields when the read fails (or no connection exists). */
+const emptyPromoteAvailability = () => ({
+    totalClients: 0,
+    totalChannels: 0,
+    avgChannels: 0,
+    maxChannels: 0,
+    minChannels: 0,
+    uniqueClientIdsCount: 0,
+    uniqueClientIds: [],
+    clientBreakdown: [],
+});
+/** ROUTED-USER FOLD (see incrementRoutedUserCount): one pipeline, shared by both entry points. */
+const routedUserCountPipeline = (count) => [
+    {
+        $set: {
+            routedUserCount: {
+                $let: {
+                    vars: { base: { $ifNull: ['$routedUserCount', '$convertedCount'] } },
+                    in: { $add: [{ $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] }, count] },
+                },
+            },
+        },
+    },
+    { $unset: ['convertedCount'] },
+];
+class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = 'promoteMsgs';
@@ -20937,19 +21002,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
             this.logger.warn(`[promoteClientStats] routed-user increment refused for ${clientId}: count=${count}`);
             return false;
         }
-        return this.guardWrite(`incrementRoutedUserCount(${clientId})`, () => this.connection.collection('promoteClientStats').updateOne({ clientId }, [
-            {
-                $set: {
-                    routedUserCount: {
-                        $let: {
-                            vars: { base: { $ifNull: ['$routedUserCount', '$convertedCount'] } },
-                            in: { $add: [{ $cond: [{ $gt: ['$$base', 0] }, '$$base', 0] }, count] },
-                        },
-                    },
-                },
-            },
-            { $unset: ['convertedCount'] },
-        ], 
+        return this.guardWrite(`incrementRoutedUserCount(${clientId})`, () => this.connection.collection('promoteClientStats').updateOne({ clientId }, routedUserCountPipeline(count), 
         // A newly provisioned promote client can route a user before its stats row exists.
         // Upsert preserves that conversion rather than dropping it.
         { upsert: true }));
@@ -20960,6 +21013,305 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
         return this.guard(`getClientStat(${clientId})`, null, () => this.connection
             .collection('promoteClientStats')
             .findOne({ clientId }));
+    }
+    // ── promoteClientStats / promoteClients (moved from the app dbservices, dbservice removal step 3) ──
+    // Every method below keeps its dbservice contract: reads return null on failure (never throw),
+    // writes return the driver result or null. Failures are logged through the repository logger.
+    get clientStats() {
+        return this.connection.collection('promoteClientStats');
+    }
+    get promoteClients() {
+        return this.connection.collection('promoteClients');
+    }
+    info(message, data) {
+        if (this.logger.info)
+            this.logger.info(message, data);
+        else
+            this.logger.log(message, data);
+    }
+    /**
+     * STRICT (throws): called at connect, where a unique-index failure on existing duplicate rows
+     * must stop startup rather than be swallowed (ensureIndexes() below swallows).
+     * One metrics row per logical promotion client. Existing rows are verified before startup.
+     */
+    async createClientStatsIndex() {
+        await this.connection
+            .collection('promoteClientStats')
+            .createIndex({ clientId: 1 }, { unique: true, name: 'uniq_promote_client_stats_client' });
+    }
+    /** STRICT (throws), see createClientStatsIndex. Mobile is the stable promotion-account identity. */
+    async createMobileIndex() {
+        await this.connection.collection('promoteClients').createIndex({ mobile: 1 }, {
+            unique: true,
+            name: 'uniq_promote_clients_mobile',
+            // Existing legacy rows without a usable mobile remain outside the invariant.
+            partialFilterExpression: { mobile: { $gt: '' } },
+        });
+    }
+    /**
+     * Unlike incrementRoutedUserCount (boolean, throws nothing, refuses blank ids with a warn) this
+     * keeps the promote app's contract: the UpdateResult, or null when refused or failed. `clientId`
+     * is the caller's environment clientId; it is trimmed and used as the upsert filter.
+     */
+    async incrementRoutedUserCountBy(clientId, count) {
+        return this.guard('incrementRoutedUserCountBy', null, async () => {
+            if (!Number.isFinite(count) || count <= 0)
+                return null;
+            const id = clientId?.trim();
+            if (!id) {
+                this.logger.error('[promoteClientStats] incrementRoutedUserCountBy refused: missing clientId');
+                return null;
+            }
+            // ATOMIC ON-WRITE MIGRATION (convertedCount -> routedUserCount): see incrementRoutedUserCount.
+            return await this.clientStats.updateOne({ clientId: id }, routedUserCountPipeline(count), 
+            // A newly provisioned promote client can receive a routed conversion before a stats
+            // row is created by the normal lifecycle path. Preserve that conversion.
+            { upsert: true });
+        });
+    }
+    async updatePromoteClientStat(filter, data) {
+        return this.guard('updatePromoteClientStat', null, () => this.clientStats.updateOne(filter, { $set: data }));
+    }
+    /** The stats row of `clientId` (the caller's environment clientId, which may be undefined). */
+    async getPromoteClientStat(clientId) {
+        return this.guard('getPromoteClientStat', null, () => this.clientStats.findOne({ clientId }));
+    }
+    async getPromoteClientStats() {
+        return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1, daysLeft: 1 }).toArray());
+    }
+    async increaseMsgCount(clientId) {
+        return this.guard('increaseMsgCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { messageCount: 1 } }));
+    }
+    /** promoteClientStats counter only. The per-mobile DAILY record is the caller's (recordDailyPromo). */
+    async increaseSuccessCount(clientId) {
+        return this.guard('increaseSuccessCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { successCount: 1 } }));
+    }
+    /** promoteClientStats counter only, see increaseSuccessCount. */
+    async increaseFailedCount(clientId) {
+        return this.guard('increaseFailedCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { failedCount: 1 } }));
+    }
+    /** promoteClientStats counter only (returns the updated row), see increaseSuccessCount. */
+    async increaseReactCount(clientId, number) {
+        return this.guard('increaseReactCount', null, async () => {
+            const result = await this.clientStats.findOneAndUpdate({ clientId }, { $inc: { reactCount: number } }, { returnDocument: 'after' });
+            return result ?? null;
+        });
+    }
+    /** `lastStarted` is the caller's formatted timestamp (the format is an app util). */
+    async resetPromoteClientStats(lastStarted) {
+        return this.guard('resetPromoteClientStats', null, () => this.clientStats.updateMany({}, {
+            $set: {
+                successCount: 0,
+                failedCount: 0,
+                messageCount: 0,
+                lastStarted,
+                reactCount: 0,
+                routedUserCount: 0,
+            },
+        }));
+    }
+    /** `clientId` is the caller's environment clientId. */
+    async getAvailablePromoteMobile(filter, clientId) {
+        return this.guard('getAvailablePromoteMobile', null, async () => {
+            const threeDaysLater = (new Date(Date.now() + (3 * 24 * 60 * 60 * 1000))).toISOString().split('T')[0];
+            const query = {
+                ...filter,
+                clientId,
+                availableDate: { $lte: threeDaysLater },
+                createdAt: { $lt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+                ...getPromoteRuntimeEligibilityFilter(),
+            };
+            this.info(`Getting available mobiles with filter: ${JSON.stringify(query, null, 2)} and currentDateStr: ${threeDaysLater}`);
+            return await this.promoteClients
+                .find(query, {
+                projection: {
+                    mobile: 1,
+                    availableDate: 1,
+                    channels: 1,
+                    createdAt: 1,
+                    lastUsed: 1,
+                    clientId: 1,
+                    status: 1,
+                    warmupPhase: 1,
+                },
+            })
+                .sort({ availableDate: 1, lastUsed: 1, createdAt: 1, channels: -1 })
+                .toArray();
+        });
+    }
+    async getTotalAvailablePromoteClients() {
+        return this.guard('getTotalAvailablePromoteClients', emptyPromoteAvailability(), async () => {
+            const nextFiveDays = (new Date(Date.now() + (5 * 24 * 60 * 60 * 1000))).toISOString().split('T')[0];
+            const result = await this.connection.collection('promoteClients').aggregate([
+                {
+                    $match: {
+                        availableDate: { $lte: nextFiveDays },
+                        ...getPromoteRuntimeEligibilityFilter(),
+                    }
+                },
+                {
+                    $facet: {
+                        mainStats: [
+                            {
+                                $group: {
+                                    _id: null,
+                                    totalClients: { $sum: 1 },
+                                    totalChannels: { $sum: "$channels" },
+                                    avgChannels: { $avg: "$channels" },
+                                    maxChannels: { $max: "$channels" },
+                                    minChannels: { $min: "$channels" },
+                                    uniqueClientIds: { $addToSet: "$clientId" },
+                                    clientBreakdown: {
+                                        $push: {
+                                            clientId: "$clientId",
+                                            mobile: "$mobile",
+                                            channels: "$channels",
+                                            availableDate: "$availableDate"
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                $addFields: {
+                                    uniqueClientIdsCount: { $size: "$uniqueClientIds" }
+                                }
+                            }
+                        ],
+                        clientsPerClientId: [
+                            {
+                                $group: {
+                                    _id: "$clientId",
+                                    count: { $sum: 1 }
+                                }
+                            },
+                            {
+                                $project: {
+                                    _id: 0,
+                                    clientId: "$_id",
+                                    count: 1
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    $project: {
+                        totalClients: { $arrayElemAt: ["$mainStats.totalClients", 0] },
+                        totalChannels: { $arrayElemAt: ["$mainStats.totalChannels", 0] },
+                        avgChannels: { $round: [{ $arrayElemAt: ["$mainStats.avgChannels", 0] }, 2] },
+                        maxChannels: { $arrayElemAt: ["$mainStats.maxChannels", 0] },
+                        minChannels: { $arrayElemAt: ["$mainStats.minChannels", 0] },
+                        uniqueClientIdsCount: { $arrayElemAt: ["$mainStats.uniqueClientIdsCount", 0] },
+                        uniqueClientIds: { $arrayElemAt: ["$mainStats.uniqueClientIds", 0] },
+                        clientBreakdown: { $arrayElemAt: ["$mainStats.clientBreakdown", 0] },
+                        clientsPerClientId: "$clientsPerClientId"
+                    }
+                }
+            ]).toArray();
+            // $facet always emits exactly one document; on an empty pool the scalar
+            // projections come back as null (arrayElemAt over an empty mainStats),
+            // so normalize them to 0/[] rather than leaking null to the caller.
+            const row = (result[0] ?? {});
+            const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+            const arr = (v) => (Array.isArray(v) ? v : []);
+            return {
+                totalClients: num(row.totalClients),
+                totalChannels: num(row.totalChannels),
+                avgChannels: num(row.avgChannels),
+                maxChannels: num(row.maxChannels),
+                minChannels: num(row.minChannels),
+                uniqueClientIdsCount: num(row.uniqueClientIdsCount),
+                uniqueClientIds: arr(row.uniqueClientIds),
+                clientBreakdown: arr(row.clientBreakdown),
+                clientsPerClientId: arr(row.clientsPerClientId)
+            };
+        });
+    }
+    async searchPromoteClients(filter) {
+        return this.guard('searchPromoteClients', null, () => this.promoteClients.find(filter).toArray());
+    }
+    async findPromoteClient(filter) {
+        return this.guard('findPromoteClient', null, () => this.promoteClients.findOne(filter));
+    }
+    /** `clientId` is the caller's environment clientId. */
+    async findRuntimePromoteClient(mobile, clientId) {
+        return this.guard('findRuntimePromoteClient', null, () => this.promoteClients.findOne({
+            mobile,
+            clientId,
+            ...getPromoteRuntimeEligibilityFilter(),
+        }));
+    }
+    async updatePromoteClient(filter, data) {
+        return this.guard('updatePromoteClient', null, async () => {
+            const mobile = typeof filter.mobile === 'string' ? filter.mobile.trim() : '';
+            if (!mobile) {
+                this.logger.warn('Skipping promote client update: a non-empty mobile identity is required');
+                return null;
+            }
+            const result = await this.promoteClients.findOneAndUpdate(
+            // `mobile` is the required identity, but callers may add lifecycle guards to
+            // prevent a stale manager from mutating a reassigned client document.
+            { ...filter, mobile }, { $set: { ...data, updatedAt: new Date() } }, { returnDocument: 'after' });
+            return result ?? null;
+        });
+    }
+    async createPromoteClient(clientData) {
+        return this.guard('createPromoteClient', null, async () => {
+            const mobile = typeof clientData.mobile === 'string' ? clientData.mobile.trim() : '';
+            if (!mobile) {
+                this.logger.warn('Skipping promote client creation: a non-empty mobile identity is required');
+                return null;
+            }
+            const newClient = {
+                tgId: clientData.tgId,
+                mobile,
+                lastActive: clientData.lastActive,
+                availableDate: clientData.availableDate,
+                channels: clientData.channels,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+            const result = await this.promoteClients.insertOne(newClient);
+            return { ...newClient, _id: result.insertedId };
+        });
+    }
+    /** THROWS on a read failure (the persona flow must see it); logs what was loaded. */
+    async getPromoteClientDoc(mobile) {
+        this.logger.debug?.(`[Persona] Loading promote client doc for ${mobile}`);
+        const doc = await this.promoteClients.findOne({ mobile });
+        if (doc) {
+            this.logger.debug?.(`[Persona] Loaded promote client doc for ${mobile}`, {
+                hasAssignedFirstName: !!doc.assignedFirstName,
+                hasAssignedLastName: !!doc.assignedLastName,
+                hasAssignedBio: !!doc.assignedBio,
+                assignedPhotoCount: doc.assignedProfilePics?.length || 0,
+                nameBioTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__.describePersonaTimestamp)(doc.nameBioUpdatedAt),
+                privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__.describePersonaTimestamp)(doc.privacyUpdatedAt),
+                profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__.describePersonaTimestamp)(doc.profilePicsUpdatedAt),
+                status: doc.status || null,
+            });
+        }
+        else {
+            this.logger.warn(`[Persona] Promote client doc not found for ${mobile}`);
+        }
+        return doc;
+    }
+    /** THROWS on a write failure (the persona flow must see it). */
+    async updatePromoteClientAssignment(mobile, update) {
+        this.info(`[Persona] Persisting promote client assignment update for ${mobile}`, {
+            keys: Object.keys(update),
+        });
+        await this.promoteClients.updateOne({ mobile }, { $set: update });
+    }
+    /**
+     * The promoteClients half of the persona assignment snapshot (accounts of `clientId` that hold an
+     * assignment). THROWS on failure: both apps merge this with a bufferClients read inside their own
+     * error handling, and that handling differs per app.
+     */
+    async findPersonaAssignments(clientId) {
+        return this.promoteClients
+            .find(personaAssignmentFilter(clientId), { projection: PERSONA_ASSIGNMENT_PROJECTION })
+            .toArray();
     }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(promoteClientStats.clientId)', () => this.connection
@@ -21505,6 +21857,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
+/* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
@@ -21517,11 +21870,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
 /* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
+/* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ensureAllIndexes),
+/* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
+/* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
-/* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId)
+/* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -21584,7 +21941,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   RepositoryContainer: () => (/* binding */ RepositoryContainer),
 /* harmony export */   createRepositories: () => (/* binding */ createRepositories),
-/* harmony export */   ensureAllIndexes: () => (/* binding */ ensureAllIndexes)
+/* harmony export */   ensureAllIndexes: () => (/* binding */ ensureAllIndexes),
+/* harmony export */   withErrorReporter: () => (/* binding */ withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
 /* harmony import */ var _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./collections/user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
@@ -21661,6 +22019,28 @@ async function ensureAllIndexes(repositories, logger) {
             logger.warn(`[tg-db] ensureIndexes failed for ${name}: ${String(error)}`);
         }
     }
+}
+/**
+ * Wrap an app logger so repository failures also go to `report` (the app's parseError, which sends
+ * the Telegram error alert). The dbservice methods moved into these repositories used to call
+ * parseError(error, "...") with alerting on; without this, their DB failures would only be logged.
+ * tg-db stays free of app/core imports: the reporter is injected.
+ */
+function withErrorReporter(logger, report) {
+    return {
+        log: (message, ...args) => logger.log(message, ...args),
+        info: (message, ...args) => (logger.info ?? logger.log).call(logger, message, ...args),
+        warn: (message, ...args) => logger.warn(message, ...args),
+        debug: (message, ...args) => logger.debug?.(message, ...args),
+        error: (message, ...args) => {
+            try {
+                report(message);
+            }
+            catch {
+                logger.error(message, ...args);
+            }
+        },
+    };
 }
 /**
  * A container that rebuilds its repositories whenever the underlying MongoClient changes.
@@ -31198,7 +31578,8 @@ class UserDataDtoCrud {
          * The @tg/db composition root for this process. Rebuilds its repositories whenever the
          * MongoClient changes, so a reconnect can never leave a repository wrapping a closed handle.
          */
-        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_3__.RepositoryContainer(logger);
+        // Repository failures alert via parseError, as the moved dbservice methods did.
+        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_3__.RepositoryContainer((0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.withErrorReporter)(logger, (message) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(new Error(message), 'tg-db'); }));
         /**
          * Lazily build the daily-stats repository over the app's live MongoClient.
          *
@@ -32759,35 +33140,6 @@ class UserDataDtoCrud {
             $set: { callTime: Date.now() - 5 * 60000 }
         });
     }
-    /**
-     * The legacy promotion message pool, as a { index -> text } map.
-     *
-     * `_id` is PROJECTED OUT deliberately. The caller assigns this straight to
-     * BasePromotionEngine.promoteMsgs, which is indexed by key — so a leaked `_id` becomes a
-     * selectable 23rd "message" whose value is an ObjectId, and inflates the
-     * `Loaded N promotion messages` count. promote-clients already stripped it; tg-aut did not,
-     * so the two apps saw different pools from the same document.
-     *
-     * Returns null (not undefined) on failure, matching promote-clients: both callers do
-     * `?? {}`, so the contract must be a definite value rather than an implicit undefined.
-     */
-    async getPromoteMsgs() {
-        // Routed through @tg/db (B3). The repository issues the identical
-        // findOne({}, {projection:{_id:0}}) and returns null on failure, so this is a change of
-        // owner, not of behaviour. The raw read below stays as the fallback for the window before
-        // the client is connected, when the container has no repositories to hand out yet.
-        const repositories = this.repositories.get(this.client);
-        if (repositories)
-            return repositories.promote.getPromoteMsgs();
-        try {
-            const channelDb = this.client.db("tgclients").collection('promoteMsgs');
-            return await channelDb.findOne({}, { projection: { _id: 0 } });
-        }
-        catch (e) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(e, "Error fetching promote messages");
-            return null;
-        }
-    }
     async updateClient(filter, data) {
         try {
             const clientsDb = this.client.db("tgclients").collection('clients');
@@ -32860,24 +33212,13 @@ class UserDataDtoCrud {
         const seenMobiles = new Set();
         try {
             const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
-            const promoteClientsDb = this.client.db("tgclients").collection('promoteClients');
-            const assignmentFilter = {
-                clientId,
-                status: 'active',
-                $or: [
-                    { assignedFirstName: { $ne: null } },
-                    { assignedLastName: { $ne: null } },
-                    { assignedBio: { $ne: null } },
-                    { 'assignedProfilePics.0': { $exists: true } },
-                ],
-            };
+            const assignmentFilter = (0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.personaAssignmentFilter)(clientId);
+            // promoteClients half via the repository (step 3); bufferClients stays here until step 4.
             const [localBufferAssignments, localPromoteAssignments] = await Promise.all([
                 bufferClientsDb.find(assignmentFilter, {
-                    projection: { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 },
+                    projection: _tg_db__WEBPACK_IMPORTED_MODULE_3__.PERSONA_ASSIGNMENT_PROJECTION,
                 }).toArray(),
-                promoteClientsDb.find(assignmentFilter, {
-                    projection: { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 },
-                }).toArray(),
+                this.repositories.get(this.client).promote.findPersonaAssignments(clientId),
             ]);
             for (const assignment of [...localBufferAssignments, ...localPromoteAssignments]) {
                 if (!assignment.mobile || seenMobiles.has(assignment.mobile))
@@ -55759,7 +56100,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
         return {
             findActiveChannel: (channelId) => _core_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore.findActiveChannel(channelId),
             updateActiveChannel: (channelId, patch) => _core_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore.updateActiveChannel(channelId, patch),
-            getPromoteMsgs: () => _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().getPromoteMsgs(),
+            getPromoteMsgs: async () => (await (0,_core_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)()?.promote.getPromoteMsgs()) ?? null,
         };
     }
     envNumber(name, fallback) {
