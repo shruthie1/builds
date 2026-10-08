@@ -28203,7 +28203,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DailyAnalyticsService = exports.DAILY_ANALYTICS_SOURCE_ENV = exports.MONGO_RETENTION_DAYS = exports.REVENUE_FROM_DAY = void 0;
+exports.DailyAnalyticsService = exports.DAILY_ANALYTICS_SOURCE_ENV = exports.MONGO_RETENTION_DAYS = exports.PROMOTION_SEND_FROM_DAY = exports.REVENUE_FROM_DAY = void 0;
 exports.dailyAnalyticsSource = dailyAnalyticsSource;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -28211,6 +28211,7 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const daily_analytics_schema_1 = __webpack_require__(/*! ./schemas/daily-analytics.schema */ "./src/components/daily-analytics/schemas/daily-analytics.schema.ts");
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 exports.REVENUE_FROM_DAY = '2026-10-04';
+exports.PROMOTION_SEND_FROM_DAY = '2026-10-05';
 const PG_COLUMNS = {
     promote: { sent: 'sent', success: 'delivered', failed: 'failed', banned: 'banned' },
     reaction: {
@@ -28463,7 +28464,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
     async byMobile(metric, days = 14, clientId, namespace) {
         const dates = this.lastNDates(days);
         const fields = this.numericFields(metric);
-        if (metric === 'promote' && dailyAnalyticsSource() === 'pg') {
+        if (metric === 'promote' && dailyAnalyticsSource() === 'pg' && !namespace && dates[0] >= exports.PROMOTION_SEND_FROM_DAY) {
             const pg = await this.pgPromoteByMobile(dates, clientId);
             if (pg)
                 return pg;
