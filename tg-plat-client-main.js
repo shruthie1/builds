@@ -20375,6 +20375,17 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
         super(...arguments);
         this.collectionName = 'activeChannels';
     }
+    /**
+     * The two collections @tg/channel-state's promotion runtime reads and writes itself (scoring,
+     * locks, attribution). The runtime is their owner for those operations; this is the one place
+     * the apps obtain the handles, so no app opens a collection by name.
+     */
+    promotionRuntimeCollections() {
+        return {
+            activeChannels: this.connection.collection('activeChannels'),
+            channelIntelligence: this.connection.collection('channelIntelligence'),
+        };
+    }
     // ── READS ───────────────────────────────────────────────────────────────────────────────────
     // Point reads RETHROW on a database error: a caller must never mistake "the database is down"
     // for "no such channel" (hydration would then rebuild the doc from scratch and reset its
@@ -20674,6 +20685,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ClientsRepository: () => (/* binding */ ClientsRepository)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _promote_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+
 
 /** Fields stripped from every masked read. */
 const SECRET_FIELDS = ['session', 'password'];
@@ -20697,11 +20710,83 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
             return client ? maskClient(client) : null;
         });
     }
-    async listMasked() {
-        return this.guard('listMasked', [], async () => {
-            const clients = await this.collection.find({}).toArray();
-            return clients.map(maskClient);
+    /**
+     * Every client, secrets stripped. `strict` rethrows instead of returning [] — for callers where
+     * an empty list would silently disable a check (tg-aut's payment-ownership name lists).
+     */
+    async listMasked(options = {}) {
+        const run = async () => (await this.collection.find({}).toArray()).map(maskClient);
+        return options.strict ? this.guardStrict('listMasked', run) : this.guard('listMasked', [], run);
+    }
+    /** $set display fields on one client. Returns false on failure; never throws. */
+    async updateProfile(clientId, update) {
+        if (!clientId?.trim())
+            return false;
+        return this.guardWrite(`updateProfile(${clientId})`, () => this.collection.updateOne({ clientId }, { $set: update }));
+    }
+    /**
+     * The client's persona pool for one fleet, or null when the client is missing, every list is
+     * empty, or the read failed. dbcoll is lowercased.
+     */
+    async findPersonaPool(clientId, kind) {
+        if (!clientId?.trim())
+            return null;
+        const lastNamesField = kind === 'buffer' ? 'bufferLastNames' : 'promoteLastNames';
+        return this.guard(`findPersonaPool(${clientId},${kind})`, null, async () => {
+            const doc = await this.collection.findOne({ clientId }, { projection: { firstNames: 1, [lastNamesField]: 1, bios: 1, profilePics: 1, dbcoll: 1 } });
+            if (!doc)
+                return null;
+            const pool = {
+                firstNames: doc.firstNames || [],
+                lastNames: doc[lastNamesField] || [],
+                bios: doc.bios || [],
+                profilePics: doc.profilePics || [],
+                dbcoll: (doc.dbcoll || '').toLowerCase(),
+            };
+            const empty = !pool.firstNames.length && !pool.lastNames.length && !pool.bios.length && !pool.profilePics.length;
+            return empty ? null : pool;
         });
+    }
+    // ── bufferClients ───────────────────────────────────────────────────────────────────────────
+    async findBufferClient(mobile) {
+        if (!mobile?.trim())
+            return null;
+        return this.guard(`bufferClients.findByMobile(${mobile})`, null, () => this.bufferClients.findOne({ mobile }));
+    }
+    async updateBufferClientAssignment(mobile, update) {
+        if (!mobile?.trim())
+            return false;
+        return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, () => this.bufferClients.updateOne({ mobile }, { $set: update }));
+    }
+    /**
+     * Active buffer accounts of `clientId` that already hold a persona. Strict: callers merge this
+     * with other sources and must know when it failed rather than see an empty list.
+     */
+    async findBufferPersonaAssignments(clientId) {
+        return this.guardStrict('bufferClients.findPersonaAssignments', () => this.bufferClients
+            .find((0,_promote_repository__WEBPACK_IMPORTED_MODULE_1__.personaAssignmentFilter)(clientId), { projection: _promote_repository__WEBPACK_IMPORTED_MODULE_1__.PERSONA_ASSIGNMENT_PROJECTION })
+            .toArray());
+    }
+    // ── timestamps / tgautClientStats ───────────────────────────────────────────────────────────
+    /** Stamp `key` = now on the single heartbeat document. */
+    async touchHeartbeat(key, now = Date.now()) {
+        if (!key?.trim())
+            return false;
+        return this.guardWrite(`timestamps.touch(${key})`, () => this.timestamps.updateOne({}, { $set: { [key]: now } }, { upsert: true }));
+    }
+    async setTgautDaysLeft(clientId, daysLeft) {
+        if (!clientId?.trim())
+            return false;
+        return this.guardWrite(`tgautClientStats.setDaysLeft(${clientId})`, () => this.tgautClientStats.updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true }));
+    }
+    get bufferClients() {
+        return this.connection.collection('bufferClients');
+    }
+    get timestamps() {
+        return this.connection.collection('timestamps');
+    }
+    get tgautClientStats() {
+        return this.connection.collection('tgautClientStats');
     }
     /**
      * Full client document INCLUDING session and password.
@@ -20879,11 +20964,10 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
      */
     async ensureIndexes() {
         for (const name of [USER_STATS_DAILY, PROMOTE_STATS_DAILY, REACTION_STATS_DAILY]) {
-            await this.guardWrite(`ensureIndexes(${name})`, async () => {
-                const collection = this.connection.collection(name);
-                await collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' });
-                await collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' });
-            });
+            const collection = this.connection.collection(name);
+            // Guarded separately: a conflict on one index must not skip the other.
+            await this.guardWrite(`ensureIndexes(${name}.expireAt_1)`, () => collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' }));
+            await this.guardWrite(`ensureIndexes(${name}.daily_key)`, () => collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' }));
         }
     }
 }
@@ -20906,6 +20990,78 @@ function toIncrement(fields) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/promote-stats.normalize.ts"
+/*!***********************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/promote-stats.normalize.ts ***!
+  \***********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   normalizeFiniteNumber: () => (/* binding */ normalizeFiniteNumber),
+/* harmony export */   normalizeNonNegativeNumber: () => (/* binding */ normalizeNonNegativeNumber),
+/* harmony export */   normalizePositiveTimestamp: () => (/* binding */ normalizePositiveTimestamp),
+/* harmony export */   normalizePromoteStatsChannelKey: () => (/* binding */ normalizePromoteStatsChannelKey),
+/* harmony export */   normalizePromoteStatsData: () => (/* binding */ normalizePromoteStatsData)
+/* harmony export */ });
+/**
+ * Pure repair helpers for `promoteStats` rows (moved verbatim from tg-aut's dbservice, step 5a).
+ * Old rows carry strings, NaN, negative counts and channel keys with `.`/`$` that Mongo cannot
+ * $inc into; these coerce them so the counters keep working.
+ */
+function normalizeFiniteNumber(value) {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+function normalizeNonNegativeNumber(value) {
+    const parsed = normalizeFiniteNumber(value);
+    return parsed != null && parsed >= 0 ? parsed : null;
+}
+function normalizePositiveTimestamp(value) {
+    const parsed = normalizeFiniteNumber(value);
+    return parsed != null && parsed > 0 ? parsed : null;
+}
+/** Mongo field-safe channel key: `.`, `$`, NUL -> `_`; prototype names get a `channel_` prefix. */
+function normalizePromoteStatsChannelKey(channelName) {
+    const normalized = (channelName || "null").trim().replace(/[.$\0]/g, "_") || "null";
+    return ['prototype'].includes(normalized) || normalized in Object.prototype
+        ? `channel_${normalized}`
+        : normalized;
+}
+function normalizePromoteStatsData(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return { data: {}, changed: true };
+    }
+    let changed = false;
+    const normalized = {};
+    for (const [key, value] of Object.entries(data)) {
+        const numericValue = normalizeNonNegativeNumber(value);
+        if (numericValue != null) {
+            const safeKey = normalizePromoteStatsChannelKey(key);
+            const existingValue = Object.prototype.hasOwnProperty.call(normalized, safeKey)
+                ? normalized[safeKey]
+                : 0;
+            normalized[safeKey] = existingValue + numericValue;
+            if (safeKey !== key || numericValue !== value)
+                changed = true;
+        }
+        else {
+            changed = true;
+        }
+    }
+    return { data: normalized, changed };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/promote.repository.ts"
 /*!******************************************************************!*\
   !*** ../../packages/tg-db/src/collections/promote.repository.ts ***!
@@ -20923,6 +21079,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
+
 
 
 const PROMOTE_RUNTIME_CHANNEL_FLOOR = 230;
@@ -21327,6 +21485,147 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             .find(personaAssignmentFilter(clientId), { projection: PERSONA_ASSIGNMENT_PROJECTION })
             .toArray();
     }
+    // ── promoteStats (tg-aut only) ──────────────────────────────────────────────────────────────
+    // Moved verbatim from tg-aut's dbservice (step 5a). Failure behaviour is unchanged: every
+    // method THROWS except updatePromoteStats, which logs/alerts and returns undefined.
+    get promoteStats() {
+        return this.connection.collection('promoteStats');
+    }
+    /** Create the row if missing, else repair malformed fields in place. */
+    async ensurePromoteStatsInitialized(client) {
+        const now = Date.now();
+        const filter = { client };
+        const existingDocument = await this.promoteStats.findOne(filter);
+        if (existingDocument) {
+            const defaults = {};
+            const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsData)(existingDocument.data);
+            const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.count);
+            const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+            const normalizedUniqueChannels = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.uniqueChannels);
+            const normalizedLastUpdated = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePositiveTimestamp)(existingDocument.lastUpdatedTimeStamp);
+            const normalizedReleaseDay = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePositiveTimestamp)(existingDocument.releaseDay);
+            if (normalizedCount == null)
+                defaults.count = 0;
+            else if (normalizedCount !== existingDocument.count)
+                defaults.count = normalizedCount;
+            if (normalizedTotalCount == null)
+                defaults.totalCount = 0;
+            else if (normalizedTotalCount !== existingDocument.totalCount)
+                defaults.totalCount = normalizedTotalCount;
+            if (normalizedData.changed)
+                defaults.data = normalizedData.data;
+            const uniqueChannelCount = Object.keys(normalizedData.data).length;
+            if (normalizedUniqueChannels == null || normalizedUniqueChannels !== uniqueChannelCount) {
+                defaults.uniqueChannels = uniqueChannelCount;
+            }
+            else if (normalizedUniqueChannels !== existingDocument.uniqueChannels) {
+                defaults.uniqueChannels = normalizedUniqueChannels;
+            }
+            if (normalizedLastUpdated == null)
+                defaults.lastUpdatedTimeStamp = now;
+            else if (normalizedLastUpdated !== existingDocument.lastUpdatedTimeStamp)
+                defaults.lastUpdatedTimeStamp = normalizedLastUpdated;
+            if (normalizedReleaseDay == null)
+                defaults.releaseDay = now;
+            else if (normalizedReleaseDay !== existingDocument.releaseDay)
+                defaults.releaseDay = normalizedReleaseDay;
+            if (typeof existingDocument.isActive !== 'boolean') {
+                if (existingDocument.isActive == null) {
+                    defaults.isActive = true;
+                }
+                else {
+                    const activeValue = String(existingDocument.isActive).trim().toLowerCase();
+                    defaults.isActive = ['true', '1', 'yes', 'active', 'on'].includes(activeValue);
+                }
+            }
+            if (Object.keys(defaults).length > 0) {
+                await this.promoteStats.updateOne(filter, { $set: defaults });
+            }
+            return;
+        }
+        await this.promoteStats.updateOne(filter, {
+            $setOnInsert: {
+                client,
+                count: 0,
+                totalCount: 0,
+                data: {},
+                uniqueChannels: 0,
+                lastUpdatedTimeStamp: now,
+                releaseDay: now,
+                isActive: true,
+            },
+        }, { upsert: true });
+    }
+    /** Boot stamp: a swapped-in mobile gets a fresh grace window. Throws. */
+    async stampPromoteStatsTime(client, now = Date.now()) {
+        await this.promoteStats.updateOne({ client }, { $set: { lastUpdatedTimeStamp: now } });
+    }
+    /** Count one send to `channelName`. Never throws: logs/alerts and returns undefined. */
+    async updatePromoteStats(client, channelName) {
+        const channelKey = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsChannelKey)(channelName);
+        return this.guard('promoteStats.update', undefined, async () => {
+            const filter = { client };
+            const now = Date.now();
+            const existingDocument = await this.promoteStats.findOne(filter);
+            if (existingDocument) {
+                const repairs = {};
+                const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizePromoteStatsData)(existingDocument.data);
+                const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.count);
+                const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_2__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+                if (normalizedCount == null)
+                    repairs.count = 0;
+                else if (normalizedCount !== existingDocument.count)
+                    repairs.count = normalizedCount;
+                if (normalizedTotalCount == null)
+                    repairs.totalCount = 0;
+                else if (normalizedTotalCount !== existingDocument.totalCount)
+                    repairs.totalCount = normalizedTotalCount;
+                if (normalizedData.changed) {
+                    normalizedData.data[channelKey] = normalizedData.data[channelKey] ?? 0;
+                    repairs.data = normalizedData.data;
+                }
+                else if (typeof normalizedData.data[channelKey] !== 'number' || !Number.isFinite(normalizedData.data[channelKey])) {
+                    repairs[`data.${channelKey}`] = 0;
+                }
+                if (Object.keys(repairs).length > 0) {
+                    await this.promoteStats.updateOne(filter, { $set: repairs });
+                }
+            }
+            await this.promoteStats.updateOne(filter, {
+                $inc: { count: 1, totalCount: 1, [`data.${channelKey}`]: 1 },
+                $set: { lastUpdatedTimeStamp: now, releaseDay: now },
+                $setOnInsert: { client, isActive: true },
+            }, { upsert: true });
+            const updatedDocument = await this.promoteStats.findOne(filter);
+            const uniqueChannels = Object.keys(updatedDocument?.data || {}).length;
+            await this.promoteStats.updateOne(filter, { $set: { uniqueChannels } });
+            return updatedDocument;
+        });
+    }
+    async activatePromotions(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        const now = Date.now();
+        await this.promoteStats.updateOne({ client }, {
+            $set: { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true },
+            $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0 },
+        }, { upsert: true });
+    }
+    async deactivatePromotions(client, day = Date.now()) {
+        await this.ensurePromoteStatsInitialized(client);
+        const now = Date.now();
+        await this.promoteStats.updateOne({ client }, {
+            $set: { releaseDay: day, isActive: false },
+            $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0, lastUpdatedTimeStamp: now },
+        }, { upsert: true });
+    }
+    async readPromoteStats(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        return this.promoteStats.findOne({ client });
+    }
+    async readPromoteStatsTime(client) {
+        await this.ensurePromoteStatsInitialized(client);
+        return this.promoteStats.findOne({ client }, { projection: { client: 1, totalCount: 1, lastUpdatedTimeStamp: 1, isActive: 1, _id: 0 } });
+    }
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(promoteClientStats.clientId)', () => this.connection
             .collection('promoteClientStats')
@@ -21350,6 +21649,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
+const UNCREDITED_ATTRIBUTION = [
+    { paymentAttributionCreditedAt: { $exists: false } },
+    { paymentAttributionCreditedAt: null },
+];
 class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -21388,6 +21691,99 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
         const legacy = await this.guardWrite(`setKey(stats.${key})`, () => this.legacyCollection().updateOne(filter, update, { upsert: true }));
         return primary && legacy;
     }
+    // ── moved from tg-aut dbservice (step 5b) ──────────────────────────────────────────────────
+    // Same filters, update shapes and options as the raw code. Methods THROW unless noted; the
+    // caller's try/catch (or lack of one) is unchanged.
+    /**
+     * One funnel event: in BOTH collections, $inc count + $set the funnel state on an existing row,
+     * else insert a fresh row. Find-then-insert is not atomic; the unique
+     * chatId_1_profile_1_client_1 index rejects the losing insert. Returns whether the stats2 row
+     * was inserted (the caller runs first-contact side effects only then).
+     */
+    async recordFunnelEvent(chatId, scope, fields) {
+        const filter = { chatId, client: scope.client, profile: scope.profile };
+        const { name, payAmount, newUser, demoGiven, paidReply, secondShow } = fields;
+        const legacy = this.legacyCollection();
+        const chat = await legacy.findOne(filter);
+        const chat2 = await this.collection.findOne(filter);
+        if (chat) {
+            await legacy.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+        }
+        else {
+            await legacy.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
+        }
+        if (chat2) {
+            await this.collection.updateOne(filter, { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } });
+            return { insertedPrimary: false };
+        }
+        await this.collection.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
+        return { insertedPrimary: true };
+    }
+    /**
+     * Atomically ratchet stats2.payAmount and stamp today's paid marker; returns the PRE-image
+     * (null when no row). upsert:false on purpose — see recordPaymentAttribution in tg-aut.
+     */
+    async markDailyPaid(chatId, scope, dayKey, roundedAmount, floorAmount) {
+        return this.collection.findOneAndUpdate({ chatId, profile: scope.profile, client: scope.client }, [
+            {
+                $set: {
+                    payAmount: { $max: [{ $ifNull: ['$payAmount', 0] }, roundedAmount] },
+                    dailyPaidCountedAt: dayKey,
+                    dailyRevenueCounted: {
+                        // First count today -> floorAmount; same-day upgrade -> max(prev, floor).
+                        $cond: [
+                            { $eq: ['$dailyPaidCountedAt', dayKey] },
+                            { $max: [{ $ifNull: ['$dailyRevenueCounted', 0] }, floorAmount] },
+                            floorAmount,
+                        ],
+                    },
+                },
+            },
+        ], {
+            upsert: false,
+            returnDocument: 'before',
+            projection: { dailyPaidCountedAt: 1, dailyRevenueCounted: 1 },
+        });
+    }
+    /** stats2 payers (payAmount >= 15) not yet attribution-credited; optionally one chatId. */
+    async findUncreditedPayers(scope, chatId) {
+        const query = {
+            profile: scope.profile,
+            client: scope.client,
+            payAmount: { $gte: 15 },
+            $or: UNCREDITED_ATTRIBUTION,
+        };
+        if (chatId)
+            query.chatId = chatId;
+        return this.collection.find(query, { projection: { chatId: 1, newUser: 1 } }).toArray();
+    }
+    /** Set paymentAttributionCreditedAt once; modifiedCount 0 means another run already did. */
+    async markAttributionCredited(chatId, scope, now = Date.now()) {
+        return this.collection.updateOne({ chatId, profile: scope.profile, client: scope.client, $or: UNCREDITED_ATTRIBUTION }, { $set: { paymentAttributionCreditedAt: now } });
+    }
+    /** Every row of `client`, newUser first. `legacy` reads `stats`, else `stats2`. */
+    async listByClient(client, options = {}) {
+        const collection = options.legacy ? this.legacyCollection() : this.collection;
+        return collection.find({ client }).sort({ newUser: -1 }).toArray();
+    }
+    /** Recent payers: `stats` rows with payAmount > 26, or `stats2` rows with payAmount >= 15. */
+    async listRecentPayers(client, options = {}) {
+        if (options.legacy) {
+            return this.legacyCollection().find({ client, payAmount: { $gt: 26 } }).toArray();
+        }
+        return this.collection.find({ client, payAmount: { $gte: 15 } }).toArray();
+    }
+    /** stats2 rows with payAmount > 10: total and newUser count. Never throws: {0,0} on failure. */
+    async countPaidUsers(client) {
+        return this.guard('countPaidUsers', { total: 0, new: 0 }, async () => {
+            const rows = await this.collection.find({ client, payAmount: { $gt: 10 } }).toArray();
+            return { total: rows.length, new: rows.filter((row) => row.newUser).length };
+        });
+    }
+    /** Delete the user's `stats` rows (stats only, NOT stats2). Never throws. */
+    async removeLegacyRows(chatId, scope) {
+        return this.guardWrite('removeLegacyRows', () => this.legacyCollection().deleteMany({ chatId, profile: scope.profile, client: scope.client }));
+    }
     /**
      * No index is created here, deliberately.
      *
@@ -21415,6 +21811,7 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Base
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
+/* harmony export */   USER_DATA_DEFAULTS: () => (/* binding */ USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
@@ -21425,6 +21822,34 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+/** Seeded via $setOnInsert when a row is created (minus any key the same write $sets/$incs). */
+const USER_DATA_DEFAULTS = {
+    fullShow: 0,
+    callTime: 0,
+    cheatCount: 0,
+    graceFlag: false,
+    highestPayAmount: 0,
+    videos: [],
+    picsSent: 0,
+    attributionChannelIds: [],
+    attributionUpdatedAt: 0,
+    picCount: 0,
+    limitTime: 0,
+    paidCount: 0,
+    prfCount: 0,
+    canReply: 1,
+    payAmount: 0,
+    paidReply: true,
+    demoGiven: false,
+    secondShow: false,
+    accessHash: '',
+    username: '',
+    totalCount: 0,
+    msgCount: 0,
+    windowCount: 0,
+};
+/** Keys createOrUpdate/recordInbound never accept from callers ($inc-ed or identity). */
+const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'];
 /** How many recent idempotency keys a row remembers. See `creditPayment`. */
 const CREDIT_KEY_HISTORY = 20;
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
@@ -21593,6 +22018,132 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                 lifetimePaid: Math.max(before.lifetimePaid ?? 0, amount),
             };
         });
+    }
+    // ── writers moved from tg-aut dbservice (step 6) ────────────────────────────────────────────
+    // Each builds the exact update the app built, then goes through upsert() (persona filter +
+    // one duplicate-key retry; non-duplicate failures rethrow).
+    /** $set `updates` (+ lastMsgTimeStamp); seed USER_DATA_DEFAULTS on insert. */
+    async updateFields(chatId, identity, updates, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        // Caller-provided lastMsgTimeStamp takes precedence.
+        const setFields = { lastMsgTimeStamp: now, ...safeUpdates };
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile };
+        for (const key of Object.keys(setFields))
+            delete setOnInsert[key];
+        // Ownership after the conflict strip, so a caller-supplied key can never remove it.
+        Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
+        return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
+    }
+    /** $set one key (+ lastMsgTimeStamp); seed defaults minus that key on insert. */
+    async setField(chatId, identity, key, value, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
+        delete setOnInsert[key];
+        return this.upsert(chatId, identity, {
+            $set: { [key]: value, lastMsgTimeStamp: now },
+            $setOnInsert: setOnInsert,
+        });
+    }
+    /**
+     * One inbound message: $set `updates`, $inc totalCount + msgCount (D3 dual-write), seed defaults
+     * on insert. totalCount/msgCount are never in $setOnInsert: a key in both $inc and $setOnInsert
+     * is rejected by Mongo with error 40 on every call. The caller detects creation by totalCount===1.
+     */
+    async recordInbound(chatId, identity, updates, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = {};
+        for (const [key, value] of Object.entries(updates)) {
+            if (!INBOUND_FORBIDDEN_KEYS.includes(key))
+                safeUpdates[key] = value;
+        }
+        const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
+        for (const [key, value] of Object.entries(USER_DATA_DEFAULTS)) {
+            if (key === 'totalCount' || key === 'msgCount')
+                continue;
+            if (key in safeUpdates)
+                continue;
+            setOnInsert[key] = value;
+        }
+        return this.upsert(chatId, identity, {
+            $set: { ...safeUpdates, lastMsgTimeStamp: now },
+            $inc: { totalCount: 1, msgCount: 1 },
+            $setOnInsert: setOnInsert,
+        });
+    }
+    /** $addToSet a video and backdate callTime 5 min, on the client-first read scope. No upsert. Throws. */
+    async addVideo(chatId, identity, video, now = Date.now()) {
+        return this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), {
+            $addToSet: { videos: video },
+            $set: { callTime: now - 5 * 60000 },
+        });
+    }
+    /**
+     * Merge common-chat channel ids into an EXISTING persona row (upsert:false, never creates).
+     * True when exactly one row matched. Throws; callers catch.
+     */
+    async mergeAttributionChannelIds(chatId, profile, channelIds, now = Date.now()) {
+        const update = channelIds.length > 0
+            ? { $set: { attributionUpdatedAt: now }, $addToSet: { attributionChannelIds: { $each: channelIds } } }
+            : { $set: { attributionUpdatedAt: now } };
+        const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), update, { upsert: false });
+        return result.acknowledged && result.matchedCount === 1;
+    }
+    /** Delete the persona row(s) of chatId. Throws. */
+    async deleteForPersona(chatId, identity) {
+        return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    }
+    // ── bulk maintenance (MINE scope = this persona) ────────────────────────────────────────────
+    /** paidCount -> 0 on rows idle > 30 days that never paid. Throws. */
+    async resetStalePaidCount(identity, now = Date.now()) {
+        return this.collection.updateMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $lt: now - 30 * 24 * 60 * 60 * 1000 }, paidCount: { $gt: 0 }, payAmount: 0 }, { $set: { paidCount: 0 } });
+    }
+    /**
+     * Delete rows whose real numeric lastMsgTimeStamp is older than `cutoff`. `$gt: 0` never matches
+     * null/missing/strings (BSON orders them below numbers), so unanchored rows are kept. Throws.
+     */
+    async deleteInactiveBefore(identity, cutoff) {
+        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff } });
+    }
+    /** paidReply -> true on every row of this persona. Throws. */
+    async enablePaidReplyForAll(identity) {
+        return this.collection.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), { $set: { paidReply: true } });
+    }
+    // ── reads ───────────────────────────────────────────────────────────────────────────────────
+    /** Does this client/persona hold a row for chatId (client-first scope). Throws. */
+    async exists(chatId, identity) {
+        return !!(await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity)));
+    }
+    /** One field of the client-first row, or undefined. Throws. */
+    async findField(chatId, identity, key) {
+        const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { projection: { [key]: 1 } });
+        return row ? row[key] : undefined;
+    }
+    /** chatId's rows under OTHER personas (full docs). Throws. */
+    async findInOtherPersonas(chatId, identity) {
+        return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
+    }
+    /** The persona row's attributionChannelIds projection, or null. Throws. */
+    async findAttributionChannelIds(chatId, identity) {
+        return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { projection: { attributionChannelIds: 1 } });
+    }
+    /** The persona row (persona scope only, no client-first preference). Throws. */
+    async findForPersona(chatId, identity) {
+        return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    }
+    /** Up to 25 rows of this persona with payAmount > 26, most recent first. Throws. */
+    async listTopPayers(identity, limit = 25) {
+        return this.collection
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), payAmount: { $gt: 26 } })
+            .sort({ lastMsgTimeStamp: -1 })
+            .limit(limit)
+            .toArray();
+    }
+    /** Rows of `profile` among chatIds that have messaged at least once (totalCount > 0). Throws. */
+    async findReachedRecords(profile, chatIds) {
+        return this.collection.find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
     }
     async ensureIndexesForTests() {
         await this.ensureIndexes();
@@ -21848,6 +22399,31 @@ function describeError(error) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/database-info.ts"
+/*!*************************************************!*\
+  !*** ../../packages/tg-db/src/database-info.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   readDatabaseSize: () => (/* binding */ readDatabaseSize)
+/* harmony export */ });
+/* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
+
+/**
+ * Size of the tgclients database. A database-level read that belongs to no collection, so it is a
+ * function rather than a repository. Throws on failure; the caller decides whether that matters.
+ */
+async function readDatabaseSize(client) {
+    const stats = await (0,_adopt_connection__WEBPACK_IMPORTED_MODULE_0__.adoptMongoClient)(client).rawDb().stats({ scale: 1024 * 1024 });
+    return { dataSizeMB: stats.dataSize, indexSizeMB: stats.indexSize, objects: stats.objects };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/index.ts"
 /*!*****************************************!*\
   !*** ../../packages/tg-db/src/index.ts ***!
@@ -21871,11 +22447,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ERROR_ALERT_WINDOW_MS),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
-/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.RepositoryContainer),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
+/* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
 /* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
@@ -21883,17 +22460,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
-/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.createRepositories),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
-/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.ensureAllIndexes),
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
+/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_10__.readDatabaseSize),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
-/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_10__.withErrorReporter)
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -21905,7 +22483,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
-/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
+/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -21930,6 +22509,7 @@ __webpack_require__.r(__webpack_exports__);
  *   events                                            -> OWNED BY @tg/events (EventStore),
  *                                                        deliberately NOT here — see repositories.ts
  */
+
 
 
 
@@ -22052,7 +22632,9 @@ function withErrorReporter(logger, report, options = {}) {
     const windowMs = options.windowMs ?? ERROR_ALERT_WINDOW_MS;
     const now = options.now ?? Date.now;
     const lastAlertAt = new Map();
-    const alertKey = (message) => (/^\[[^\]]+\]\s+\S+/.exec(message)?.[0] ?? message.slice(0, 80));
+    // Key on "[collection] operation" WITHOUT its arguments: op names embed a chatId/mobile
+    // (`upsert(12345)`), and keying on that made every chat its own alert during an outage.
+    const alertKey = (message) => (/^\[[^\]]+\]\s+[^\s(]+/.exec(message)?.[0] ?? message.slice(0, 80));
     return {
         log: (message, ...args) => logger.log(message, ...args),
         info: (message, ...args) => (logger.info ?? logger.log).call(logger, message, ...args),
@@ -31015,7 +31597,7 @@ class TelegramManager {
                 }
                 const me = (await this.client.getMe());
                 const db = _dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
-                await db.updateClient({ clientId: this.clientId }, { mobile: me?.phone, username: me?.username }); // Small sanity ping
+                await db.updateClient(this.clientId, { mobile: me?.phone, username: me?.username }); // Small sanity ping
                 // Persona verification and photo fallback run in background so startup is not blocked
                 void (async () => {
                     try {
@@ -31043,7 +31625,7 @@ class TelegramManager {
                                 const latestBufferDoc = await db.getBufferClientDoc(bufferDoc.mobile);
                                 const mirroredClientName = buildMirroredClientName(latestBufferDoc?.assignedFirstName || bufferDoc.assignedFirstName || null, latestBufferDoc?.assignedLastName || bufferDoc.assignedLastName || null);
                                 if (mirroredClientName) {
-                                    await db.updateClient({ clientId: this.clientId }, { name: mirroredClientName });
+                                    await db.updateClient(this.clientId, { name: mirroredClientName });
                                     logger.info(`🧍 PERSONA client-doc updated | ${this.clientId} | ${bufferDoc.mobile} | ${mirroredClientName}`);
                                 }
                                 else {
@@ -31524,13 +32106,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! mongodb */ "mongodb");
 /* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(mongodb__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
-/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
-/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
@@ -31539,8 +32120,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:dbservice");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
     totalCount: "totalCount",
@@ -31577,31 +32157,6 @@ const user = Object.freeze({
     attributionChannelIds: "attributionChannelIds",
     attributionUpdatedAt: "attributionUpdatedAt",
 });
-const USER_DEFAULTS = {
-    fullShow: 0,
-    callTime: 0,
-    cheatCount: 0,
-    graceFlag: false,
-    highestPayAmount: 0,
-    videos: [],
-    picsSent: 0,
-    attributionChannelIds: [],
-    attributionUpdatedAt: 0,
-    picCount: 0,
-    limitTime: 0,
-    paidCount: 0,
-    prfCount: 0,
-    canReply: 1,
-    payAmount: 0,
-    paidReply: true,
-    demoGiven: false,
-    secondShow: false,
-    accessHash: '',
-    username: '',
-    totalCount: 0,
-    msgCount: 0,
-    windowCount: 0,
-};
 class UserDataDtoCrud {
     constructor() {
         this.clients = {};
@@ -31615,14 +32170,7 @@ class UserDataDtoCrud {
          * MongoClient changes, so a reconnect can never leave a repository wrapping a closed handle.
          */
         // Repository failures alert via parseError, as the moved dbservice methods did.
-        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_3__.RepositoryContainer((0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.withErrorReporter)(logger, (message) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(new Error(message), 'tg-db'); }));
-        /**
-         * Lazily build the daily-stats repository over the app's live MongoClient.
-         *
-         * Rebuilt whenever the underlying client changes (reconnects create a new client), so a stale
-         * handle can never outlive the connection it wraps.
-         */
-        this.dailyStats = null;
+        this.repositories = new _tg_db__WEBPACK_IMPORTED_MODULE_2__.RepositoryContainer((0,_tg_db__WEBPACK_IMPORTED_MODULE_2__.withErrorReporter)(logger, (message) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(new Error(message), 'tg-db'); }));
         logger.log("Creating MongoDb Instance");
     }
     static getInstance() {
@@ -31677,13 +32225,6 @@ class UserDataDtoCrud {
                 this.client = connectedClient;
                 logger.log('Connected to MongoDB');
                 this.isConnected = true;
-                this.db = connectedClient.db("tgclients").collection('userData');
-                this.statsDb = connectedClient.db("tgclients").collection('stats');
-                this.statsDb2 = connectedClient.db("tgclients").collection('stats2');
-                this.activeChannelDb = connectedClient.db("tgclients").collection('activeChannels');
-                this.channelIntelligenceDb = connectedClient.db("tgclients").collection('channelIntelligence');
-                this.promoteStatsDb = connectedClient.db("tgclients").collection('promoteStats');
-                await this.ensureDailyAnalyticsIndexes(connectedClient);
                 await this.ensureSharedLayerIndexes(connectedClient);
                 await this.initializePromotionRuntime();
                 if (generation !== this.connectionGeneration) {
@@ -31696,7 +32237,9 @@ class UserDataDtoCrud {
                     }
                     return false;
                 }
-                const clients = await connectedClient.db("tgclients").collection('clients').find({}).toArray();
+                // Strict: an empty cache would silently disable the payment-ownership name checks.
+                // Masked: nothing reads session/password off this cache.
+                const clients = await this.repositories.get(connectedClient).clients.listMasked({ strict: true });
                 connectedClient.on('close', () => {
                     if (this.client !== connectedClient) {
                         logger.warn('Ignoring stale MongoDB close event from a superseded client');
@@ -31706,20 +32249,21 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
                 });
-                await this.ensurePromoteStatsInitialized();
+                const promote = this.repositories.get(connectedClient).promote;
+                await promote.ensurePromoteStatsInitialized(process.env.clientId);
                 // On boot (every account swap triggers a full restart), stamp the promotion
                 // timestamp to now so the swapped-in mobile gets a fresh 30-min grace window
                 // instead of inheriting the previous mobile's stale value and re-swapping immediately.
-                await this.promoteStatsDb.updateOne({ client: process.env.clientId }, { $set: { lastUpdatedTimeStamp: Date.now() } });
+                await promote.stampPromoteStatsTime(process.env.clientId);
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error connecting to MongoDB");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error connecting to MongoDB");
                 await this.closeConnection();
                 return false;
             }
@@ -31728,21 +32272,12 @@ class UserDataDtoCrud {
     }
     /**
      * Persist the live spam-limit daysLeft signal to a per-client stat row so it is observable
-     * outside the in-memory globalState module (previously nowhere-persisted for tg-aut). Mirrors
-     * promote-clients' updatePromoteClientStat: raw driver, upsert, keyed by process.env.clientId.
-     * Fire-and-forget from callers — errors are parsed/logged here, never thrown.
+     * outside the in-memory globalState module (previously nowhere-persisted for tg-aut). Upsert
+     * keyed by process.env.clientId via ClientsRepository. Never throws; failures are logged and
+     * alerted by the repository.
      */
     async updateTgautClientStat(daysLeft) {
-        try {
-            const clientId = process.env.clientId;
-            await this.client
-                .db("tgclients")
-                .collection('tgautClientStats')
-                .updateOne({ clientId }, { $set: { clientId, daysLeft, updatedAt: new Date() } }, { upsert: true });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating tgaut client stat daysLeft");
-        }
+        await this.getRepositories()?.clients.setTgautDaysLeft(process.env.clientId ?? '', daysLeft);
     }
     getEventsCollection() {
         if (!this.client) {
@@ -31751,7 +32286,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -31798,9 +32333,13 @@ class UserDataDtoCrud {
                 await this.closePromotionRedis();
                 throw error;
             }
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.createPromotionRuntime)({
-                channelIntelligenceCollection: this.channelIntelligenceDb,
-                activeChannelCollection: this.activeChannelDb,
+            const repositories = this.getRepositories();
+            if (!repositories)
+                throw new Error('Mongo client not connected; promotion runtime needs its collections');
+            const runtimeCollections = repositories.channels.promotionRuntimeCollections();
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.createPromotionRuntime)({
+                channelIntelligenceCollection: runtimeCollections.channelIntelligence,
+                activeChannelCollection: runtimeCollections.activeChannels,
                 redis,
                 enableLocks: promotionFlags.redisChannelLock,
                 enableAttribution: promotionFlags.conversionAttribution,
@@ -31810,7 +32349,7 @@ class UserDataDtoCrud {
             logger.log('Promotion runtime initialized; collections=channelIntelligence,activeChannels');
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'Promotion runtime initialization failed');
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Promotion runtime initialization failed');
             await this.closePromotionRedis();
             throw error;
         }
@@ -31824,7 +32363,7 @@ class UserDataDtoCrud {
             redis.disconnect?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'Error closing promotion Redis connection', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Error closing promotion Redis connection', false);
         }
     }
     async refreshPromotionRuntime() {
@@ -31833,19 +32372,15 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
-        await this.ensurePromoteStatsInitialized();
+        await this.promoteRepository().ensurePromoteStatsInitialized(process.env.clientId);
         return true;
     }
     async checkIfUserAlreadyExists(chatId) {
         // Scoped: an unqualified { chatId } matched ANY persona's row, so a user who had only ever
         // talked to a different persona was reported as already-existing to this one.
-        const document = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.readFilter)(chatId));
-        if (document) {
-            return true;
-        }
-        return false;
+        return this.userDataRepository().exists(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
     async textedClientCount(chatId) {
         const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -31855,7 +32390,7 @@ class UserDataDtoCrud {
             // OTHERS scope. This previously filtered `client: { $ne: clientId }`, but userData has
             // no `client` field — so $ne matched every row, including this client's own. Scope by
             // persona, which is the identity userData actually stores.
-            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.othersFilter)(chatId)).toArray();
+            const documents = await this.userDataRepository().findInOtherPersonas(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
             // Preprocess list extraction once
             const profiles = [];
             const lastDayProfiles = [];
@@ -31890,14 +32425,14 @@ class UserDataDtoCrud {
             return result;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching texted client count");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
     }
     async checkIfPaidToOthers(chatId) {
         const resp = { paid: '', demoGiven: '' };
         try {
-            const documents = await this.db.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.othersFilter)(chatId)).toArray();
+            const documents = await this.userDataRepository().findInOtherPersonas(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
             for (const doc of documents) {
                 if (doc.payAmount >= 10) {
                     resp.paid = resp.paid + `@${this.clients[doc.profile]?.username}` + ", ";
@@ -31908,7 +32443,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error checking payment status");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error checking payment status");
         }
         return resp;
     }
@@ -31990,30 +32525,15 @@ class UserDataDtoCrud {
         }
         return Array.from(names);
     }
-    async ensureDailyAnalyticsIndexes(client) {
-        try {
-            for (const name of UserDataDtoCrud.DAILY_COLLECTIONS) {
-                const coll = client.db("tgclients").collection(name);
-                await coll.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }).catch(() => undefined);
-                // One doc per day per namespace per client per mobile. Old {date,clientId} unique
-                // index (pre-mobile) is superseded by this compound key; createIndex on a conflicting
-                // spec throws on an existing differently-shaped index of the same name/keys — caught
-                // and ignored here exactly like the TTL index above, matching the existing pattern.
-                await coll.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true }).catch(() => undefined);
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error ensuring daily analytics indexes", false);
-        }
-    }
     /**
      * Create the indexes every @tg/db repository declares.
      *
      * Each repository has implemented ensureIndexes() since the layer was written, and until now
      * NOTHING called any of them — index creation was a dead code path across the whole package.
      *
-     * Placed beside ensureDailyAnalyticsIndexes and inside the connect block so it re-runs on every
-     * reconnect, matching the existing pattern. Failures are logged and swallowed by
+     * Includes the daily-analytics TTL + daily-key indexes (DailyStatsRepository), which this app
+     * used to create by hand under the same names. Inside the connect block so it re-runs on every
+     * reconnect. Failures are logged and swallowed by
      * ensureAllIndexes: a missing index makes queries slow, but refusing to boot over one would
      * turn a performance problem into an outage.
      */
@@ -32021,7 +32541,7 @@ class UserDataDtoCrud {
         const repositories = this.repositories.get(client);
         if (!repositories)
             return;
-        await (0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.ensureAllIndexes)(repositories, logger);
+        await (0,_tg_db__WEBPACK_IMPORTED_MODULE_2__.ensureAllIndexes)(repositories, logger);
     }
     todayKey() {
         const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -32087,14 +32607,9 @@ class UserDataDtoCrud {
                 logger.warn(`recordDaily: no repository route for collection '${collection}'`);
         }
     }
+    /** The container's DailyStatsRepository (rebuilt by the container on reconnect). */
     dailyStatsRepository() {
-        if (!this.client)
-            return null;
-        if (this.dailyStats?.client === this.client)
-            return this.dailyStats.repository;
-        const repository = new _tg_db__WEBPACK_IMPORTED_MODULE_3__.DailyStatsRepository((0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.adoptMongoClient)(this.client, { logger }), logger);
-        this.dailyStats = { client: this.client, repository };
-        return repository;
+        return this.getRepositories()?.dailyStats ?? null;
     }
     /**
      * Daily promotion outcome (sent/success/failed/banned) for tg-aut's helper promotion loop.
@@ -32158,36 +32673,14 @@ class UserDataDtoCrud {
             newUsers: newUser ? 1 : 0,
         });
         try {
-            const filter = { chatId, client: process.env.clientId, profile: process.env.dbcoll };
-            const chat = await this.statsDb.findOne(filter);
-            const chat2 = await this.statsDb2.findOne(filter);
-            if (chat) {
-                await this.statsDb.updateOne(filter, {
-                    $inc: { count: 1 },
-                    $set: {
-                        payAmount: payAmount,
-                        demoGiven: demoGiven,
-                        paidReply, secondShow
-                    }
-                });
-            }
-            else {
-                await this.statsDb.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: process.env.clientId, profile: process.env.dbcoll });
-            }
-            if (chat2) {
-                await this.statsDb2.updateOne(filter, {
-                    $inc: { count: 1 },
-                    $set: { payAmount: payAmount, demoGiven: demoGiven, paidReply, secondShow }
-                });
-            }
-            else {
-                await this.statsDb2.insertOne({ chatId, count: 1, payAmount, demoGiven: demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: process.env.clientId, profile: process.env.dbcoll });
+            const { insertedPrimary } = await this.statsRepository().recordFunnelEvent(chatId, { client: process.env.clientId, profile: process.env.dbcoll }, { name, payAmount, newUser, demoGiven, paidReply, secondShow });
+            if (insertedPrimary) {
                 const textedClientCount = await this.textedClientCount(chatId);
                 if (textedClientCount.lastHour.length > 2) {
                     // Store timeout reference and unref to allow process exit if needed
                     const limitTimeout = setTimeout(() => {
                         void this.updateSingleKey(chatId, user.limitTime, Date.now() + (2 * 60 * 60 * 1000))
-                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
+                            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false));
                     }, 20000);
                     limitTimeout.unref();
                 }
@@ -32203,7 +32696,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Creating/updating stats", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Creating/updating stats", false);
         }
     }
     // =========================================================================
@@ -32236,17 +32729,9 @@ class UserDataDtoCrud {
         await this.createOrUpdateStats(chatId, null, payAmount, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
     }
     async updateStatSingleKey(chatId, mykey, value) {
-        // Routed through @tg/db. StatsRepository.setKey dual-writes stats2 + stats via
-        // legacyCollection(), so the two collections cannot drift apart. Raw path below stays for
-        // the pre-connection window.
-        const repositories = this.repositories.get(this.client);
-        if (repositories) {
-            await repositories.stats.setKey(chatId, { client: process.env.clientId, profile: process.env.dbcoll }, mykey, value);
-            return;
-        }
-        const filter = { chatId, profile: process.env.dbcoll, client: process.env.clientId };
-        await this.statsDb.updateOne(filter, { $set: { [mykey]: value } }, { upsert: true });
-        await this.statsDb2.updateOne(filter, { $set: { [mykey]: value } }, { upsert: true });
+        // StatsRepository.setKey dual-writes stats2 + stats and swallows failures (logged/alerted).
+        // Before connect it throws, as the old raw fallback did on its unset collections.
+        await this.statsRepository().setKey(chatId, { client: process.env.clientId, profile: process.env.dbcoll }, mykey, value);
     }
     /**
      * Fetch a user row for THIS client: prefer a row this client owns, else the shared persona row.
@@ -32254,23 +32739,12 @@ class UserDataDtoCrud {
      * user with BOTH an owned row and a legacy persona row must deterministically get the owned one.
      */
     async readOwnThenPersona(chatId) {
-        // Routed through @tg/db (B6). UserDataRepository.findForClient runs the same OWN-first
-        // then persona fallback. A failed read THROWS (as the raw findOne did): returning
-        // undefined would send an existing user down the new-user path. Raw path below covers pre-connection.
-        const repositories = this.repositories.get(this.client);
-        if (repositories) {
-            return await repositories.userData.findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)()) ?? undefined;
-        }
-        const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.ownFilter)(chatId);
-        if (own) {
-            const owned = await this.db.findOne(own);
-            if (owned)
-                return owned;
-        }
-        return (await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.personaFilter)(chatId))) ?? undefined;
+        // UserDataRepository.findForClient: OWN-first then persona fallback. A failed read THROWS:
+        // returning undefined would send an existing user down the new-user path.
+        return await this.userDataRepository().findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)()) ?? undefined;
     }
     async delete(chatId) {
-        const result = await this.db.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.personaFilter)(chatId));
+        await this.userDataRepository().deleteForPersona(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
     async read(chatId) {
         const result = await this.readOwnThenPersona(chatId);
@@ -32288,20 +32762,12 @@ class UserDataDtoCrud {
             const profile = process.env.dbcoll?.trim();
             if (!normalizedChatId || !profile)
                 return false;
-            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.normalizeAttributionChannelIds)(channelIds);
-            const update = normalizedChannelIds.length > 0
-                ? {
-                    $set: { attributionUpdatedAt: Date.now() },
-                    $addToSet: { attributionChannelIds: { $each: normalizedChannelIds } },
-                }
-                : { $set: { attributionUpdatedAt: Date.now() } };
-            // upsert:false — merges into an EXISTING conversation row only, so the persona-index
-            // shape is correct here and cannot create a duplicate.
-            const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.personaFilter)(normalizedChatId, { profile }), update, { upsert: false });
-            return result.acknowledged && result.matchedCount === 1;
+            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.normalizeAttributionChannelIds)(channelIds);
+            // upsert:false — merges into an EXISTING conversation row only.
+            return await this.userDataRepository().mergeAttributionChannelIds(normalizedChatId, profile, normalizedChannelIds);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error recording direct attribution channels for ${chatId}`, false);
             return false;
         }
     }
@@ -32400,26 +32866,7 @@ class UserDataDtoCrud {
         // (chatId, profile, client, dayKey) — same day identity as the userStatsDaily bucket.
         try {
             const dayKey = this.todayKey();
-            const pre = await this.statsDb2.findOneAndUpdate({ chatId: normalizedChatId, profile, client: clientId }, [
-                {
-                    $set: {
-                        payAmount: { $max: [{ $ifNull: ['$payAmount', 0] }, roundedAmount] },
-                        dailyPaidCountedAt: dayKey,
-                        dailyRevenueCounted: {
-                            // First count today -> floorAmount; same-day upgrade -> max(prev, floor).
-                            $cond: [
-                                { $eq: ['$dailyPaidCountedAt', dayKey] },
-                                { $max: [{ $ifNull: ['$dailyRevenueCounted', 0] }, floorAmount] },
-                                floorAmount,
-                            ],
-                        },
-                    },
-                },
-            ], {
-                upsert: false,
-                returnDocument: 'before',
-                projection: { dailyPaidCountedAt: 1, dailyRevenueCounted: 1 },
-            });
+            const pre = await this.statsRepository().markDailyPaid(normalizedChatId, { profile, client: clientId }, dayKey, roundedAmount, floorAmount);
             const countedToday = pre?.dailyPaidCountedAt === dayKey;
             // Amount this call newly credited in Mongo; 0 means a re-entry for an already-counted
             // payment (repeat screenshot / full-show), which must not write another payment_event.
@@ -32450,7 +32897,7 @@ class UserDataDtoCrud {
             // never lands here either.
             try {
                 if (creditedNow > 0)
-                    (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_4__.getAnalytics)().recordPayment({
+                    (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_3__.getAnalytics)().recordPayment({
                         chatId: normalizedChatId,
                         clientId,
                         personaId: profile,
@@ -32468,7 +32915,7 @@ class UserDataDtoCrud {
         }
         catch (error) {
             // Analytics counting must never block payment service.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
         }
         await this.processPendingPaymentAttributions(normalizedChatId);
     }
@@ -32484,33 +32931,20 @@ class UserDataDtoCrud {
         if (!profile || !clientId)
             return summary;
         const normalizedChatId = chatId == null ? '' : String(chatId).trim();
-        const query = {
-            profile,
-            client: clientId,
-            payAmount: { $gte: 15 },
-            $or: [
-                { paymentAttributionCreditedAt: { $exists: false } },
-                { paymentAttributionCreditedAt: null },
-            ],
-        };
-        if (normalizedChatId)
-            query.chatId = normalizedChatId;
-        const candidates = await this.statsDb2.find(query, {
-            projection: { chatId: 1, newUser: 1 },
-        }).toArray();
+        const candidates = await this.statsRepository().findUncreditedPayers({ profile, client: clientId }, normalizedChatId || undefined);
         summary.scanned = candidates.length;
         if (candidates.length === 0)
             return summary;
         let attribution;
         try {
-            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime.getInstance().attribution;
+            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.PromotionRuntime.getInstance().attribution;
             if (!runtimeAttribution)
                 throw new Error('conversion attribution is disabled');
             attribution = runtimeAttribution;
         }
         catch (error) {
             summary.failed = candidates.length;
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'Payment attribution runtime unavailable', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Payment attribution runtime unavailable', false);
             return summary;
         }
         const dayKey = formatAttributionDayKey(Date.now());
@@ -32521,8 +32955,8 @@ class UserDataDtoCrud {
                 continue;
             }
             try {
-                const userData = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.personaFilter)(candidateChatId, { profile }), { projection: { attributionChannelIds: 1 } });
-                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
+                const userData = await this.userDataRepository().findAttributionChannelIds(candidateChatId, { profile });
+                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
                 if (channelIds.length === 0) {
                     summary.awaitingChannels += 1;
                     continue;
@@ -32532,312 +32966,78 @@ class UserDataDtoCrud {
                     summary.failed += 1;
                     continue;
                 }
-                const marker = await this.statsDb2.updateOne({
-                    chatId: candidateChatId,
-                    profile,
-                    client: clientId,
-                    $or: [
-                        { paymentAttributionCreditedAt: { $exists: false } },
-                        { paymentAttributionCreditedAt: null },
-                    ],
-                }, { $set: { paymentAttributionCreditedAt: Date.now() } });
+                // Re-resolve after the awaits above: a reconnect rebuilds the repositories.
+                const marker = await this.statsRepository().markAttributionCredited(candidateChatId, { profile, client: clientId });
                 if (marker.modifiedCount > 0)
                     summary.credited += 1;
             }
             catch (error) {
                 summary.failed += 1;
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Payment attribution failed for ${candidateChatId}`, false);
             }
         }
         logger.log(`Payment attribution reconcile | scanned=${summary.scanned} credited=${summary.credited} awaitingChannels=${summary.awaitingChannels} failed=${summary.failed}`);
         return summary;
     }
-    async ensurePromoteStatsInitialized() {
-        const now = Date.now();
-        const clientId = process.env.clientId;
-        const existingDocument = await this.promoteStatsDb.findOne({ client: clientId });
-        if (existingDocument) {
-            const defaults = {};
-            const normalizedData = this.normalizePromoteStatsData(existingDocument.data);
-            const normalizedCount = this.normalizeNonNegativeNumber(existingDocument.count);
-            const normalizedTotalCount = this.normalizeNonNegativeNumber(existingDocument.totalCount);
-            const normalizedUniqueChannels = this.normalizeNonNegativeNumber(existingDocument.uniqueChannels);
-            const normalizedLastUpdated = this.normalizePositiveTimestamp(existingDocument.lastUpdatedTimeStamp);
-            const normalizedReleaseDay = this.normalizePositiveTimestamp(existingDocument.releaseDay);
-            if (normalizedCount == null)
-                defaults.count = 0;
-            else if (normalizedCount !== existingDocument.count)
-                defaults.count = normalizedCount;
-            if (normalizedTotalCount == null)
-                defaults.totalCount = 0;
-            else if (normalizedTotalCount !== existingDocument.totalCount)
-                defaults.totalCount = normalizedTotalCount;
-            if (normalizedData.changed)
-                defaults.data = normalizedData.data;
-            const uniqueChannelCount = Object.keys(normalizedData.data).length;
-            if (normalizedUniqueChannels == null || normalizedUniqueChannels !== uniqueChannelCount) {
-                defaults.uniqueChannels = uniqueChannelCount;
-            }
-            else if (normalizedUniqueChannels !== existingDocument.uniqueChannels) {
-                defaults.uniqueChannels = normalizedUniqueChannels;
-            }
-            if (normalizedLastUpdated == null)
-                defaults.lastUpdatedTimeStamp = now;
-            else if (normalizedLastUpdated !== existingDocument.lastUpdatedTimeStamp)
-                defaults.lastUpdatedTimeStamp = normalizedLastUpdated;
-            if (normalizedReleaseDay == null)
-                defaults.releaseDay = now;
-            else if (normalizedReleaseDay !== existingDocument.releaseDay)
-                defaults.releaseDay = normalizedReleaseDay;
-            if (typeof existingDocument.isActive !== 'boolean') {
-                if (existingDocument.isActive == null) {
-                    defaults.isActive = true;
-                }
-                else {
-                    const activeValue = String(existingDocument.isActive).trim().toLowerCase();
-                    defaults.isActive = ['true', '1', 'yes', 'active', 'on'].includes(activeValue)
-                        ? true
-                        : false;
-                }
-            }
-            if (Object.keys(defaults).length > 0) {
-                await this.promoteStatsDb.updateOne({ client: clientId }, { $set: defaults });
-            }
-            return;
-        }
-        await this.promoteStatsDb.updateOne({ client: clientId }, {
-            $setOnInsert: {
-                client: clientId,
-                count: 0,
-                totalCount: 0,
-                data: {},
-                uniqueChannels: 0,
-                lastUpdatedTimeStamp: now,
-                releaseDay: now,
-                isActive: true,
-            },
-        }, { upsert: true });
-    }
-    normalizeFiniteNumber(value) {
-        if (typeof value === 'number') {
-            return Number.isFinite(value) ? value : null;
-        }
-        if (typeof value === 'string' && value.trim() !== '') {
-            const parsed = Number(value);
-            return Number.isFinite(parsed) ? parsed : null;
-        }
-        return null;
-    }
-    normalizeNonNegativeNumber(value) {
-        const parsed = this.normalizeFiniteNumber(value);
-        return parsed != null && parsed >= 0 ? parsed : null;
-    }
-    normalizePositiveTimestamp(value) {
-        const parsed = this.normalizeFiniteNumber(value);
-        return parsed != null && parsed > 0 ? parsed : null;
-    }
-    normalizePromoteStatsData(data) {
-        if (!data || typeof data !== 'object' || Array.isArray(data)) {
-            return { data: {}, changed: true };
-        }
-        let changed = false;
-        const normalized = {};
-        for (const [key, value] of Object.entries(data)) {
-            const numericValue = this.normalizeNonNegativeNumber(value);
-            if (numericValue != null) {
-                const safeKey = this.normalizePromoteStatsChannelKey(key);
-                const existingValue = Object.prototype.hasOwnProperty.call(normalized, safeKey)
-                    ? normalized[safeKey]
-                    : 0;
-                normalized[safeKey] = existingValue + numericValue;
-                if (safeKey !== key || numericValue !== value)
-                    changed = true;
-            }
-            else {
-                changed = true;
-            }
-        }
-        return { data: normalized, changed };
-    }
-    normalizePromoteStatsChannelKey(channelName) {
-        const normalized = (channelName || "null").trim().replace(/[.$\0]/g, "_") || "null";
-        return ['prototype'].includes(normalized) || normalized in Object.prototype
-            ? `channel_${normalized}`
-            : normalized;
+    /** promoteStats lives in PromoteRepository; these methods throw before connect, as before. */
+    promoteRepository() {
+        const repositories = this.getRepositories();
+        if (!repositories)
+            throw new Error('Mongo client not connected; promoteStats unavailable');
+        return repositories.promote;
     }
     async updatePromoteStats(channelName) {
-        const channelKey = this.normalizePromoteStatsChannelKey(channelName);
-        try {
-            const clientId = process.env.clientId;
-            const now = Date.now();
-            const existingDocument = await this.promoteStatsDb.findOne({ client: clientId });
-            if (existingDocument) {
-                const repairs = {};
-                const normalizedData = this.normalizePromoteStatsData(existingDocument.data);
-                const normalizedCount = this.normalizeNonNegativeNumber(existingDocument.count);
-                const normalizedTotalCount = this.normalizeNonNegativeNumber(existingDocument.totalCount);
-                if (normalizedCount == null)
-                    repairs.count = 0;
-                else if (normalizedCount !== existingDocument.count)
-                    repairs.count = normalizedCount;
-                if (normalizedTotalCount == null)
-                    repairs.totalCount = 0;
-                else if (normalizedTotalCount !== existingDocument.totalCount)
-                    repairs.totalCount = normalizedTotalCount;
-                if (normalizedData.changed) {
-                    normalizedData.data[channelKey] = normalizedData.data[channelKey] ?? 0;
-                    repairs.data = normalizedData.data;
-                }
-                else if (typeof normalizedData.data[channelKey] !== 'number' || !Number.isFinite(normalizedData.data[channelKey])) {
-                    repairs[`data.${channelKey}`] = 0;
-                }
-                if (Object.keys(repairs).length > 0) {
-                    await this.promoteStatsDb.updateOne({ client: clientId }, { $set: repairs });
-                }
-            }
-            await this.promoteStatsDb.updateOne({ client: clientId }, {
-                $inc: {
-                    count: 1,
-                    totalCount: 1,
-                    [`data.${channelKey}`]: 1,
-                },
-                $set: {
-                    lastUpdatedTimeStamp: now,
-                    releaseDay: now,
-                },
-                $setOnInsert: {
-                    client: clientId,
-                    isActive: true,
-                },
-            }, { upsert: true });
-            const updatedDocument = await this.promoteStatsDb.findOne({ client: clientId });
-            const uniqueChannels = Object.keys(updatedDocument?.data || {}).length;
-            await this.promoteStatsDb.updateOne({ client: clientId }, { $set: { uniqueChannels } });
-            return updatedDocument;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating promotion stats");
-        }
+        return this.getRepositories()?.promote.updatePromoteStats(process.env.clientId, channelName);
     }
     async activatePromotions() {
-        await this.ensurePromoteStatsInitialized();
-        const clientId = process.env.clientId;
-        const now = Date.now();
-        const result = await this.promoteStatsDb.updateOne({ client: clientId }, {
-            $set: {
-                releaseDay: now,
-                lastUpdatedTimeStamp: now,
-                isActive: true
-            },
-            $setOnInsert: {
-                client: clientId,
-                count: 0,
-                totalCount: 0,
-                data: {},
-                uniqueChannels: 0,
-            },
-        }, { upsert: true });
+        await this.promoteRepository().activatePromotions(process.env.clientId);
     }
     async deactivatePromotions(day = Date.now()) {
-        await this.ensurePromoteStatsInitialized();
-        const clientId = process.env.clientId;
-        const now = Date.now();
-        const result = await this.promoteStatsDb.updateOne({ client: clientId }, {
-            $set: {
-                releaseDay: day,
-                isActive: false
-            },
-            $setOnInsert: {
-                client: clientId,
-                count: 0,
-                totalCount: 0,
-                data: {},
-                uniqueChannels: 0,
-                lastUpdatedTimeStamp: now,
-            },
-        }, { upsert: true });
+        await this.promoteRepository().deactivatePromotions(process.env.clientId, day);
     }
     async readPromoteStats() {
-        await this.ensurePromoteStatsInitialized();
-        const result = await this.promoteStatsDb.findOne({ "client": process.env.clientId });
-        return result;
+        return this.promoteRepository().readPromoteStats(process.env.clientId);
     }
     async readPromoteStatsTime() {
-        await this.ensurePromoteStatsInitialized();
-        const result = await this.promoteStatsDb.findOne({ "client": process.env.clientId }, { projection: { "client": 1, "totalCount": 1, "lastUpdatedTimeStamp": 1, "isActive": 1, "_id": 0 } });
-        return result;
+        return this.promoteRepository().readPromoteStatsTime(process.env.clientId);
+    }
+    /** userData lives in UserDataRepository; throws before connect, as the raw handle did. */
+    userDataRepository() {
+        const repositories = this.getRepositories();
+        if (!repositories)
+            throw new Error('Mongo client not connected; userData unavailable');
+        return repositories.userData;
+    }
+    /** stats/stats2 live in StatsRepository; throws before connect, as the raw handles did. */
+    statsRepository() {
+        const repositories = this.getRepositories();
+        if (!repositories)
+            throw new Error('Mongo client not connected; stats unavailable');
+        return repositories.stats;
     }
     async readstats() {
-        const result = await this.statsDb.find({ client: process.env.clientId }).sort({ newUser: -1 });
-        if (result) {
-            return await result.toArray();
-        }
-        else {
-            return undefined;
-        }
+        return this.statsRepository().listByClient(process.env.clientId, { legacy: true });
     }
     async readstats2() {
-        const result = await this.statsDb2.find({ client: process.env.clientId }).sort({ newUser: -1 });
-        if (result) {
-            return await result.toArray();
-        }
-        else {
-            return [];
-        }
+        return this.statsRepository().listByClient(process.env.clientId);
     }
     async getTodayPaidUsers() {
-        try {
-            const result = await this.statsDb2.find({ client: process.env.clientId, payAmount: { $gt: 10 } });
-            if (result) {
-                const res = await result.toArray();
-                let newUsers = 0;
-                for (const u of res) {
-                    if (u.newUser) {
-                        newUsers++;
-                    }
-                }
-                return ({ total: res.length || 0, new: newUsers || 0 });
-            }
-            else {
-                return ({ total: 0, new: 0 });
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching paid users");
-            return ({ total: 0, new: 0 });
-        }
+        return (await this.getRepositories()?.stats.countPaidUsers(process.env.clientId)) ?? { total: 0, new: 0 };
     }
     async removeSingleStat(chatId) {
-        try {
-            const result = await this.statsDb.deleteMany({ chatId, profile: process.env.dbcoll, client: process.env.clientId });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error removing single stat");
-        }
+        await this.getRepositories()?.stats.removeLegacyRows(chatId, { client: process.env.clientId, profile: process.env.dbcoll });
     }
     async readRecentPaidPpl() {
-        const result = await this.statsDb.find({ client: process.env.clientId, payAmount: { $gt: 26 } });
-        if (result) {
-            return await result.toArray();
-        }
-        else {
-            return undefined;
-        }
+        return this.statsRepository().listRecentPayers(process.env.clientId, { legacy: true });
     }
     async readRecentPaidPpl2() {
-        const result = await this.statsDb2.find({ client: process.env.clientId, payAmount: { $gte: 15 } });
-        if (result) {
-            return await result.toArray();
-        }
-        else {
-            return undefined;
-        }
+        return this.statsRepository().listRecentPayers(process.env.clientId);
     }
     async getPaidList() {
         let ppl = '';
         // MINE-scoped: this feeds an operator's own /paid listing. Unscoped it ranked the ENTIRE
         // fleet's payers, so one client's command surfaced other clients' users.
-        const result = await this.db.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.mineFilter)(), payAmount: { $gt: 26 } }).sort({ lastMsgTimeStamp: -1 }).limit(25).toArray();
+        const result = await this.userDataRepository().listTopPayers((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
         if (result) {
             result.forEach((element) => {
                 ppl = ppl + '\n ' + element?.username + ' : ' + element?.paidCount + "|" + element?.payAmount;
@@ -32853,97 +33053,18 @@ class UserDataDtoCrud {
             logger.log("ChatId or updates are undefined");
             throw new Error("ChatId or updates are undefined");
         }
-        // Declared OUTSIDE the try so the duplicate-key retry in the catch can reuse the exact same
-        // filter and payload. Rebuilding them there would risk a subtly different write.
-        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
-        let setFields = {};
-        let setOnInsert = {};
-        // Set once the write is delegated: UserDataRepository.upsert has ALREADY spent the one
-        // E11000 retry and rethrown, so retrying again in the catch would make a sick database
-        // serve three attempts for one row. Only the raw fallback below still needs the local retry.
-        let retriedByRepository = false;
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
         try {
-            const now = Date.now();
-            // 1️⃣ Sanitize updates — prevent overwriting system or indexed fields
-            // Note: totalCount and lastMsgTimeStamp are allowed when explicitly passed
-            // (e.g. executehs/executehsl reset totalCount intentionally)
-            const safeUpdates = { ...updates };
-            delete safeUpdates['chatId'];
-            delete safeUpdates['profile'];
-            // 2️⃣ Prepare $set values (caller-provided lastMsgTimeStamp takes precedence)
-            setFields = {
-                lastMsgTimeStamp: now,
-                ...safeUpdates,
-            };
-            // 3️⃣ Prepare $setOnInsert safely — remove any key that overlaps with updates
-            setOnInsert = {
-                ...USER_DEFAULTS,
-                chatId,
-                profile,
-            };
-            // Remove conflicting fields that also exist in setFields
-            for (const key of Object.keys(setFields)) {
-                if (key in setOnInsert) {
-                    delete setOnInsert[key];
-                }
-            }
-            // Stamp ownership AFTER the conflict strip: `clientId` is never a caller-supplied
-            // update, so it cannot collide, and adding it before the loop would risk it being
-            // stripped by a future caller that does pass one.
-            Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.ownershipOnInsert)());
-            // 4️⃣ Perform upsert safely.
-            // Same posture as updateSingleKey/createOrUpdate: the filter stays on the
-            // (chatId, profile) unique-index pair because an $or cannot seed an insert, and
-            // ownership is stamped via $setOnInsert so a row created here is client-owned too.
-            //
-            // Routed through @tg/db (C1). UserDataRepository.upsert builds that SAME persona
-            // filter from the shared user-scope helpers and carries the identical duplicate-key
-            // retry, so the three hand-rolled copies of that race handling collapse into one. It
-            // RETHROWS a non-duplicate failure rather than swallowing it, so a write that never
-            // landed cannot be reported as success. The `?? await this.read(chatId)` below covers
-            // only the benign case of a write that succeeded but returned no document.
-            const update = { $set: setFields, $setOnInsert: setOnInsert };
-            const repositories = this.repositories.get(this.client);
-            if (repositories) {
-                retriedByRepository = true;
-                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), update);
-                return viaRepo ?? await this.read(chatId);
-            }
-            const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
-            return result ?? await this.read(chatId);
+            // UserDataRepository.updateFields: persona-pair filter (an $or cannot seed an insert),
+            // $set updates + lastMsgTimeStamp, USER_DATA_DEFAULTS + ownership on insert, one
+            // duplicate-key retry inside upsert(). A non-duplicate failure RETHROWS: a write that
+            // never landed must not be reported as success. `?? read` covers only a write that
+            // succeeded but returned no document.
+            const viaRepo = await this.userDataRepository().updateFields(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), updates);
+            return viaRepo ?? await this.read(chatId);
         }
         catch (error) {
-            // A duplicate-key error here is a concurrent-insert race, not a failed write: the
-            // caller's update was REJECTED, so returning a plain read would silently drop it.
-            // Retry once — the winning row now exists, so the same filter matches an update.
-            //
-            // Guarded by retriedByRepository: on the repository path UserDataRepository.upsert has
-            // already performed exactly this retry and rethrown, so running it again would make one
-            // wanted row cost three write attempts against a database that is already failing. The
-            // block stays for the raw fallback above, which still runs pre-connection.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_2__.isDuplicateKeyError)(error) && !retriedByRepository) {
-                try {
-                    logger.debug(`update: duplicate-key race for ${chatId}; retrying as update`);
-                    const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: setFields, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
-                    if (retried)
-                        return retried;
-                }
-                catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(retryError, "Error retrying UserDataDto update after duplicate key", false);
-                }
-                // E11000 proves the row EXISTS, so this is never a hard failure: log it without
-                // rethrowing and return the current row. Rethrowing here would surface a benign
-                // race to callers as an error.
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Duplicate key on UserDataDto update; resolved by read", false);
-                return await this.read(chatId);
-            }
-            // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
-            // read. Returning `await this.read(chatId)` here reported a plausible-looking row to a
-            // caller whose update never landed — and once the read itself was routed through
-            // @tg/db (B6), which degrades a failed read to null, even the read's own error was
-            // swallowed, so the failure became completely invisible. The scheduled-retry caller in
-            // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating UserDataDto", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error updating UserDataDto", true);
             throw error;
         }
     }
@@ -32952,133 +33073,27 @@ class UserDataDtoCrud {
             logger.log("ChatId or key is undefined");
             throw new Error("ChatId or key is undefined");
         }
-        // Declared OUTSIDE the try so the duplicate-key retry in the catch reuses the identical
-        // filter and payload rather than rebuilding a subtly different one.
-        // Set once the write is delegated: UserDataRepository.upsert has ALREADY spent the one
-        // E11000 retry and rethrown, so retrying again in the catch would make a sick database
-        // serve three attempts for one row. Only the raw fallback below still needs the local retry.
-        let retriedByRepository = false;
-        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
-        const now = Date.now();
-        // UPSERT: the filter must stay on the (chatId, profile) unique-index pair — an $or
-        // cannot seed an insert, and a client-scoped filter would insert a SECOND row for a user
-        // who already has a persona row, violating chatId_Profile. Ownership is recorded via
-        // $setOnInsert; reads still resolve OWN-first via readFilter/readOwnThenPersona.
-        const setOnInsert = { ...USER_DEFAULTS, chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.ownershipOnInsert)() };
-        delete setOnInsert[key];
-        // Routed through @tg/db (C1) — same persona filter, same duplicate-key retry. See update().
-        const update = { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert };
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
         try {
-            const repositories = this.repositories.get(this.client);
-            if (repositories) {
-                retriedByRepository = true;
-                const viaRepo = await repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), update);
-                return viaRepo ?? await this.read(chatId);
-            }
-            const result = await this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
-            return result ?? await this.read(chatId);
+            // Same filter, insert seeding and duplicate-key handling as update(); see setField.
+            const viaRepo = await this.userDataRepository().setField(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), key, value);
+            return viaRepo ?? await this.read(chatId);
         }
         catch (error) {
-            // Same concurrent-insert race as update()/createOrUpdate: retry once rather than
-            // returning a stale read that silently discards this key's new value.
-            if ((0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_2__.isDuplicateKeyError)(error) && !retriedByRepository) {
-                try {
-                    logger.debug(`updateSingleKey: duplicate-key race for ${chatId}; retrying as update`);
-                    const retried = await this.db.findOneAndUpdate({ chatId, profile }, { $set: { [key]: value, lastMsgTimeStamp: now }, $setOnInsert: setOnInsert }, { upsert: true, returnDocument: 'after' });
-                    if (retried)
-                        return retried;
-                }
-                catch (retryError) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(retryError, "Error retrying single-key update after duplicate key", false);
-                }
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Duplicate key on single-key update; resolved by read", false);
-                return await this.read(chatId);
-            }
-            // A real write failure is NOT a missing value, so it is rethrown rather than masked by a
-            // read. Returning `await this.read(chatId)` here reported a plausible-looking row to a
-            // caller whose update never landed — and once the read itself was routed through
-            // @tg/db (B6), which degrades a failed read to null, even the read's own error was
-            // swallowed, so the failure became completely invisible. The scheduled-retry caller in
-            // createOrUpdateStats has always had a `.catch()` waiting for exactly this.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating single key", true);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error updating single key", true);
             logger.error(`Error updating single key for chatId: ${chatId}`, error);
             throw error;
         }
     }
     async createOrUpdate(chatId, updates = {}) {
-        let newUser;
-        let existing = null;
         try {
             const now = Date.now();
             chatId = chatId?.trim() || `fallback_${now}_${Math.random().toString(36).slice(2, 9)}`;
-            const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
-            const safeUpdates = {};
-            Object.entries(updates).forEach(([key, value]) => {
-                if (!['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'].includes(key)) {
-                    safeUpdates[key] = value;
-                }
-            });
-            // Atomic upsert. A read-then-insert (findOne → insertOne) races: two messages from a
-            // brand-new chat both see no doc and both insert, and the second violates the unique
-            // chatId_Profile index (E11000). findOneAndUpdate with upsert is a single atomic op the
-            // index makes safe. totalCount is driven by $inc (0→1 on insert, N→N+1 on update, which
-            // matches the old two-branch behavior). $setOnInsert seeds defaults ONLY on creation, and
-            // must not name any field already in $set (Mongo rejects a field in both operators), so we
-            // drop any USER_DEFAULTS key that safeUpdates already provides.
-            // Ownership is stamped on INSERT only (see user-scope.ts): existing rows are never
-            // rewritten by normal traffic, and the key is omitted when the process has no clientId.
-            const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.ownershipOnInsert)() };
-            for (const [key, value] of Object.entries(USER_DEFAULTS)) {
-                // Both counters are $inc-ed below. A key present in BOTH $inc and $setOnInsert is
-                // not merged by Mongo — it is rejected outright with "Updating the path 'x' would
-                // create a conflict at 'x'" (error 40), on EVERY call, insert or not. msgCount was
-                // added to USER_DEFAULTS for D3 but not to this skip list; reproduced against real
-                // Mongo 2026-10-02. $inc creates the field on insert anyway, so skipping is correct.
-                if (key === 'totalCount' || key === 'msgCount')
-                    continue; // handled by $inc
-                if (key in safeUpdates)
-                    continue; // provided by $set — can't be in both
-                setOnInsert[key] = value;
-            }
-            // Routed through @tg/db (C1). The repository owns the persona filter and the E11000
-            // retry described below; when it is available the local retry block becomes a no-op
-            // because `write()` has already resolved the race internally. The raw thunk stays as
-            // the pre-connection fallback.
-            const update = {
-                $set: { ...safeUpdates, lastMsgTimeStamp: now },
-                // D3 dual-write: msgCount is the honest counter. totalCount keeps being written
-                // unchanged until msgCount is populated everywhere and the readers have moved, so
-                // this step is purely additive and reversible.
-                $inc: { totalCount: 1, msgCount: 1 },
-                $setOnInsert: setOnInsert,
-            };
-            const repositories = this.repositories.get(this.client);
-            const write = () => repositories
-                ? repositories.userData.upsert(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), update)
-                : this.db.findOneAndUpdate({ chatId, profile }, update, { upsert: true, returnDocument: 'after' });
-            // Native driver: `result` is the post-update document (returnDocument: 'after').
-            //
-            // E11000 RETRY. upsert is atomic but NOT immune to duplicate-key errors: when two
-            // messages from a brand-new chat race, both can miss the document during the query
-            // phase and both attempt an insert. The unique chatId_Profile index correctly rejects
-            // the loser with E11000 — that is the index doing its job, not corruption. Retrying
-            // once resolves it deterministically, because by then the winner's document exists and
-            // the same filter now matches an update instead of an insert.
-            //
-            // Without this the loser fell through to the generic catch below and returned
-            // `newUser: true` off USER_DEFAULTS — a phantom "new user" with default state that
-            // silently discarded the caller's updates. (`write` was already extracted as a thunk
-            // for exactly this retry; the retry itself was never wired up.)
-            let result;
-            try {
-                result = await write();
-            }
-            catch (writeError) {
-                if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_2__.isDuplicateKeyError)(writeError))
-                    throw writeError;
-                logger.debug(`createOrUpdate: duplicate-key race for ${chatId}; retrying as update`);
-                result = await write();
-            }
+            (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
+            // UserDataRepository.recordInbound: atomic upsert, $inc totalCount+msgCount, caller
+            // fields in $set (minus chatId/profile/counters/lastMsgTimeStamp), defaults on insert.
+            // The duplicate-key race of two first messages is retried once inside upsert().
+            const result = await this.userDataRepository().recordInbound(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), updates, now);
             const userDetails = result ?? await this.read(chatId);
             // totalCount === 1 after the $inc means this call created the doc.
             const wasCreated = userDetails?.totalCount === 1;
@@ -33088,21 +33103,21 @@ class UserDataDtoCrud {
             return { newUser: wasCreated, userDetails };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error creating or updating UserDataDto");
+            // Never throws: the inbound handler must keep going with the best row it can get.
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error creating or updating UserDataDto");
             let fallback;
             try {
                 fallback = await this.read(chatId);
             }
             catch (readError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(readError, "Error reading fallback user after createOrUpdate failure", false);
             }
-            const safeDetails = fallback || existing || (newUser ? { ...newUser, totalCount: 0 } : { ...USER_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() });
-            return { newUser: !!newUser, userDetails: safeDetails };
+            const safeDetails = fallback || { ..._tg_db__WEBPACK_IMPORTED_MODULE_2__.USER_DATA_DEFAULTS, chatId, profile: process.env.dbcoll, lastMsgTimeStamp: Date.now() };
+            return { newUser: false, userDetails: safeDetails };
         }
     }
     async resetUnpaid() {
-        const result = await this.db.updateMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.mineFilter)(), lastMsgTimeStamp: { $lt: Date.now() - 30 * 24 * 60 * 60 * 1000 }, paidCount: { $gt: 0 }, payAmount: 0 }, { $set: { paidCount: 0 } });
-        return result;
+        return this.userDataRepository().resetStalePaidCount((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
     /**
      * DB-size bounding (512 MB hard cap — see docs/superpowers/specs/2026-07-16-mongo-512mb-bounding.md).
@@ -33122,7 +33137,8 @@ class UserDataDtoCrud {
         try {
             if (!this.client)
                 return null;
-            const s = await this.client.db('tgclients').stats({ scale: 1024 * 1024 });
+            const size = await (0,_tg_db__WEBPACK_IMPORTED_MODULE_2__.readDatabaseSize)(this.client);
+            const s = { dataSize: size.dataSizeMB, indexSize: size.indexSizeMB, objects: size.objects };
             const totalMB = Math.round((s.dataSize + s.indexSize) * 10) / 10;
             const alertMB = Number(process.env.DB_SIZE_ALERT_MB ?? 450);
             const pct = ((totalMB / 512) * 100).toFixed(1);
@@ -33135,7 +33151,7 @@ class UserDataDtoCrud {
             return { totalMB, alert };
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'logDbSize failed', false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'logDbSize failed', false);
             return null;
         }
     }
@@ -33150,111 +33166,55 @@ class UserDataDtoCrud {
         // lastMsgTimeStamp are left alone (never matched) rather than risking deletion of unanchored state.
         // `$gt: 0` guarantees a real positive numeric anchor (BSON orders null/missing/strings below
         // numbers, so they never satisfy $gt:0) — docs without a genuine lastMsgTimeStamp are never matched.
-        const result = await this.db.deleteMany({
-            ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.mineFilter)(),
-            lastMsgTimeStamp: { $gt: 0, $lt: cutoff },
-        });
+        const result = await this.userDataRepository().deleteInactiveBefore((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), cutoff);
         logger.log(`sweepStaleUserData: deleted ${result.deletedCount ?? 0} userData docs inactive > ${ttlDays}d`);
         return { deleted: result.deletedCount ?? 0, ttlDays };
     }
     async resetPpl() {
-        const result = await this.db.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.mineFilter)(), { $set: { paidReply: true } });
-        return result;
+        return this.userDataRepository().enablePaidReplyForAll((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
+    /** One field of the client-first row; undefined at runtime when the row or field is missing. */
     async getSingleKey(chatId, key) {
-        const result = await this.db.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.readFilter)(chatId), { projection: { [key]: 1 } });
-        if (result) {
-            return result[key];
-        }
-        else {
-            return undefined;
-        }
+        return await this.userDataRepository().findField(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), key);
     }
     async updateVideos(chatId, video) {
-        const result = await this.db.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.readFilter)(chatId), {
-            $addToSet: { videos: video }, // ✅ Ensures uniqueness
-            $set: { callTime: Date.now() - 5 * 60000 }
-        });
+        await this.userDataRepository().addVideo(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), video);
     }
-    async updateClient(filter, data) {
-        try {
-            const clientsDb = this.client.db("tgclients").collection('clients');
-            return await clientsDb.updateOne(filter, { $set: data });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating Client");
-        }
+    async updateClient(clientId, data) {
+        return (await this.getRepositories()?.clients.updateProfile(clientId, data)) ?? false;
     }
     async updateBufferClientAssignment(mobile, update) {
-        try {
-            logger.info(`🧍 PERSONA buffer-doc update | ${mobile} | keys ${Object.keys(update).join(',') || 'none'}`);
-            const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
-            await bufferClientsDb.updateOne({ mobile }, { $set: update });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating buffer client persona assignment");
-            logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`, error instanceof Error ? error.message : String(error));
-        }
+        logger.info(`🧍 PERSONA buffer-doc update | ${mobile} | keys ${Object.keys(update).join(',') || 'none'}`);
+        const ok = await this.getRepositories()?.clients.updateBufferClientAssignment(mobile, update);
+        if (!ok)
+            logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`);
     }
     async getBufferClientDoc(mobile) {
-        try {
-            logger.debug(`[Persona] Loading buffer client doc for ${mobile}`);
-            const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
-            const doc = await bufferClientsDb.findOne({ mobile });
-            if (doc) {
-                logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_7__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_7__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_7__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
-            }
-            else {
-                logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
-            }
-            return doc;
+        logger.debug(`[Persona] Loading buffer client doc for ${mobile}`);
+        const doc = (await this.getRepositories()?.clients.findBufferClient(mobile)) ?? null;
+        if (doc) {
+            logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_6__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_6__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_6__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
         }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching buffer client doc");
-            logger.error(`[Persona] Failed to load buffer client doc for ${mobile}`, error instanceof Error ? error.message : String(error));
-            return null;
+        else {
+            logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
         }
+        return doc;
     }
     async getBufferPersonaPool(clientId) {
-        try {
-            logger.debug(`[Persona] Loading buffer persona pool from Mongo for ${clientId}`);
-            const clientsDb = this.client.db("tgclients").collection('clients');
-            const clientDoc = await clientsDb.findOne({ clientId }, { projection: { firstNames: 1, bufferLastNames: 1, bios: 1, profilePics: 1, dbcoll: 1 } });
-            if (!clientDoc) {
-                logger.warn(`[Persona] Buffer persona pool not found in Mongo for ${clientId}`);
-                return null;
-            }
-            const pool = {
-                firstNames: clientDoc.firstNames || [],
-                lastNames: clientDoc.bufferLastNames || [],
-                bios: clientDoc.bios || [],
-                profilePics: clientDoc.profilePics || [],
-                dbcoll: (clientDoc.dbcoll || '').toLowerCase(),
-            };
-            if (!pool.firstNames.length && !pool.lastNames.length && !pool.bios.length && !pool.profilePics.length) {
-                logger.debug(`[Persona] Buffer persona pool empty for ${clientId}`);
-                return null;
-            }
-            return pool;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching buffer persona pool");
-            logger.error(`[Persona] Failed to load buffer persona pool for ${clientId}`, error instanceof Error ? error.message : String(error));
-            return null;
-        }
+        logger.debug(`[Persona] Loading buffer persona pool from Mongo for ${clientId}`);
+        const pool = (await this.getRepositories()?.clients.findPersonaPool(clientId, 'buffer')) ?? null;
+        if (!pool)
+            logger.debug(`[Persona] Buffer persona pool missing or empty for ${clientId}`);
+        return pool;
     }
     async fetchExistingAssignments(clientId) {
         const localAssignments = [];
         const seenMobiles = new Set();
         try {
-            const bufferClientsDb = this.client.db("tgclients").collection('bufferClients');
-            const assignmentFilter = (0,_tg_db__WEBPACK_IMPORTED_MODULE_3__.personaAssignmentFilter)(clientId);
-            // promoteClients half via the repository (step 3); bufferClients stays here until step 4.
+            const repositories = this.repositories.get(this.client);
             const [localBufferAssignments, localPromoteAssignments] = await Promise.all([
-                bufferClientsDb.find(assignmentFilter, {
-                    projection: _tg_db__WEBPACK_IMPORTED_MODULE_3__.PERSONA_ASSIGNMENT_PROJECTION,
-                }).toArray(),
-                this.repositories.get(this.client).promote.findPersonaAssignments(clientId),
+                repositories.clients.findBufferPersonaAssignments(clientId),
+                repositories.promote.findPersonaAssignments(clientId),
             ]);
             for (const assignment of [...localBufferAssignments, ...localPromoteAssignments]) {
                 if (!assignment.mobile || seenMobiles.has(assignment.mobile))
@@ -33270,7 +33230,7 @@ class UserDataDtoCrud {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching local persona assignment snapshot", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error fetching local persona assignment snapshot", false);
             logger.warn(`[Persona] Failed to load local assignment snapshot for ${clientId}`, error instanceof Error ? error.message : String(error));
         }
         try {
@@ -33303,16 +33263,7 @@ class UserDataDtoCrud {
         return localAssignments;
     }
     async updateTimestamps() {
-        try {
-            if (this.client) {
-                const collection = this.client.db("tgclients").collection('timestamps');
-                const result = await collection.updateOne({}, { $set: { [process.env.clientId]: Date.now() } }, { upsert: true });
-                return result;
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error updating timestamps");
-        }
+        await this.getRepositories()?.clients.touchHeartbeat(process.env.clientId ?? '');
     }
     // async getAvgCalculatedChannels() {
     //     const channelStatsDb = this.client.db("tgclients").collection('channelStats');
@@ -33359,12 +33310,12 @@ class UserDataDtoCrud {
                 logger.log('MongoDB connection closed.');
             }
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_8__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_7__.PromotionRuntime.reset();
             await this.client?.close();
             this.client = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error closing MongoDB connection");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error closing MongoDB connection");
         }
     }
 }
@@ -33378,8 +33329,6 @@ class UserDataDtoCrud {
 // ===================================================================
 /** Hardcoded per-app namespace constant — distinguishes tg-aut rows from promote-clients rows. */
 UserDataDtoCrud.DAILY_ANALYTICS_NAMESPACE = 'tg-aut';
-UserDataDtoCrud.DAILY_ANALYTICS_TTL_DAYS = 14;
-UserDataDtoCrud.DAILY_COLLECTIONS = ['promoteStatsDaily', 'reactionStatsDaily', 'userStatsDaily'];
 function formatAttributionDayKey(nowMs) {
     const safeNow = Number.isFinite(nowMs) && nowMs > 0 ? nowMs : Date.now();
     return new Intl.DateTimeFormat('en-CA', {
