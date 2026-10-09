@@ -57970,7 +57970,10 @@ async function handleTyping(client, chatId) {
         logger.error(`Error setting typing:`, error);
     }
 }
-const RECENT_MAX_AGE_MS = 5 * 60 * 1000;
+// Fresh items wait behind the whole queue, and a PEER_FLOOD/FLOOD_WAIT pause holds that queue for
+// 5–10 min. At 5 min, replies that arrived during a pause were dropped unsent (prod 2026-10-09:
+// 94 drops by midday, all first attempts aged 5.5–17 min). 20 min covers a pause plus the backlog.
+const RECENT_MAX_AGE_MS = 20 * 60 * 1000;
 // In-memory retried items are not covered by state-persistence's STALE_CUTOFF_MS (load-time only).
 const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
 /**
@@ -57994,8 +57997,8 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             const hasOthersMsg = !msgs || (Array.isArray(msgs) && msgs.some((msg) => msg?.fromId == null));
             const ageMs = Date.now() - replyObj.pushedAt;
             const isRetry = (replyObj.retryCount ?? 0) > 0;
-            // Fresh items must be < 5 min old. Items already retried (e.g. after PEER_FLOOD, whose
-            // backoff alone outlasts 5 min) keep their original pushedAt, so they are bounded by the
+            // Fresh items must be < 20 min old. Items already retried (e.g. after PEER_FLOOD, whose
+            // backoff can outlast the fresh window) keep their original pushedAt, so they are bounded by the
             // 1h cap instead; otherwise every retried reply would be silently dropped as stale.
             const isRecent = ageMs < (isRetry ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS);
             if (!isRecent && isRetry) {
