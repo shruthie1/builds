@@ -14882,6 +14882,8 @@ exports.parseLimitedUntil = parseLimitedUntil;
 exports.classifySpamBotReply = classifySpamBotReply;
 exports.probeSpamBot = probeSpamBot;
 const connection_manager_1 = __webpack_require__(/*! ./connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
+const telegram_logger_1 = __webpack_require__(/*! ./telegram-logger */ "./src/components/Telegram/utils/telegram-logger.ts");
+const logger = new telegram_logger_1.TelegramLogger('SpamBotProbe');
 exports.SPAMBOT_USERNAME = '@SpamBot';
 exports.SPAMBOT_POLL_TIMEOUT_MS = 15_000;
 exports.SPAMBOT_POLL_INTERVAL_MS = 1_500;
@@ -14980,6 +14982,7 @@ async function probeSpamBot(mobile, options = {}) {
     const deadline = Date.now() + totalTimeoutMs;
     const reuseState = connection_manager_1.connectionManager.getReuseState(mobile);
     if (reuseState === 'busy') {
+        logger.info(mobile, 'SpamBot probe skipped: connection busy in another flow');
         return { status: 'unknown', limitedUntil: null, busy: true, error: 'connection in use by another flow' };
     }
     const openedByProbe = reuseState === 'none';
@@ -15019,7 +15022,10 @@ async function probeSpamBot(mobile, options = {}) {
     }
     catch (error) {
         if (openedByProbe) {
-            connecting.then(() => connection_manager_1.connectionManager.unregisterClient(mobile).catch(() => undefined), () => undefined);
+            connecting.then(() => {
+                logger.warn(mobile, 'SpamBot probe: late connection disconnected after connect timeout', { totalTimeoutMs });
+                return connection_manager_1.connectionManager.unregisterClient(mobile).catch(() => undefined);
+            }, () => undefined);
         }
         return {
             status: 'unknown', limitedUntil: null, connectFailed: true,
@@ -23521,6 +23527,22 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
     getExtraAvailabilityFilter() {
         return (0, buffer_client_schema_1.buildSpamEligibleFilter)();
+    }
+    adjustSupplyDateForPoolState(doc, date, now) {
+        if (!date)
+            return date;
+        const spam = doc;
+        if (spam.spamStatus === 'harsh') {
+            const checkedAt = spam.spamCheckedAt ? new Date(spam.spamCheckedAt).getTime() : NaN;
+            if (Number.isFinite(checkedAt) && now - checkedAt < buffer_client_schema_1.HARSH_RECHECK_AFTER_MS)
+                return null;
+        }
+        const until = spam.limitedUntil ? new Date(spam.limitedUntil).getTime() : NaN;
+        if (Number.isFinite(until) && until > now) {
+            const liftDate = client_helper_utils_1.ClientHelperUtils.toDateString(until);
+            return liftDate > date ? liftDate : date;
+        }
+        return date;
     }
     async getLeastRecentlyUsedBufferClients(clientId, limit = 1) {
         return await this.getLeastRecentlyUsedClients(clientId, limit);
@@ -41239,6 +41261,7 @@ class BaseClientService {
             targetDate: client_helper_utils_1.ClientHelperUtils.toDateString(today.getTime() + window.days * this.ONE_DAY_MS),
         }));
         const activeDocs = await this.model.find({ clientId, status: 'active' }, {
+            mobile: 1,
             availableDate: 1,
             warmupPhase: 1,
             warmupJitter: 1,
@@ -41254,12 +41277,20 @@ class BaseClientService {
             twoFASetAt: 1,
             privacyUpdatedAt: 1,
             channels: 1,
+            spamStatus: 1,
+            limitedUntil: 1,
+            spamCheckedAt: 1,
         }).exec();
         const readyOperationalDates = [];
         const pipelineOperationalDates = [];
         const operationalChannelThreshold = this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING;
+        const supplyAdjustments = [];
         for (const doc of activeDocs) {
-            const operationalDate = this.getOperationalAvailabilityDateString(doc, today.getTime());
+            const baseDate = this.getOperationalAvailabilityDateString(doc, today.getTime());
+            const operationalDate = this.adjustSupplyDateForPoolState(doc, baseDate, Date.now());
+            if (baseDate && operationalDate !== baseDate) {
+                supplyAdjustments.push({ mobile: doc.mobile, from: baseDate, to: operationalDate });
+            }
             if (!operationalDate)
                 continue;
             const phase = doc.warmupPhase;
@@ -41276,6 +41307,13 @@ class BaseClientService {
             else {
                 pipelineOperationalDates.push(operationalDate);
             }
+        }
+        if (supplyAdjustments.length) {
+            this.logger.info(`[${clientId}] Supply adjusted for pool state`, {
+                excluded: supplyAdjustments.filter((a) => a.to === null).length,
+                deferred: supplyAdjustments.filter((a) => a.to !== null).length,
+                accounts: supplyAdjustments,
+            });
         }
         const readyActive = readyOperationalDates.length;
         const warmingPipeline = pipelineOperationalDates.length;
@@ -41384,6 +41422,9 @@ class BaseClientService {
             clientId: doc.clientId,
             lastUsed: doc.lastUsed,
         }));
+    }
+    adjustSupplyDateForPoolState(_doc, date, _now) {
+        return date;
     }
     getExtraAvailabilityFilter() {
         return {};
