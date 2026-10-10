@@ -26955,7 +26955,8 @@ function buildInHouseEventLadder(chatId, clientId, type, now) {
 }
 /**
  * After an in-house show was cut short: ring again after `delayMs` (it resumes where it stopped),
- * then back off (+2, +6, +15 min) with one nudge, and the VCUI link once at the end as the fallback.
+ * then back off (+2, +6, +15 min) silently — no "calling you back" texts mid-show (owner, 2026-10-10)
+ * — and the VCUI link once at the end as the fallback.
  */
 function buildInHouseFollowUp(chatId, clientId, now, delayMs = 3 * MIN) {
     const call = (ms) => ({ type: 'call', chatId, clientId, time: now + ms, payload: {}, attempts: 0 });
@@ -26963,7 +26964,6 @@ function buildInHouseFollowUp(chatId, clientId, now, delayMs = 3 * MIN) {
     return [
         call(delayMs),
         call(delayMs + 2 * MIN),
-        msg(delayMs + 2.5 * MIN, "Baby <b>pick up</b> na 🥺\n\nI'm calling you\nto finish the show 😘"),
         call(delayMs + 6 * MIN),
         call(delayMs + 15 * MIN),
         msg(delayMs + 16 * MIN, `Not getting my call? 🥺\n\n<b>Call me here</b> 👇\n\n${vcuiLink(chatId, clientId)}\n\nI'll continue\nfrom where we stopped 😘`),
@@ -51225,10 +51225,10 @@ class InHouseCallService {
             await this.safeClearEvents(chatId);
             return { status: 'partial', videoId: plan.videoId, outcome };
         }
-        // Cut short: say we'll call back, and re-call with back-off (persisted events, so a restart
-        // keeps it). The attempts rule bounds this: the third connected attempt counts as delivered.
+        // Cut short: re-call with back-off (persisted events, so a restart keeps it), silently — no
+        // "calling you back" text mid-show for now (owner, 2026-10-10). The attempts rule bounds this:
+        // the third connected attempt counts as delivered.
         const dropped = outcome.endCall === 'VideoStalled';
-        await this.safeSend(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(dropped ? _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callDroppedMessages : _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callUserEndedMessages, chatId, 'cut'), true);
         try {
             await this.deps.followUp?.(chatId, dropped ? DROPPED_RECALL_MS : USER_ENDED_RECALL_MS);
         }
