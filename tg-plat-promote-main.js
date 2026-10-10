@@ -21352,6 +21352,21 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), update, { upsert: false });
         return result.acknowledged && result.matchedCount === 1;
     }
+    /**
+     * $set bookkeeping fields on an EXISTING row WITHOUT touching lastMsgTimeStamp and without
+     * creating a row. lastMsgTimeStamp means "last inbound message": the 30-day idle sweep and the
+     * replier read it, so an outbound reminder stamp must not refresh it (setField does).
+     * True when exactly one row matched. Throws; callers catch.
+     */
+    async setBookkeepingFields(chatId, identity, fields) {
+        const safe = { ...fields };
+        for (const key of INBOUND_FORBIDDEN_KEYS)
+            delete safe[key];
+        if (Object.keys(safe).length === 0)
+            return false;
+        const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { $set: safe }, { upsert: false });
+        return result.acknowledged && result.matchedCount === 1;
+    }
     /** Delete the persona row(s) of chatId. Throws. */
     async deleteForPersona(chatId, identity) {
         return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
