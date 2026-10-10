@@ -15018,6 +15018,9 @@ async function probeSpamBot(mobile, options = {}) {
         manager = await withDeadline(connecting, 'connect');
     }
     catch (error) {
+        if (openedByProbe) {
+            connecting.then(() => connection_manager_1.connectionManager.unregisterClient(mobile).catch(() => undefined), () => undefined);
+        }
         return {
             status: 'unknown', limitedUntil: null, connectFailed: true,
             error: error instanceof Error ? error.message : String(error),
@@ -49901,6 +49904,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                     userData.updateMany({ payAmount: { $gt: 10 }, totalCount: { $gt: 30 } }, {
                         $set: {
                             totalCount: 10,
+                            windowCount: 1,
                             limitTime: now,
                             paidReply: true,
                         },
