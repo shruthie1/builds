@@ -39677,7 +39677,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS[1];
+// 26B: live 2026-10-11 the 31B returned HTTP 500 / 2-38 s on the verify call; 26B answered in ~5 s (fakeScore 0.95 on a known fake).
+const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS[0];
 const SECOND_OPINION_TIMEOUT_MS = 12000;
 const AUTHENTICITY_SECOND_OPINION_SCORE = 0.4;
 const isMasked = (vpa) => /\*|x{2,}/i.test(vpa);
