@@ -942,7 +942,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             resolve: () => undefined,
             finished: false,
             record: {
-                callId: null, direction, peerUserId: userId.toString(), peerUsername: username, video,
+                callId: null, direction, peerUserId: userId.toString(), peerUsername: username,
+                video: video || (direction === 'outgoing' && !!media.ringAsVideo),
                 mediaFile: media.file, mediaStartSec: Math.max(0, Number(media.startSec) || 0), requestedAt: Date.now(), answeredAt: null, connectedAt: null, endedAt: null,
                 ringToAnswerMs: null, connectMs: null, talkMs: null, mediaCompleted: false,
                 endReason: null, endedBy: null, telegramDurationSec: null, needRating: false,
@@ -969,7 +970,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 ? { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true }
                 : shellMicrophone,
         };
-        if (call.record.video) {
+        // record.video is the ring type; a ringAsVideo call has no camera track to send.
+        if (call.record.video && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media)) {
             const video = media.size ? { ...this.video, width: media.size.width, height: media.size.height } : this.video;
             description.camera = {
                 mediaSource: MediaSource.SHELL, input: (0,_media__WEBPACK_IMPORTED_MODULE_6__.videoShellCommand)(media.file, video, this.ffmpeg, media.startSec),
@@ -50743,7 +50745,7 @@ class InHouseCallService {
             const peer = await this.deps.resolvePeer(chatId);
             if (this.stopped)
                 return { status: 'error' };
-            const record = await engine.call(peer, { file: clipPath, video: false }, {
+            const record = await engine.call(peer, { file: clipPath, video: false, ringAsVideo: true }, {
                 answerTimeoutMs: VOICE_PROOF_RING_MS,
                 maxDurationMs: Math.min((durationSec ?? VOICE_PROOF_DEFAULT_CLIP_SEC) * 1000 + VOICE_PROOF_CAP_SLACK_MS, VOICE_PROOF_MAX_MS),
                 hangupOnMediaEnd: true,
