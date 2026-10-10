@@ -36233,10 +36233,11 @@ async function analyzePaymentProof(image, opts = {}) {
     const attempts = [];
     // chain
     let providers;
+    let registry = null;
     if (opts.providers)
         providers = opts.providers;
     else {
-        const registry = opts.env || opts.fetch ? (0,_providers__WEBPACK_IMPORTED_MODULE_3__.createProviders)({ ...opts, v2 }) : (0,_providers__WEBPACK_IMPORTED_MODULE_3__.getDefaultProviders)();
+        registry = opts.env || opts.fetch ? (0,_providers__WEBPACK_IMPORTED_MODULE_3__.createProviders)({ ...opts, v2 }) : (0,_providers__WEBPACK_IMPORTED_MODULE_3__.getDefaultProviders)();
         providers = [];
         for (const name of (0,_config__WEBPACK_IMPORTED_MODULE_1__.resolveProviderNames)(env)) {
             const p = registry.get(name);
@@ -36252,11 +36253,16 @@ async function analyzePaymentProof(image, opts = {}) {
     let precheck = { status: 'skipped', wordCount: 0 };
     let ocrText = '';
     if (doPrecheck) {
-        const prober = providers.find((p) => typeof p.probeText === 'function') ?? opts.providers?.find((p) => p.probeText);
-        const probe = prober
+        // The prober must not depend on VISION_PROVIDERS: if 'ocr-space' is left out of the chain the registry's OCR-Space
+        // still probes (it fails open as 'unavailable' when it has no keys).
+        const prober = providers.find((p) => typeof p.probeText === 'function') ?? registry?.get('ocr-space');
+        const tp = clock();
+        const probe = prober?.probeText
             ? await prober.probeText(image, minWords, PROBE_TIMEOUT_MS, v2)
             : { status: 'unavailable', wordCount: 0, text: '', detail: 'no probe provider' };
-        precheck = { status: probe.status, wordCount: probe.wordCount };
+        precheck = { status: probe.status, wordCount: probe.wordCount, ms: clock() - tp };
+        if (probe.status === 'no-text')
+            precheck.text = probe.text;
         if (probe.status === 'text')
             ocrText = probe.text;
         if (probe.status === 'no-text' && !v2.has('R03-soft')) {
@@ -36424,6 +36430,7 @@ __webpack_require__.r(__webpack_exports__);
 /** R07 outer per-provider budgets (ms), from service-config.json. */
 const DEFAULT_BUDGETS_MS = {
     gemini: 30000,
+    groq: 15000,
     nvidia: 20000,
     mistral: 30000,
     gemma: 20000,
@@ -36620,7 +36627,7 @@ function toLegacyImageDetails(result, opts) {
         }
         case 'no_text':
             return blank({
-                text: result.extraction?.ocrText ?? '',
+                text: result.extraction?.ocrText ?? result.precheck.text ?? '',
                 wordCount: result.precheck.wordCount,
                 description: 'Image does not contain sufficient text for analysis',
                 error: true,
@@ -37206,64 +37213,65 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ANALYSIS_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.ANALYSIS_PROMPT),
 /* harmony export */   AUTHENTICITY_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.AUTHENTICITY_FIELDS),
-/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.AUTHENTICITY_SECOND_OPINION_SCORE),
+/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.AUTHENTICITY_SECOND_OPINION_SCORE),
 /* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
-/* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.CURRENCY_REGEX),
-/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.DEFAULT_BUDGETS_MS),
-/* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.DEFAULT_PROVIDER_ORDER),
+/* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.CURRENCY_REGEX),
+/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.DEFAULT_BUDGETS_MS),
+/* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.DEFAULT_PROVIDER_ORDER),
 /* harmony export */   EnvKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.EnvKeyPool),
 /* harmony export */   FAKE_SIGNALS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_SIGNALS),
 /* harmony export */   FAKE_VERDICTS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_VERDICTS),
 /* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_DEFAULT_MODEL),
 /* harmony export */   GEMMA_MODELS: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.GEMMA_MODELS),
-/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.GEMMA_R07B_BUDGET_MS),
+/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.GEMMA_R07B_BUDGET_MS),
 /* harmony export */   GENERATION_CONFIG: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.GENERATION_CONFIG),
 /* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MAX_PAYMENT_AMOUNT),
 /* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MIN_PAYMENT_AMOUNT),
 /* harmony export */   NOOP_LOGGER: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER),
 /* harmony export */   NO_RULES: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES),
-/* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.OPERATIONAL_CLASSES),
+/* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.OPERATIONAL_CLASSES),
 /* harmony export */   ProviderError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.ProviderError),
 /* harmony export */   TokenBudget: () => (/* reexport safe */ _transport_token_budget__WEBPACK_IMPORTED_MODULE_12__.TokenBudget),
 /* harmony export */   VERIFICATION_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.VERIFICATION_PROMPT),
 /* harmony export */   WIRE_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_FIELDS),
 /* harmony export */   WIRE_KEYS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_KEYS),
 /* harmony export */   advisoryFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.advisoryFlags),
-/* harmony export */   allProvidersFailedMessage: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.allProvidersFailedMessage),
+/* harmony export */   allProvidersFailedMessage: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.allProvidersFailedMessage),
 /* harmony export */   amountOrNull: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.amountOrNull),
 /* harmony export */   analysisPromptWithKeys: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.analysisPromptWithKeys),
-/* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_24__.analyzePaymentProof),
+/* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_25__.analyzePaymentProof),
 /* harmony export */   applyProviderTweaks: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.applyProviderTweaks),
 /* harmony export */   classifyError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.classifyError),
-/* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.classifyExhausted),
+/* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.classifyExhausted),
 /* harmony export */   coerceConfidence: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.coerceConfidence),
-/* harmony export */   combineAll: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.combineAll),
-/* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.combineSecondOpinion),
+/* harmony export */   combineAll: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.combineAll),
+/* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.combineSecondOpinion),
 /* harmony export */   correctNonStandardAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.correctNonStandardAmount),
 /* harmony export */   countWords: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.countWords),
 /* harmony export */   createGeminiProvider: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.createGeminiProvider),
 /* harmony export */   createGemmaProvider: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.createGemmaProvider),
-/* harmony export */   createMistralProvider: () => (/* reexport safe */ _providers_mistral__WEBPACK_IMPORTED_MODULE_17__.createMistralProvider),
-/* harmony export */   createNvidiaProvider: () => (/* reexport safe */ _providers_nvidia__WEBPACK_IMPORTED_MODULE_16__.createNvidiaProvider),
-/* harmony export */   createOcrSpaceProvider: () => (/* reexport safe */ _providers_ocr_space__WEBPACK_IMPORTED_MODULE_18__.createOcrSpaceProvider),
-/* harmony export */   createProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.createProviders),
-/* harmony export */   createRapidapiProvider: () => (/* reexport safe */ _providers_rapidapi__WEBPACK_IMPORTED_MODULE_19__.createRapidapiProvider),
+/* harmony export */   createGroqProvider: () => (/* reexport safe */ _providers_groq__WEBPACK_IMPORTED_MODULE_16__.createGroqProvider),
+/* harmony export */   createMistralProvider: () => (/* reexport safe */ _providers_mistral__WEBPACK_IMPORTED_MODULE_18__.createMistralProvider),
+/* harmony export */   createNvidiaProvider: () => (/* reexport safe */ _providers_nvidia__WEBPACK_IMPORTED_MODULE_17__.createNvidiaProvider),
+/* harmony export */   createOcrSpaceProvider: () => (/* reexport safe */ _providers_ocr_space__WEBPACK_IMPORTED_MODULE_19__.createOcrSpaceProvider),
+/* harmony export */   createProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.createProviders),
+/* harmony export */   createRapidapiProvider: () => (/* reexport safe */ _providers_rapidapi__WEBPACK_IMPORTED_MODULE_20__.createRapidapiProvider),
 /* harmony export */   createRestGenAiClient: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.createRestGenAiClient),
-/* harmony export */   createSecondOpinionRunner: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.createSecondOpinionRunner),
+/* harmony export */   createSecondOpinionRunner: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.createSecondOpinionRunner),
 /* harmony export */   dHash: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.dHash),
 /* harmony export */   extractAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.extractAmount),
-/* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPayeeName),
-/* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPayerName),
-/* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPaymentDataFromText),
-/* harmony export */   getDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.getDefaultProviders),
+/* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPayeeName),
+/* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPayerName),
+/* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPaymentDataFromText),
+/* harmony export */   getDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.getDefaultProviders),
 /* harmony export */   getNumberFromString: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.getNumberFromString),
 /* harmony export */   hamming: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.hamming),
 /* harmony export */   inferStatusFromText: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.inferStatusFromText),
 /* harmony export */   isFalsePositive: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isFalsePositive),
-/* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.isNoVerifiableAmount),
+/* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.isNoVerifiableAmount),
 /* harmony export */   isRateLimit: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimit),
 /* harmony export */   isRateLimitLegacy: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimitLegacy),
-/* harmony export */   isStrategyFailure: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.isStrategyFailure),
+/* harmony export */   isStrategyFailure: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.isStrategyFailure),
 /* harmony export */   isTransient: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isTransient),
 /* harmony export */   isValidAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isValidAmount),
 /* harmony export */   istEpochMs: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istEpochMs),
@@ -37271,23 +37279,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   keyFingerprint: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.keyFingerprint),
 /* harmony export */   normalizeAuthenticity: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeAuthenticity),
 /* harmony export */   normalizeWire: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeWire),
-/* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.ocrTextToWire),
+/* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.ocrTextToWire),
 /* harmony export */   parseModelOutput: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.parseModelOutput),
 /* harmony export */   parseRulesV2: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.parseRulesV2),
 /* harmony export */   parseTimeString: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.parseTimeString),
 /* harmony export */   processChatGptResponse: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.processChatGptResponse),
-/* harmony export */   providerBudgetMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.providerBudgetMs),
+/* harmony export */   providerBudgetMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.providerBudgetMs),
 /* harmony export */   readKeys: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.readKeys),
-/* harmony export */   requestSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.requestSecondOpinion),
-/* harmony export */   resetDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.resetDefaultProviders),
-/* harmony export */   resolveProviderNames: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.resolveProviderNames),
+/* harmony export */   requestSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.requestSecondOpinion),
+/* harmony export */   resetDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.resetDefaultProviders),
+/* harmony export */   resolveProviderNames: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.resolveProviderNames),
 /* harmony export */   resolveVisionTime: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.resolveVisionTime),
 /* harmony export */   rulesV2FromEnv: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.rulesV2FromEnv),
 /* harmony export */   runWithKeys: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.runWithKeys),
 /* harmony export */   sanitizeExtraction: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.sanitizeExtraction),
-/* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.secondOpinionTriggers),
-/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_24__.shouldFallbackForPaymentExtraction),
-/* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.smartMergeWire),
+/* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.secondOpinionTriggers),
+/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_25__.shouldFallbackForPaymentExtraction),
+/* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.smartMergeWire),
 /* harmony export */   statusFromFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusFromFlags),
 /* harmony export */   statusToFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusToFlags),
 /* harmony export */   toGeminiSchema: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toGeminiSchema),
@@ -37317,16 +37325,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
 /* harmony import */ var _providers_gemini__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./providers/gemini */ "../../packages/tg-vision/src/providers/gemini.ts");
 /* harmony import */ var _providers_gemma__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./providers/gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
-/* harmony import */ var _providers_nvidia__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./providers/nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
-/* harmony import */ var _providers_mistral__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./providers/mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
-/* harmony import */ var _providers_ocr_space__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./providers/ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
-/* harmony import */ var _providers_rapidapi__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./providers/rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
-/* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./providers */ "../../packages/tg-vision/src/providers/index.ts");
-/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./rules/text */ "../../packages/tg-vision/src/rules/text.ts");
-/* harmony import */ var _chain_config__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./chain/config */ "../../packages/tg-vision/src/chain/config.ts");
-/* harmony import */ var _chain_outcome__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./chain/outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
-/* harmony import */ var _chain_analyze__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./chain/analyze */ "../../packages/tg-vision/src/chain/analyze.ts");
-/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+/* harmony import */ var _providers_groq__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./providers/groq */ "../../packages/tg-vision/src/providers/groq.ts");
+/* harmony import */ var _providers_nvidia__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./providers/nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
+/* harmony import */ var _providers_mistral__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./providers/mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
+/* harmony import */ var _providers_ocr_space__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./providers/ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
+/* harmony import */ var _providers_rapidapi__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./providers/rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
+/* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./providers */ "../../packages/tg-vision/src/providers/index.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _chain_config__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./chain/config */ "../../packages/tg-vision/src/chain/config.ts");
+/* harmony import */ var _chain_outcome__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./chain/outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
+/* harmony import */ var _chain_analyze__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./chain/analyze */ "../../packages/tg-vision/src/chain/analyze.ts");
+/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+
 
 
 
@@ -37507,6 +37517,103 @@ function createGemmaProvider(opts = {}) {
 
 /***/ },
 
+/***/ "../../packages/tg-vision/src/providers/groq.ts"
+/*!******************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/groq.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GROQ_DEFAULT_MODEL: () => (/* binding */ GROQ_DEFAULT_MODEL),
+/* harmony export */   GROQ_KEY_ENV: () => (/* binding */ GROQ_KEY_ENV),
+/* harmony export */   GROQ_URL: () => (/* binding */ GROQ_URL),
+/* harmony export */   createGroqProvider: () => (/* binding */ createGroqProvider)
+/* harmony export */ });
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+// Groq vision provider: OpenAI-compatible chat completions with json_object. Not schema-enforced, so the canonical keys
+// block is appended to the prompt. Confidence capped at 0.85 (R26, same as nvidia/gemma: self-reported, unverified).
+// Groq free-tier limits are tight (~8000 tokens/min per key/org, 1000 req/day; one image ~4.2k tokens): a 429 rotates keys
+// (one pass) and then throws so the chain falls through to the next provider; it never waits.
+
+
+
+
+
+
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_KEY_ENV = ['GROQ_API_KEYS', 'GROQ_API_KEY'];
+const GROQ_DEFAULT_MODEL = 'qwen/qwen3.8-27b';
+function createGroqProvider(opts = {}) {
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 12000;
+    const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'groq', envNames: GROQ_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    return {
+        name: 'groq',
+        kind: 'llm',
+        innerTimeoutMs,
+        confidenceCap: 0.85,
+        confidenceFloor: null,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            const env = (0,_provider__WEBPACK_IMPORTED_MODULE_5__.envOf)(opts);
+            const model = env.GROQ_VISION_MODEL || GROQ_DEFAULT_MODEL;
+            const prompt = (0,_contract_prompt__WEBPACK_IMPORTED_MODULE_0__.analysisPromptWithKeys)((0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toKeysBlock)());
+            const dataUrl = `data:${_provider__WEBPACK_IMPORTED_MODULE_5__.IMAGE_MIME};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_5__.toBase64)(image)}`;
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
+                name: 'groq',
+                pool: pool.get(env, v2),
+                keyEnvNames: GROQ_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2: v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    let data;
+                    try {
+                        data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, GROQ_URL, { authorization: `Bearer ${apiKey}` }, {
+                            model,
+                            temperature: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.temperature,
+                            max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
+                            response_format: { type: 'json_object' },
+                            messages: [{ role: 'user', content: [
+                                        { type: 'text', text: prompt },
+                                        { type: 'image_url', image_url: { url: dataUrl } },
+                                    ] }],
+                        }, sig);
+                    }
+                    catch (error) {
+                        // Groq answers HTTP 400 "Organization has been restricted" for a dead key (2 of the 6 prod keys, 2026-10-10).
+                        // That is a per-key failure, not a bad request: report it as 403 so the pool parks the key and the next is tried.
+                        if (error instanceof _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError && error.status === 400 && /organization has been restricted/i.test(error.message)) {
+                            // the message carries 403 so the legacy (flag-off) message regex also classifies it as a per-key failure
+                            throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError(error.message.replace(/^HTTP 400/, 'HTTP 403 (key restricted)'), { status: 403 });
+                        }
+                        throw error;
+                    }
+                    const content = data?.choices?.[0]?.message?.content;
+                    if (!content)
+                        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Groq returned empty content', { errorClass: 'empty' });
+                    const total = data.usage?.total_tokens;
+                    return { text: typeof content === 'string' ? content : JSON.stringify(content), model, tokens: typeof total === 'number' ? total : null };
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-vision/src/providers/http.ts"
 /*!******************************************************!*\
   !*** ../../packages/tg-vision/src/providers/http.ts ***!
@@ -37569,25 +37676,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _gemini__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./gemini */ "../../packages/tg-vision/src/providers/gemini.ts");
 /* harmony import */ var _gemma__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
-/* harmony import */ var _mistral__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
-/* harmony import */ var _nvidia__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
-/* harmony import */ var _ocr_space__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
-/* harmony import */ var _rapidapi__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
+/* harmony import */ var _groq__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./groq */ "../../packages/tg-vision/src/providers/groq.ts");
+/* harmony import */ var _mistral__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
+/* harmony import */ var _nvidia__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
+/* harmony import */ var _ocr_space__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
+/* harmony import */ var _rapidapi__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
 
 
 
 
 
 
-const DEFAULT_PROVIDER_ORDER = ['gemini', 'nvidia', 'mistral', 'gemma', 'rapidapi', 'ocr-space'];
+
+const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia', 'mistral', 'gemma', 'rapidapi', 'ocr-space'];
 function createProviders(deps = {}) {
     const providers = [
         (0,_gemini__WEBPACK_IMPORTED_MODULE_0__.createGeminiProvider)(deps),
-        (0,_nvidia__WEBPACK_IMPORTED_MODULE_3__.createNvidiaProvider)(deps),
-        (0,_mistral__WEBPACK_IMPORTED_MODULE_2__.createMistralProvider)(deps),
+        (0,_groq__WEBPACK_IMPORTED_MODULE_2__.createGroqProvider)(deps),
+        (0,_nvidia__WEBPACK_IMPORTED_MODULE_4__.createNvidiaProvider)(deps),
+        (0,_mistral__WEBPACK_IMPORTED_MODULE_3__.createMistralProvider)(deps),
         (0,_gemma__WEBPACK_IMPORTED_MODULE_1__.createGemmaProvider)(deps),
-        (0,_rapidapi__WEBPACK_IMPORTED_MODULE_5__.createRapidapiProvider)(deps),
-        (0,_ocr_space__WEBPACK_IMPORTED_MODULE_4__.createOcrSpaceProvider)(deps),
+        (0,_rapidapi__WEBPACK_IMPORTED_MODULE_6__.createRapidapiProvider)(deps),
+        (0,_ocr_space__WEBPACK_IMPORTED_MODULE_5__.createOcrSpaceProvider)(deps),
     ];
     return new Map(providers.map((p) => [p.name, p]));
 }
@@ -70574,6 +70684,7 @@ function snapshotLocal(vision, legacy, proof, durationMs) {
                 fakeScore: vision.secondOpinion.authenticity?.fakeScore ?? null, signals: (vision.secondOpinion.authenticity?.signals ?? []).slice(0, 10),
             }
             : null,
+        precheck: vision.precheck ? { status: vision.precheck.status, wordCount: vision.precheck.wordCount, ms: typeof vision.precheck.ms === 'number' ? vision.precheck.ms : null } : null,
         durationMs, error: null, wouldDecision: would,
     };
 }
@@ -70582,7 +70693,7 @@ function failedLocal(error, durationMs) {
         outcome: null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
         isFinished: false, noVerifiableAmount: false, confidence: 0, attempts: [], watermarkPresent: null,
         disclaimerPhrases: [], utr: null, payeeUpiId: null, rulesApplied: [], proofDecision: null, proofReasons: [],
-        fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null,
+        fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null, precheck: null,
         durationMs, error: clip(String(error?.message ?? error ?? 'unknown'), 200), wouldDecision: null,
     };
 }
@@ -70832,7 +70943,10 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
                 recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: 'block', remoteConfirm: 'none' });
                 return { ...legacy, proofBlocked: true };
             }
-            if (source === 'local-only' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.isLegacyAccept)(attempt.legacy)) {
+            // OCR pre-check reject (no readable text): a remote re-check could only reject it too (mySuperSever runs the same
+            // OCR gate), so skip the paid call. The legacy details carry error:true + the probe text, exactly like the remote's
+            // "Image rejected: Insufficient text" result, and take the same processImage path.
+            if (source === 'local-only' || attempt.vision.outcome === 'no_text' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.isLegacyAccept)(attempt.legacy)) {
                 recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'none' });
                 return legacy;
             }
