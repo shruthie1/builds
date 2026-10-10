@@ -55658,24 +55658,25 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../helpers/parseImage */ "./src/helpers/parseImage.ts");
 /* harmony import */ var _helpers_imageDetails__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../helpers/imageDetails */ "./src/helpers/imageDetails.ts");
 /* harmony import */ var _payments_vision_shadow__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../payments/vision-shadow */ "./src/payments/vision-shadow.ts");
-/* harmony import */ var _utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/isWithinPastTenMinutes */ "./src/utils/isWithinPastTenMinutes.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
-/* harmony import */ var _telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram-utils/forwardToChannel */ "./src/telegram-utils/forwardToChannel.ts");
-/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
-/* harmony import */ var _downloadMedia__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./downloadMedia */ "./src/imageUtils/downloadMedia.ts");
-/* harmony import */ var _normaliseAmount__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./normaliseAmount */ "./src/imageUtils/normaliseAmount.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _helpers__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./helpers */ "./src/imageUtils/helpers.ts");
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
-/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
-/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+/* harmony import */ var _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../payments/proof-check/messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../utils/isWithinPastTenMinutes */ "./src/utils/isWithinPastTenMinutes.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
+/* harmony import */ var _telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../telegram-utils/forwardToChannel */ "./src/telegram-utils/forwardToChannel.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _downloadMedia__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./downloadMedia */ "./src/imageUtils/downloadMedia.ts");
+/* harmony import */ var _normaliseAmount__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./normaliseAmount */ "./src/imageUtils/normaliseAmount.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _helpers__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./helpers */ "./src/imageUtils/helpers.ts");
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
+/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
+/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
 
 
 
@@ -55704,17 +55705,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:process-image");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__.Logger("tg-aut:process-image");
 const MAX_PAYMENT_AMOUNT = 10000;
 function scheduleProcessImageTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, context);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, context);
         });
     }, delayMs);
 }
-function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO, details) {
-    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, {
+function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.INFO, details) {
+    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, {
         severity,
         title,
         summary,
@@ -55723,10 +55725,10 @@ function notifyProcessImage(context, title, summary, fields = [], severity = _tg
         tags: ["process-image", "payment-image"],
     }).then((sent) => {
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
         }
     }).catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `ProcessImage.notification.${context}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, `ProcessImage.notification.${context}`, false);
     });
 }
 function imageUserFields(chatId, broadcastName, fields = []) {
@@ -55744,7 +55746,7 @@ function imageUserFields(chatId, broadcastName, fields = []) {
  */
 function canSendPicsScore(userDetails, chatId) {
     const picCount = userDetails.picCount || 0; // Use database picCount instead of Redis
-    const pleaseRequestCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getPleaseRequestCount(chatId);
+    const pleaseRequestCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getPleaseRequestCount(chatId);
     return (picCount * 2) + (pleaseRequestCount * 1);
 }
 /**
@@ -55894,7 +55896,7 @@ async function holdForLaterAnalysis(event, chatId) {
         }, delay);
     }
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, `IMAGE ANALYSIS UNAVAILABLE @${(process.env.clientId || '').toUpperCase()}\nChatId: ${chatId}\nMsg: ${msgId}\n${note}`);
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, `IMAGE ANALYSIS UNAVAILABLE @${(process.env.clientId || '').toUpperCase()}\nChatId: ${chatId}\nMsg: ${msgId}\n${note}`);
     }
     catch (error) {
         logger.error('[ProcessImage] analysis-unavailable notice failed', error);
@@ -55904,7 +55906,7 @@ async function processImage(event) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     try {
         const chatId = event.message.chatId.toString();
-        const photoBuffer = await (0,_downloadMedia__WEBPACK_IMPORTED_MODULE_16__.downloadMedia)(event);
+        const photoBuffer = await (0,_downloadMedia__WEBPACK_IMPORTED_MODULE_17__.downloadMedia)(event);
         // IMAGE_ANALYSIS_SOURCE=remote (default): this IS getImageDetails' own result; tg-vision runs on the same
         // bytes in the background (shadow, log-only). See payments/vision-shadow.ts.
         const imageDetails = await (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_9__.analyzeImage)(photoBuffer, {
@@ -55920,30 +55922,39 @@ async function processImage(event) {
             await holdForLaterAnalysis(event, chatId);
             return;
         }
+        if (imageDetails.proofBlocked) {
+            // Fake-receipt generator text on the screenshot: no credit. Owner wording: call it an old payment and
+            // ask for a fresh one; never say fake/used/duplicate. Not counted as an invalid photo (no ban path).
+            logger.warn(`[ProcessImage] proof blocked for ${chatId} msg ${event.message.id}: not crediting`);
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
+                message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_10__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_10__.OLD_PAYMENT_MESSAGES.length)],
+            });
+            return;
+        }
         imageDetails.amount = imageDetails.amount || 0;
         const sanitizedData = (0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__.parseImage)(imageDetails);
         logger.log(sanitizedData);
         let userDetails = await db.read(chatId);
-        const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_17__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
+        const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_18__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
         const text = imageDetails.text.toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
         imageDetails.text = text;
         // Track "please" in payment messages (desperation indicator)
         const messageText = event.message.text?.toLowerCase() || "";
         if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(messageText, ['please', 'pls', 'plz', 'plss'])) {
-            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementPleaseRequestCount(chatId);
+            _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementPleaseRequestCount(chatId);
             logger.debug(`[ProcessImage] User said "please" in payment message - incremented pleaseRequestCount`);
         }
         const senderJson = await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getSenderJson)(event);
         const broadcastName = senderJson.username
             ? `@${senderJson.username}`
             : [senderJson.firstName, senderJson.lastName].filter(Boolean).join(" ");
-        const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
-        const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
+        const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getUserState(chatId);
+        const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getInvalidPhotoCount(chatId);
         if (invalidPhotoCount > 4) {
             if (invalidPhotoCount > 6) {
                 // Single message: image + analysis in one caption (was forward + separate text card).
-                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
+                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
                     caption: `BANNED (invalid pics x${invalidPhotoCount})\nChatId:${chatId} Name:${broadcastName}\nAmount:${userDetails.payAmount} DemoGiven:${userDetails.demoGiven}\nDescription: ${imageDetails.description}`.slice(0, 500),
                 });
                 // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
@@ -55954,7 +55965,7 @@ async function processImage(event) {
                 userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
             }
             else {
-                (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                     message: `Dont send Other Pics/Screenshots, I am Warning you!!!\n\n<b>I will BLOCK You</b>, If u send random pics again!\n\n\n<b>Pay Me!!\nI will Show you Boobs in video Call Now Itself!!\nQR:</b> ${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe1}`,
                     parseMode: "html",
                 });
@@ -55966,7 +55977,7 @@ async function processImage(event) {
             (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine)) {
             // Single message: the image WITH the analysis as its caption. (Previously this both
             // forwarded the image AND sent a separate text-only card — the same info twice.)
-            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
+            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
             if (!paymentEvidenceSent) {
                 logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
             }
@@ -55978,14 +55989,14 @@ async function processImage(event) {
             // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
             // Fallback ONLY then: bot photo on UNVDS (never CLIENT_UPDATES; no bot is a member of @unwantedupdates1).
             try {
-                await (0,_telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_14__.forwardToChannel)(event, "@unwantedupdates1");
+                await (0,_telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_15__.forwardToChannel)(event, "@unwantedupdates1");
                 await event.client.sendMessage("@unwantedupdates1", {
                     message: msg.slice(0, 1000),
                 });
             }
             catch (error) {
                 logger.error(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
-                const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.UNVDS, photoBuffer, { caption: msg.slice(0, 900) } // headroom: sendMedia prepends "CLIENTID: <id>"; Telegram caps captions at 1024
+                const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.UNVDS, photoBuffer, { caption: msg.slice(0, 900) } // headroom: sendMedia prepends "CLIENTID: <id>"; Telegram caps captions at 1024
                 );
                 if (!unwantedSent) {
                     logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
@@ -55993,7 +56004,7 @@ async function processImage(event) {
             }
         }
         if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
-            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.proceedWithCall)(userDetails, chatId, "Image Processed");
+            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_25__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
                 return true;
             }
@@ -56001,20 +56012,20 @@ async function processImage(event) {
         if (imageDetails && sanitizedData.isPaymentRelated) {
             if (text?.startsWith("payment to") &&
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ["phonepe", "transfer details"])) {
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                         "It's a Failed payment, Don't play Games!!",
                         "Stop trying to fool me with fake payments!!",
                         "That's a failed screenshot baby, pay properly!!"
                     ]),
                 });
-                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Trying to Scam!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Trying to Scam!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
             }
             else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text.toLowerCase(), [
                 `${process.env.name} connecting`,
                 "failed to connect",
             ])) {
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                         "Wait baby...\ntrying to connect again",
                         "Network issue...\nlet me fix this for you",
@@ -56027,21 +56038,21 @@ async function processImage(event) {
                 logger.log("isLocalFailedImg: ", isLocalFailedImg);
                 if ((sanitizedData.isFinishedPayment ||
                     (!sanitizedData.isFinishedPayment && isLocalFailedImg)) &&
-                    (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
+                    (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
                         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                             message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                 "**Oye....!! Payment Failed??**",
                                 "**Baby... your payment didn't go through!!**",
                                 "**Darling!! This payment failed, try again!**"
                             ]),
                         });
-                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Failed Payment, Number SENT`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
-                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.respToFailedMSg)(event, imageDetails.text, chatId);
+                        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Failed Payment, Number SENT`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.respToFailedMSg)(event, imageDetails.text, chatId);
                         scheduleProcessImageTask(async () => {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "Don't send me failed screenshots baby, send only success ones!!\n\nTry **SCANNING** QR with **another phone**!!\nThen it will work perfectly!!",
                                     "Only successful payment screenshots darling!!\n\n**Use different mobile** to scan QR!!\nThat's the trick baby!!",
@@ -56052,15 +56063,15 @@ async function processImage(event) {
                         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.sendImageToChannel)(photoBuffer);
                     }
                     else {
-                        if ((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_25__.detectFakeScreenshot)(imageDetails.text)) {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                        if ((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_26__.detectFakeScreenshot)(imageDetails.text)) {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "Hatt...\nFake screenshot!!\n\nI'm Blocking you Now!!",
                                     "Stop sending fake payments!!\n\nYou're Blocked Now!!",
                                     "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
                                 ]),
                             });
-                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Fake Screenshot!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                            await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told Fake Screenshot!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                             scheduleProcessImageTask(async () => {
                                 await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.limitTime, Date.now() + 10 * 60 * 1000);
                                 await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
@@ -56069,9 +56080,9 @@ async function processImage(event) {
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
                             if (!(amount > 0 && amount <= MAX_PAYMENT_AMOUNT)) {
                                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`AmountNotInRange:MESSAGE_DELETED\nTold seems like fake`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`AmountNotInRange:MESSAGE_DELETED\nTold seems like fake`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                 scheduleProcessImageTask(async () => {
-                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                             "This looks like fake payment baby\n\nsend me detailed screenshot from **Transaction History**\nDon't send same pic again",
                                             "Seems fake darling\n\nI need proper screenshot from **Payment History**\nSend a different one sweetie",
@@ -56098,10 +56109,10 @@ async function processImage(event) {
                                         notifyProcessImage("crossClientPayment", "Cross-client payment suspicion", "User may have paid another client", imageUserFields(chatId, broadcastName, [
                                             { label: "Paid", value: didPayOthersResp.paid || "none" },
                                             { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
-                                        ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING, reply);
+                                        ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING, reply);
                                         didPayOthers = true;
                                     }
-                                    let isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_10__["default"])(imageDetails.time, userDetails);
+                                    let isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__["default"])(imageDetails.time, userDetails);
                                     // if (!isWithinPastTenMinutesImage.result) {
                                     //   logger.log("Extracting timestamps from image text for validation...");
                                     //   const possibleTimeStamps = extractTimestamps(
@@ -56119,15 +56130,15 @@ async function processImage(event) {
                                     //     }
                                     //   }
                                     // }
-                                    const isPaymentProperlyMine = await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers);
+                                    const isPaymentProperlyMine = await (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers);
                                     if (isPaymentProperlyMine.isvalid) {
                                         logger.log("Valid payment confirmed and processed.");
                                         // Smart state reset based on payment
                                         const oldPayAmount = userDetails.payAmount;
-                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnPayment)(chatId, userDetails, amount);
+                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__.resetStatesOnPayment)(chatId, userDetails, amount);
                                         // Check if this is an upgrade
                                         if (amount > oldPayAmount && oldPayAmount > 0) {
-                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
+                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
                                         }
                                         if (amount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, amount);
@@ -56136,11 +56147,11 @@ async function processImage(event) {
                                             logger.log("Processing low amount payment for pics/demo logic.");
                                             if (userDetails.picsSent > 0) {
                                                 const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getDemoPicsSentTimestamp(chatId);
+                                                const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getDemoPicsSentTimestamp(chatId);
                                                 const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount, true // this branch only runs when amount !== payAmount
                                                 );
                                                 if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "Wait baby....!! ",
                                                             "Just a moment Babyy...!!",
@@ -56151,29 +56162,29 @@ async function processImage(event) {
                                                         demoGiven: false,
                                                         payAmount: 50,
                                                     });
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
                                                     // Reset counters
                                                     userChatState.pleaseRequestCount = 0;
                                                     // picCount reset handled in database via state reset helper
                                                 }
                                                 else {
                                                     // Tell user pics already sent
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
                                                             "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
                                                             "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
                                                         ]),
                                                     });
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                     // Pic request count handled in database (userDetails.picCount)
                                                 }
                                             }
                                             else {
                                                 // Send demo pics (first time or weighted score >= 3)
-                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`PICS SENT (weighted logic)\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`PICS SENT (weighted logic)\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 try {
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "Wait baby....\nSending you my hot pics!! 🔥",
                                                             "Hold on darling...\nPreparing my sexiest pics for you!! 💋",
@@ -56181,8 +56192,8 @@ async function processImage(event) {
                                                         ]),
                                                     });
                                                     scheduleProcessImageTask(async () => {
-                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
-                                                            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandles([
+                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
+                                                            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandles([
                                                                 "dmp1.jpg",
                                                                 "dmp2.jpg",
                                                                 "dmp3.jpg",
@@ -56203,11 +56214,11 @@ async function processImage(event) {
                                                         // Increment picsSent count in DB
                                                         userDetails = await db.update(chatId, updatedData);
                                                         // Update timestamp in UserState
-                                                        _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.setDemoPicsSent(chatId, true);
+                                                        _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.setDemoPicsSent(chatId, true);
                                                     }, 6000, `processImage.demoPicsFollowup.${chatId}`);
                                                 }
                                                 catch (error) {
-                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error);
+                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error);
                                                 }
                                             }
                                         }
@@ -56215,7 +56226,7 @@ async function processImage(event) {
                                             if (amount >= 30 &&
                                                 amount >= userDetails.payAmount + 20 &&
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canStartService)(userDetails, amount)) {
-                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(amount, userDetails, "Reg");
+                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(amount, userDetails, "Reg");
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                             }
                                             else {
@@ -56233,16 +56244,16 @@ async function processImage(event) {
                                                     if (amount > userDetails.highestPayAmount) {
                                                         updatedData['highestPayAmount'] = amount;
                                                     }
-                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__.inHouseCallsActive)();
+                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__.inHouseCallsActive)();
                                                     // VCUI path: link first, exactly as before.
                                                     if (!inHouse)
-                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
+                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
                                                     userDetails = await db.update(chatId, updatedData);
                                                     // In-house: after the update, so the re-call sees the new amount.
                                                     if (inHouse) {
-                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
                                                     }
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
                                                 else {
                                                     if (amount < 30 &&
@@ -56250,14 +56261,14 @@ async function processImage(event) {
                                                             (amount > 25 && !userDetails.picsSent))) {
                                                         if (userDetails.picsSent > 0) {
                                                             const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                            const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getDemoPicsSentTimestamp(chatId);
+                                                            const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getDemoPicsSentTimestamp(chatId);
                                                             const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount);
                                                             // Already sent pics, check weighted score
                                                             if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
                                                                 // High score, upgrade to demo call
                                                                 userDetails.demoGiven = false;
                                                                 if (userDetails.payAmount <= 50) {
-                                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
+                                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
                                                                 }
                                                                 // Reset counters
                                                                 userChatState.pleaseRequestCount = 0;
@@ -56265,23 +56276,23 @@ async function processImage(event) {
                                                             }
                                                             else {
                                                                 // Tell user pics already sent
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
                                                                         "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
                                                                         "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
                                                                     ]),
                                                                 });
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                                 // Increment counters
-                                                                _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementPleaseRequestCount(chatId);
+                                                                _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementPleaseRequestCount(chatId);
                                                                 // picCount handled in database (userDetails.picCount)
                                                             }
                                                         }
                                                         else {
                                                             // Send demo pics (first time or weighted score >= 3)
                                                             try {
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "Wait baby....\nSending you my Nude pics!! 🔥",
                                                                         "Hold on darling...\nTaking my Sexy pics for you!! 💋",
@@ -56289,8 +56300,8 @@ async function processImage(event) {
                                                                     ]),
                                                                 });
                                                                 scheduleProcessImageTask(async () => {
-                                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
-                                                                        file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandles([
+                                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                        file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandles([
                                                                             "dmp1.jpg",
                                                                             "dmp2.jpg",
                                                                             "dmp3.jpg",
@@ -56314,11 +56325,11 @@ async function processImage(event) {
                                                                     }
                                                                     userDetails = await db.update(chatId, updatedData);
                                                                     // Update timestamp in UserState
-                                                                    _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.setDemoPicsSent(chatId, true);
+                                                                    _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.setDemoPicsSent(chatId, true);
                                                                 }, 6000, `processImage.firstDemoPicsFollowup.${chatId}`);
                                                             }
                                                             catch (error) {
-                                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error);
+                                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error);
                                                             }
                                                         }
                                                     }
@@ -56332,20 +56343,20 @@ async function processImage(event) {
                                                             userDetails.callTime < Date.now() - 3 * 60 * 1000) {
                                                             if (amount < 50) {
                                                                 userDetails.demoGiven = false;
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
                                                             }
                                                             else {
                                                                 let updatedAmount = userDetails.payAmount;
                                                                 if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
                                                                     updatedAmount = userDetails.payAmount + 100;
                                                                 }
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(updatedAmount, userDetails, "Re-initiated Call for Full Show");
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(updatedAmount, userDetails, "Re-initiated Call for Full Show");
                                                             }
                                                             (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                                             // await sendMessageWithButton(`, ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`)
                                                         }
                                                         else {
-                                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                     "**Your call is over baby!!**\nPay again if you want more**\n\nNo MONEY? then No SERVICE!!\nDon't WASTE your time dear!!**",
                                                                     "**Your Call finished baby!!**\nPay again for more**\n\nMoney first, then service!!\nStop wasting time Dear!!**"
@@ -56364,11 +56375,11 @@ async function processImage(event) {
                                                                     msg =
                                                                         "**30 Mins VideoCall   :  350₹/-\n1 Hour Full show with Face!!   :   600₹/-** 💋\n\nI'm all alone in my room waiting for you!!\nLet's enjoy together darling...\nPay me and message!! 😘";
                                                                 }
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([msg]),
                                                                 });
                                                                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(15000);
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "**Send me new payment screenshot baby** 💋",
                                                                         "**Show me fresh payment proof darling** 😘",
@@ -56376,17 +56387,17 @@ async function processImage(event) {
                                                                     ]),
                                                                 });
                                                             }, 15000, `processImage.callOverFollowup.${chatId}`);
-                                                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told His Call is Over!! ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                            await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told His Call is Over!! ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                         }
                                                         // Decrement invalid photo count (user sent valid payment)
-                                                        const currentInvalidCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
+                                                        const currentInvalidCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getInvalidPhotoCount(chatId);
                                                         if (currentInvalidCount > 0) {
                                                             userChatState.invalidPhotoCount = currentInvalidCount - 1;
                                                             userChatState.invalidPhotoTimestamp = Date.now();
                                                         }
                                                     }
                                                     else {
-                                                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Ignored PIC - Weird Case`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Ignored PIC - Weird Case`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                     }
                                                 }
                                                 if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ["fmp"])) {
@@ -56397,13 +56408,13 @@ async function processImage(event) {
                                                 if (amount <= userDetails.payAmount &&
                                                     !isWithinPastTenMinutesImage.result) {
                                                     await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`UnWanted Pic Deleted(same/less Amount)\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`UnWanted Pic Deleted(same/less Amount)\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
                                             }
                                         }
                                         else {
                                             await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`WeirdCase Pic Deleted\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                            await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`WeirdCase Pic Deleted\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                         }
                                         // Centralized payAmount update - ensures payAmount is updated for all valid payments
                                         // This handles cases where payAmount might not be updated in specific code paths above
@@ -56431,7 +56442,7 @@ async function processImage(event) {
                                             }
                                             catch (creditError) {
                                                 // A ledger failure must never break the payment flow the user is watching.
-                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
+                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
                                             }
                                         }
                                         if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
@@ -56450,37 +56461,37 @@ async function processImage(event) {
                                         }
                                         catch (error) {
                                             // Payment service must not be withheld because analytics is unavailable.
-                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
+                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
                                         }
                                     }
                                     else {
-                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                             message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([isPaymentProperlyMine.msg]),
                                         });
                                         scheduleProcessImageTask(async () => {
-                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                                 message: `${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.qr}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.link}`,
-                                                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle("./QR.jpg"),
+                                                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandle("./QR.jpg"),
                                             });
                                         }, 20000, `processImage.paymentValidationQr.${chatId}`);
-                                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told: \n${isPaymentProperlyMine.msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told: \n${isPaymentProperlyMine.msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                     }
                                 }
                                 else {
-                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                             `Aww baby...\n\nNot just **${amount}₹**!! 💔\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo,
                                             `Come on darling...\n\n**${amount}₹** is too less!! 😔\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo,
                                             `Sweetie... **${amount}₹** won't be enough!!  💸\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo
                                         ]),
                                     });
-                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Not Just - ${amount}₹`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told Not Just - ${amount}₹`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                 }
                             }
                         }
                         else {
                             await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`PaymentNotMine:MESSAGE_DELETED\nAsked to Pay me!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                            await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`PaymentNotMine:MESSAGE_DELETED\nAsked to Pay me!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                             scheduleProcessImageTask(async () => {
                                 const msg = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "What baby?? **That's not my payment!!** 💔\n\nPay me properly and I'll Suck your Dick 🍆💦",
@@ -56490,7 +56501,7 @@ async function processImage(event) {
                                     "**its Not my Payment darling!!** 💔\n\nSend MY payment and I'll make you cum 🍆💦",
                                     "Oh darling..?? **Wrong screenshot baby!!** 😞\n\nPay ME and I'll be your slut tonight 😈🔥"
                                 ]);
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                         `${msg}\n\nComplete **my payment** and send me the screenshot darling!! 💋`,
                                         `${msg}\n\nFinish **my payment** and show me proof baby!! 😘`,
@@ -56499,23 +56510,23 @@ async function processImage(event) {
                                 });
                             }, 10000, `processImage.paymentNotMineReminder.${chatId}`);
                             // Increment invalid photo count
-                            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementInvalidPhotoCount(chatId);
+                            _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementInvalidPhotoCount(chatId);
                         }
                     }
                 }
                 else {
-                    await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.askToFinishPayment)(event);
+                    await (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.askToFinishPayment)(event);
                 }
             }
         }
         else {
             if (sanitizedData.isPaymentMine) {
-                await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.askToFinishPayment)(event);
+                await (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.askToFinishPayment)(event);
             }
             else {
-                const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
+                const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getInvalidPhotoCount(chatId);
                 if (invalidPhotoCount <= 4) {
-                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                             "Nice 😘",
                             "Looks Good",
@@ -56527,7 +56538,7 @@ async function processImage(event) {
                             "Mmm... 💋"
                         ]),
                     });
-                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, {
                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                             (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
                             (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
@@ -56540,14 +56551,14 @@ async function processImage(event) {
                 }
                 // Increment invalid photo count if inappropriate
                 if (!imageDetails.isPayment) {
-                    _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementInvalidPhotoCount(chatId);
+                    _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementInvalidPhotoCount(chatId);
                 }
             }
         }
-        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
+        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error Processing image");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, "Error Processing image");
     }
 }
 
@@ -69917,6 +69928,8 @@ __webpack_require__.r(__webpack_exports__);
 const LONG_DISCLAIMERS = [
     'not a real transaction', 'not a real payment', 'this is not a real',
     'for entertainment purposes only', 'for entertainment purpose only',
+    // Generator-app stamp seen 2026-10-10 ("FOR ENTERTAINMENT ONLY" on a fake GPay-style receipt).
+    'for entertainment only', 'entertainment only', 'entertainment purposes only', 'entertainment purpose only',
     'for fun purposes only', 'for prank purposes', 'dummy transaction', 'fake transaction',
     'sample transaction', 'this is a sample', 'not an actual transaction',
     'simulated transaction', 'for demonstration purposes only',
@@ -70560,6 +70573,12 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
         attempt = await tryLocalDecision(photoBuffer);
         if (attempt.ok) {
             const legacy = attempt.legacy;
+            // Generator-app disclaimer text ("for entertainment only", "not a real transaction"...) is
+            // deterministic: never credit, and never let mySuperSever (which accepts these) overturn it.
+            if (isProofBlocked(attempt.vision, ctx)) {
+                recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: 'block', remoteConfirm: 'none' });
+                return { ...legacy, proofBlocked: true };
+            }
             if (source === 'local-only' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.isLegacyAccept)(attempt.legacy)) {
                 recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'none' });
                 return legacy;
@@ -70611,6 +70630,23 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
         recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-fallback', finalDecision: snap.wouldDecision, remoteConfirm: 'ran' });
     }
     return details;
+}
+function isProofBlocked(vision, ctx) {
+    try {
+        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_3__.proofCheck)({
+            vision,
+            ctx: { chatId: ctx.chatId, profile: (process.env.dbcoll || '').toLowerCase(), clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: null, now: deps.now() },
+            dbcoll: process.env.dbcoll ?? null,
+        });
+        if (proof.decision !== 'BLOCK')
+            return false;
+        logger.warn(`[vision-shadow] proof BLOCK chat=${ctx.chatId} msg=${ctx.msgId}: ${proof.reasons.join(',')}`);
+        return true;
+    }
+    catch (error) {
+        logger.warn(`[vision-shadow] proof check failed, not blocking: ${String(error?.message ?? error)}`);
+        return false;
+    }
 }
 function raceRemote(work, ms) {
     let timer;
