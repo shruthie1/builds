@@ -1291,11 +1291,17 @@ function seekArg(startSec) {
     const sec = Number(startSec);
     return Number.isFinite(sec) && sec > 0 ? `-ss ${sec.toFixed(3)} ` : '';
 }
+/** A CDN source survives a network blip (reconnects and resumes) instead of stalling the stream. */
+function reconnectArgs(file) {
+    return /^https?:\/\//i.test(file) ? '-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 5 ' : '';
+}
+// Each pipe decodes only its own stream: without -vn the audio process also decoded the whole
+// video (~13% of a core per call on the 2-vCPU VMs, measured 2026-10-10).
 function audioShellCommand(file, audio, ffmpeg = 'ffmpeg', startSec) {
-    return `${ffmpeg} ${seekArg(startSec)}-i ${shellQuote(file)} -v quiet -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
+    return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -vn -v quiet -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
 }
 function videoShellCommand(file, video, ffmpeg = 'ffmpeg', startSec) {
-    return `${ffmpeg} ${seekArg(startSec)}-i ${shellQuote(file)} -v quiet -f rawvideo -r ${video.fps} -pix_fmt yuv420p -vf scale=${video.width}:${video.height}:force_original_aspect_ratio=increase,crop=${video.width}:${video.height},setsar=1 pipe:1`;
+    return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -an -v quiet -f rawvideo -r ${video.fps} -pix_fmt yuv420p -vf scale=${video.width}:${video.height}:force_original_aspect_ratio=increase,crop=${video.width}:${video.height},setsar=1 pipe:1`;
 }
 
 
@@ -40939,7 +40945,10 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
                 limitedCallRequestState.set(chatId, activeCallRequestState);
                 logger.debug(`[EDGE CASE] Requesting another call - chatId: ${chatId}, highestPayAmount: ${userDetails.highestPayAmount}, suppressed: ${suppressedCount}`);
                 try {
-                    await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_16__.scheduleLadder)(chatId, '1');
+                    // In-house: their pending ladder/follow-up already exists, so scheduleLadder would no-op
+                    // and "call me now" would wait for the timer. Ring now instead (once per throttle window).
+                    if (!(await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.recallNowInHouse)(chatId)))
+                        await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_16__.scheduleLadder)(chatId, '1');
                     activeCallRequestState.nextAllowedAt = now + CONSTANTS.LIMITED_CALL_REQUEST_THROTTLE_MS;
                     logger.log("Another call schedule requested via in-process scheduler");
                 }
@@ -46996,7 +47005,7 @@ const callNotEligibleMessages = [
 ];
 /** The user hung up the show early: we call back in a few minutes and resume. */
 const callUserEndedMessages = [
-    `Why did you cut the call baby? 🥺\n\nI'll **call you again**\nin a few mins..\n\nPick up na\nWe'll continue 😘`,
+    `Why did you cut the call baby? 🥺\n\nI'll **call you again**\nin a minute..\n\nPick up na\nWe'll continue 😘`,
     `Arey you cut it in the middle 🙈\n\nI'll call you back soon..\n\n**Show is still pending**\nfor you`,
     `Baby come back 🥺\n\nI'll **call you again** in a bit\n\nI'll start from\nwhere it stopped`,
     `You left so soon? 😏\n\nI'll call you back baby..\n\n**Pick up** this time 💋`,
@@ -49329,7 +49338,8 @@ CallManager.activeInstances = new Map();
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   inHouseCallsActive: () => (/* binding */ inHouseCallsActive),
-/* harmony export */   offerCallOrLink: () => (/* binding */ offerCallOrLink)
+/* harmony export */   offerCallOrLink: () => (/* binding */ offerCallOrLink),
+/* harmony export */   recallNowInHouse: () => (/* binding */ recallNowInHouse)
 /* harmony export */ });
 /* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../messages/messageUtils */ "./src/messages/messageUtils.ts");
 /* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../messages/callMessages */ "./src/messages/callMessages.ts");
@@ -49358,6 +49368,19 @@ async function inHouseCallsActive(callManager) {
     catch {
         return false;
     }
+}
+async function recallNowInHouse(chatId, manager) {
+    const callManager = manager ?? _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager;
+    if (!(await inHouseCallsActive(callManager)))
+        return false;
+    if (!callManager)
+        return false;
+    if (callManager.isOnInHouseCall?.(chatId))
+        return true; // already ringing / on the show
+    if ((await callManager.getInHouse())?.isPrivacyBlocked?.(chatId))
+        return false;
+    callManager.addToQueue(chatId);
+    return true;
 }
 /**
  * "Call me here <VCUI link>" replies. With in-house calls active and a show pending, ring the user
@@ -49658,7 +49681,7 @@ const PRIVACY_MESSAGE = "Change Your Call Settings\n\nPrivacy Settings... I'm un
 const UNANSWERED_RETRY_MS = 3 * 60 * 1000;
 /** Re-call after a show was cut: soon after a network drop, a little later after the user hung up. */
 const DROPPED_RECALL_MS = 30 * 1000;
-const USER_ENDED_RECALL_MS = 3 * 60 * 1000;
+const USER_ENDED_RECALL_MS = 60 * 1000;
 /** At most one automatic retry per chat in this window. */
 const AUTO_RETRY_WINDOW_MS = 30 * 60 * 1000;
 /** A paid caller with nothing pending gets at most one pay-again prompt per window. */
@@ -50452,7 +50475,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.inHouseCallsSwitchState),
 /* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_15__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_16__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.setInHouseCallsOverride)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
@@ -50474,7 +50497,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
 /* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
 /* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+
 
 
 
@@ -50564,7 +50589,7 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_15__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_16__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList({
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_14__.isInHouseCallsEnabled)(),
@@ -50620,6 +50645,7 @@ function createInHouseCallService(client, hooks) {
         maxConcurrentCalls: maxCalls,
         createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_8__.CallEngine(client, {
             logger: engineLogger,
+            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_15__.callVideoParams)(),
             maxConcurrentCalls: maxCalls,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
@@ -50800,6 +50826,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESUME_MAX_AGE_MS: () => (/* binding */ RESUME_MAX_AGE_MS),
 /* harmony export */   RESUME_REWIND_SEC: () => (/* binding */ RESUME_REWIND_SEC),
 /* harmony export */   VIDEO_IDS: () => (/* binding */ VIDEO_IDS),
+/* harmony export */   callVideoParams: () => (/* binding */ callVideoParams),
 /* harmony export */   canCallUser: () => (/* binding */ canCallUser),
 /* harmony export */   classifyService: () => (/* binding */ classifyService),
 /* harmony export */   evaluateCall: () => (/* binding */ evaluateCall),
@@ -50973,6 +51000,27 @@ function evaluateCall(facts, durationSec) {
         endCall = 'VideoStalled';
     const complete = percentage > 90 || endCall === 'videoEnd' || (endCall === 'Manual End' && percentage > 65) || (facts.count ?? 0) > 2;
     return { positionSec: Math.floor(positionSec), percentage, endCall, complete };
+}
+/**
+ * Size/fps of the video we send. 540x960 by default: measured 2026-10-10 on a 2-vCPU VM, 720x1280
+ * cost ~50-70% of a core to encode and ~3 Mbps upstream (weak-signal warnings and stutter on
+ * mobile). INHOUSE_VIDEO_SIZE=WxH (even, 240-1280 / 320-1920) and INHOUSE_VIDEO_FPS (10-30) tune it.
+ */
+function callVideoParams(env = process.env) {
+    const m = /^\s*(\d+)\s*x\s*(\d+)\s*$/i.exec(env.INHOUSE_VIDEO_SIZE ?? '');
+    let width = 540;
+    let height = 960;
+    if (m) {
+        const w = Number(m[1]);
+        const h = Number(m[2]);
+        if (w >= 240 && w <= 1280 && h >= 320 && h <= 1920 && w % 2 === 0 && h % 2 === 0) {
+            width = w;
+            height = h;
+        }
+    }
+    const f = Math.floor(Number(env.INHOUSE_VIDEO_FPS));
+    const fps = Number.isFinite(f) && f >= 10 && f <= 30 ? f : 24;
+    return { width, height, fps };
 }
 
 
