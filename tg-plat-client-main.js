@@ -1,6 +1,4751 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ "../../node_modules/jpeg-js/index.js"
+/*!*******************************************!*\
+  !*** ../../node_modules/jpeg-js/index.js ***!
+  \*******************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+var encode = __webpack_require__(/*! ./lib/encoder */ "../../node_modules/jpeg-js/lib/encoder.js"),
+    decode = __webpack_require__(/*! ./lib/decoder */ "../../node_modules/jpeg-js/lib/decoder.js");
+
+module.exports = {
+  encode: encode,
+  decode: decode
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/jpeg-js/lib/decoder.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/jpeg-js/lib/decoder.js ***!
+  \*************************************************/
+(module) {
+
+/* -*- tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- /
+/* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/*
+   Copyright 2011 notmasteryet
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+// - The JPEG specification can be found in the ITU CCITT Recommendation T.81
+//   (www.w3.org/Graphics/JPEG/itu-t81.pdf)
+// - The JFIF specification can be found in the JPEG File Interchange Format
+//   (www.w3.org/Graphics/JPEG/jfif3.pdf)
+// - The Adobe Application-Specific JPEG markers in the Supporting the DCT Filters
+//   in PostScript Level 2, Technical Note #5116
+//   (partners.adobe.com/public/developer/en/ps/sdk/5116.DCT_Filter.pdf)
+
+var JpegImage = (function jpegImage() {
+  "use strict";
+  var dctZigZag = new Int32Array([
+     0,
+     1,  8,
+    16,  9,  2,
+     3, 10, 17, 24,
+    32, 25, 18, 11, 4,
+     5, 12, 19, 26, 33, 40,
+    48, 41, 34, 27, 20, 13,  6,
+     7, 14, 21, 28, 35, 42, 49, 56,
+    57, 50, 43, 36, 29, 22, 15,
+    23, 30, 37, 44, 51, 58,
+    59, 52, 45, 38, 31,
+    39, 46, 53, 60,
+    61, 54, 47,
+    55, 62,
+    63
+  ]);
+
+  var dctCos1  =  4017   // cos(pi/16)
+  var dctSin1  =   799   // sin(pi/16)
+  var dctCos3  =  3406   // cos(3*pi/16)
+  var dctSin3  =  2276   // sin(3*pi/16)
+  var dctCos6  =  1567   // cos(6*pi/16)
+  var dctSin6  =  3784   // sin(6*pi/16)
+  var dctSqrt2 =  5793   // sqrt(2)
+  var dctSqrt1d2 = 2896  // sqrt(2) / 2
+
+  function constructor() {
+  }
+
+  function buildHuffmanTable(codeLengths, values) {
+    var k = 0, code = [], i, j, length = 16;
+    while (length > 0 && !codeLengths[length - 1])
+      length--;
+    code.push({children: [], index: 0});
+    var p = code[0], q;
+    for (i = 0; i < length; i++) {
+      for (j = 0; j < codeLengths[i]; j++) {
+        p = code.pop();
+        p.children[p.index] = values[k];
+        while (p.index > 0) {
+          if (code.length === 0)
+            throw new Error('Could not recreate Huffman Table');
+          p = code.pop();
+        }
+        p.index++;
+        code.push(p);
+        while (code.length <= i) {
+          code.push(q = {children: [], index: 0});
+          p.children[p.index] = q.children;
+          p = q;
+        }
+        k++;
+      }
+      if (i + 1 < length) {
+        // p here points to last code
+        code.push(q = {children: [], index: 0});
+        p.children[p.index] = q.children;
+        p = q;
+      }
+    }
+    return code[0].children;
+  }
+
+  function decodeScan(data, offset,
+                      frame, components, resetInterval,
+                      spectralStart, spectralEnd,
+                      successivePrev, successive, opts) {
+    var precision = frame.precision;
+    var samplesPerLine = frame.samplesPerLine;
+    var scanLines = frame.scanLines;
+    var mcusPerLine = frame.mcusPerLine;
+    var progressive = frame.progressive;
+    var maxH = frame.maxH, maxV = frame.maxV;
+
+    var startOffset = offset, bitsData = 0, bitsCount = 0;
+    function readBit() {
+      if (bitsCount > 0) {
+        bitsCount--;
+        return (bitsData >> bitsCount) & 1;
+      }
+      bitsData = data[offset++];
+      if (bitsData == 0xFF) {
+        var nextByte = data[offset++];
+        if (nextByte) {
+          throw new Error("unexpected marker: " + ((bitsData << 8) | nextByte).toString(16));
+        }
+        // unstuff 0
+      }
+      bitsCount = 7;
+      return bitsData >>> 7;
+    }
+    function decodeHuffman(tree) {
+      var node = tree, bit;
+      while ((bit = readBit()) !== null) {
+        node = node[bit];
+        if (typeof node === 'number')
+          return node;
+        if (typeof node !== 'object')
+          throw new Error("invalid huffman sequence");
+      }
+      return null;
+    }
+    function receive(length) {
+      var n = 0;
+      while (length > 0) {
+        var bit = readBit();
+        if (bit === null) return;
+        n = (n << 1) | bit;
+        length--;
+      }
+      return n;
+    }
+    function receiveAndExtend(length) {
+      var n = receive(length);
+      if (n >= 1 << (length - 1))
+        return n;
+      return n + (-1 << length) + 1;
+    }
+    function decodeBaseline(component, zz) {
+      var t = decodeHuffman(component.huffmanTableDC);
+      var diff = t === 0 ? 0 : receiveAndExtend(t);
+      zz[0]= (component.pred += diff);
+      var k = 1;
+      while (k < 64) {
+        var rs = decodeHuffman(component.huffmanTableAC);
+        var s = rs & 15, r = rs >> 4;
+        if (s === 0) {
+          if (r < 15)
+            break;
+          k += 16;
+          continue;
+        }
+        k += r;
+        var z = dctZigZag[k];
+        zz[z] = receiveAndExtend(s);
+        k++;
+      }
+    }
+    function decodeDCFirst(component, zz) {
+      var t = decodeHuffman(component.huffmanTableDC);
+      var diff = t === 0 ? 0 : (receiveAndExtend(t) << successive);
+      zz[0] = (component.pred += diff);
+    }
+    function decodeDCSuccessive(component, zz) {
+      zz[0] |= readBit() << successive;
+    }
+    var eobrun = 0;
+    function decodeACFirst(component, zz) {
+      if (eobrun > 0) {
+        eobrun--;
+        return;
+      }
+      var k = spectralStart, e = spectralEnd;
+      while (k <= e) {
+        var rs = decodeHuffman(component.huffmanTableAC);
+        var s = rs & 15, r = rs >> 4;
+        if (s === 0) {
+          if (r < 15) {
+            eobrun = receive(r) + (1 << r) - 1;
+            break;
+          }
+          k += 16;
+          continue;
+        }
+        k += r;
+        var z = dctZigZag[k];
+        zz[z] = receiveAndExtend(s) * (1 << successive);
+        k++;
+      }
+    }
+    var successiveACState = 0, successiveACNextValue;
+    function decodeACSuccessive(component, zz) {
+      var k = spectralStart, e = spectralEnd, r = 0;
+      while (k <= e) {
+        var z = dctZigZag[k];
+        var direction = zz[z] < 0 ? -1 : 1;
+        switch (successiveACState) {
+        case 0: // initial state
+          var rs = decodeHuffman(component.huffmanTableAC);
+          var s = rs & 15, r = rs >> 4;
+          if (s === 0) {
+            if (r < 15) {
+              eobrun = receive(r) + (1 << r);
+              successiveACState = 4;
+            } else {
+              r = 16;
+              successiveACState = 1;
+            }
+          } else {
+            if (s !== 1)
+              throw new Error("invalid ACn encoding");
+            successiveACNextValue = receiveAndExtend(s);
+            successiveACState = r ? 2 : 3;
+          }
+          continue;
+        case 1: // skipping r zero items
+        case 2:
+          if (zz[z])
+            zz[z] += (readBit() << successive) * direction;
+          else {
+            r--;
+            if (r === 0)
+              successiveACState = successiveACState == 2 ? 3 : 0;
+          }
+          break;
+        case 3: // set value for a zero item
+          if (zz[z])
+            zz[z] += (readBit() << successive) * direction;
+          else {
+            zz[z] = successiveACNextValue << successive;
+            successiveACState = 0;
+          }
+          break;
+        case 4: // eob
+          if (zz[z])
+            zz[z] += (readBit() << successive) * direction;
+          break;
+        }
+        k++;
+      }
+      if (successiveACState === 4) {
+        eobrun--;
+        if (eobrun === 0)
+          successiveACState = 0;
+      }
+    }
+    function decodeMcu(component, decode, mcu, row, col) {
+      var mcuRow = (mcu / mcusPerLine) | 0;
+      var mcuCol = mcu % mcusPerLine;
+      var blockRow = mcuRow * component.v + row;
+      var blockCol = mcuCol * component.h + col;
+      // If the block is missing and we're in tolerant mode, just skip it.
+      if (component.blocks[blockRow] === undefined && opts.tolerantDecoding)
+        return;
+      decode(component, component.blocks[blockRow][blockCol]);
+    }
+    function decodeBlock(component, decode, mcu) {
+      var blockRow = (mcu / component.blocksPerLine) | 0;
+      var blockCol = mcu % component.blocksPerLine;
+      // If the block is missing and we're in tolerant mode, just skip it.
+      if (component.blocks[blockRow] === undefined && opts.tolerantDecoding)
+        return;
+      decode(component, component.blocks[blockRow][blockCol]);
+    }
+
+    var componentsLength = components.length;
+    var component, i, j, k, n;
+    var decodeFn;
+    if (progressive) {
+      if (spectralStart === 0)
+        decodeFn = successivePrev === 0 ? decodeDCFirst : decodeDCSuccessive;
+      else
+        decodeFn = successivePrev === 0 ? decodeACFirst : decodeACSuccessive;
+    } else {
+      decodeFn = decodeBaseline;
+    }
+
+    var mcu = 0, marker;
+    var mcuExpected;
+    if (componentsLength == 1) {
+      mcuExpected = components[0].blocksPerLine * components[0].blocksPerColumn;
+    } else {
+      mcuExpected = mcusPerLine * frame.mcusPerColumn;
+    }
+    if (!resetInterval) resetInterval = mcuExpected;
+
+    var h, v;
+    while (mcu < mcuExpected) {
+      // reset interval stuff
+      for (i = 0; i < componentsLength; i++)
+        components[i].pred = 0;
+      eobrun = 0;
+
+      if (componentsLength == 1) {
+        component = components[0];
+        for (n = 0; n < resetInterval; n++) {
+          decodeBlock(component, decodeFn, mcu);
+          mcu++;
+        }
+      } else {
+        for (n = 0; n < resetInterval; n++) {
+          for (i = 0; i < componentsLength; i++) {
+            component = components[i];
+            h = component.h;
+            v = component.v;
+            for (j = 0; j < v; j++) {
+              for (k = 0; k < h; k++) {
+                decodeMcu(component, decodeFn, mcu, j, k);
+              }
+            }
+          }
+          mcu++;
+
+          // If we've reached our expected MCU's, stop decoding
+          if (mcu === mcuExpected) break;
+        }
+      }
+
+      if (mcu === mcuExpected) {
+        // Skip trailing bytes at the end of the scan - until we reach the next marker
+        do {
+          if (data[offset] === 0xFF) {
+            if (data[offset + 1] !== 0x00) {
+              break;
+            }
+          }
+          offset += 1;
+        } while (offset < data.length - 2);
+      }
+
+      // find marker
+      bitsCount = 0;
+      marker = (data[offset] << 8) | data[offset + 1];
+      if (marker < 0xFF00) {
+        throw new Error("marker was not found");
+      }
+
+      if (marker >= 0xFFD0 && marker <= 0xFFD7) { // RSTx
+        offset += 2;
+      }
+      else
+        break;
+    }
+
+    return offset - startOffset;
+  }
+
+  function buildComponentData(frame, component) {
+    var lines = [];
+    var blocksPerLine = component.blocksPerLine;
+    var blocksPerColumn = component.blocksPerColumn;
+    var samplesPerLine = blocksPerLine << 3;
+    // Only 1 used per invocation of this function and garbage collected after invocation, so no need to account for its memory footprint.
+    var R = new Int32Array(64), r = new Uint8Array(64);
+
+    // A port of poppler's IDCT method which in turn is taken from:
+    //   Christoph Loeffler, Adriaan Ligtenberg, George S. Moschytz,
+    //   "Practical Fast 1-D DCT Algorithms with 11 Multiplications",
+    //   IEEE Intl. Conf. on Acoustics, Speech & Signal Processing, 1989,
+    //   988-991.
+    function quantizeAndInverse(zz, dataOut, dataIn) {
+      var qt = component.quantizationTable;
+      var v0, v1, v2, v3, v4, v5, v6, v7, t;
+      var p = dataIn;
+      var i;
+
+      // dequant
+      for (i = 0; i < 64; i++)
+        p[i] = zz[i] * qt[i];
+
+      // inverse DCT on rows
+      for (i = 0; i < 8; ++i) {
+        var row = 8 * i;
+
+        // check for all-zero AC coefficients
+        if (p[1 + row] == 0 && p[2 + row] == 0 && p[3 + row] == 0 &&
+            p[4 + row] == 0 && p[5 + row] == 0 && p[6 + row] == 0 &&
+            p[7 + row] == 0) {
+          t = (dctSqrt2 * p[0 + row] + 512) >> 10;
+          p[0 + row] = t;
+          p[1 + row] = t;
+          p[2 + row] = t;
+          p[3 + row] = t;
+          p[4 + row] = t;
+          p[5 + row] = t;
+          p[6 + row] = t;
+          p[7 + row] = t;
+          continue;
+        }
+
+        // stage 4
+        v0 = (dctSqrt2 * p[0 + row] + 128) >> 8;
+        v1 = (dctSqrt2 * p[4 + row] + 128) >> 8;
+        v2 = p[2 + row];
+        v3 = p[6 + row];
+        v4 = (dctSqrt1d2 * (p[1 + row] - p[7 + row]) + 128) >> 8;
+        v7 = (dctSqrt1d2 * (p[1 + row] + p[7 + row]) + 128) >> 8;
+        v5 = p[3 + row] << 4;
+        v6 = p[5 + row] << 4;
+
+        // stage 3
+        t = (v0 - v1+ 1) >> 1;
+        v0 = (v0 + v1 + 1) >> 1;
+        v1 = t;
+        t = (v2 * dctSin6 + v3 * dctCos6 + 128) >> 8;
+        v2 = (v2 * dctCos6 - v3 * dctSin6 + 128) >> 8;
+        v3 = t;
+        t = (v4 - v6 + 1) >> 1;
+        v4 = (v4 + v6 + 1) >> 1;
+        v6 = t;
+        t = (v7 + v5 + 1) >> 1;
+        v5 = (v7 - v5 + 1) >> 1;
+        v7 = t;
+
+        // stage 2
+        t = (v0 - v3 + 1) >> 1;
+        v0 = (v0 + v3 + 1) >> 1;
+        v3 = t;
+        t = (v1 - v2 + 1) >> 1;
+        v1 = (v1 + v2 + 1) >> 1;
+        v2 = t;
+        t = (v4 * dctSin3 + v7 * dctCos3 + 2048) >> 12;
+        v4 = (v4 * dctCos3 - v7 * dctSin3 + 2048) >> 12;
+        v7 = t;
+        t = (v5 * dctSin1 + v6 * dctCos1 + 2048) >> 12;
+        v5 = (v5 * dctCos1 - v6 * dctSin1 + 2048) >> 12;
+        v6 = t;
+
+        // stage 1
+        p[0 + row] = v0 + v7;
+        p[7 + row] = v0 - v7;
+        p[1 + row] = v1 + v6;
+        p[6 + row] = v1 - v6;
+        p[2 + row] = v2 + v5;
+        p[5 + row] = v2 - v5;
+        p[3 + row] = v3 + v4;
+        p[4 + row] = v3 - v4;
+      }
+
+      // inverse DCT on columns
+      for (i = 0; i < 8; ++i) {
+        var col = i;
+
+        // check for all-zero AC coefficients
+        if (p[1*8 + col] == 0 && p[2*8 + col] == 0 && p[3*8 + col] == 0 &&
+            p[4*8 + col] == 0 && p[5*8 + col] == 0 && p[6*8 + col] == 0 &&
+            p[7*8 + col] == 0) {
+          t = (dctSqrt2 * dataIn[i+0] + 8192) >> 14;
+          p[0*8 + col] = t;
+          p[1*8 + col] = t;
+          p[2*8 + col] = t;
+          p[3*8 + col] = t;
+          p[4*8 + col] = t;
+          p[5*8 + col] = t;
+          p[6*8 + col] = t;
+          p[7*8 + col] = t;
+          continue;
+        }
+
+        // stage 4
+        v0 = (dctSqrt2 * p[0*8 + col] + 2048) >> 12;
+        v1 = (dctSqrt2 * p[4*8 + col] + 2048) >> 12;
+        v2 = p[2*8 + col];
+        v3 = p[6*8 + col];
+        v4 = (dctSqrt1d2 * (p[1*8 + col] - p[7*8 + col]) + 2048) >> 12;
+        v7 = (dctSqrt1d2 * (p[1*8 + col] + p[7*8 + col]) + 2048) >> 12;
+        v5 = p[3*8 + col];
+        v6 = p[5*8 + col];
+
+        // stage 3
+        t = (v0 - v1 + 1) >> 1;
+        v0 = (v0 + v1 + 1) >> 1;
+        v1 = t;
+        t = (v2 * dctSin6 + v3 * dctCos6 + 2048) >> 12;
+        v2 = (v2 * dctCos6 - v3 * dctSin6 + 2048) >> 12;
+        v3 = t;
+        t = (v4 - v6 + 1) >> 1;
+        v4 = (v4 + v6 + 1) >> 1;
+        v6 = t;
+        t = (v7 + v5 + 1) >> 1;
+        v5 = (v7 - v5 + 1) >> 1;
+        v7 = t;
+
+        // stage 2
+        t = (v0 - v3 + 1) >> 1;
+        v0 = (v0 + v3 + 1) >> 1;
+        v3 = t;
+        t = (v1 - v2 + 1) >> 1;
+        v1 = (v1 + v2 + 1) >> 1;
+        v2 = t;
+        t = (v4 * dctSin3 + v7 * dctCos3 + 2048) >> 12;
+        v4 = (v4 * dctCos3 - v7 * dctSin3 + 2048) >> 12;
+        v7 = t;
+        t = (v5 * dctSin1 + v6 * dctCos1 + 2048) >> 12;
+        v5 = (v5 * dctCos1 - v6 * dctSin1 + 2048) >> 12;
+        v6 = t;
+
+        // stage 1
+        p[0*8 + col] = v0 + v7;
+        p[7*8 + col] = v0 - v7;
+        p[1*8 + col] = v1 + v6;
+        p[6*8 + col] = v1 - v6;
+        p[2*8 + col] = v2 + v5;
+        p[5*8 + col] = v2 - v5;
+        p[3*8 + col] = v3 + v4;
+        p[4*8 + col] = v3 - v4;
+      }
+
+      // convert to 8-bit integers
+      for (i = 0; i < 64; ++i) {
+        var sample = 128 + ((p[i] + 8) >> 4);
+        dataOut[i] = sample < 0 ? 0 : sample > 0xFF ? 0xFF : sample;
+      }
+    }
+
+    requestMemoryAllocation(samplesPerLine * blocksPerColumn * 8);
+
+    var i, j;
+    for (var blockRow = 0; blockRow < blocksPerColumn; blockRow++) {
+      var scanLine = blockRow << 3;
+      for (i = 0; i < 8; i++)
+        lines.push(new Uint8Array(samplesPerLine));
+      for (var blockCol = 0; blockCol < blocksPerLine; blockCol++) {
+        quantizeAndInverse(component.blocks[blockRow][blockCol], r, R);
+
+        var offset = 0, sample = blockCol << 3;
+        for (j = 0; j < 8; j++) {
+          var line = lines[scanLine + j];
+          for (i = 0; i < 8; i++)
+            line[sample + i] = r[offset++];
+        }
+      }
+    }
+    return lines;
+  }
+
+  function clampTo8bit(a) {
+    return a < 0 ? 0 : a > 255 ? 255 : a;
+  }
+
+  constructor.prototype = {
+    load: function load(path) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", path, true);
+      xhr.responseType = "arraybuffer";
+      xhr.onload = (function() {
+        // TODO catch parse error
+        var data = new Uint8Array(xhr.response || xhr.mozResponseArrayBuffer);
+        this.parse(data);
+        if (this.onload)
+          this.onload();
+      }).bind(this);
+      xhr.send(null);
+    },
+    parse: function parse(data) {
+      var maxResolutionInPixels = this.opts.maxResolutionInMP * 1000 * 1000;
+      var offset = 0, length = data.length;
+      function readUint16() {
+        var value = (data[offset] << 8) | data[offset + 1];
+        offset += 2;
+        return value;
+      }
+      function readDataBlock() {
+        var length = readUint16();
+        var array = data.subarray(offset, offset + length - 2);
+        offset += array.length;
+        return array;
+      }
+      function prepareComponents(frame) {
+        // According to the JPEG standard, the sampling factor must be between 1 and 4
+        // See https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9abeff46d87bd201a952e276f3e4339556a403a3/libjpeg.txt#L1138-L1146
+        var maxH = 1, maxV = 1;
+        var component, componentId;
+        for (componentId in frame.components) {
+          if (frame.components.hasOwnProperty(componentId)) {
+            component = frame.components[componentId];
+            if (maxH < component.h) maxH = component.h;
+            if (maxV < component.v) maxV = component.v;
+          }
+        }
+        var mcusPerLine = Math.ceil(frame.samplesPerLine / 8 / maxH);
+        var mcusPerColumn = Math.ceil(frame.scanLines / 8 / maxV);
+        for (componentId in frame.components) {
+          if (frame.components.hasOwnProperty(componentId)) {
+            component = frame.components[componentId];
+            var blocksPerLine = Math.ceil(Math.ceil(frame.samplesPerLine / 8) * component.h / maxH);
+            var blocksPerColumn = Math.ceil(Math.ceil(frame.scanLines  / 8) * component.v / maxV);
+            var blocksPerLineForMcu = mcusPerLine * component.h;
+            var blocksPerColumnForMcu = mcusPerColumn * component.v;
+            var blocksToAllocate = blocksPerColumnForMcu * blocksPerLineForMcu;
+            var blocks = [];
+
+            // Each block is a Int32Array of length 64 (4 x 64 = 256 bytes)
+            requestMemoryAllocation(blocksToAllocate * 256);
+
+            for (var i = 0; i < blocksPerColumnForMcu; i++) {
+              var row = [];
+              for (var j = 0; j < blocksPerLineForMcu; j++)
+                row.push(new Int32Array(64));
+              blocks.push(row);
+            }
+            component.blocksPerLine = blocksPerLine;
+            component.blocksPerColumn = blocksPerColumn;
+            component.blocks = blocks;
+          }
+        }
+        frame.maxH = maxH;
+        frame.maxV = maxV;
+        frame.mcusPerLine = mcusPerLine;
+        frame.mcusPerColumn = mcusPerColumn;
+      }
+      var jfif = null;
+      var adobe = null;
+      var pixels = null;
+      var frame, resetInterval;
+      var quantizationTables = [], frames = [];
+      var huffmanTablesAC = [], huffmanTablesDC = [];
+      var fileMarker = readUint16();
+      var malformedDataOffset = -1;
+      this.comments = [];
+      if (fileMarker != 0xFFD8) { // SOI (Start of Image)
+        throw new Error("SOI not found");
+      }
+
+      fileMarker = readUint16();
+      while (fileMarker != 0xFFD9) { // EOI (End of image)
+        var i, j, l;
+        switch(fileMarker) {
+          case 0xFF00: break;
+          case 0xFFE0: // APP0 (Application Specific)
+          case 0xFFE1: // APP1
+          case 0xFFE2: // APP2
+          case 0xFFE3: // APP3
+          case 0xFFE4: // APP4
+          case 0xFFE5: // APP5
+          case 0xFFE6: // APP6
+          case 0xFFE7: // APP7
+          case 0xFFE8: // APP8
+          case 0xFFE9: // APP9
+          case 0xFFEA: // APP10
+          case 0xFFEB: // APP11
+          case 0xFFEC: // APP12
+          case 0xFFED: // APP13
+          case 0xFFEE: // APP14
+          case 0xFFEF: // APP15
+          case 0xFFFE: // COM (Comment)
+            var appData = readDataBlock();
+
+            if (fileMarker === 0xFFFE) {
+              var comment = String.fromCharCode.apply(null, appData);
+              this.comments.push(comment);
+            }
+
+            if (fileMarker === 0xFFE0) {
+              if (appData[0] === 0x4A && appData[1] === 0x46 && appData[2] === 0x49 &&
+                appData[3] === 0x46 && appData[4] === 0) { // 'JFIF\x00'
+                jfif = {
+                  version: { major: appData[5], minor: appData[6] },
+                  densityUnits: appData[7],
+                  xDensity: (appData[8] << 8) | appData[9],
+                  yDensity: (appData[10] << 8) | appData[11],
+                  thumbWidth: appData[12],
+                  thumbHeight: appData[13],
+                  thumbData: appData.subarray(14, 14 + 3 * appData[12] * appData[13])
+                };
+              }
+            }
+            // TODO APP1 - Exif
+            if (fileMarker === 0xFFE1) {
+              if (appData[0] === 0x45 &&
+                appData[1] === 0x78 &&
+                appData[2] === 0x69 &&
+                appData[3] === 0x66 &&
+                appData[4] === 0) { // 'EXIF\x00'
+                this.exifBuffer = appData.subarray(5, appData.length);
+              }
+            }
+
+            if (fileMarker === 0xFFEE) {
+              if (appData[0] === 0x41 && appData[1] === 0x64 && appData[2] === 0x6F &&
+                appData[3] === 0x62 && appData[4] === 0x65 && appData[5] === 0) { // 'Adobe\x00'
+                adobe = {
+                  version: appData[6],
+                  flags0: (appData[7] << 8) | appData[8],
+                  flags1: (appData[9] << 8) | appData[10],
+                  transformCode: appData[11]
+                };
+              }
+            }
+            break;
+
+          case 0xFFDB: // DQT (Define Quantization Tables)
+            var quantizationTablesLength = readUint16();
+            var quantizationTablesEnd = quantizationTablesLength + offset - 2;
+            while (offset < quantizationTablesEnd) {
+              var quantizationTableSpec = data[offset++];
+              requestMemoryAllocation(64 * 4);
+              var tableData = new Int32Array(64);
+              if ((quantizationTableSpec >> 4) === 0) { // 8 bit values
+                for (j = 0; j < 64; j++) {
+                  var z = dctZigZag[j];
+                  tableData[z] = data[offset++];
+                }
+              } else if ((quantizationTableSpec >> 4) === 1) { //16 bit
+                for (j = 0; j < 64; j++) {
+                  var z = dctZigZag[j];
+                  tableData[z] = readUint16();
+                }
+              } else
+                throw new Error("DQT: invalid table spec");
+              quantizationTables[quantizationTableSpec & 15] = tableData;
+            }
+            break;
+
+          case 0xFFC0: // SOF0 (Start of Frame, Baseline DCT)
+          case 0xFFC1: // SOF1 (Start of Frame, Extended DCT)
+          case 0xFFC2: // SOF2 (Start of Frame, Progressive DCT)
+            readUint16(); // skip data length
+            frame = {};
+            frame.extended = (fileMarker === 0xFFC1);
+            frame.progressive = (fileMarker === 0xFFC2);
+            frame.precision = data[offset++];
+            frame.scanLines = readUint16();
+            frame.samplesPerLine = readUint16();
+            frame.components = {};
+            frame.componentsOrder = [];
+
+            var pixelsInFrame = frame.scanLines * frame.samplesPerLine;
+            if (pixelsInFrame > maxResolutionInPixels) {
+              var exceededAmount = Math.ceil((pixelsInFrame - maxResolutionInPixels) / 1e6);
+              throw new Error(`maxResolutionInMP limit exceeded by ${exceededAmount}MP`);
+            }
+
+            var componentsCount = data[offset++], componentId;
+            var maxH = 0, maxV = 0;
+            for (i = 0; i < componentsCount; i++) {
+              componentId = data[offset];
+              var h = data[offset + 1] >> 4;
+              var v = data[offset + 1] & 15;
+              var qId = data[offset + 2];
+
+              if ( h <= 0 || v <= 0 ) {
+                throw new Error('Invalid sampling factor, expected values above 0');
+              }
+
+              frame.componentsOrder.push(componentId);
+              frame.components[componentId] = {
+                h: h,
+                v: v,
+                quantizationIdx: qId
+              };
+              offset += 3;
+            }
+            prepareComponents(frame);
+            frames.push(frame);
+            break;
+
+          case 0xFFC4: // DHT (Define Huffman Tables)
+            var huffmanLength = readUint16();
+            for (i = 2; i < huffmanLength;) {
+              var huffmanTableSpec = data[offset++];
+              var codeLengths = new Uint8Array(16);
+              var codeLengthSum = 0;
+              for (j = 0; j < 16; j++, offset++) {
+                codeLengthSum += (codeLengths[j] = data[offset]);
+              }
+              requestMemoryAllocation(16 + codeLengthSum);
+              var huffmanValues = new Uint8Array(codeLengthSum);
+              for (j = 0; j < codeLengthSum; j++, offset++)
+                huffmanValues[j] = data[offset];
+              i += 17 + codeLengthSum;
+
+              ((huffmanTableSpec >> 4) === 0 ?
+                huffmanTablesDC : huffmanTablesAC)[huffmanTableSpec & 15] =
+                buildHuffmanTable(codeLengths, huffmanValues);
+            }
+            break;
+
+          case 0xFFDD: // DRI (Define Restart Interval)
+            readUint16(); // skip data length
+            resetInterval = readUint16();
+            break;
+
+          case 0xFFDC: // Number of Lines marker
+            readUint16() // skip data length
+            readUint16() // Ignore this data since it represents the image height
+            break;
+            
+          case 0xFFDA: // SOS (Start of Scan)
+            var scanLength = readUint16();
+            var selectorsCount = data[offset++];
+            var components = [], component;
+            for (i = 0; i < selectorsCount; i++) {
+              component = frame.components[data[offset++]];
+              var tableSpec = data[offset++];
+              component.huffmanTableDC = huffmanTablesDC[tableSpec >> 4];
+              component.huffmanTableAC = huffmanTablesAC[tableSpec & 15];
+              components.push(component);
+            }
+            var spectralStart = data[offset++];
+            var spectralEnd = data[offset++];
+            var successiveApproximation = data[offset++];
+            var processed = decodeScan(data, offset,
+              frame, components, resetInterval,
+              spectralStart, spectralEnd,
+              successiveApproximation >> 4, successiveApproximation & 15, this.opts);
+            offset += processed;
+            break;
+
+          case 0xFFFF: // Fill bytes
+            if (data[offset] !== 0xFF) { // Avoid skipping a valid marker.
+              offset--;
+            }
+            break;
+          default:
+            if (data[offset - 3] == 0xFF &&
+                data[offset - 2] >= 0xC0 && data[offset - 2] <= 0xFE) {
+              // could be incorrect encoding -- last 0xFF byte of the previous
+              // block was eaten by the encoder
+              offset -= 3;
+              break;
+            }
+            else if (fileMarker === 0xE0 || fileMarker == 0xE1) {
+              // Recover from malformed APP1 markers popular in some phone models.
+              // See https://github.com/eugeneware/jpeg-js/issues/82
+              if (malformedDataOffset !== -1) {
+                throw new Error(`first unknown JPEG marker at offset ${malformedDataOffset.toString(16)}, second unknown JPEG marker ${fileMarker.toString(16)} at offset ${(offset - 1).toString(16)}`);
+              }
+              malformedDataOffset = offset - 1;
+              const nextOffset = readUint16();
+              if (data[offset + nextOffset - 2] === 0xFF) {
+                offset += nextOffset - 2;
+                break;
+              }
+            }
+            throw new Error("unknown JPEG marker " + fileMarker.toString(16));
+        }
+        fileMarker = readUint16();
+      }
+      if (frames.length != 1)
+        throw new Error("only single frame JPEGs supported");
+
+      // set each frame's components quantization table
+      for (var i = 0; i < frames.length; i++) {
+        var cp = frames[i].components;
+        for (var j in cp) {
+          cp[j].quantizationTable = quantizationTables[cp[j].quantizationIdx];
+          delete cp[j].quantizationIdx;
+        }
+      }
+
+      this.width = frame.samplesPerLine;
+      this.height = frame.scanLines;
+      this.jfif = jfif;
+      this.adobe = adobe;
+      this.components = [];
+      for (var i = 0; i < frame.componentsOrder.length; i++) {
+        var component = frame.components[frame.componentsOrder[i]];
+        this.components.push({
+          lines: buildComponentData(frame, component),
+          scaleX: component.h / frame.maxH,
+          scaleY: component.v / frame.maxV
+        });
+      }
+    },
+    getData: function getData(width, height) {
+      var scaleX = this.width / width, scaleY = this.height / height;
+
+      var component1, component2, component3, component4;
+      var component1Line, component2Line, component3Line, component4Line;
+      var x, y;
+      var offset = 0;
+      var Y, Cb, Cr, K, C, M, Ye, R, G, B;
+      var colorTransform;
+      var dataLength = width * height * this.components.length;
+      requestMemoryAllocation(dataLength);
+      var data = new Uint8Array(dataLength);
+      switch (this.components.length) {
+        case 1:
+          component1 = this.components[0];
+          for (y = 0; y < height; y++) {
+            component1Line = component1.lines[0 | (y * component1.scaleY * scaleY)];
+            for (x = 0; x < width; x++) {
+              Y = component1Line[0 | (x * component1.scaleX * scaleX)];
+
+              data[offset++] = Y;
+            }
+          }
+          break;
+        case 2:
+          // PDF might compress two component data in custom colorspace
+          component1 = this.components[0];
+          component2 = this.components[1];
+          for (y = 0; y < height; y++) {
+            component1Line = component1.lines[0 | (y * component1.scaleY * scaleY)];
+            component2Line = component2.lines[0 | (y * component2.scaleY * scaleY)];
+            for (x = 0; x < width; x++) {
+              Y = component1Line[0 | (x * component1.scaleX * scaleX)];
+              data[offset++] = Y;
+              Y = component2Line[0 | (x * component2.scaleX * scaleX)];
+              data[offset++] = Y;
+            }
+          }
+          break;
+        case 3:
+          // The default transform for three components is true
+          colorTransform = true;
+          // The adobe transform marker overrides any previous setting
+          if (this.adobe && this.adobe.transformCode)
+            colorTransform = true;
+          else if (typeof this.opts.colorTransform !== 'undefined')
+            colorTransform = !!this.opts.colorTransform;
+
+          component1 = this.components[0];
+          component2 = this.components[1];
+          component3 = this.components[2];
+          for (y = 0; y < height; y++) {
+            component1Line = component1.lines[0 | (y * component1.scaleY * scaleY)];
+            component2Line = component2.lines[0 | (y * component2.scaleY * scaleY)];
+            component3Line = component3.lines[0 | (y * component3.scaleY * scaleY)];
+            for (x = 0; x < width; x++) {
+              if (!colorTransform) {
+                R = component1Line[0 | (x * component1.scaleX * scaleX)];
+                G = component2Line[0 | (x * component2.scaleX * scaleX)];
+                B = component3Line[0 | (x * component3.scaleX * scaleX)];
+              } else {
+                Y = component1Line[0 | (x * component1.scaleX * scaleX)];
+                Cb = component2Line[0 | (x * component2.scaleX * scaleX)];
+                Cr = component3Line[0 | (x * component3.scaleX * scaleX)];
+
+                R = clampTo8bit(Y + 1.402 * (Cr - 128));
+                G = clampTo8bit(Y - 0.3441363 * (Cb - 128) - 0.71413636 * (Cr - 128));
+                B = clampTo8bit(Y + 1.772 * (Cb - 128));
+              }
+
+              data[offset++] = R;
+              data[offset++] = G;
+              data[offset++] = B;
+            }
+          }
+          break;
+        case 4:
+          if (!this.adobe)
+            throw new Error('Unsupported color mode (4 components)');
+          // The default transform for four components is false
+          colorTransform = false;
+          // The adobe transform marker overrides any previous setting
+          if (this.adobe && this.adobe.transformCode)
+            colorTransform = true;
+          else if (typeof this.opts.colorTransform !== 'undefined')
+            colorTransform = !!this.opts.colorTransform;
+
+          component1 = this.components[0];
+          component2 = this.components[1];
+          component3 = this.components[2];
+          component4 = this.components[3];
+          for (y = 0; y < height; y++) {
+            component1Line = component1.lines[0 | (y * component1.scaleY * scaleY)];
+            component2Line = component2.lines[0 | (y * component2.scaleY * scaleY)];
+            component3Line = component3.lines[0 | (y * component3.scaleY * scaleY)];
+            component4Line = component4.lines[0 | (y * component4.scaleY * scaleY)];
+            for (x = 0; x < width; x++) {
+              if (!colorTransform) {
+                C = component1Line[0 | (x * component1.scaleX * scaleX)];
+                M = component2Line[0 | (x * component2.scaleX * scaleX)];
+                Ye = component3Line[0 | (x * component3.scaleX * scaleX)];
+                K = component4Line[0 | (x * component4.scaleX * scaleX)];
+              } else {
+                Y = component1Line[0 | (x * component1.scaleX * scaleX)];
+                Cb = component2Line[0 | (x * component2.scaleX * scaleX)];
+                Cr = component3Line[0 | (x * component3.scaleX * scaleX)];
+                K = component4Line[0 | (x * component4.scaleX * scaleX)];
+
+                C = 255 - clampTo8bit(Y + 1.402 * (Cr - 128));
+                M = 255 - clampTo8bit(Y - 0.3441363 * (Cb - 128) - 0.71413636 * (Cr - 128));
+                Ye = 255 - clampTo8bit(Y + 1.772 * (Cb - 128));
+              }
+              data[offset++] = 255-C;
+              data[offset++] = 255-M;
+              data[offset++] = 255-Ye;
+              data[offset++] = 255-K;
+            }
+          }
+          break;
+        default:
+          throw new Error('Unsupported color mode');
+      }
+      return data;
+    },
+    copyToImageData: function copyToImageData(imageData, formatAsRGBA) {
+      var width = imageData.width, height = imageData.height;
+      var imageDataArray = imageData.data;
+      var data = this.getData(width, height);
+      var i = 0, j = 0, x, y;
+      var Y, K, C, M, R, G, B;
+      switch (this.components.length) {
+        case 1:
+          for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+              Y = data[i++];
+
+              imageDataArray[j++] = Y;
+              imageDataArray[j++] = Y;
+              imageDataArray[j++] = Y;
+              if (formatAsRGBA) {
+                imageDataArray[j++] = 255;
+              }
+            }
+          }
+          break;
+        case 3:
+          for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+              R = data[i++];
+              G = data[i++];
+              B = data[i++];
+
+              imageDataArray[j++] = R;
+              imageDataArray[j++] = G;
+              imageDataArray[j++] = B;
+              if (formatAsRGBA) {
+                imageDataArray[j++] = 255;
+              }
+            }
+          }
+          break;
+        case 4:
+          for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+              C = data[i++];
+              M = data[i++];
+              Y = data[i++];
+              K = data[i++];
+
+              R = 255 - clampTo8bit(C * (1 - K / 255) + K);
+              G = 255 - clampTo8bit(M * (1 - K / 255) + K);
+              B = 255 - clampTo8bit(Y * (1 - K / 255) + K);
+
+              imageDataArray[j++] = R;
+              imageDataArray[j++] = G;
+              imageDataArray[j++] = B;
+              if (formatAsRGBA) {
+                imageDataArray[j++] = 255;
+              }
+            }
+          }
+          break;
+        default:
+          throw new Error('Unsupported color mode');
+      }
+    }
+  };
+
+
+  // We cap the amount of memory used by jpeg-js to avoid unexpected OOMs from untrusted content.
+  var totalBytesAllocated = 0;
+  var maxMemoryUsageBytes = 0;
+  function requestMemoryAllocation(increaseAmount = 0) {
+    var totalMemoryImpactBytes = totalBytesAllocated + increaseAmount;
+    if (totalMemoryImpactBytes > maxMemoryUsageBytes) {
+      var exceededAmount = Math.ceil((totalMemoryImpactBytes - maxMemoryUsageBytes) / 1024 / 1024);
+      throw new Error(`maxMemoryUsageInMB limit exceeded by at least ${exceededAmount}MB`);
+    }
+
+    totalBytesAllocated = totalMemoryImpactBytes;
+  }
+
+  constructor.resetMaxMemoryUsage = function (maxMemoryUsageBytes_) {
+    totalBytesAllocated = 0;
+    maxMemoryUsageBytes = maxMemoryUsageBytes_;
+  };
+
+  constructor.getBytesAllocated = function () {
+    return totalBytesAllocated;
+  };
+
+  constructor.requestMemoryAllocation = requestMemoryAllocation;
+
+  return constructor;
+})();
+
+if (true) {
+	module.exports = decode;
+} else // removed by dead control flow
+{}
+
+function decode(jpegData, userOpts = {}) {
+  var defaultOpts = {
+    // "undefined" means "Choose whether to transform colors based on the image’s color model."
+    colorTransform: undefined,
+    useTArray: false,
+    formatAsRGBA: true,
+    tolerantDecoding: true,
+    maxResolutionInMP: 100, // Don't decode more than 100 megapixels
+    maxMemoryUsageInMB: 512, // Don't decode if memory footprint is more than 512MB
+  };
+
+  var opts = {...defaultOpts, ...userOpts};
+  var arr = new Uint8Array(jpegData);
+  var decoder = new JpegImage();
+  decoder.opts = opts;
+  // If this constructor ever supports async decoding this will need to be done differently.
+  // Until then, treating as singleton limit is fine.
+  JpegImage.resetMaxMemoryUsage(opts.maxMemoryUsageInMB * 1024 * 1024);
+  decoder.parse(arr);
+
+  var channels = (opts.formatAsRGBA) ? 4 : 3;
+  var bytesNeeded = decoder.width * decoder.height * channels;
+  try {
+    JpegImage.requestMemoryAllocation(bytesNeeded);
+    var image = {
+      width: decoder.width,
+      height: decoder.height,
+      exifBuffer: decoder.exifBuffer,
+      data: opts.useTArray ?
+        new Uint8Array(bytesNeeded) :
+        Buffer.alloc(bytesNeeded)
+    };
+    if(decoder.comments.length > 0) {
+      image["comments"] = decoder.comments;
+    }
+  } catch (err) {
+    if (err instanceof RangeError) {
+      throw new Error("Could not allocate enough memory for the image. " +
+                      "Required: " + bytesNeeded);
+    } 
+    
+    if (err instanceof ReferenceError) {
+      if (err.message === "Buffer is not defined") {
+        throw new Error("Buffer is not globally defined in this environment. " +
+                        "Consider setting useTArray to true");
+      }
+    }
+    throw err;
+  }
+
+  decoder.copyToImageData(image, opts.formatAsRGBA);
+
+  return image;
+}
+
+
+/***/ },
+
+/***/ "../../node_modules/jpeg-js/lib/encoder.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/jpeg-js/lib/encoder.js ***!
+  \*************************************************/
+(module) {
+
+/*
+  Copyright (c) 2008, Adobe Systems Incorporated
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without 
+  modification, are permitted provided that the following conditions are
+  met:
+
+  * Redistributions of source code must retain the above copyright notice, 
+    this list of conditions and the following disclaimer.
+  
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the 
+    documentation and/or other materials provided with the distribution.
+  
+  * Neither the name of Adobe Systems Incorporated nor the names of its 
+    contributors may be used to endorse or promote products derived from 
+    this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR 
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+/*
+JPEG encoder ported to JavaScript and optimized by Andreas Ritter, www.bytestrom.eu, 11/2009
+
+Basic GUI blocking jpeg encoder
+*/
+
+var btoa = btoa || function(buf) {
+  return Buffer.from(buf).toString('base64');
+};
+
+function JPEGEncoder(quality) {
+  var self = this;
+	var fround = Math.round;
+	var ffloor = Math.floor;
+	var YTable = new Array(64);
+	var UVTable = new Array(64);
+	var fdtbl_Y = new Array(64);
+	var fdtbl_UV = new Array(64);
+	var YDC_HT;
+	var UVDC_HT;
+	var YAC_HT;
+	var UVAC_HT;
+	
+	var bitcode = new Array(65535);
+	var category = new Array(65535);
+	var outputfDCTQuant = new Array(64);
+	var DU = new Array(64);
+	var byteout = [];
+	var bytenew = 0;
+	var bytepos = 7;
+	
+	var YDU = new Array(64);
+	var UDU = new Array(64);
+	var VDU = new Array(64);
+	var clt = new Array(256);
+	var RGB_YUV_TABLE = new Array(2048);
+	var currentQuality;
+	
+	var ZigZag = [
+			 0, 1, 5, 6,14,15,27,28,
+			 2, 4, 7,13,16,26,29,42,
+			 3, 8,12,17,25,30,41,43,
+			 9,11,18,24,31,40,44,53,
+			10,19,23,32,39,45,52,54,
+			20,22,33,38,46,51,55,60,
+			21,34,37,47,50,56,59,61,
+			35,36,48,49,57,58,62,63
+		];
+	
+	var std_dc_luminance_nrcodes = [0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0];
+	var std_dc_luminance_values = [0,1,2,3,4,5,6,7,8,9,10,11];
+	var std_ac_luminance_nrcodes = [0,0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,0x7d];
+	var std_ac_luminance_values = [
+			0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,
+			0x21,0x31,0x41,0x06,0x13,0x51,0x61,0x07,
+			0x22,0x71,0x14,0x32,0x81,0x91,0xa1,0x08,
+			0x23,0x42,0xb1,0xc1,0x15,0x52,0xd1,0xf0,
+			0x24,0x33,0x62,0x72,0x82,0x09,0x0a,0x16,
+			0x17,0x18,0x19,0x1a,0x25,0x26,0x27,0x28,
+			0x29,0x2a,0x34,0x35,0x36,0x37,0x38,0x39,
+			0x3a,0x43,0x44,0x45,0x46,0x47,0x48,0x49,
+			0x4a,0x53,0x54,0x55,0x56,0x57,0x58,0x59,
+			0x5a,0x63,0x64,0x65,0x66,0x67,0x68,0x69,
+			0x6a,0x73,0x74,0x75,0x76,0x77,0x78,0x79,
+			0x7a,0x83,0x84,0x85,0x86,0x87,0x88,0x89,
+			0x8a,0x92,0x93,0x94,0x95,0x96,0x97,0x98,
+			0x99,0x9a,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,
+			0xa8,0xa9,0xaa,0xb2,0xb3,0xb4,0xb5,0xb6,
+			0xb7,0xb8,0xb9,0xba,0xc2,0xc3,0xc4,0xc5,
+			0xc6,0xc7,0xc8,0xc9,0xca,0xd2,0xd3,0xd4,
+			0xd5,0xd6,0xd7,0xd8,0xd9,0xda,0xe1,0xe2,
+			0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xea,
+			0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,
+			0xf9,0xfa
+		];
+	
+	var std_dc_chrominance_nrcodes = [0,0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0];
+	var std_dc_chrominance_values = [0,1,2,3,4,5,6,7,8,9,10,11];
+	var std_ac_chrominance_nrcodes = [0,0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,0x77];
+	var std_ac_chrominance_values = [
+			0x00,0x01,0x02,0x03,0x11,0x04,0x05,0x21,
+			0x31,0x06,0x12,0x41,0x51,0x07,0x61,0x71,
+			0x13,0x22,0x32,0x81,0x08,0x14,0x42,0x91,
+			0xa1,0xb1,0xc1,0x09,0x23,0x33,0x52,0xf0,
+			0x15,0x62,0x72,0xd1,0x0a,0x16,0x24,0x34,
+			0xe1,0x25,0xf1,0x17,0x18,0x19,0x1a,0x26,
+			0x27,0x28,0x29,0x2a,0x35,0x36,0x37,0x38,
+			0x39,0x3a,0x43,0x44,0x45,0x46,0x47,0x48,
+			0x49,0x4a,0x53,0x54,0x55,0x56,0x57,0x58,
+			0x59,0x5a,0x63,0x64,0x65,0x66,0x67,0x68,
+			0x69,0x6a,0x73,0x74,0x75,0x76,0x77,0x78,
+			0x79,0x7a,0x82,0x83,0x84,0x85,0x86,0x87,
+			0x88,0x89,0x8a,0x92,0x93,0x94,0x95,0x96,
+			0x97,0x98,0x99,0x9a,0xa2,0xa3,0xa4,0xa5,
+			0xa6,0xa7,0xa8,0xa9,0xaa,0xb2,0xb3,0xb4,
+			0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xc2,0xc3,
+			0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xd2,
+			0xd3,0xd4,0xd5,0xd6,0xd7,0xd8,0xd9,0xda,
+			0xe2,0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,
+			0xea,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,
+			0xf9,0xfa
+		];
+	
+	function initQuantTables(sf){
+			var YQT = [
+				16, 11, 10, 16, 24, 40, 51, 61,
+				12, 12, 14, 19, 26, 58, 60, 55,
+				14, 13, 16, 24, 40, 57, 69, 56,
+				14, 17, 22, 29, 51, 87, 80, 62,
+				18, 22, 37, 56, 68,109,103, 77,
+				24, 35, 55, 64, 81,104,113, 92,
+				49, 64, 78, 87,103,121,120,101,
+				72, 92, 95, 98,112,100,103, 99
+			];
+			
+			for (var i = 0; i < 64; i++) {
+				var t = ffloor((YQT[i]*sf+50)/100);
+				if (t < 1) {
+					t = 1;
+				} else if (t > 255) {
+					t = 255;
+				}
+				YTable[ZigZag[i]] = t;
+			}
+			var UVQT = [
+				17, 18, 24, 47, 99, 99, 99, 99,
+				18, 21, 26, 66, 99, 99, 99, 99,
+				24, 26, 56, 99, 99, 99, 99, 99,
+				47, 66, 99, 99, 99, 99, 99, 99,
+				99, 99, 99, 99, 99, 99, 99, 99,
+				99, 99, 99, 99, 99, 99, 99, 99,
+				99, 99, 99, 99, 99, 99, 99, 99,
+				99, 99, 99, 99, 99, 99, 99, 99
+			];
+			for (var j = 0; j < 64; j++) {
+				var u = ffloor((UVQT[j]*sf+50)/100);
+				if (u < 1) {
+					u = 1;
+				} else if (u > 255) {
+					u = 255;
+				}
+				UVTable[ZigZag[j]] = u;
+			}
+			var aasf = [
+				1.0, 1.387039845, 1.306562965, 1.175875602,
+				1.0, 0.785694958, 0.541196100, 0.275899379
+			];
+			var k = 0;
+			for (var row = 0; row < 8; row++)
+			{
+				for (var col = 0; col < 8; col++)
+				{
+					fdtbl_Y[k]  = (1.0 / (YTable [ZigZag[k]] * aasf[row] * aasf[col] * 8.0));
+					fdtbl_UV[k] = (1.0 / (UVTable[ZigZag[k]] * aasf[row] * aasf[col] * 8.0));
+					k++;
+				}
+			}
+		}
+		
+		function computeHuffmanTbl(nrcodes, std_table){
+			var codevalue = 0;
+			var pos_in_table = 0;
+			var HT = new Array();
+			for (var k = 1; k <= 16; k++) {
+				for (var j = 1; j <= nrcodes[k]; j++) {
+					HT[std_table[pos_in_table]] = [];
+					HT[std_table[pos_in_table]][0] = codevalue;
+					HT[std_table[pos_in_table]][1] = k;
+					pos_in_table++;
+					codevalue++;
+				}
+				codevalue*=2;
+			}
+			return HT;
+		}
+		
+		function initHuffmanTbl()
+		{
+			YDC_HT = computeHuffmanTbl(std_dc_luminance_nrcodes,std_dc_luminance_values);
+			UVDC_HT = computeHuffmanTbl(std_dc_chrominance_nrcodes,std_dc_chrominance_values);
+			YAC_HT = computeHuffmanTbl(std_ac_luminance_nrcodes,std_ac_luminance_values);
+			UVAC_HT = computeHuffmanTbl(std_ac_chrominance_nrcodes,std_ac_chrominance_values);
+		}
+	
+		function initCategoryNumber()
+		{
+			var nrlower = 1;
+			var nrupper = 2;
+			for (var cat = 1; cat <= 15; cat++) {
+				//Positive numbers
+				for (var nr = nrlower; nr<nrupper; nr++) {
+					category[32767+nr] = cat;
+					bitcode[32767+nr] = [];
+					bitcode[32767+nr][1] = cat;
+					bitcode[32767+nr][0] = nr;
+				}
+				//Negative numbers
+				for (var nrneg =-(nrupper-1); nrneg<=-nrlower; nrneg++) {
+					category[32767+nrneg] = cat;
+					bitcode[32767+nrneg] = [];
+					bitcode[32767+nrneg][1] = cat;
+					bitcode[32767+nrneg][0] = nrupper-1+nrneg;
+				}
+				nrlower <<= 1;
+				nrupper <<= 1;
+			}
+		}
+		
+		function initRGBYUVTable() {
+			for(var i = 0; i < 256;i++) {
+				RGB_YUV_TABLE[i]      		=  19595 * i;
+				RGB_YUV_TABLE[(i+ 256)>>0] 	=  38470 * i;
+				RGB_YUV_TABLE[(i+ 512)>>0] 	=   7471 * i + 0x8000;
+				RGB_YUV_TABLE[(i+ 768)>>0] 	= -11059 * i;
+				RGB_YUV_TABLE[(i+1024)>>0] 	= -21709 * i;
+				RGB_YUV_TABLE[(i+1280)>>0] 	=  32768 * i + 0x807FFF;
+				RGB_YUV_TABLE[(i+1536)>>0] 	= -27439 * i;
+				RGB_YUV_TABLE[(i+1792)>>0] 	= - 5329 * i;
+			}
+		}
+		
+		// IO functions
+		function writeBits(bs)
+		{
+			var value = bs[0];
+			var posval = bs[1]-1;
+			while ( posval >= 0 ) {
+				if (value & (1 << posval) ) {
+					bytenew |= (1 << bytepos);
+				}
+				posval--;
+				bytepos--;
+				if (bytepos < 0) {
+					if (bytenew == 0xFF) {
+						writeByte(0xFF);
+						writeByte(0);
+					}
+					else {
+						writeByte(bytenew);
+					}
+					bytepos=7;
+					bytenew=0;
+				}
+			}
+		}
+	
+		function writeByte(value)
+		{
+			//byteout.push(clt[value]); // write char directly instead of converting later
+      byteout.push(value);
+		}
+	
+		function writeWord(value)
+		{
+			writeByte((value>>8)&0xFF);
+			writeByte((value   )&0xFF);
+		}
+		
+		// DCT & quantization core
+		function fDCTQuant(data, fdtbl)
+		{
+			var d0, d1, d2, d3, d4, d5, d6, d7;
+			/* Pass 1: process rows. */
+			var dataOff=0;
+			var i;
+			var I8 = 8;
+			var I64 = 64;
+			for (i=0; i<I8; ++i)
+			{
+				d0 = data[dataOff];
+				d1 = data[dataOff+1];
+				d2 = data[dataOff+2];
+				d3 = data[dataOff+3];
+				d4 = data[dataOff+4];
+				d5 = data[dataOff+5];
+				d6 = data[dataOff+6];
+				d7 = data[dataOff+7];
+				
+				var tmp0 = d0 + d7;
+				var tmp7 = d0 - d7;
+				var tmp1 = d1 + d6;
+				var tmp6 = d1 - d6;
+				var tmp2 = d2 + d5;
+				var tmp5 = d2 - d5;
+				var tmp3 = d3 + d4;
+				var tmp4 = d3 - d4;
+	
+				/* Even part */
+				var tmp10 = tmp0 + tmp3;	/* phase 2 */
+				var tmp13 = tmp0 - tmp3;
+				var tmp11 = tmp1 + tmp2;
+				var tmp12 = tmp1 - tmp2;
+	
+				data[dataOff] = tmp10 + tmp11; /* phase 3 */
+				data[dataOff+4] = tmp10 - tmp11;
+	
+				var z1 = (tmp12 + tmp13) * 0.707106781; /* c4 */
+				data[dataOff+2] = tmp13 + z1; /* phase 5 */
+				data[dataOff+6] = tmp13 - z1;
+	
+				/* Odd part */
+				tmp10 = tmp4 + tmp5; /* phase 2 */
+				tmp11 = tmp5 + tmp6;
+				tmp12 = tmp6 + tmp7;
+	
+				/* The rotator is modified from fig 4-8 to avoid extra negations. */
+				var z5 = (tmp10 - tmp12) * 0.382683433; /* c6 */
+				var z2 = 0.541196100 * tmp10 + z5; /* c2-c6 */
+				var z4 = 1.306562965 * tmp12 + z5; /* c2+c6 */
+				var z3 = tmp11 * 0.707106781; /* c4 */
+	
+				var z11 = tmp7 + z3;	/* phase 5 */
+				var z13 = tmp7 - z3;
+	
+				data[dataOff+5] = z13 + z2;	/* phase 6 */
+				data[dataOff+3] = z13 - z2;
+				data[dataOff+1] = z11 + z4;
+				data[dataOff+7] = z11 - z4;
+	
+				dataOff += 8; /* advance pointer to next row */
+			}
+	
+			/* Pass 2: process columns. */
+			dataOff = 0;
+			for (i=0; i<I8; ++i)
+			{
+				d0 = data[dataOff];
+				d1 = data[dataOff + 8];
+				d2 = data[dataOff + 16];
+				d3 = data[dataOff + 24];
+				d4 = data[dataOff + 32];
+				d5 = data[dataOff + 40];
+				d6 = data[dataOff + 48];
+				d7 = data[dataOff + 56];
+				
+				var tmp0p2 = d0 + d7;
+				var tmp7p2 = d0 - d7;
+				var tmp1p2 = d1 + d6;
+				var tmp6p2 = d1 - d6;
+				var tmp2p2 = d2 + d5;
+				var tmp5p2 = d2 - d5;
+				var tmp3p2 = d3 + d4;
+				var tmp4p2 = d3 - d4;
+	
+				/* Even part */
+				var tmp10p2 = tmp0p2 + tmp3p2;	/* phase 2 */
+				var tmp13p2 = tmp0p2 - tmp3p2;
+				var tmp11p2 = tmp1p2 + tmp2p2;
+				var tmp12p2 = tmp1p2 - tmp2p2;
+	
+				data[dataOff] = tmp10p2 + tmp11p2; /* phase 3 */
+				data[dataOff+32] = tmp10p2 - tmp11p2;
+	
+				var z1p2 = (tmp12p2 + tmp13p2) * 0.707106781; /* c4 */
+				data[dataOff+16] = tmp13p2 + z1p2; /* phase 5 */
+				data[dataOff+48] = tmp13p2 - z1p2;
+	
+				/* Odd part */
+				tmp10p2 = tmp4p2 + tmp5p2; /* phase 2 */
+				tmp11p2 = tmp5p2 + tmp6p2;
+				tmp12p2 = tmp6p2 + tmp7p2;
+	
+				/* The rotator is modified from fig 4-8 to avoid extra negations. */
+				var z5p2 = (tmp10p2 - tmp12p2) * 0.382683433; /* c6 */
+				var z2p2 = 0.541196100 * tmp10p2 + z5p2; /* c2-c6 */
+				var z4p2 = 1.306562965 * tmp12p2 + z5p2; /* c2+c6 */
+				var z3p2 = tmp11p2 * 0.707106781; /* c4 */
+	
+				var z11p2 = tmp7p2 + z3p2;	/* phase 5 */
+				var z13p2 = tmp7p2 - z3p2;
+	
+				data[dataOff+40] = z13p2 + z2p2; /* phase 6 */
+				data[dataOff+24] = z13p2 - z2p2;
+				data[dataOff+ 8] = z11p2 + z4p2;
+				data[dataOff+56] = z11p2 - z4p2;
+	
+				dataOff++; /* advance pointer to next column */
+			}
+	
+			// Quantize/descale the coefficients
+			var fDCTQuant;
+			for (i=0; i<I64; ++i)
+			{
+				// Apply the quantization and scaling factor & Round to nearest integer
+				fDCTQuant = data[i]*fdtbl[i];
+				outputfDCTQuant[i] = (fDCTQuant > 0.0) ? ((fDCTQuant + 0.5)|0) : ((fDCTQuant - 0.5)|0);
+				//outputfDCTQuant[i] = fround(fDCTQuant);
+
+			}
+			return outputfDCTQuant;
+		}
+		
+		function writeAPP0()
+		{
+			writeWord(0xFFE0); // marker
+			writeWord(16); // length
+			writeByte(0x4A); // J
+			writeByte(0x46); // F
+			writeByte(0x49); // I
+			writeByte(0x46); // F
+			writeByte(0); // = "JFIF",'\0'
+			writeByte(1); // versionhi
+			writeByte(1); // versionlo
+			writeByte(0); // xyunits
+			writeWord(1); // xdensity
+			writeWord(1); // ydensity
+			writeByte(0); // thumbnwidth
+			writeByte(0); // thumbnheight
+		}
+
+		function writeAPP1(exifBuffer) {
+			if (!exifBuffer) return;
+
+			writeWord(0xFFE1); // APP1 marker
+
+			if (exifBuffer[0] === 0x45 &&
+					exifBuffer[1] === 0x78 &&
+					exifBuffer[2] === 0x69 &&
+					exifBuffer[3] === 0x66) {
+				// Buffer already starts with EXIF, just use it directly
+				writeWord(exifBuffer.length + 2); // length is buffer + length itself!
+			} else {
+				// Buffer doesn't start with EXIF, write it for them
+				writeWord(exifBuffer.length + 5 + 2); // length is buffer + EXIF\0 + length itself!
+				writeByte(0x45); // E
+				writeByte(0x78); // X
+				writeByte(0x69); // I
+				writeByte(0x66); // F
+				writeByte(0); // = "EXIF",'\0'
+			}
+
+			for (var i = 0; i < exifBuffer.length; i++) {
+				writeByte(exifBuffer[i]);
+			}
+		}
+
+		function writeSOF0(width, height)
+		{
+			writeWord(0xFFC0); // marker
+			writeWord(17);   // length, truecolor YUV JPG
+			writeByte(8);    // precision
+			writeWord(height);
+			writeWord(width);
+			writeByte(3);    // nrofcomponents
+			writeByte(1);    // IdY
+			writeByte(0x11); // HVY
+			writeByte(0);    // QTY
+			writeByte(2);    // IdU
+			writeByte(0x11); // HVU
+			writeByte(1);    // QTU
+			writeByte(3);    // IdV
+			writeByte(0x11); // HVV
+			writeByte(1);    // QTV
+		}
+	
+		function writeDQT()
+		{
+			writeWord(0xFFDB); // marker
+			writeWord(132);	   // length
+			writeByte(0);
+			for (var i=0; i<64; i++) {
+				writeByte(YTable[i]);
+			}
+			writeByte(1);
+			for (var j=0; j<64; j++) {
+				writeByte(UVTable[j]);
+			}
+		}
+	
+		function writeDHT()
+		{
+			writeWord(0xFFC4); // marker
+			writeWord(0x01A2); // length
+	
+			writeByte(0); // HTYDCinfo
+			for (var i=0; i<16; i++) {
+				writeByte(std_dc_luminance_nrcodes[i+1]);
+			}
+			for (var j=0; j<=11; j++) {
+				writeByte(std_dc_luminance_values[j]);
+			}
+	
+			writeByte(0x10); // HTYACinfo
+			for (var k=0; k<16; k++) {
+				writeByte(std_ac_luminance_nrcodes[k+1]);
+			}
+			for (var l=0; l<=161; l++) {
+				writeByte(std_ac_luminance_values[l]);
+			}
+	
+			writeByte(1); // HTUDCinfo
+			for (var m=0; m<16; m++) {
+				writeByte(std_dc_chrominance_nrcodes[m+1]);
+			}
+			for (var n=0; n<=11; n++) {
+				writeByte(std_dc_chrominance_values[n]);
+			}
+	
+			writeByte(0x11); // HTUACinfo
+			for (var o=0; o<16; o++) {
+				writeByte(std_ac_chrominance_nrcodes[o+1]);
+			}
+			for (var p=0; p<=161; p++) {
+				writeByte(std_ac_chrominance_values[p]);
+			}
+		}
+		
+		function writeCOM(comments)
+		{
+			if (typeof comments === "undefined" || comments.constructor !== Array) return;
+			comments.forEach(e => {
+				if (typeof e !== "string") return;
+				writeWord(0xFFFE); // marker
+				var l = e.length;
+				writeWord(l + 2); // length itself as well
+				var i;
+				for (i = 0; i < l; i++)
+					writeByte(e.charCodeAt(i));
+			});
+		}
+	
+		function writeSOS()
+		{
+			writeWord(0xFFDA); // marker
+			writeWord(12); // length
+			writeByte(3); // nrofcomponents
+			writeByte(1); // IdY
+			writeByte(0); // HTY
+			writeByte(2); // IdU
+			writeByte(0x11); // HTU
+			writeByte(3); // IdV
+			writeByte(0x11); // HTV
+			writeByte(0); // Ss
+			writeByte(0x3f); // Se
+			writeByte(0); // Bf
+		}
+		
+		function processDU(CDU, fdtbl, DC, HTDC, HTAC){
+			var EOB = HTAC[0x00];
+			var M16zeroes = HTAC[0xF0];
+			var pos;
+			var I16 = 16;
+			var I63 = 63;
+			var I64 = 64;
+			var DU_DCT = fDCTQuant(CDU, fdtbl);
+			//ZigZag reorder
+			for (var j=0;j<I64;++j) {
+				DU[ZigZag[j]]=DU_DCT[j];
+			}
+			var Diff = DU[0] - DC; DC = DU[0];
+			//Encode DC
+			if (Diff==0) {
+				writeBits(HTDC[0]); // Diff might be 0
+			} else {
+				pos = 32767+Diff;
+				writeBits(HTDC[category[pos]]);
+				writeBits(bitcode[pos]);
+			}
+			//Encode ACs
+			var end0pos = 63; // was const... which is crazy
+			for (; (end0pos>0)&&(DU[end0pos]==0); end0pos--) {};
+			//end0pos = first element in reverse order !=0
+			if ( end0pos == 0) {
+				writeBits(EOB);
+				return DC;
+			}
+			var i = 1;
+			var lng;
+			while ( i <= end0pos ) {
+				var startpos = i;
+				for (; (DU[i]==0) && (i<=end0pos); ++i) {}
+				var nrzeroes = i-startpos;
+				if ( nrzeroes >= I16 ) {
+					lng = nrzeroes>>4;
+					for (var nrmarker=1; nrmarker <= lng; ++nrmarker)
+						writeBits(M16zeroes);
+					nrzeroes = nrzeroes&0xF;
+				}
+				pos = 32767+DU[i];
+				writeBits(HTAC[(nrzeroes<<4)+category[pos]]);
+				writeBits(bitcode[pos]);
+				i++;
+			}
+			if ( end0pos != I63 ) {
+				writeBits(EOB);
+			}
+			return DC;
+		}
+
+		function initCharLookupTable(){
+			var sfcc = String.fromCharCode;
+			for(var i=0; i < 256; i++){ ///// ACHTUNG // 255
+				clt[i] = sfcc(i);
+			}
+		}
+		
+		this.encode = function(image,quality) // image data object
+		{
+			var time_start = new Date().getTime();
+			
+			if(quality) setQuality(quality);
+			
+			// Initialize bit writer
+			byteout = new Array();
+			bytenew=0;
+			bytepos=7;
+	
+			// Add JPEG headers
+			writeWord(0xFFD8); // SOI
+			writeAPP0();
+			writeCOM(image.comments);
+			writeAPP1(image.exifBuffer);
+			writeDQT();
+			writeSOF0(image.width,image.height);
+			writeDHT();
+			writeSOS();
+
+	
+			// Encode 8x8 macroblocks
+			var DCY=0;
+			var DCU=0;
+			var DCV=0;
+			
+			bytenew=0;
+			bytepos=7;
+			
+			
+			this.encode.displayName = "_encode_";
+
+			var imageData = image.data;
+			var width = image.width;
+			var height = image.height;
+
+			var quadWidth = width*4;
+			var tripleWidth = width*3;
+			
+			var x, y = 0;
+			var r, g, b;
+			var start,p, col,row,pos;
+			while(y < height){
+				x = 0;
+				while(x < quadWidth){
+				start = quadWidth * y + x;
+				p = start;
+				col = -1;
+				row = 0;
+				
+				for(pos=0; pos < 64; pos++){
+					row = pos >> 3;// /8
+					col = ( pos & 7 ) * 4; // %8
+					p = start + ( row * quadWidth ) + col;		
+					
+					if(y+row >= height){ // padding bottom
+						p-= (quadWidth*(y+1+row-height));
+					}
+
+					if(x+col >= quadWidth){ // padding right	
+						p-= ((x+col) - quadWidth +4)
+					}
+					
+					r = imageData[ p++ ];
+					g = imageData[ p++ ];
+					b = imageData[ p++ ];
+					
+					
+					/* // calculate YUV values dynamically
+					YDU[pos]=((( 0.29900)*r+( 0.58700)*g+( 0.11400)*b))-128; //-0x80
+					UDU[pos]=(((-0.16874)*r+(-0.33126)*g+( 0.50000)*b));
+					VDU[pos]=((( 0.50000)*r+(-0.41869)*g+(-0.08131)*b));
+					*/
+					
+					// use lookup table (slightly faster)
+					YDU[pos] = ((RGB_YUV_TABLE[r]             + RGB_YUV_TABLE[(g +  256)>>0] + RGB_YUV_TABLE[(b +  512)>>0]) >> 16)-128;
+					UDU[pos] = ((RGB_YUV_TABLE[(r +  768)>>0] + RGB_YUV_TABLE[(g + 1024)>>0] + RGB_YUV_TABLE[(b + 1280)>>0]) >> 16)-128;
+					VDU[pos] = ((RGB_YUV_TABLE[(r + 1280)>>0] + RGB_YUV_TABLE[(g + 1536)>>0] + RGB_YUV_TABLE[(b + 1792)>>0]) >> 16)-128;
+
+				}
+				
+				DCY = processDU(YDU, fdtbl_Y, DCY, YDC_HT, YAC_HT);
+				DCU = processDU(UDU, fdtbl_UV, DCU, UVDC_HT, UVAC_HT);
+				DCV = processDU(VDU, fdtbl_UV, DCV, UVDC_HT, UVAC_HT);
+				x+=32;
+				}
+				y+=8;
+			}
+			
+			
+			////////////////////////////////////////////////////////////////
+	
+			// Do the bit alignment of the EOI marker
+			if ( bytepos >= 0 ) {
+				var fillbits = [];
+				fillbits[1] = bytepos+1;
+				fillbits[0] = (1<<(bytepos+1))-1;
+				writeBits(fillbits);
+			}
+	
+			writeWord(0xFFD9); //EOI
+
+			if (false) // removed by dead control flow
+{}
+      return Buffer.from(byteout);
+
+			// removed by dead control flow
+ var jpegDataUri; 
+			
+			// removed by dead control flow
+
+			
+			// benchmarking
+			// removed by dead control flow
+ var duration; 
+    		//console.log('Encoding time: '+ duration + 'ms');
+    		//
+			
+			// removed by dead control flow
+			
+	}
+	
+	function setQuality(quality){
+		if (quality <= 0) {
+			quality = 1;
+		}
+		if (quality > 100) {
+			quality = 100;
+		}
+		
+		if(currentQuality == quality) return // don't recalc if unchanged
+		
+		var sf = 0;
+		if (quality < 50) {
+			sf = Math.floor(5000 / quality);
+		} else {
+			sf = Math.floor(200 - quality*2);
+		}
+		
+		initQuantTables(sf);
+		currentQuality = quality;
+		//console.log('Quality set to: '+quality +'%');
+	}
+	
+	function init(){
+		var time_start = new Date().getTime();
+		if(!quality) quality = 50;
+		// Create tables
+		initCharLookupTable()
+		initHuffmanTbl();
+		initCategoryNumber();
+		initRGBYUVTable();
+		
+		setQuality(quality);
+		var duration = new Date().getTime() - time_start;
+    	//console.log('Initialization '+ duration + 'ms');
+	}
+	
+	init();
+	
+};
+
+if (true) {
+	module.exports = encode;
+} else // removed by dead control flow
+{}
+
+function encode(imgData, qu) {
+  if (typeof qu === 'undefined') qu = 50;
+  var encoder = new JPEGEncoder(qu);
+	var data = encoder.encode(imgData, qu);
+  return {
+    data: data,
+    width: imgData.width,
+    height: imgData.height,
+  };
+}
+
+// helper function to get the imageData of an existing image on the current page.
+function getImageDataFromImage(idOrElement){
+	var theImg = (typeof(idOrElement)=='string')? document.getElementById(idOrElement):idOrElement;
+	var cvs = document.createElement('canvas');
+	cvs.width = theImg.width;
+	cvs.height = theImg.height;
+	var ctx = cvs.getContext("2d");
+	ctx.drawImage(theImg,0,0);
+	
+	return (ctx.getImageData(0, 0, cvs.width, cvs.height));
+}
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/bitmapper.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/pngjs/lib/bitmapper.js ***!
+  \*************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+"use strict";
+
+
+let interlaceUtils = __webpack_require__(/*! ./interlace */ "../../node_modules/pngjs/lib/interlace.js");
+
+let pixelBppMapper = [
+  // 0 - dummy entry
+  function () {},
+
+  // 1 - L
+  // 0: 0, 1: 0, 2: 0, 3: 0xff
+  function (pxData, data, pxPos, rawPos) {
+    if (rawPos === data.length) {
+      throw new Error("Ran out of data");
+    }
+
+    let pixel = data[rawPos];
+    pxData[pxPos] = pixel;
+    pxData[pxPos + 1] = pixel;
+    pxData[pxPos + 2] = pixel;
+    pxData[pxPos + 3] = 0xff;
+  },
+
+  // 2 - LA
+  // 0: 0, 1: 0, 2: 0, 3: 1
+  function (pxData, data, pxPos, rawPos) {
+    if (rawPos + 1 >= data.length) {
+      throw new Error("Ran out of data");
+    }
+
+    let pixel = data[rawPos];
+    pxData[pxPos] = pixel;
+    pxData[pxPos + 1] = pixel;
+    pxData[pxPos + 2] = pixel;
+    pxData[pxPos + 3] = data[rawPos + 1];
+  },
+
+  // 3 - RGB
+  // 0: 0, 1: 1, 2: 2, 3: 0xff
+  function (pxData, data, pxPos, rawPos) {
+    if (rawPos + 2 >= data.length) {
+      throw new Error("Ran out of data");
+    }
+
+    pxData[pxPos] = data[rawPos];
+    pxData[pxPos + 1] = data[rawPos + 1];
+    pxData[pxPos + 2] = data[rawPos + 2];
+    pxData[pxPos + 3] = 0xff;
+  },
+
+  // 4 - RGBA
+  // 0: 0, 1: 1, 2: 2, 3: 3
+  function (pxData, data, pxPos, rawPos) {
+    if (rawPos + 3 >= data.length) {
+      throw new Error("Ran out of data");
+    }
+
+    pxData[pxPos] = data[rawPos];
+    pxData[pxPos + 1] = data[rawPos + 1];
+    pxData[pxPos + 2] = data[rawPos + 2];
+    pxData[pxPos + 3] = data[rawPos + 3];
+  },
+];
+
+let pixelBppCustomMapper = [
+  // 0 - dummy entry
+  function () {},
+
+  // 1 - L
+  // 0: 0, 1: 0, 2: 0, 3: 0xff
+  function (pxData, pixelData, pxPos, maxBit) {
+    let pixel = pixelData[0];
+    pxData[pxPos] = pixel;
+    pxData[pxPos + 1] = pixel;
+    pxData[pxPos + 2] = pixel;
+    pxData[pxPos + 3] = maxBit;
+  },
+
+  // 2 - LA
+  // 0: 0, 1: 0, 2: 0, 3: 1
+  function (pxData, pixelData, pxPos) {
+    let pixel = pixelData[0];
+    pxData[pxPos] = pixel;
+    pxData[pxPos + 1] = pixel;
+    pxData[pxPos + 2] = pixel;
+    pxData[pxPos + 3] = pixelData[1];
+  },
+
+  // 3 - RGB
+  // 0: 0, 1: 1, 2: 2, 3: 0xff
+  function (pxData, pixelData, pxPos, maxBit) {
+    pxData[pxPos] = pixelData[0];
+    pxData[pxPos + 1] = pixelData[1];
+    pxData[pxPos + 2] = pixelData[2];
+    pxData[pxPos + 3] = maxBit;
+  },
+
+  // 4 - RGBA
+  // 0: 0, 1: 1, 2: 2, 3: 3
+  function (pxData, pixelData, pxPos) {
+    pxData[pxPos] = pixelData[0];
+    pxData[pxPos + 1] = pixelData[1];
+    pxData[pxPos + 2] = pixelData[2];
+    pxData[pxPos + 3] = pixelData[3];
+  },
+];
+
+function bitRetriever(data, depth) {
+  let leftOver = [];
+  let i = 0;
+
+  function split() {
+    if (i === data.length) {
+      throw new Error("Ran out of data");
+    }
+    let byte = data[i];
+    i++;
+    let byte8, byte7, byte6, byte5, byte4, byte3, byte2, byte1;
+    switch (depth) {
+      default:
+        throw new Error("unrecognised depth");
+      case 16:
+        byte2 = data[i];
+        i++;
+        leftOver.push((byte << 8) + byte2);
+        break;
+      case 4:
+        byte2 = byte & 0x0f;
+        byte1 = byte >> 4;
+        leftOver.push(byte1, byte2);
+        break;
+      case 2:
+        byte4 = byte & 3;
+        byte3 = (byte >> 2) & 3;
+        byte2 = (byte >> 4) & 3;
+        byte1 = (byte >> 6) & 3;
+        leftOver.push(byte1, byte2, byte3, byte4);
+        break;
+      case 1:
+        byte8 = byte & 1;
+        byte7 = (byte >> 1) & 1;
+        byte6 = (byte >> 2) & 1;
+        byte5 = (byte >> 3) & 1;
+        byte4 = (byte >> 4) & 1;
+        byte3 = (byte >> 5) & 1;
+        byte2 = (byte >> 6) & 1;
+        byte1 = (byte >> 7) & 1;
+        leftOver.push(byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8);
+        break;
+    }
+  }
+
+  return {
+    get: function (count) {
+      while (leftOver.length < count) {
+        split();
+      }
+      let returner = leftOver.slice(0, count);
+      leftOver = leftOver.slice(count);
+      return returner;
+    },
+    resetAfterLine: function () {
+      leftOver.length = 0;
+    },
+    end: function () {
+      if (i !== data.length) {
+        throw new Error("extra data found");
+      }
+    },
+  };
+}
+
+function mapImage8Bit(image, pxData, getPxPos, bpp, data, rawPos) {
+  // eslint-disable-line max-params
+  let imageWidth = image.width;
+  let imageHeight = image.height;
+  let imagePass = image.index;
+  for (let y = 0; y < imageHeight; y++) {
+    for (let x = 0; x < imageWidth; x++) {
+      let pxPos = getPxPos(x, y, imagePass);
+      pixelBppMapper[bpp](pxData, data, pxPos, rawPos);
+      rawPos += bpp; //eslint-disable-line no-param-reassign
+    }
+  }
+  return rawPos;
+}
+
+function mapImageCustomBit(image, pxData, getPxPos, bpp, bits, maxBit) {
+  // eslint-disable-line max-params
+  let imageWidth = image.width;
+  let imageHeight = image.height;
+  let imagePass = image.index;
+  for (let y = 0; y < imageHeight; y++) {
+    for (let x = 0; x < imageWidth; x++) {
+      let pixelData = bits.get(bpp);
+      let pxPos = getPxPos(x, y, imagePass);
+      pixelBppCustomMapper[bpp](pxData, pixelData, pxPos, maxBit);
+    }
+    bits.resetAfterLine();
+  }
+}
+
+exports.dataToBitMap = function (data, bitmapInfo) {
+  let width = bitmapInfo.width;
+  let height = bitmapInfo.height;
+  let depth = bitmapInfo.depth;
+  let bpp = bitmapInfo.bpp;
+  let interlace = bitmapInfo.interlace;
+  let bits;
+
+  if (depth !== 8) {
+    bits = bitRetriever(data, depth);
+  }
+  let pxData;
+  if (depth <= 8) {
+    pxData = Buffer.alloc(width * height * 4);
+  } else {
+    pxData = new Uint16Array(width * height * 4);
+  }
+  let maxBit = Math.pow(2, depth) - 1;
+  let rawPos = 0;
+  let images;
+  let getPxPos;
+
+  if (interlace) {
+    images = interlaceUtils.getImagePasses(width, height);
+    getPxPos = interlaceUtils.getInterlaceIterator(width, height);
+  } else {
+    let nonInterlacedPxPos = 0;
+    getPxPos = function () {
+      let returner = nonInterlacedPxPos;
+      nonInterlacedPxPos += 4;
+      return returner;
+    };
+    images = [{ width: width, height: height }];
+  }
+
+  for (let imageIndex = 0; imageIndex < images.length; imageIndex++) {
+    if (depth === 8) {
+      rawPos = mapImage8Bit(
+        images[imageIndex],
+        pxData,
+        getPxPos,
+        bpp,
+        data,
+        rawPos
+      );
+    } else {
+      mapImageCustomBit(
+        images[imageIndex],
+        pxData,
+        getPxPos,
+        bpp,
+        bits,
+        maxBit
+      );
+    }
+  }
+  if (depth === 8) {
+    if (rawPos !== data.length) {
+      throw new Error("extra data found");
+    }
+  } else {
+    bits.end();
+  }
+
+  return pxData;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/bitpacker.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/pngjs/lib/bitpacker.js ***!
+  \*************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let constants = __webpack_require__(/*! ./constants */ "../../node_modules/pngjs/lib/constants.js");
+
+module.exports = function (dataIn, width, height, options) {
+  let outHasAlpha =
+    [constants.COLORTYPE_COLOR_ALPHA, constants.COLORTYPE_ALPHA].indexOf(
+      options.colorType
+    ) !== -1;
+  if (options.colorType === options.inputColorType) {
+    let bigEndian = (function () {
+      let buffer = new ArrayBuffer(2);
+      new DataView(buffer).setInt16(0, 256, true /* littleEndian */);
+      // Int16Array uses the platform's endianness.
+      return new Int16Array(buffer)[0] !== 256;
+    })();
+    // If no need to convert to grayscale and alpha is present/absent in both, take a fast route
+    if (options.bitDepth === 8 || (options.bitDepth === 16 && bigEndian)) {
+      return dataIn;
+    }
+  }
+
+  // map to a UInt16 array if data is 16bit, fix endianness below
+  let data = options.bitDepth !== 16 ? dataIn : new Uint16Array(dataIn.buffer);
+
+  let maxValue = 255;
+  let inBpp = constants.COLORTYPE_TO_BPP_MAP[options.inputColorType];
+  if (inBpp === 4 && !options.inputHasAlpha) {
+    inBpp = 3;
+  }
+  let outBpp = constants.COLORTYPE_TO_BPP_MAP[options.colorType];
+  if (options.bitDepth === 16) {
+    maxValue = 65535;
+    outBpp *= 2;
+  }
+  let outData = Buffer.alloc(width * height * outBpp);
+
+  let inIndex = 0;
+  let outIndex = 0;
+
+  let bgColor = options.bgColor || {};
+  if (bgColor.red === undefined) {
+    bgColor.red = maxValue;
+  }
+  if (bgColor.green === undefined) {
+    bgColor.green = maxValue;
+  }
+  if (bgColor.blue === undefined) {
+    bgColor.blue = maxValue;
+  }
+
+  function getRGBA() {
+    let red;
+    let green;
+    let blue;
+    let alpha = maxValue;
+    switch (options.inputColorType) {
+      case constants.COLORTYPE_COLOR_ALPHA:
+        alpha = data[inIndex + 3];
+        red = data[inIndex];
+        green = data[inIndex + 1];
+        blue = data[inIndex + 2];
+        break;
+      case constants.COLORTYPE_COLOR:
+        red = data[inIndex];
+        green = data[inIndex + 1];
+        blue = data[inIndex + 2];
+        break;
+      case constants.COLORTYPE_ALPHA:
+        alpha = data[inIndex + 1];
+        red = data[inIndex];
+        green = red;
+        blue = red;
+        break;
+      case constants.COLORTYPE_GRAYSCALE:
+        red = data[inIndex];
+        green = red;
+        blue = red;
+        break;
+      default:
+        throw new Error(
+          "input color type:" +
+            options.inputColorType +
+            " is not supported at present"
+        );
+    }
+
+    if (options.inputHasAlpha) {
+      if (!outHasAlpha) {
+        alpha /= maxValue;
+        red = Math.min(
+          Math.max(Math.round((1 - alpha) * bgColor.red + alpha * red), 0),
+          maxValue
+        );
+        green = Math.min(
+          Math.max(Math.round((1 - alpha) * bgColor.green + alpha * green), 0),
+          maxValue
+        );
+        blue = Math.min(
+          Math.max(Math.round((1 - alpha) * bgColor.blue + alpha * blue), 0),
+          maxValue
+        );
+      }
+    }
+    return { red: red, green: green, blue: blue, alpha: alpha };
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let rgba = getRGBA(data, inIndex);
+
+      switch (options.colorType) {
+        case constants.COLORTYPE_COLOR_ALPHA:
+        case constants.COLORTYPE_COLOR:
+          if (options.bitDepth === 8) {
+            outData[outIndex] = rgba.red;
+            outData[outIndex + 1] = rgba.green;
+            outData[outIndex + 2] = rgba.blue;
+            if (outHasAlpha) {
+              outData[outIndex + 3] = rgba.alpha;
+            }
+          } else {
+            outData.writeUInt16BE(rgba.red, outIndex);
+            outData.writeUInt16BE(rgba.green, outIndex + 2);
+            outData.writeUInt16BE(rgba.blue, outIndex + 4);
+            if (outHasAlpha) {
+              outData.writeUInt16BE(rgba.alpha, outIndex + 6);
+            }
+          }
+          break;
+        case constants.COLORTYPE_ALPHA:
+        case constants.COLORTYPE_GRAYSCALE: {
+          // Convert to grayscale and alpha
+          let grayscale = (rgba.red + rgba.green + rgba.blue) / 3;
+          if (options.bitDepth === 8) {
+            outData[outIndex] = grayscale;
+            if (outHasAlpha) {
+              outData[outIndex + 1] = rgba.alpha;
+            }
+          } else {
+            outData.writeUInt16BE(grayscale, outIndex);
+            if (outHasAlpha) {
+              outData.writeUInt16BE(rgba.alpha, outIndex + 2);
+            }
+          }
+          break;
+        }
+        default:
+          throw new Error("unrecognised color Type " + options.colorType);
+      }
+
+      inIndex += inBpp;
+      outIndex += outBpp;
+    }
+  }
+
+  return outData;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/chunkstream.js"
+/*!***************************************************!*\
+  !*** ../../node_modules/pngjs/lib/chunkstream.js ***!
+  \***************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let util = __webpack_require__(/*! util */ "util");
+let Stream = __webpack_require__(/*! stream */ "stream");
+
+let ChunkStream = (module.exports = function () {
+  Stream.call(this);
+
+  this._buffers = [];
+  this._buffered = 0;
+
+  this._reads = [];
+  this._paused = false;
+
+  this._encoding = "utf8";
+  this.writable = true;
+});
+util.inherits(ChunkStream, Stream);
+
+ChunkStream.prototype.read = function (length, callback) {
+  this._reads.push({
+    length: Math.abs(length), // if length < 0 then at most this length
+    allowLess: length < 0,
+    func: callback,
+  });
+
+  process.nextTick(
+    function () {
+      this._process();
+
+      // its paused and there is not enought data then ask for more
+      if (this._paused && this._reads && this._reads.length > 0) {
+        this._paused = false;
+
+        this.emit("drain");
+      }
+    }.bind(this)
+  );
+};
+
+ChunkStream.prototype.write = function (data, encoding) {
+  if (!this.writable) {
+    this.emit("error", new Error("Stream not writable"));
+    return false;
+  }
+
+  let dataBuffer;
+  if (Buffer.isBuffer(data)) {
+    dataBuffer = data;
+  } else {
+    dataBuffer = Buffer.from(data, encoding || this._encoding);
+  }
+
+  this._buffers.push(dataBuffer);
+  this._buffered += dataBuffer.length;
+
+  this._process();
+
+  // ok if there are no more read requests
+  if (this._reads && this._reads.length === 0) {
+    this._paused = true;
+  }
+
+  return this.writable && !this._paused;
+};
+
+ChunkStream.prototype.end = function (data, encoding) {
+  if (data) {
+    this.write(data, encoding);
+  }
+
+  this.writable = false;
+
+  // already destroyed
+  if (!this._buffers) {
+    return;
+  }
+
+  // enqueue or handle end
+  if (this._buffers.length === 0) {
+    this._end();
+  } else {
+    this._buffers.push(null);
+    this._process();
+  }
+};
+
+ChunkStream.prototype.destroySoon = ChunkStream.prototype.end;
+
+ChunkStream.prototype._end = function () {
+  if (this._reads.length > 0) {
+    this.emit("error", new Error("Unexpected end of input"));
+  }
+
+  this.destroy();
+};
+
+ChunkStream.prototype.destroy = function () {
+  if (!this._buffers) {
+    return;
+  }
+
+  this.writable = false;
+  this._reads = null;
+  this._buffers = null;
+
+  this.emit("close");
+};
+
+ChunkStream.prototype._processReadAllowingLess = function (read) {
+  // ok there is any data so that we can satisfy this request
+  this._reads.shift(); // == read
+
+  // first we need to peek into first buffer
+  let smallerBuf = this._buffers[0];
+
+  // ok there is more data than we need
+  if (smallerBuf.length > read.length) {
+    this._buffered -= read.length;
+    this._buffers[0] = smallerBuf.slice(read.length);
+
+    read.func.call(this, smallerBuf.slice(0, read.length));
+  } else {
+    // ok this is less than maximum length so use it all
+    this._buffered -= smallerBuf.length;
+    this._buffers.shift(); // == smallerBuf
+
+    read.func.call(this, smallerBuf);
+  }
+};
+
+ChunkStream.prototype._processRead = function (read) {
+  this._reads.shift(); // == read
+
+  let pos = 0;
+  let count = 0;
+  let data = Buffer.alloc(read.length);
+
+  // create buffer for all data
+  while (pos < read.length) {
+    let buf = this._buffers[count++];
+    let len = Math.min(buf.length, read.length - pos);
+
+    buf.copy(data, pos, 0, len);
+    pos += len;
+
+    // last buffer wasn't used all so just slice it and leave
+    if (len !== buf.length) {
+      this._buffers[--count] = buf.slice(len);
+    }
+  }
+
+  // remove all used buffers
+  if (count > 0) {
+    this._buffers.splice(0, count);
+  }
+
+  this._buffered -= read.length;
+
+  read.func.call(this, data);
+};
+
+ChunkStream.prototype._process = function () {
+  try {
+    // as long as there is any data and read requests
+    while (this._buffered > 0 && this._reads && this._reads.length > 0) {
+      let read = this._reads[0];
+
+      // read any data (but no more than length)
+      if (read.allowLess) {
+        this._processReadAllowingLess(read);
+      } else if (this._buffered >= read.length) {
+        // ok we can meet some expectations
+
+        this._processRead(read);
+      } else {
+        // not enought data to satisfy first request in queue
+        // so we need to wait for more
+        break;
+      }
+    }
+
+    if (this._buffers && !this.writable) {
+      this._end();
+    }
+  } catch (ex) {
+    this.emit("error", ex);
+  }
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/constants.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/pngjs/lib/constants.js ***!
+  \*************************************************/
+(module) {
+
+"use strict";
+
+
+module.exports = {
+  PNG_SIGNATURE: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+
+  TYPE_IHDR: 0x49484452,
+  TYPE_IEND: 0x49454e44,
+  TYPE_IDAT: 0x49444154,
+  TYPE_PLTE: 0x504c5445,
+  TYPE_tRNS: 0x74524e53, // eslint-disable-line camelcase
+  TYPE_gAMA: 0x67414d41, // eslint-disable-line camelcase
+
+  // color-type bits
+  COLORTYPE_GRAYSCALE: 0,
+  COLORTYPE_PALETTE: 1,
+  COLORTYPE_COLOR: 2,
+  COLORTYPE_ALPHA: 4, // e.g. grayscale and alpha
+
+  // color-type combinations
+  COLORTYPE_PALETTE_COLOR: 3,
+  COLORTYPE_COLOR_ALPHA: 6,
+
+  COLORTYPE_TO_BPP_MAP: {
+    0: 1,
+    2: 3,
+    3: 1,
+    4: 2,
+    6: 4,
+  },
+
+  GAMMA_DIVISION: 100000,
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/crc.js"
+/*!*******************************************!*\
+  !*** ../../node_modules/pngjs/lib/crc.js ***!
+  \*******************************************/
+(module) {
+
+"use strict";
+
+
+let crcTable = [];
+
+(function () {
+  for (let i = 0; i < 256; i++) {
+    let currentCrc = i;
+    for (let j = 0; j < 8; j++) {
+      if (currentCrc & 1) {
+        currentCrc = 0xedb88320 ^ (currentCrc >>> 1);
+      } else {
+        currentCrc = currentCrc >>> 1;
+      }
+    }
+    crcTable[i] = currentCrc;
+  }
+})();
+
+let CrcCalculator = (module.exports = function () {
+  this._crc = -1;
+});
+
+CrcCalculator.prototype.write = function (data) {
+  for (let i = 0; i < data.length; i++) {
+    this._crc = crcTable[(this._crc ^ data[i]) & 0xff] ^ (this._crc >>> 8);
+  }
+  return true;
+};
+
+CrcCalculator.prototype.crc32 = function () {
+  return this._crc ^ -1;
+};
+
+CrcCalculator.crc32 = function (buf) {
+  let crc = -1;
+  for (let i = 0; i < buf.length; i++) {
+    crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return crc ^ -1;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/filter-pack.js"
+/*!***************************************************!*\
+  !*** ../../node_modules/pngjs/lib/filter-pack.js ***!
+  \***************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let paethPredictor = __webpack_require__(/*! ./paeth-predictor */ "../../node_modules/pngjs/lib/paeth-predictor.js");
+
+function filterNone(pxData, pxPos, byteWidth, rawData, rawPos) {
+  for (let x = 0; x < byteWidth; x++) {
+    rawData[rawPos + x] = pxData[pxPos + x];
+  }
+}
+
+function filterSumNone(pxData, pxPos, byteWidth) {
+  let sum = 0;
+  let length = pxPos + byteWidth;
+
+  for (let i = pxPos; i < length; i++) {
+    sum += Math.abs(pxData[i]);
+  }
+  return sum;
+}
+
+function filterSub(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let val = pxData[pxPos + x] - left;
+
+    rawData[rawPos + x] = val;
+  }
+}
+
+function filterSumSub(pxData, pxPos, byteWidth, bpp) {
+  let sum = 0;
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let val = pxData[pxPos + x] - left;
+
+    sum += Math.abs(val);
+  }
+
+  return sum;
+}
+
+function filterUp(pxData, pxPos, byteWidth, rawData, rawPos) {
+  for (let x = 0; x < byteWidth; x++) {
+    let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
+    let val = pxData[pxPos + x] - up;
+
+    rawData[rawPos + x] = val;
+  }
+}
+
+function filterSumUp(pxData, pxPos, byteWidth) {
+  let sum = 0;
+  let length = pxPos + byteWidth;
+  for (let x = pxPos; x < length; x++) {
+    let up = pxPos > 0 ? pxData[x - byteWidth] : 0;
+    let val = pxData[x] - up;
+
+    sum += Math.abs(val);
+  }
+
+  return sum;
+}
+
+function filterAvg(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
+    let val = pxData[pxPos + x] - ((left + up) >> 1);
+
+    rawData[rawPos + x] = val;
+  }
+}
+
+function filterSumAvg(pxData, pxPos, byteWidth, bpp) {
+  let sum = 0;
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
+    let val = pxData[pxPos + x] - ((left + up) >> 1);
+
+    sum += Math.abs(val);
+  }
+
+  return sum;
+}
+
+function filterPaeth(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
+    let upleft =
+      pxPos > 0 && x >= bpp ? pxData[pxPos + x - (byteWidth + bpp)] : 0;
+    let val = pxData[pxPos + x] - paethPredictor(left, up, upleft);
+
+    rawData[rawPos + x] = val;
+  }
+}
+
+function filterSumPaeth(pxData, pxPos, byteWidth, bpp) {
+  let sum = 0;
+  for (let x = 0; x < byteWidth; x++) {
+    let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
+    let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
+    let upleft =
+      pxPos > 0 && x >= bpp ? pxData[pxPos + x - (byteWidth + bpp)] : 0;
+    let val = pxData[pxPos + x] - paethPredictor(left, up, upleft);
+
+    sum += Math.abs(val);
+  }
+
+  return sum;
+}
+
+let filters = {
+  0: filterNone,
+  1: filterSub,
+  2: filterUp,
+  3: filterAvg,
+  4: filterPaeth,
+};
+
+let filterSums = {
+  0: filterSumNone,
+  1: filterSumSub,
+  2: filterSumUp,
+  3: filterSumAvg,
+  4: filterSumPaeth,
+};
+
+module.exports = function (pxData, width, height, options, bpp) {
+  let filterTypes;
+  if (!("filterType" in options) || options.filterType === -1) {
+    filterTypes = [0, 1, 2, 3, 4];
+  } else if (typeof options.filterType === "number") {
+    filterTypes = [options.filterType];
+  } else {
+    throw new Error("unrecognised filter types");
+  }
+
+  if (options.bitDepth === 16) {
+    bpp *= 2;
+  }
+  let byteWidth = width * bpp;
+  let rawPos = 0;
+  let pxPos = 0;
+  let rawData = Buffer.alloc((byteWidth + 1) * height);
+
+  let sel = filterTypes[0];
+
+  for (let y = 0; y < height; y++) {
+    if (filterTypes.length > 1) {
+      // find best filter for this line (with lowest sum of values)
+      let min = Infinity;
+
+      for (let i = 0; i < filterTypes.length; i++) {
+        let sum = filterSums[filterTypes[i]](pxData, pxPos, byteWidth, bpp);
+        if (sum < min) {
+          sel = filterTypes[i];
+          min = sum;
+        }
+      }
+    }
+
+    rawData[rawPos] = sel;
+    rawPos++;
+    filters[sel](pxData, pxPos, byteWidth, rawData, rawPos, bpp);
+    rawPos += byteWidth;
+    pxPos += byteWidth;
+  }
+  return rawData;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/filter-parse-async.js"
+/*!**********************************************************!*\
+  !*** ../../node_modules/pngjs/lib/filter-parse-async.js ***!
+  \**********************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let util = __webpack_require__(/*! util */ "util");
+let ChunkStream = __webpack_require__(/*! ./chunkstream */ "../../node_modules/pngjs/lib/chunkstream.js");
+let Filter = __webpack_require__(/*! ./filter-parse */ "../../node_modules/pngjs/lib/filter-parse.js");
+
+let FilterAsync = (module.exports = function (bitmapInfo) {
+  ChunkStream.call(this);
+
+  let buffers = [];
+  let that = this;
+  this._filter = new Filter(bitmapInfo, {
+    read: this.read.bind(this),
+    write: function (buffer) {
+      buffers.push(buffer);
+    },
+    complete: function () {
+      that.emit("complete", Buffer.concat(buffers));
+    },
+  });
+
+  this._filter.start();
+});
+util.inherits(FilterAsync, ChunkStream);
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/filter-parse-sync.js"
+/*!*********************************************************!*\
+  !*** ../../node_modules/pngjs/lib/filter-parse-sync.js ***!
+  \*********************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+"use strict";
+
+
+let SyncReader = __webpack_require__(/*! ./sync-reader */ "../../node_modules/pngjs/lib/sync-reader.js");
+let Filter = __webpack_require__(/*! ./filter-parse */ "../../node_modules/pngjs/lib/filter-parse.js");
+
+exports.process = function (inBuffer, bitmapInfo) {
+  let outBuffers = [];
+  let reader = new SyncReader(inBuffer);
+  let filter = new Filter(bitmapInfo, {
+    read: reader.read.bind(reader),
+    write: function (bufferPart) {
+      outBuffers.push(bufferPart);
+    },
+    complete: function () {},
+  });
+
+  filter.start();
+  reader.process();
+
+  return Buffer.concat(outBuffers);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/filter-parse.js"
+/*!****************************************************!*\
+  !*** ../../node_modules/pngjs/lib/filter-parse.js ***!
+  \****************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let interlaceUtils = __webpack_require__(/*! ./interlace */ "../../node_modules/pngjs/lib/interlace.js");
+let paethPredictor = __webpack_require__(/*! ./paeth-predictor */ "../../node_modules/pngjs/lib/paeth-predictor.js");
+
+function getByteWidth(width, bpp, depth) {
+  let byteWidth = width * bpp;
+  if (depth !== 8) {
+    byteWidth = Math.ceil(byteWidth / (8 / depth));
+  }
+  return byteWidth;
+}
+
+let Filter = (module.exports = function (bitmapInfo, dependencies) {
+  let width = bitmapInfo.width;
+  let height = bitmapInfo.height;
+  let interlace = bitmapInfo.interlace;
+  let bpp = bitmapInfo.bpp;
+  let depth = bitmapInfo.depth;
+
+  this.read = dependencies.read;
+  this.write = dependencies.write;
+  this.complete = dependencies.complete;
+
+  this._imageIndex = 0;
+  this._images = [];
+  if (interlace) {
+    let passes = interlaceUtils.getImagePasses(width, height);
+    for (let i = 0; i < passes.length; i++) {
+      this._images.push({
+        byteWidth: getByteWidth(passes[i].width, bpp, depth),
+        height: passes[i].height,
+        lineIndex: 0,
+      });
+    }
+  } else {
+    this._images.push({
+      byteWidth: getByteWidth(width, bpp, depth),
+      height: height,
+      lineIndex: 0,
+    });
+  }
+
+  // when filtering the line we look at the pixel to the left
+  // the spec also says it is done on a byte level regardless of the number of pixels
+  // so if the depth is byte compatible (8 or 16) we subtract the bpp in order to compare back
+  // a pixel rather than just a different byte part. However if we are sub byte, we ignore.
+  if (depth === 8) {
+    this._xComparison = bpp;
+  } else if (depth === 16) {
+    this._xComparison = bpp * 2;
+  } else {
+    this._xComparison = 1;
+  }
+});
+
+Filter.prototype.start = function () {
+  this.read(
+    this._images[this._imageIndex].byteWidth + 1,
+    this._reverseFilterLine.bind(this)
+  );
+};
+
+Filter.prototype._unFilterType1 = function (
+  rawData,
+  unfilteredLine,
+  byteWidth
+) {
+  let xComparison = this._xComparison;
+  let xBiggerThan = xComparison - 1;
+
+  for (let x = 0; x < byteWidth; x++) {
+    let rawByte = rawData[1 + x];
+    let f1Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
+    unfilteredLine[x] = rawByte + f1Left;
+  }
+};
+
+Filter.prototype._unFilterType2 = function (
+  rawData,
+  unfilteredLine,
+  byteWidth
+) {
+  let lastLine = this._lastLine;
+
+  for (let x = 0; x < byteWidth; x++) {
+    let rawByte = rawData[1 + x];
+    let f2Up = lastLine ? lastLine[x] : 0;
+    unfilteredLine[x] = rawByte + f2Up;
+  }
+};
+
+Filter.prototype._unFilterType3 = function (
+  rawData,
+  unfilteredLine,
+  byteWidth
+) {
+  let xComparison = this._xComparison;
+  let xBiggerThan = xComparison - 1;
+  let lastLine = this._lastLine;
+
+  for (let x = 0; x < byteWidth; x++) {
+    let rawByte = rawData[1 + x];
+    let f3Up = lastLine ? lastLine[x] : 0;
+    let f3Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
+    let f3Add = Math.floor((f3Left + f3Up) / 2);
+    unfilteredLine[x] = rawByte + f3Add;
+  }
+};
+
+Filter.prototype._unFilterType4 = function (
+  rawData,
+  unfilteredLine,
+  byteWidth
+) {
+  let xComparison = this._xComparison;
+  let xBiggerThan = xComparison - 1;
+  let lastLine = this._lastLine;
+
+  for (let x = 0; x < byteWidth; x++) {
+    let rawByte = rawData[1 + x];
+    let f4Up = lastLine ? lastLine[x] : 0;
+    let f4Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
+    let f4UpLeft = x > xBiggerThan && lastLine ? lastLine[x - xComparison] : 0;
+    let f4Add = paethPredictor(f4Left, f4Up, f4UpLeft);
+    unfilteredLine[x] = rawByte + f4Add;
+  }
+};
+
+Filter.prototype._reverseFilterLine = function (rawData) {
+  let filter = rawData[0];
+  let unfilteredLine;
+  let currentImage = this._images[this._imageIndex];
+  let byteWidth = currentImage.byteWidth;
+
+  if (filter === 0) {
+    unfilteredLine = rawData.slice(1, byteWidth + 1);
+  } else {
+    unfilteredLine = Buffer.alloc(byteWidth);
+
+    switch (filter) {
+      case 1:
+        this._unFilterType1(rawData, unfilteredLine, byteWidth);
+        break;
+      case 2:
+        this._unFilterType2(rawData, unfilteredLine, byteWidth);
+        break;
+      case 3:
+        this._unFilterType3(rawData, unfilteredLine, byteWidth);
+        break;
+      case 4:
+        this._unFilterType4(rawData, unfilteredLine, byteWidth);
+        break;
+      default:
+        throw new Error("Unrecognised filter type - " + filter);
+    }
+  }
+
+  this.write(unfilteredLine);
+
+  currentImage.lineIndex++;
+  if (currentImage.lineIndex >= currentImage.height) {
+    this._lastLine = null;
+    this._imageIndex++;
+    currentImage = this._images[this._imageIndex];
+  } else {
+    this._lastLine = unfilteredLine;
+  }
+
+  if (currentImage) {
+    // read, using the byte width that may be from the new current image
+    this.read(currentImage.byteWidth + 1, this._reverseFilterLine.bind(this));
+  } else {
+    this._lastLine = null;
+    this.complete();
+  }
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/format-normaliser.js"
+/*!*********************************************************!*\
+  !*** ../../node_modules/pngjs/lib/format-normaliser.js ***!
+  \*********************************************************/
+(module) {
+
+"use strict";
+
+
+function dePalette(indata, outdata, width, height, palette) {
+  let pxPos = 0;
+  // use values from palette
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let color = palette[indata[pxPos]];
+
+      if (!color) {
+        throw new Error("index " + indata[pxPos] + " not in palette");
+      }
+
+      for (let i = 0; i < 4; i++) {
+        outdata[pxPos + i] = color[i];
+      }
+      pxPos += 4;
+    }
+  }
+}
+
+function replaceTransparentColor(indata, outdata, width, height, transColor) {
+  let pxPos = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let makeTrans = false;
+
+      if (transColor.length === 1) {
+        if (transColor[0] === indata[pxPos]) {
+          makeTrans = true;
+        }
+      } else if (
+        transColor[0] === indata[pxPos] &&
+        transColor[1] === indata[pxPos + 1] &&
+        transColor[2] === indata[pxPos + 2]
+      ) {
+        makeTrans = true;
+      }
+      if (makeTrans) {
+        for (let i = 0; i < 4; i++) {
+          outdata[pxPos + i] = 0;
+        }
+      }
+      pxPos += 4;
+    }
+  }
+}
+
+function scaleDepth(indata, outdata, width, height, depth) {
+  let maxOutSample = 255;
+  let maxInSample = Math.pow(2, depth) - 1;
+  let pxPos = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      for (let i = 0; i < 4; i++) {
+        outdata[pxPos + i] = Math.floor(
+          (indata[pxPos + i] * maxOutSample) / maxInSample + 0.5
+        );
+      }
+      pxPos += 4;
+    }
+  }
+}
+
+module.exports = function (indata, imageData) {
+  let depth = imageData.depth;
+  let width = imageData.width;
+  let height = imageData.height;
+  let colorType = imageData.colorType;
+  let transColor = imageData.transColor;
+  let palette = imageData.palette;
+
+  let outdata = indata; // only different for 16 bits
+
+  if (colorType === 3) {
+    // paletted
+    dePalette(indata, outdata, width, height, palette);
+  } else {
+    if (transColor) {
+      replaceTransparentColor(indata, outdata, width, height, transColor);
+    }
+    // if it needs scaling
+    if (depth !== 8) {
+      // if we need to change the buffer size
+      if (depth === 16) {
+        outdata = Buffer.alloc(width * height * 4);
+      }
+      scaleDepth(indata, outdata, width, height, depth);
+    }
+  }
+  return outdata;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/interlace.js"
+/*!*************************************************!*\
+  !*** ../../node_modules/pngjs/lib/interlace.js ***!
+  \*************************************************/
+(__unused_webpack_module, exports) {
+
+"use strict";
+
+
+// Adam 7
+//   0 1 2 3 4 5 6 7
+// 0 x 6 4 6 x 6 4 6
+// 1 7 7 7 7 7 7 7 7
+// 2 5 6 5 6 5 6 5 6
+// 3 7 7 7 7 7 7 7 7
+// 4 3 6 4 6 3 6 4 6
+// 5 7 7 7 7 7 7 7 7
+// 6 5 6 5 6 5 6 5 6
+// 7 7 7 7 7 7 7 7 7
+
+let imagePasses = [
+  {
+    // pass 1 - 1px
+    x: [0],
+    y: [0],
+  },
+  {
+    // pass 2 - 1px
+    x: [4],
+    y: [0],
+  },
+  {
+    // pass 3 - 2px
+    x: [0, 4],
+    y: [4],
+  },
+  {
+    // pass 4 - 4px
+    x: [2, 6],
+    y: [0, 4],
+  },
+  {
+    // pass 5 - 8px
+    x: [0, 2, 4, 6],
+    y: [2, 6],
+  },
+  {
+    // pass 6 - 16px
+    x: [1, 3, 5, 7],
+    y: [0, 2, 4, 6],
+  },
+  {
+    // pass 7 - 32px
+    x: [0, 1, 2, 3, 4, 5, 6, 7],
+    y: [1, 3, 5, 7],
+  },
+];
+
+exports.getImagePasses = function (width, height) {
+  let images = [];
+  let xLeftOver = width % 8;
+  let yLeftOver = height % 8;
+  let xRepeats = (width - xLeftOver) / 8;
+  let yRepeats = (height - yLeftOver) / 8;
+  for (let i = 0; i < imagePasses.length; i++) {
+    let pass = imagePasses[i];
+    let passWidth = xRepeats * pass.x.length;
+    let passHeight = yRepeats * pass.y.length;
+    for (let j = 0; j < pass.x.length; j++) {
+      if (pass.x[j] < xLeftOver) {
+        passWidth++;
+      } else {
+        break;
+      }
+    }
+    for (let j = 0; j < pass.y.length; j++) {
+      if (pass.y[j] < yLeftOver) {
+        passHeight++;
+      } else {
+        break;
+      }
+    }
+    if (passWidth > 0 && passHeight > 0) {
+      images.push({ width: passWidth, height: passHeight, index: i });
+    }
+  }
+  return images;
+};
+
+exports.getInterlaceIterator = function (width) {
+  return function (x, y, pass) {
+    let outerXLeftOver = x % imagePasses[pass].x.length;
+    let outerX =
+      ((x - outerXLeftOver) / imagePasses[pass].x.length) * 8 +
+      imagePasses[pass].x[outerXLeftOver];
+    let outerYLeftOver = y % imagePasses[pass].y.length;
+    let outerY =
+      ((y - outerYLeftOver) / imagePasses[pass].y.length) * 8 +
+      imagePasses[pass].y[outerYLeftOver];
+    return outerX * 4 + outerY * width * 4;
+  };
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/packer-async.js"
+/*!****************************************************!*\
+  !*** ../../node_modules/pngjs/lib/packer-async.js ***!
+  \****************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let util = __webpack_require__(/*! util */ "util");
+let Stream = __webpack_require__(/*! stream */ "stream");
+let constants = __webpack_require__(/*! ./constants */ "../../node_modules/pngjs/lib/constants.js");
+let Packer = __webpack_require__(/*! ./packer */ "../../node_modules/pngjs/lib/packer.js");
+
+let PackerAsync = (module.exports = function (opt) {
+  Stream.call(this);
+
+  let options = opt || {};
+
+  this._packer = new Packer(options);
+  this._deflate = this._packer.createDeflate();
+
+  this.readable = true;
+});
+util.inherits(PackerAsync, Stream);
+
+PackerAsync.prototype.pack = function (data, width, height, gamma) {
+  // Signature
+  this.emit("data", Buffer.from(constants.PNG_SIGNATURE));
+  this.emit("data", this._packer.packIHDR(width, height));
+
+  if (gamma) {
+    this.emit("data", this._packer.packGAMA(gamma));
+  }
+
+  let filteredData = this._packer.filterData(data, width, height);
+
+  // compress it
+  this._deflate.on("error", this.emit.bind(this, "error"));
+
+  this._deflate.on(
+    "data",
+    function (compressedData) {
+      this.emit("data", this._packer.packIDAT(compressedData));
+    }.bind(this)
+  );
+
+  this._deflate.on(
+    "end",
+    function () {
+      this.emit("data", this._packer.packIEND());
+      this.emit("end");
+    }.bind(this)
+  );
+
+  this._deflate.end(filteredData);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/packer-sync.js"
+/*!***************************************************!*\
+  !*** ../../node_modules/pngjs/lib/packer-sync.js ***!
+  \***************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let hasSyncZlib = true;
+let zlib = __webpack_require__(/*! zlib */ "zlib");
+if (!zlib.deflateSync) {
+  hasSyncZlib = false;
+}
+let constants = __webpack_require__(/*! ./constants */ "../../node_modules/pngjs/lib/constants.js");
+let Packer = __webpack_require__(/*! ./packer */ "../../node_modules/pngjs/lib/packer.js");
+
+module.exports = function (metaData, opt) {
+  if (!hasSyncZlib) {
+    throw new Error(
+      "To use the sync capability of this library in old node versions, please pin pngjs to v2.3.0"
+    );
+  }
+
+  let options = opt || {};
+
+  let packer = new Packer(options);
+
+  let chunks = [];
+
+  // Signature
+  chunks.push(Buffer.from(constants.PNG_SIGNATURE));
+
+  // Header
+  chunks.push(packer.packIHDR(metaData.width, metaData.height));
+
+  if (metaData.gamma) {
+    chunks.push(packer.packGAMA(metaData.gamma));
+  }
+
+  let filteredData = packer.filterData(
+    metaData.data,
+    metaData.width,
+    metaData.height
+  );
+
+  // compress it
+  let compressedData = zlib.deflateSync(
+    filteredData,
+    packer.getDeflateOptions()
+  );
+  filteredData = null;
+
+  if (!compressedData || !compressedData.length) {
+    throw new Error("bad png - invalid compressed data response");
+  }
+  chunks.push(packer.packIDAT(compressedData));
+
+  // End
+  chunks.push(packer.packIEND());
+
+  return Buffer.concat(chunks);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/packer.js"
+/*!**********************************************!*\
+  !*** ../../node_modules/pngjs/lib/packer.js ***!
+  \**********************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let constants = __webpack_require__(/*! ./constants */ "../../node_modules/pngjs/lib/constants.js");
+let CrcStream = __webpack_require__(/*! ./crc */ "../../node_modules/pngjs/lib/crc.js");
+let bitPacker = __webpack_require__(/*! ./bitpacker */ "../../node_modules/pngjs/lib/bitpacker.js");
+let filter = __webpack_require__(/*! ./filter-pack */ "../../node_modules/pngjs/lib/filter-pack.js");
+let zlib = __webpack_require__(/*! zlib */ "zlib");
+
+let Packer = (module.exports = function (options) {
+  this._options = options;
+
+  options.deflateChunkSize = options.deflateChunkSize || 32 * 1024;
+  options.deflateLevel =
+    options.deflateLevel != null ? options.deflateLevel : 9;
+  options.deflateStrategy =
+    options.deflateStrategy != null ? options.deflateStrategy : 3;
+  options.inputHasAlpha =
+    options.inputHasAlpha != null ? options.inputHasAlpha : true;
+  options.deflateFactory = options.deflateFactory || zlib.createDeflate;
+  options.bitDepth = options.bitDepth || 8;
+  // This is outputColorType
+  options.colorType =
+    typeof options.colorType === "number"
+      ? options.colorType
+      : constants.COLORTYPE_COLOR_ALPHA;
+  options.inputColorType =
+    typeof options.inputColorType === "number"
+      ? options.inputColorType
+      : constants.COLORTYPE_COLOR_ALPHA;
+
+  if (
+    [
+      constants.COLORTYPE_GRAYSCALE,
+      constants.COLORTYPE_COLOR,
+      constants.COLORTYPE_COLOR_ALPHA,
+      constants.COLORTYPE_ALPHA,
+    ].indexOf(options.colorType) === -1
+  ) {
+    throw new Error(
+      "option color type:" + options.colorType + " is not supported at present"
+    );
+  }
+  if (
+    [
+      constants.COLORTYPE_GRAYSCALE,
+      constants.COLORTYPE_COLOR,
+      constants.COLORTYPE_COLOR_ALPHA,
+      constants.COLORTYPE_ALPHA,
+    ].indexOf(options.inputColorType) === -1
+  ) {
+    throw new Error(
+      "option input color type:" +
+        options.inputColorType +
+        " is not supported at present"
+    );
+  }
+  if (options.bitDepth !== 8 && options.bitDepth !== 16) {
+    throw new Error(
+      "option bit depth:" + options.bitDepth + " is not supported at present"
+    );
+  }
+});
+
+Packer.prototype.getDeflateOptions = function () {
+  return {
+    chunkSize: this._options.deflateChunkSize,
+    level: this._options.deflateLevel,
+    strategy: this._options.deflateStrategy,
+  };
+};
+
+Packer.prototype.createDeflate = function () {
+  return this._options.deflateFactory(this.getDeflateOptions());
+};
+
+Packer.prototype.filterData = function (data, width, height) {
+  // convert to correct format for filtering (e.g. right bpp and bit depth)
+  let packedData = bitPacker(data, width, height, this._options);
+
+  // filter pixel data
+  let bpp = constants.COLORTYPE_TO_BPP_MAP[this._options.colorType];
+  let filteredData = filter(packedData, width, height, this._options, bpp);
+  return filteredData;
+};
+
+Packer.prototype._packChunk = function (type, data) {
+  let len = data ? data.length : 0;
+  let buf = Buffer.alloc(len + 12);
+
+  buf.writeUInt32BE(len, 0);
+  buf.writeUInt32BE(type, 4);
+
+  if (data) {
+    data.copy(buf, 8);
+  }
+
+  buf.writeInt32BE(
+    CrcStream.crc32(buf.slice(4, buf.length - 4)),
+    buf.length - 4
+  );
+  return buf;
+};
+
+Packer.prototype.packGAMA = function (gamma) {
+  let buf = Buffer.alloc(4);
+  buf.writeUInt32BE(Math.floor(gamma * constants.GAMMA_DIVISION), 0);
+  return this._packChunk(constants.TYPE_gAMA, buf);
+};
+
+Packer.prototype.packIHDR = function (width, height) {
+  let buf = Buffer.alloc(13);
+  buf.writeUInt32BE(width, 0);
+  buf.writeUInt32BE(height, 4);
+  buf[8] = this._options.bitDepth; // Bit depth
+  buf[9] = this._options.colorType; // colorType
+  buf[10] = 0; // compression
+  buf[11] = 0; // filter
+  buf[12] = 0; // interlace
+
+  return this._packChunk(constants.TYPE_IHDR, buf);
+};
+
+Packer.prototype.packIDAT = function (data) {
+  return this._packChunk(constants.TYPE_IDAT, data);
+};
+
+Packer.prototype.packIEND = function () {
+  return this._packChunk(constants.TYPE_IEND, null);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/paeth-predictor.js"
+/*!*******************************************************!*\
+  !*** ../../node_modules/pngjs/lib/paeth-predictor.js ***!
+  \*******************************************************/
+(module) {
+
+"use strict";
+
+
+module.exports = function paethPredictor(left, above, upLeft) {
+  let paeth = left + above - upLeft;
+  let pLeft = Math.abs(paeth - left);
+  let pAbove = Math.abs(paeth - above);
+  let pUpLeft = Math.abs(paeth - upLeft);
+
+  if (pLeft <= pAbove && pLeft <= pUpLeft) {
+    return left;
+  }
+  if (pAbove <= pUpLeft) {
+    return above;
+  }
+  return upLeft;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/parser-async.js"
+/*!****************************************************!*\
+  !*** ../../node_modules/pngjs/lib/parser-async.js ***!
+  \****************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let util = __webpack_require__(/*! util */ "util");
+let zlib = __webpack_require__(/*! zlib */ "zlib");
+let ChunkStream = __webpack_require__(/*! ./chunkstream */ "../../node_modules/pngjs/lib/chunkstream.js");
+let FilterAsync = __webpack_require__(/*! ./filter-parse-async */ "../../node_modules/pngjs/lib/filter-parse-async.js");
+let Parser = __webpack_require__(/*! ./parser */ "../../node_modules/pngjs/lib/parser.js");
+let bitmapper = __webpack_require__(/*! ./bitmapper */ "../../node_modules/pngjs/lib/bitmapper.js");
+let formatNormaliser = __webpack_require__(/*! ./format-normaliser */ "../../node_modules/pngjs/lib/format-normaliser.js");
+
+let ParserAsync = (module.exports = function (options) {
+  ChunkStream.call(this);
+
+  this._parser = new Parser(options, {
+    read: this.read.bind(this),
+    error: this._handleError.bind(this),
+    metadata: this._handleMetaData.bind(this),
+    gamma: this.emit.bind(this, "gamma"),
+    palette: this._handlePalette.bind(this),
+    transColor: this._handleTransColor.bind(this),
+    finished: this._finished.bind(this),
+    inflateData: this._inflateData.bind(this),
+    simpleTransparency: this._simpleTransparency.bind(this),
+    headersFinished: this._headersFinished.bind(this),
+  });
+  this._options = options;
+  this.writable = true;
+
+  this._parser.start();
+});
+util.inherits(ParserAsync, ChunkStream);
+
+ParserAsync.prototype._handleError = function (err) {
+  this.emit("error", err);
+
+  this.writable = false;
+
+  this.destroy();
+
+  if (this._inflate && this._inflate.destroy) {
+    this._inflate.destroy();
+  }
+
+  if (this._filter) {
+    this._filter.destroy();
+    // For backward compatibility with Node 7 and below.
+    // Suppress errors due to _inflate calling write() even after
+    // it's destroy()'ed.
+    this._filter.on("error", function () {});
+  }
+
+  this.errord = true;
+};
+
+ParserAsync.prototype._inflateData = function (data) {
+  if (!this._inflate) {
+    if (this._bitmapInfo.interlace) {
+      this._inflate = zlib.createInflate();
+
+      this._inflate.on("error", this.emit.bind(this, "error"));
+      this._filter.on("complete", this._complete.bind(this));
+
+      this._inflate.pipe(this._filter);
+    } else {
+      let rowSize =
+        ((this._bitmapInfo.width *
+          this._bitmapInfo.bpp *
+          this._bitmapInfo.depth +
+          7) >>
+          3) +
+        1;
+      let imageSize = rowSize * this._bitmapInfo.height;
+      let chunkSize = Math.max(imageSize, zlib.Z_MIN_CHUNK);
+
+      this._inflate = zlib.createInflate({ chunkSize: chunkSize });
+      let leftToInflate = imageSize;
+
+      let emitError = this.emit.bind(this, "error");
+      this._inflate.on("error", function (err) {
+        if (!leftToInflate) {
+          return;
+        }
+
+        emitError(err);
+      });
+      this._filter.on("complete", this._complete.bind(this));
+
+      let filterWrite = this._filter.write.bind(this._filter);
+      this._inflate.on("data", function (chunk) {
+        if (!leftToInflate) {
+          return;
+        }
+
+        if (chunk.length > leftToInflate) {
+          chunk = chunk.slice(0, leftToInflate);
+        }
+
+        leftToInflate -= chunk.length;
+
+        filterWrite(chunk);
+      });
+
+      this._inflate.on("end", this._filter.end.bind(this._filter));
+    }
+  }
+  this._inflate.write(data);
+};
+
+ParserAsync.prototype._handleMetaData = function (metaData) {
+  this._metaData = metaData;
+  this._bitmapInfo = Object.create(metaData);
+
+  this._filter = new FilterAsync(this._bitmapInfo);
+};
+
+ParserAsync.prototype._handleTransColor = function (transColor) {
+  this._bitmapInfo.transColor = transColor;
+};
+
+ParserAsync.prototype._handlePalette = function (palette) {
+  this._bitmapInfo.palette = palette;
+};
+
+ParserAsync.prototype._simpleTransparency = function () {
+  this._metaData.alpha = true;
+};
+
+ParserAsync.prototype._headersFinished = function () {
+  // Up until this point, we don't know if we have a tRNS chunk (alpha)
+  // so we can't emit metadata any earlier
+  this.emit("metadata", this._metaData);
+};
+
+ParserAsync.prototype._finished = function () {
+  if (this.errord) {
+    return;
+  }
+
+  if (!this._inflate) {
+    this.emit("error", "No Inflate block");
+  } else {
+    // no more data to inflate
+    this._inflate.end();
+  }
+};
+
+ParserAsync.prototype._complete = function (filteredData) {
+  if (this.errord) {
+    return;
+  }
+
+  let normalisedBitmapData;
+
+  try {
+    let bitmapData = bitmapper.dataToBitMap(filteredData, this._bitmapInfo);
+
+    normalisedBitmapData = formatNormaliser(bitmapData, this._bitmapInfo);
+    bitmapData = null;
+  } catch (ex) {
+    this._handleError(ex);
+    return;
+  }
+
+  this.emit("parsed", normalisedBitmapData);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/parser-sync.js"
+/*!***************************************************!*\
+  !*** ../../node_modules/pngjs/lib/parser-sync.js ***!
+  \***************************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let hasSyncZlib = true;
+let zlib = __webpack_require__(/*! zlib */ "zlib");
+let inflateSync = __webpack_require__(/*! ./sync-inflate */ "../../node_modules/pngjs/lib/sync-inflate.js");
+if (!zlib.deflateSync) {
+  hasSyncZlib = false;
+}
+let SyncReader = __webpack_require__(/*! ./sync-reader */ "../../node_modules/pngjs/lib/sync-reader.js");
+let FilterSync = __webpack_require__(/*! ./filter-parse-sync */ "../../node_modules/pngjs/lib/filter-parse-sync.js");
+let Parser = __webpack_require__(/*! ./parser */ "../../node_modules/pngjs/lib/parser.js");
+let bitmapper = __webpack_require__(/*! ./bitmapper */ "../../node_modules/pngjs/lib/bitmapper.js");
+let formatNormaliser = __webpack_require__(/*! ./format-normaliser */ "../../node_modules/pngjs/lib/format-normaliser.js");
+
+module.exports = function (buffer, options) {
+  if (!hasSyncZlib) {
+    throw new Error(
+      "To use the sync capability of this library in old node versions, please pin pngjs to v2.3.0"
+    );
+  }
+
+  let err;
+  function handleError(_err_) {
+    err = _err_;
+  }
+
+  let metaData;
+  function handleMetaData(_metaData_) {
+    metaData = _metaData_;
+  }
+
+  function handleTransColor(transColor) {
+    metaData.transColor = transColor;
+  }
+
+  function handlePalette(palette) {
+    metaData.palette = palette;
+  }
+
+  function handleSimpleTransparency() {
+    metaData.alpha = true;
+  }
+
+  let gamma;
+  function handleGamma(_gamma_) {
+    gamma = _gamma_;
+  }
+
+  let inflateDataList = [];
+  function handleInflateData(inflatedData) {
+    inflateDataList.push(inflatedData);
+  }
+
+  let reader = new SyncReader(buffer);
+
+  let parser = new Parser(options, {
+    read: reader.read.bind(reader),
+    error: handleError,
+    metadata: handleMetaData,
+    gamma: handleGamma,
+    palette: handlePalette,
+    transColor: handleTransColor,
+    inflateData: handleInflateData,
+    simpleTransparency: handleSimpleTransparency,
+  });
+
+  parser.start();
+  reader.process();
+
+  if (err) {
+    throw err;
+  }
+
+  //join together the inflate datas
+  let inflateData = Buffer.concat(inflateDataList);
+  inflateDataList.length = 0;
+
+  let inflatedData;
+  if (metaData.interlace) {
+    inflatedData = zlib.inflateSync(inflateData);
+  } else {
+    let rowSize =
+      ((metaData.width * metaData.bpp * metaData.depth + 7) >> 3) + 1;
+    let imageSize = rowSize * metaData.height;
+    inflatedData = inflateSync(inflateData, {
+      chunkSize: imageSize,
+      maxLength: imageSize,
+    });
+  }
+  inflateData = null;
+
+  if (!inflatedData || !inflatedData.length) {
+    throw new Error("bad png - invalid inflate data response");
+  }
+
+  let unfilteredData = FilterSync.process(inflatedData, metaData);
+  inflateData = null;
+
+  let bitmapData = bitmapper.dataToBitMap(unfilteredData, metaData);
+  unfilteredData = null;
+
+  let normalisedBitmapData = formatNormaliser(bitmapData, metaData);
+
+  metaData.data = normalisedBitmapData;
+  metaData.gamma = gamma || 0;
+
+  return metaData;
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/parser.js"
+/*!**********************************************!*\
+  !*** ../../node_modules/pngjs/lib/parser.js ***!
+  \**********************************************/
+(module, __unused_webpack_exports, __webpack_require__) {
+
+"use strict";
+
+
+let constants = __webpack_require__(/*! ./constants */ "../../node_modules/pngjs/lib/constants.js");
+let CrcCalculator = __webpack_require__(/*! ./crc */ "../../node_modules/pngjs/lib/crc.js");
+
+let Parser = (module.exports = function (options, dependencies) {
+  this._options = options;
+  options.checkCRC = options.checkCRC !== false;
+
+  this._hasIHDR = false;
+  this._hasIEND = false;
+  this._emittedHeadersFinished = false;
+
+  // input flags/metadata
+  this._palette = [];
+  this._colorType = 0;
+
+  this._chunks = {};
+  this._chunks[constants.TYPE_IHDR] = this._handleIHDR.bind(this);
+  this._chunks[constants.TYPE_IEND] = this._handleIEND.bind(this);
+  this._chunks[constants.TYPE_IDAT] = this._handleIDAT.bind(this);
+  this._chunks[constants.TYPE_PLTE] = this._handlePLTE.bind(this);
+  this._chunks[constants.TYPE_tRNS] = this._handleTRNS.bind(this);
+  this._chunks[constants.TYPE_gAMA] = this._handleGAMA.bind(this);
+
+  this.read = dependencies.read;
+  this.error = dependencies.error;
+  this.metadata = dependencies.metadata;
+  this.gamma = dependencies.gamma;
+  this.transColor = dependencies.transColor;
+  this.palette = dependencies.palette;
+  this.parsed = dependencies.parsed;
+  this.inflateData = dependencies.inflateData;
+  this.finished = dependencies.finished;
+  this.simpleTransparency = dependencies.simpleTransparency;
+  this.headersFinished = dependencies.headersFinished || function () {};
+});
+
+Parser.prototype.start = function () {
+  this.read(constants.PNG_SIGNATURE.length, this._parseSignature.bind(this));
+};
+
+Parser.prototype._parseSignature = function (data) {
+  let signature = constants.PNG_SIGNATURE;
+
+  for (let i = 0; i < signature.length; i++) {
+    if (data[i] !== signature[i]) {
+      this.error(new Error("Invalid file signature"));
+      return;
+    }
+  }
+  this.read(8, this._parseChunkBegin.bind(this));
+};
+
+Parser.prototype._parseChunkBegin = function (data) {
+  // chunk content length
+  let length = data.readUInt32BE(0);
+
+  // chunk type
+  let type = data.readUInt32BE(4);
+  let name = "";
+  for (let i = 4; i < 8; i++) {
+    name += String.fromCharCode(data[i]);
+  }
+
+  //console.log('chunk ', name, length);
+
+  // chunk flags
+  let ancillary = Boolean(data[4] & 0x20); // or critical
+  //    priv = Boolean(data[5] & 0x20), // or public
+  //    safeToCopy = Boolean(data[7] & 0x20); // or unsafe
+
+  if (!this._hasIHDR && type !== constants.TYPE_IHDR) {
+    this.error(new Error("Expected IHDR on beggining"));
+    return;
+  }
+
+  this._crc = new CrcCalculator();
+  this._crc.write(Buffer.from(name));
+
+  if (this._chunks[type]) {
+    return this._chunks[type](length);
+  }
+
+  if (!ancillary) {
+    this.error(new Error("Unsupported critical chunk type " + name));
+    return;
+  }
+
+  this.read(length + 4, this._skipChunk.bind(this));
+};
+
+Parser.prototype._skipChunk = function (/*data*/) {
+  this.read(8, this._parseChunkBegin.bind(this));
+};
+
+Parser.prototype._handleChunkEnd = function () {
+  this.read(4, this._parseChunkEnd.bind(this));
+};
+
+Parser.prototype._parseChunkEnd = function (data) {
+  let fileCrc = data.readInt32BE(0);
+  let calcCrc = this._crc.crc32();
+
+  // check CRC
+  if (this._options.checkCRC && calcCrc !== fileCrc) {
+    this.error(new Error("Crc error - " + fileCrc + " - " + calcCrc));
+    return;
+  }
+
+  if (!this._hasIEND) {
+    this.read(8, this._parseChunkBegin.bind(this));
+  }
+};
+
+Parser.prototype._handleIHDR = function (length) {
+  this.read(length, this._parseIHDR.bind(this));
+};
+Parser.prototype._parseIHDR = function (data) {
+  this._crc.write(data);
+
+  let width = data.readUInt32BE(0);
+  let height = data.readUInt32BE(4);
+  let depth = data[8];
+  let colorType = data[9]; // bits: 1 palette, 2 color, 4 alpha
+  let compr = data[10];
+  let filter = data[11];
+  let interlace = data[12];
+
+  // console.log('    width', width, 'height', height,
+  //     'depth', depth, 'colorType', colorType,
+  //     'compr', compr, 'filter', filter, 'interlace', interlace
+  // );
+
+  if (
+    depth !== 8 &&
+    depth !== 4 &&
+    depth !== 2 &&
+    depth !== 1 &&
+    depth !== 16
+  ) {
+    this.error(new Error("Unsupported bit depth " + depth));
+    return;
+  }
+  if (!(colorType in constants.COLORTYPE_TO_BPP_MAP)) {
+    this.error(new Error("Unsupported color type"));
+    return;
+  }
+  if (compr !== 0) {
+    this.error(new Error("Unsupported compression method"));
+    return;
+  }
+  if (filter !== 0) {
+    this.error(new Error("Unsupported filter method"));
+    return;
+  }
+  if (interlace !== 0 && interlace !== 1) {
+    this.error(new Error("Unsupported interlace method"));
+    return;
+  }
+
+  this._colorType = colorType;
+
+  let bpp = constants.COLORTYPE_TO_BPP_MAP[this._colorType];
+
+  this._hasIHDR = true;
+
+  this.metadata({
+    width: width,
+    height: height,
+    depth: depth,
+    interlace: Boolean(interlace),
+    palette: Boolean(colorType & constants.COLORTYPE_PALETTE),
+    color: Boolean(colorType & constants.COLORTYPE_COLOR),
+    alpha: Boolean(colorType & constants.COLORTYPE_ALPHA),
+    bpp: bpp,
+    colorType: colorType,
+  });
+
+  this._handleChunkEnd();
+};
+
+Parser.prototype._handlePLTE = function (length) {
+  this.read(length, this._parsePLTE.bind(this));
+};
+Parser.prototype._parsePLTE = function (data) {
+  this._crc.write(data);
+
+  let entries = Math.floor(data.length / 3);
+  // console.log('Palette:', entries);
+
+  for (let i = 0; i < entries; i++) {
+    this._palette.push([data[i * 3], data[i * 3 + 1], data[i * 3 + 2], 0xff]);
+  }
+
+  this.palette(this._palette);
+
+  this._handleChunkEnd();
+};
+
+Parser.prototype._handleTRNS = function (length) {
+  this.simpleTransparency();
+  this.read(length, this._parseTRNS.bind(this));
+};
+Parser.prototype._parseTRNS = function (data) {
+  this._crc.write(data);
+
+  // palette
+  if (this._colorType === constants.COLORTYPE_PALETTE_COLOR) {
+    if (this._palette.length === 0) {
+      this.error(new Error("Transparency chunk must be after palette"));
+      return;
+    }
+    if (data.length > this._palette.length) {
+      this.error(new Error("More transparent colors than palette size"));
+      return;
+    }
+    for (let i = 0; i < data.length; i++) {
+      this._palette[i][3] = data[i];
+    }
+    this.palette(this._palette);
+  }
+
+  // for colorType 0 (grayscale) and 2 (rgb)
+  // there might be one gray/color defined as transparent
+  if (this._colorType === constants.COLORTYPE_GRAYSCALE) {
+    // grey, 2 bytes
+    this.transColor([data.readUInt16BE(0)]);
+  }
+  if (this._colorType === constants.COLORTYPE_COLOR) {
+    this.transColor([
+      data.readUInt16BE(0),
+      data.readUInt16BE(2),
+      data.readUInt16BE(4),
+    ]);
+  }
+
+  this._handleChunkEnd();
+};
+
+Parser.prototype._handleGAMA = function (length) {
+  this.read(length, this._parseGAMA.bind(this));
+};
+Parser.prototype._parseGAMA = function (data) {
+  this._crc.write(data);
+  this.gamma(data.readUInt32BE(0) / constants.GAMMA_DIVISION);
+
+  this._handleChunkEnd();
+};
+
+Parser.prototype._handleIDAT = function (length) {
+  if (!this._emittedHeadersFinished) {
+    this._emittedHeadersFinished = true;
+    this.headersFinished();
+  }
+  this.read(-length, this._parseIDAT.bind(this, length));
+};
+Parser.prototype._parseIDAT = function (length, data) {
+  this._crc.write(data);
+
+  if (
+    this._colorType === constants.COLORTYPE_PALETTE_COLOR &&
+    this._palette.length === 0
+  ) {
+    throw new Error("Expected palette not found");
+  }
+
+  this.inflateData(data);
+  let leftOverLength = length - data.length;
+
+  if (leftOverLength > 0) {
+    this._handleIDAT(leftOverLength);
+  } else {
+    this._handleChunkEnd();
+  }
+};
+
+Parser.prototype._handleIEND = function (length) {
+  this.read(length, this._parseIEND.bind(this));
+};
+Parser.prototype._parseIEND = function (data) {
+  this._crc.write(data);
+
+  this._hasIEND = true;
+  this._handleChunkEnd();
+
+  if (this.finished) {
+    this.finished();
+  }
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/png-sync.js"
+/*!************************************************!*\
+  !*** ../../node_modules/pngjs/lib/png-sync.js ***!
+  \************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+"use strict";
+
+
+let parse = __webpack_require__(/*! ./parser-sync */ "../../node_modules/pngjs/lib/parser-sync.js");
+let pack = __webpack_require__(/*! ./packer-sync */ "../../node_modules/pngjs/lib/packer-sync.js");
+
+exports.read = function (buffer, options) {
+  return parse(buffer, options || {});
+};
+
+exports.write = function (png, options) {
+  return pack(png, options);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/png.js"
+/*!*******************************************!*\
+  !*** ../../node_modules/pngjs/lib/png.js ***!
+  \*******************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+"use strict";
+
+
+let util = __webpack_require__(/*! util */ "util");
+let Stream = __webpack_require__(/*! stream */ "stream");
+let Parser = __webpack_require__(/*! ./parser-async */ "../../node_modules/pngjs/lib/parser-async.js");
+let Packer = __webpack_require__(/*! ./packer-async */ "../../node_modules/pngjs/lib/packer-async.js");
+let PNGSync = __webpack_require__(/*! ./png-sync */ "../../node_modules/pngjs/lib/png-sync.js");
+
+let PNG = (exports.PNG = function (options) {
+  Stream.call(this);
+
+  options = options || {}; // eslint-disable-line no-param-reassign
+
+  // coerce pixel dimensions to integers (also coerces undefined -> 0):
+  this.width = options.width | 0;
+  this.height = options.height | 0;
+
+  this.data =
+    this.width > 0 && this.height > 0
+      ? Buffer.alloc(4 * this.width * this.height)
+      : null;
+
+  if (options.fill && this.data) {
+    this.data.fill(0);
+  }
+
+  this.gamma = 0;
+  this.readable = this.writable = true;
+
+  this._parser = new Parser(options);
+
+  this._parser.on("error", this.emit.bind(this, "error"));
+  this._parser.on("close", this._handleClose.bind(this));
+  this._parser.on("metadata", this._metadata.bind(this));
+  this._parser.on("gamma", this._gamma.bind(this));
+  this._parser.on(
+    "parsed",
+    function (data) {
+      this.data = data;
+      this.emit("parsed", data);
+    }.bind(this)
+  );
+
+  this._packer = new Packer(options);
+  this._packer.on("data", this.emit.bind(this, "data"));
+  this._packer.on("end", this.emit.bind(this, "end"));
+  this._parser.on("close", this._handleClose.bind(this));
+  this._packer.on("error", this.emit.bind(this, "error"));
+});
+util.inherits(PNG, Stream);
+
+PNG.sync = PNGSync;
+
+PNG.prototype.pack = function () {
+  if (!this.data || !this.data.length) {
+    this.emit("error", "No data provided");
+    return this;
+  }
+
+  process.nextTick(
+    function () {
+      this._packer.pack(this.data, this.width, this.height, this.gamma);
+    }.bind(this)
+  );
+
+  return this;
+};
+
+PNG.prototype.parse = function (data, callback) {
+  if (callback) {
+    let onParsed, onError;
+
+    onParsed = function (parsedData) {
+      this.removeListener("error", onError);
+
+      this.data = parsedData;
+      callback(null, this);
+    }.bind(this);
+
+    onError = function (err) {
+      this.removeListener("parsed", onParsed);
+
+      callback(err, null);
+    }.bind(this);
+
+    this.once("parsed", onParsed);
+    this.once("error", onError);
+  }
+
+  this.end(data);
+  return this;
+};
+
+PNG.prototype.write = function (data) {
+  this._parser.write(data);
+  return true;
+};
+
+PNG.prototype.end = function (data) {
+  this._parser.end(data);
+};
+
+PNG.prototype._metadata = function (metadata) {
+  this.width = metadata.width;
+  this.height = metadata.height;
+
+  this.emit("metadata", metadata);
+};
+
+PNG.prototype._gamma = function (gamma) {
+  this.gamma = gamma;
+};
+
+PNG.prototype._handleClose = function () {
+  if (!this._parser.writable && !this._packer.readable) {
+    this.emit("close");
+  }
+};
+
+PNG.bitblt = function (src, dst, srcX, srcY, width, height, deltaX, deltaY) {
+  // eslint-disable-line max-params
+  // coerce pixel dimensions to integers (also coerces undefined -> 0):
+  /* eslint-disable no-param-reassign */
+  srcX |= 0;
+  srcY |= 0;
+  width |= 0;
+  height |= 0;
+  deltaX |= 0;
+  deltaY |= 0;
+  /* eslint-enable no-param-reassign */
+
+  if (
+    srcX > src.width ||
+    srcY > src.height ||
+    srcX + width > src.width ||
+    srcY + height > src.height
+  ) {
+    throw new Error("bitblt reading outside image");
+  }
+
+  if (
+    deltaX > dst.width ||
+    deltaY > dst.height ||
+    deltaX + width > dst.width ||
+    deltaY + height > dst.height
+  ) {
+    throw new Error("bitblt writing outside image");
+  }
+
+  for (let y = 0; y < height; y++) {
+    src.data.copy(
+      dst.data,
+      ((deltaY + y) * dst.width + deltaX) << 2,
+      ((srcY + y) * src.width + srcX) << 2,
+      ((srcY + y) * src.width + srcX + width) << 2
+    );
+  }
+};
+
+PNG.prototype.bitblt = function (
+  dst,
+  srcX,
+  srcY,
+  width,
+  height,
+  deltaX,
+  deltaY
+) {
+  // eslint-disable-line max-params
+
+  PNG.bitblt(this, dst, srcX, srcY, width, height, deltaX, deltaY);
+  return this;
+};
+
+PNG.adjustGamma = function (src) {
+  if (src.gamma) {
+    for (let y = 0; y < src.height; y++) {
+      for (let x = 0; x < src.width; x++) {
+        let idx = (src.width * y + x) << 2;
+
+        for (let i = 0; i < 3; i++) {
+          let sample = src.data[idx + i] / 255;
+          sample = Math.pow(sample, 1 / 2.2 / src.gamma);
+          src.data[idx + i] = Math.round(sample * 255);
+        }
+      }
+    }
+    src.gamma = 0;
+  }
+};
+
+PNG.prototype.adjustGamma = function () {
+  PNG.adjustGamma(this);
+};
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/sync-inflate.js"
+/*!****************************************************!*\
+  !*** ../../node_modules/pngjs/lib/sync-inflate.js ***!
+  \****************************************************/
+(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+let assert = (__webpack_require__(/*! assert */ "assert").ok);
+let zlib = __webpack_require__(/*! zlib */ "zlib");
+let util = __webpack_require__(/*! util */ "util");
+
+let kMaxLength = (__webpack_require__(/*! buffer */ "buffer").kMaxLength);
+
+function Inflate(opts) {
+  if (!(this instanceof Inflate)) {
+    return new Inflate(opts);
+  }
+
+  if (opts && opts.chunkSize < zlib.Z_MIN_CHUNK) {
+    opts.chunkSize = zlib.Z_MIN_CHUNK;
+  }
+
+  zlib.Inflate.call(this, opts);
+
+  // Node 8 --> 9 compatibility check
+  this._offset = this._offset === undefined ? this._outOffset : this._offset;
+  this._buffer = this._buffer || this._outBuffer;
+
+  if (opts && opts.maxLength != null) {
+    this._maxLength = opts.maxLength;
+  }
+}
+
+function createInflate(opts) {
+  return new Inflate(opts);
+}
+
+function _close(engine, callback) {
+  if (callback) {
+    process.nextTick(callback);
+  }
+
+  // Caller may invoke .close after a zlib error (which will null _handle).
+  if (!engine._handle) {
+    return;
+  }
+
+  engine._handle.close();
+  engine._handle = null;
+}
+
+Inflate.prototype._processChunk = function (chunk, flushFlag, asyncCb) {
+  if (typeof asyncCb === "function") {
+    return zlib.Inflate._processChunk.call(this, chunk, flushFlag, asyncCb);
+  }
+
+  let self = this;
+
+  let availInBefore = chunk && chunk.length;
+  let availOutBefore = this._chunkSize - this._offset;
+  let leftToInflate = this._maxLength;
+  let inOff = 0;
+
+  let buffers = [];
+  let nread = 0;
+
+  let error;
+  this.on("error", function (err) {
+    error = err;
+  });
+
+  function handleChunk(availInAfter, availOutAfter) {
+    if (self._hadError) {
+      return;
+    }
+
+    let have = availOutBefore - availOutAfter;
+    assert(have >= 0, "have should not go down");
+
+    if (have > 0) {
+      let out = self._buffer.slice(self._offset, self._offset + have);
+      self._offset += have;
+
+      if (out.length > leftToInflate) {
+        out = out.slice(0, leftToInflate);
+      }
+
+      buffers.push(out);
+      nread += out.length;
+      leftToInflate -= out.length;
+
+      if (leftToInflate === 0) {
+        return false;
+      }
+    }
+
+    if (availOutAfter === 0 || self._offset >= self._chunkSize) {
+      availOutBefore = self._chunkSize;
+      self._offset = 0;
+      self._buffer = Buffer.allocUnsafe(self._chunkSize);
+    }
+
+    if (availOutAfter === 0) {
+      inOff += availInBefore - availInAfter;
+      availInBefore = availInAfter;
+
+      return true;
+    }
+
+    return false;
+  }
+
+  assert(this._handle, "zlib binding closed");
+  let res;
+  do {
+    res = this._handle.writeSync(
+      flushFlag,
+      chunk, // in
+      inOff, // in_off
+      availInBefore, // in_len
+      this._buffer, // out
+      this._offset, //out_off
+      availOutBefore
+    ); // out_len
+    // Node 8 --> 9 compatibility check
+    res = res || this._writeState;
+  } while (!this._hadError && handleChunk(res[0], res[1]));
+
+  if (this._hadError) {
+    throw error;
+  }
+
+  if (nread >= kMaxLength) {
+    _close(this);
+    throw new RangeError(
+      "Cannot create final Buffer. It would be larger than 0x" +
+        kMaxLength.toString(16) +
+        " bytes"
+    );
+  }
+
+  let buf = Buffer.concat(buffers, nread);
+  _close(this);
+
+  return buf;
+};
+
+util.inherits(Inflate, zlib.Inflate);
+
+function zlibBufferSync(engine, buffer) {
+  if (typeof buffer === "string") {
+    buffer = Buffer.from(buffer);
+  }
+  if (!(buffer instanceof Buffer)) {
+    throw new TypeError("Not a string or buffer");
+  }
+
+  let flushFlag = engine._finishFlushFlag;
+  if (flushFlag == null) {
+    flushFlag = zlib.Z_FINISH;
+  }
+
+  return engine._processChunk(buffer, flushFlag);
+}
+
+function inflateSync(buffer, opts) {
+  return zlibBufferSync(new Inflate(opts), buffer);
+}
+
+module.exports = exports = inflateSync;
+exports.Inflate = Inflate;
+exports.createInflate = createInflate;
+exports.inflateSync = inflateSync;
+
+
+/***/ },
+
+/***/ "../../node_modules/pngjs/lib/sync-reader.js"
+/*!***************************************************!*\
+  !*** ../../node_modules/pngjs/lib/sync-reader.js ***!
+  \***************************************************/
+(module) {
+
+"use strict";
+
+
+let SyncReader = (module.exports = function (buffer) {
+  this._buffer = buffer;
+  this._reads = [];
+});
+
+SyncReader.prototype.read = function (length, callback) {
+  this._reads.push({
+    length: Math.abs(length), // if length < 0 then at most this length
+    allowLess: length < 0,
+    func: callback,
+  });
+};
+
+SyncReader.prototype.process = function () {
+  // as long as there is any data and read requests
+  while (this._reads.length > 0 && this._buffer.length) {
+    let read = this._reads[0];
+
+    if (
+      this._buffer.length &&
+      (this._buffer.length >= read.length || read.allowLess)
+    ) {
+      // ok there is any data so that we can satisfy this request
+      this._reads.shift(); // == read
+
+      let buf = this._buffer;
+
+      this._buffer = buf.slice(read.length);
+
+      read.func.call(this, buf.slice(0, read.length));
+    } else {
+      break;
+    }
+  }
+
+  if (this._reads.length > 0) {
+    return new Error("There are some read requests waitng on finished stream");
+  }
+
+  if (this._buffer.length > 0) {
+    return new Error("unrecognised content at end of stream");
+  }
+};
+
+
+/***/ },
+
 /***/ "../../packages/tg-analytics/src/analytics-sink.ts"
 /*!*********************************************************!*\
   !*** ../../packages/tg-analytics/src/analytics-sink.ts ***!
@@ -24018,6 +28763,48 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/vision-shadow.repository.ts"
+/*!************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/vision-shadow.repository.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   VISION_SHADOW_TTL_INDEX: () => (/* binding */ VISION_SHADOW_TTL_INDEX),
+/* harmony export */   VISION_SHADOW_TTL_SECONDS: () => (/* binding */ VISION_SHADOW_TTL_SECONDS),
+/* harmony export */   VisionShadowRepository: () => (/* binding */ VisionShadowRepository)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/**
+ * `visionShadow`: one small comparison row per analysed payment screenshot (remote mySuperSever vs the
+ * in-process @tg/vision chain), written fire-and-forget by tg-aut in shadow mode. LOG ONLY: no code path
+ * reads it except scripts/vision-parity.cjs. Design: docs/design/2026-10-10-tg-vision-payment-proof.md.
+ *
+ * Never stored: image bytes/base64, OCR text, payer/payee names. Only the TTL index exists (30 days);
+ * the parity script range-scans `createdAt`, which that same index serves, so there is no second index.
+ */
+const VISION_SHADOW_TTL_SECONDS = 30 * 24 * 60 * 60;
+const VISION_SHADOW_TTL_INDEX = 'createdAt_ttl';
+class VisionShadowRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'visionShadow';
+    }
+    /** Never throws; false when the write failed (already logged by guardWrite). */
+    async insert(doc) {
+        return this.guardWrite(`insert(${String(doc.chatId)})`, () => this.collection.insertOne({ ...doc, createdAt: doc.createdAt ?? new Date() }));
+    }
+    async ensureIndexes() {
+        await this.guardWrite('ensureIndexes(createdAt ttl)', () => this.collection.createIndex({ createdAt: 1 }, { name: VISION_SHADOW_TTL_INDEX, expireAfterSeconds: VISION_SHADOW_TTL_SECONDS }));
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/connection.ts"
 /*!**********************************************!*\
   !*** ../../packages/tg-db/src/connection.ts ***!
@@ -24297,6 +29084,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
+/* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
+
 
 
 
@@ -24330,6 +29119,7 @@ function createRepositories(connection, logger) {
         clients: new _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__.ClientsRepository(connection, logger),
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
+        visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
     };
 }
 /**
@@ -24358,6 +29148,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['clients', repositories.clients],
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
+        ['visionShadow', repositories.visionShadow],
     ];
     for (const [name, repository] of all) {
         try {
@@ -31344,6 +36135,3974 @@ class RuntimeRestrictionStore {
                 return;
             this.entries.delete(soonestId);
         }
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/chain/analyze.ts"
+/*!*****************************************************!*\
+  !*** ../../packages/tg-vision/src/chain/analyze.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   analyzePaymentProof: () => (/* binding */ analyzePaymentProof),
+/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* binding */ shouldFallbackForPaymentExtraction)
+/* harmony export */ });
+/* harmony import */ var _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/wire-normalize */ "../../packages/tg-vision/src/contract/wire-normalize.ts");
+/* harmony import */ var _config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./config */ "../../packages/tg-vision/src/chain/config.ts");
+/* harmony import */ var _outcome__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
+/* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../providers */ "../../packages/tg-vision/src/providers/index.ts");
+/* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+// The chain (design section 4): OCR pre-check, ordered providers, gates R08-R13, outcome, optional second opinion.
+
+
+
+
+
+
+
+
+
+
+const MIN_CONFIDENCE_THRESHOLD = 0.35;
+const R12_CONFIDENCE_THRESHOLD = 0.4;
+const PROBE_TIMEOUT_MS = 8000;
+const KEYWORDS = [
+    'payment', 'paid', 'txn', 'txnid', 'transaction', 'receipt', 'invoice', 'amount', 'paid to', 'credited', 'debited',
+    'paid via', 'ref no', 'reference', 'order', 'success', 'failed', 'payment id', 'transaction id', 'authorization',
+];
+const CURRENCY_FOR_FALLBACK = /₹|rs\.?|rs\b|\binr\b|\$|usd|eur|€|£|gbp/i;
+/** R12 on the typed extraction (text = OCR text when present, names include the note unless V2:R10b). */
+function shouldFallbackForPaymentExtraction(e, noteMergedIntoNames) {
+    const text = ((e.ocrText && e.ocrText.trim().length > 0 ? e.ocrText : e.fullText) || '').toLowerCase();
+    const hasKeyword = KEYWORDS.some((k) => text.includes(k));
+    const note = noteMergedIntoNames ? (e.note ?? '') : '';
+    const hasNames = Boolean((e.payeeName ?? note).trim()) || Boolean((e.payerName ?? note).trim());
+    const hasStatus = e.isPayment === true && (e.status === 'success' || e.status === 'failed');
+    const hasCurrency = CURRENCY_FOR_FALLBACK.test(text);
+    const lowConfidence = typeof e.confidence === 'number' && e.confidence < R12_CONFIDENCE_THRESHOLD;
+    const paymentEvidence = e.isPayment === true || hasKeyword || hasNames || hasStatus || hasCurrency;
+    const amountMissingOrZero = typeof e.amount !== 'number' || e.amount === 0;
+    const reasons = [];
+    if (amountMissingOrZero)
+        reasons.push('amount missing or zero');
+    if (lowConfidence)
+        reasons.push(`low confidence (${e.confidence})`);
+    if (!hasKeyword)
+        reasons.push('no payment keywords');
+    if (!hasCurrency)
+        reasons.push('no currency symbol');
+    if (!hasNames)
+        reasons.push('no payer/payee name');
+    if (!hasStatus)
+        reasons.push('no transaction status markers');
+    return { fallback: paymentEvidence && (amountMissingOrZero || lowConfidence), reasons };
+}
+function clip(message) {
+    return message.length > 300 ? `${message.slice(0, 300)}...` : message;
+}
+async function analyzePaymentProof(image, opts = {}) {
+    const env = opts.env ?? process.env;
+    const v2 = opts.v2 ?? (0,_rules_v2__WEBPACK_IMPORTED_MODULE_7__.rulesV2FromEnv)(env);
+    const logger = opts.logger ?? _transport_retry__WEBPACK_IMPORTED_MODULE_9__.NOOP_LOGGER;
+    const clock = opts.now ?? Date.now;
+    const started = clock();
+    const nowMs = opts.nowMs ?? started;
+    const attempts = [];
+    // chain
+    let providers;
+    if (opts.providers)
+        providers = opts.providers;
+    else {
+        const registry = opts.env || opts.fetch ? (0,_providers__WEBPACK_IMPORTED_MODULE_3__.createProviders)({ ...opts, v2 }) : (0,_providers__WEBPACK_IMPORTED_MODULE_3__.getDefaultProviders)();
+        providers = [];
+        for (const name of (0,_config__WEBPACK_IMPORTED_MODULE_1__.resolveProviderNames)(env)) {
+            const p = registry.get(name);
+            if (p)
+                providers.push(p);
+            else
+                logger.warn(`[vision] unknown provider in VISION_PROVIDERS: ${name}`);
+        }
+    }
+    // 1. pre-check (R01-R05)
+    const minWords = Number(env.VISION_MIN_WORDS) > 0 ? Number(env.VISION_MIN_WORDS) : 5;
+    const doPrecheck = opts.precheck ?? env.VISION_PRECHECK !== 'off';
+    let precheck = { status: 'skipped', wordCount: 0 };
+    let ocrText = '';
+    if (doPrecheck) {
+        const prober = providers.find((p) => typeof p.probeText === 'function') ?? opts.providers?.find((p) => p.probeText);
+        const probe = prober
+            ? await prober.probeText(image, minWords, PROBE_TIMEOUT_MS, v2)
+            : { status: 'unavailable', wordCount: 0, text: '', detail: 'no probe provider' };
+        precheck = { status: probe.status, wordCount: probe.wordCount };
+        if (probe.status === 'text')
+            ocrText = probe.text;
+        if (probe.status === 'no-text' && !v2.has('R03-soft')) {
+            return {
+                outcome: 'no_text', extraction: null, attempts, precheck, secondOpinion: null,
+                totalLatencyMs: clock() - started, fallbackUsed: false,
+            };
+        }
+        // V2:R03-soft: no-text no longer rejects; the unreliable probe text is not trusted as ocrText (ocrText stays '')
+    }
+    if (providers.length === 0) {
+        return {
+            outcome: 'no_providers', extraction: null, attempts, precheck, secondOpinion: null,
+            totalLatencyMs: clock() - started, fallbackUsed: false,
+        };
+    }
+    // 2. providers in order
+    for (let i = 0; i < providers.length; i++) {
+        const provider = providers[i];
+        const remaining = providers.length - i - 1;
+        const t0 = clock();
+        const fail = (errorClass, message, model = '') => {
+            attempts.push({ provider: provider.name, model, ok: false, errorClass, message: clip(message), latencyMs: clock() - t0 });
+        };
+        let model = '';
+        try {
+            const budget = (0,_config__WEBPACK_IMPORTED_MODULE_1__.providerBudgetMs)(provider.name, env, v2);
+            const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`);
+            model = raw.model;
+            const latencyMs = clock() - t0;
+            const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.parseModelOutput)(raw.text, v2);
+            const errors = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.validateWire)(parsed.wire);
+            if (errors.length > 0) {
+                fail('validation', `Response validation failed: ${errors.join(', ')}`, model);
+                continue;
+            }
+            let wire = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.applyProviderTweaks)(provider, parsed.wire);
+            // R25(1): low-confidence / non-payment answers are enriched from the model's own text
+            const modelText = typeof wire.text === 'string' ? wire.text : '';
+            const rulesExtra = [];
+            if (modelText && (wire.isPayment !== true || (typeof wire.confidence === 'number' && wire.confidence < 0.5))) {
+                const merged = (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.smartMergeWire)(wire, (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.extractPaymentDataFromText)(modelText, v2));
+                if (JSON.stringify(merged) !== JSON.stringify(wire))
+                    rulesExtra.push('R44');
+                wire = merged;
+            }
+            const normalized = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.normalizeWire)(wire, { ocrText, nowMs, provider: provider.name, model, latencyMs, v2, dayOfMonth: opts.dayOfMonth });
+            const extraction = normalized.extraction;
+            extraction.rulesApplied.push(...rulesExtra);
+            // R09
+            if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0) {
+                fail('low_confidence', `Confidence ${extraction.confidence.toFixed(2)} below minimum threshold ${MIN_CONFIDENCE_THRESHOLD}`, model);
+                continue;
+            }
+            // R11: secondary extraction from the pre-check OCR text
+            if (extraction.isPayment === true && extraction.amount === null && ocrText.length > 10) {
+                const secondary = (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.extractPaymentDataFromText)(ocrText, v2);
+                if (secondary.amount > 0) {
+                    extraction.amount = secondary.amount;
+                    extraction.confidence = Math.max(extraction.confidence, 0.5);
+                    extraction.rulesApplied.push('R11');
+                }
+                const noteFallback = v2.has('R10b') ? null : extraction.note;
+                if (!extraction.payeeName && !noteFallback && secondary.payeeName)
+                    extraction.payeeName = secondary.payeeName;
+                if (!extraction.payerName && !noteFallback && secondary.payerName)
+                    extraction.payerName = secondary.payerName;
+            }
+            // R12
+            const r12 = shouldFallbackForPaymentExtraction(extraction, !v2.has('R10b'));
+            if (r12.fallback) {
+                if (normalized.amountOutOfRange !== null && extraction.amount === null) {
+                    fail('amount_range', `payment amount ${normalized.amountOutOfRange} is outside valid range (${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT}-${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT})`, model);
+                }
+                else {
+                    fail('no_amount', `could not extract a payment amount: ${r12.reasons.join('; ')}`, model);
+                }
+                continue;
+            }
+            // R13 (defensive: typed amounts are range-checked in normalizeWire, R11 amounts come from R34)
+            if (extraction.isPayment === true && extraction.amount !== null
+                && (extraction.amount < _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT || extraction.amount > _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT)) {
+                fail('amount_range', `payment amount ${extraction.amount} is outside valid range`, model);
+                continue;
+            }
+            attempts.push({ provider: provider.name, model, ok: true, errorClass: null, message: null, latencyMs });
+            const outcome = extraction.isPayment === true ? 'extracted' : 'not_payment';
+            // 4. optional second opinion on the winner (never throws, never changes the extraction)
+            let secondOpinion = null;
+            const runner = opts.secondOpinion ?? (env.VISION_SECOND_OPINION === 'on' ? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)() : undefined);
+            if (runner && outcome === 'extracted') {
+                try {
+                    secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
+                }
+                catch (error) {
+                    logger.warn(`[vision] second opinion failed: ${error instanceof Error ? error.message : String(error)}`);
+                    secondOpinion = null;
+                }
+            }
+            return {
+                outcome, extraction, attempts, precheck, secondOpinion,
+                totalLatencyMs: clock() - started, fallbackUsed: i > 0,
+            };
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.warn(`[vision] ${provider.name} failed: ${message}`);
+            fail((0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.classifyError)(error), message, model);
+        }
+    }
+    // 5. chain exhausted (R15 / R16)
+    const exhausted = (0,_outcome__WEBPACK_IMPORTED_MODULE_2__.classifyExhausted)(attempts, ocrText);
+    if (exhausted === 'no_verifiable_amount') {
+        const extraction = {
+            isPayment: true,
+            status: 'unknown',
+            amount: null,
+            currency: null,
+            time: { state: 'unknown', date: null, clock: null, epochMs: null, raw: null, source: null, yearInferred: false },
+            payeeName: null, payeeUpiId: null, payerName: null, utr: null, app: null, note: null,
+            fullText: ocrText,
+            ocrText,
+            fakeMarkers: { disclaimerPhrases: [], aiWatermark: { present: null, location: null, evidence: null } },
+            isInappropriate: null,
+            provider: 'none',
+            model: 'none',
+            confidence: 0.2,
+            latencyMs: 0,
+            rulesApplied: [],
+        };
+        return {
+            outcome: 'no_verifiable_amount', extraction, attempts, precheck, secondOpinion: null,
+            totalLatencyMs: clock() - started, fallbackUsed: true,
+        };
+    }
+    return {
+        outcome: 'all_providers_failed', extraction: null, attempts, precheck, secondOpinion: null,
+        totalLatencyMs: clock() - started, fallbackUsed: true,
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/chain/config.ts"
+/*!****************************************************!*\
+  !*** ../../packages/tg-vision/src/chain/config.ts ***!
+  \****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* binding */ DEFAULT_BUDGETS_MS),
+/* harmony export */   DEFAULT_BUDGET_MS: () => (/* binding */ DEFAULT_BUDGET_MS),
+/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* binding */ GEMMA_R07B_BUDGET_MS),
+/* harmony export */   providerBudgetMs: () => (/* binding */ providerBudgetMs),
+/* harmony export */   resolveProviderNames: () => (/* binding */ resolveProviderNames)
+/* harmony export */ });
+/* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../providers */ "../../packages/tg-vision/src/providers/index.ts");
+// Chain configuration read from env at call time (design section 4 "Config"). No env flags beyond the doc's:
+// VISION_PROVIDERS, VISION_TIMEOUTS, VISION_MIN_WORDS, VISION_PRECHECK, VISION_RULES_V2, VISION_SECOND_OPINION.
+
+/** R07 outer per-provider budgets (ms), from service-config.json. */
+const DEFAULT_BUDGETS_MS = {
+    gemini: 30000,
+    nvidia: 20000,
+    mistral: 30000,
+    gemma: 20000,
+    rapidapi: 15000,
+    'ocr-space': 15000,
+};
+const DEFAULT_BUDGET_MS = 30000;
+/** V2:R07b: Gemma outer budget covers two sequential 15 s models (inner spec is 35 s). */
+const GEMMA_R07B_BUDGET_MS = 32000;
+function resolveProviderNames(env) {
+    const raw = env.VISION_PROVIDERS;
+    if (!raw || !raw.trim())
+        return [..._providers__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_PROVIDER_ORDER];
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+function providerBudgetMs(name, env, v2) {
+    const raw = env.VISION_TIMEOUTS;
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            const v = parsed[name];
+            if (typeof v === 'number' && Number.isFinite(v) && v > 0)
+                return v;
+        }
+        catch {
+            // ignore malformed JSON: fall through to the defaults
+        }
+    }
+    if (name === 'gemma' && v2.has('R07b'))
+        return GEMMA_R07B_BUDGET_MS;
+    return DEFAULT_BUDGETS_MS[name] ?? DEFAULT_BUDGET_MS;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/chain/outcome.ts"
+/*!*****************************************************!*\
+  !*** ../../packages/tg-vision/src/chain/outcome.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CURRENCY_REGEX: () => (/* binding */ CURRENCY_REGEX),
+/* harmony export */   OPERATIONAL_CLASSES: () => (/* binding */ OPERATIONAL_CLASSES),
+/* harmony export */   allProvidersFailedMessage: () => (/* binding */ allProvidersFailedMessage),
+/* harmony export */   classifyExhausted: () => (/* binding */ classifyExhausted),
+/* harmony export */   failedAttempts: () => (/* binding */ failedAttempts),
+/* harmony export */   isNoVerifiableAmount: () => (/* binding */ isNoVerifiableAmount),
+/* harmony export */   isStrategyFailure: () => (/* binding */ isStrategyFailure)
+/* harmony export */ });
+/** Failures that need an operator: provider outage, quota/rate exhaustion, network, crash, misconfiguration. */
+const OPERATIONAL_CLASSES = new Set([
+    'quota', 'rate', 'network', 'server', 'timeout', 'config',
+]);
+/** R15 currency marker (matches the substring "rs", as legacy does). */
+const CURRENCY_REGEX = /₹|rs\.?|\binr\b|\$|usd|eur|€|£|gbp/i;
+const AMOUNT_CLASSES = new Set(['no_amount', 'amount_range']);
+function failedAttempts(attempts) {
+    return attempts.filter((a) => !a.ok);
+}
+/**
+ * R15: the chain is exhausted, EVERY recorded failure is an amount problem (none was a crash, 404, rate limit, ...),
+ * and the OCR text carries no currency marker: a cropped / partial / fake payment screen, not a system failure.
+ */
+function isNoVerifiableAmount(attempts, ocrText) {
+    const failures = failedAttempts(attempts);
+    if (failures.length === 0)
+        return false;
+    if (!failures.every((a) => a.errorClass !== null && AMOUNT_CLASSES.has(a.errorClass)))
+        return false;
+    return !CURRENCY_REGEX.test(ocrText || '');
+}
+function classifyExhausted(attempts, ocrText) {
+    return isNoVerifiableAmount(attempts, ocrText) ? 'no_verifiable_amount' : 'all_providers_failed';
+}
+/**
+ * R60: alert only on OPERATIONAL failures. Never for an OCR pre-check reject (no_text), never for the benign
+ * no_verifiable_amount, never when every provider was healthy but could not read the image. `no_providers` always
+ * alerts (misconfiguration).
+ */
+function isStrategyFailure(outcome, attempts) {
+    if (outcome === 'no_providers')
+        return true;
+    if (outcome !== 'all_providers_failed')
+        return false;
+    return failedAttempts(attempts).some((a) => a.errorClass !== null && OPERATIONAL_CLASSES.has(a.errorClass));
+}
+/** R16 error text, same shape as legacy: "All N provider(s) failed. Failures: gemini (reason); ...". */
+function allProvidersFailedMessage(attempts, providerCount) {
+    const failures = failedAttempts(attempts).map((a) => `${a.provider} (${a.message ?? a.errorClass ?? 'unknown'})`).join('; ');
+    return `All ${providerCount} provider(s) failed. Failures: ${failures}`;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/contract/legacy.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/contract/legacy.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   toLegacyImageDetails: () => (/* binding */ toLegacyImageDetails)
+/* harmony export */ });
+/* harmony import */ var _rules_status__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/status */ "../../packages/tg-vision/src/rules/status.ts");
+/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _rules_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../rules/time */ "../../packages/tg-vision/src/rules/time.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+
+
+
+function blank(over) {
+    return {
+        text: '', isPayment: false, isFinished: false, isFailed: false, isSuccess: false, amount: 0, wordCount: 0,
+        time: '', payeeName: '', payerName: '', description: 'Payment image analysis', isInappropriate: false,
+        error: false, confidence: 0, ...over,
+    };
+}
+function fromExtraction(e, opts) {
+    const v2 = opts.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES;
+    const isPayment = e.isPayment === true;
+    const flags = (0,_rules_status__WEBPACK_IMPORTED_MODULE_0__.statusToFlags)(e.status);
+    const isSuccess = isPayment && flags.isSuccess;
+    const isFailed = isPayment && flags.isFailed;
+    const isFinished = isPayment && flags.isFinished;
+    const amount = isPayment ? (e.amount ?? 0) : 0;
+    const noteFallback = v2.has('R10b') ? '' : (e.note ?? '');
+    const payeeName = e.payeeName ?? noteFallback;
+    const payerName = e.payerName ?? noteFallback;
+    let text = e.ocrText && e.ocrText.trim().length > 0 ? e.ocrText : e.fullText;
+    if (!text || text.trim().length < 10) {
+        const parts = [];
+        if (amount > 0)
+            parts.push(`₹${amount}`);
+        if (payeeName)
+            parts.push(`to ${payeeName}`);
+        if (payerName)
+            parts.push(`from ${payerName}`);
+        if (isSuccess)
+            parts.push('successful');
+        if (isFailed)
+            parts.push('failed');
+        const fallback = parts.join(' ');
+        if (fallback.trim().length > 0) {
+            text = text && text.trim().length > 0 ? `${text} ${fallback}`.trim() : fallback;
+        }
+    }
+    text = text || '';
+    const isInappropriate = e.isInappropriate === true;
+    const advisory = (0,_rules_status__WEBPACK_IMPORTED_MODULE_0__.advisoryFlags)(isPayment, isInappropriate, isFailed);
+    return {
+        text,
+        isPayment,
+        isFinished,
+        isFailed,
+        isSuccess,
+        amount,
+        wordCount: (0,_rules_sanitize__WEBPACK_IMPORTED_MODULE_1__.countWords)(text, v2),
+        time: (0,_rules_time__WEBPACK_IMPORTED_MODULE_2__.visionTimeToLegacyString)(e.time, opts.nowMs, !v2.has('R53')),
+        payeeName,
+        payerName,
+        description: 'Payment image analysis',
+        isInappropriate,
+        error: false,
+        confidence: Math.max(0, Math.min(1, e.confidence || 0)),
+        provider: e.provider,
+        suspectedFake: advisory.suspectedFake,
+        paymentNotSuccessful: advisory.paymentNotSuccessful,
+    };
+}
+function toLegacyImageDetails(result, opts) {
+    const v2 = opts.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES;
+    switch (result.outcome) {
+        case 'extracted':
+        case 'no_verifiable_amount': {
+            if (!result.extraction)
+                return blank({ description: 'Unwanted Image', isFailed: true });
+            const out = fromExtraction(result.extraction, opts);
+            if (result.outcome === 'no_verifiable_amount')
+                out.noVerifiableAmount = true;
+            return out;
+        }
+        case 'not_payment': {
+            if (!result.extraction)
+                return blank({});
+            return fromExtraction({ ...result.extraction, isPayment: false }, opts);
+        }
+        case 'no_text':
+            return blank({
+                text: result.extraction?.ocrText ?? '',
+                wordCount: result.precheck.wordCount,
+                description: 'Image does not contain sufficient text for analysis',
+                error: true,
+            });
+        case 'all_providers_failed':
+        case 'no_providers':
+            if (v2.has('T02')) {
+                return blank({ description: 'Analysis unavailable', error: true, analysisUnavailable: true, outage: true });
+            }
+            return blank({ description: 'Unwanted Image', isFailed: true });
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/contract/prompt.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/contract/prompt.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ANALYSIS_PROMPT: () => (/* binding */ ANALYSIS_PROMPT),
+/* harmony export */   GENERATION_CONFIG: () => (/* binding */ GENERATION_CONFIG),
+/* harmony export */   VERIFICATION_PROMPT: () => (/* binding */ VERIFICATION_PROMPT),
+/* harmony export */   analysisPromptWithKeys: () => (/* binding */ analysisPromptWithKeys)
+/* harmony export */ });
+// Prompts (design 3 "Prompt"). Sections AMOUNT, PAYEE, PAYER, STATUS, TEXT, CONFIDENCE follow the MSS prompt
+// (llm-prompt.service.ts:117-178) with the doc's edits. The prompt is a CONSTANT: "today" is no longer given to the
+// model (a clock-only receipt becomes state clock_only and code supplies the IST date), which also keeps the prefix
+// byte-stable for provider prompt caches.
+const GENERATION_CONFIG = {
+    temperature: 0.1,
+    topP: 0.8,
+    topK: 20,
+    maxOutputTokens: 4192,
+};
+const ANALYSIS_PROMPT = `You extract UPI/payment transaction data from Indian payment-app screenshots (PhonePe, Paytm, GPay, etc.). Return strict JSON. Extract only what is clearly visible; never guess or hallucinate.
+
+=== FIELD RULES ===
+
+AMOUNT (integer rupees)
+  - The single transaction amount, labeled "Paid", "Sent", "Received", "Amount", or shown as a large rupee value near a success/fail indicator.
+  - IGNORE: balance, available limit, cashback, reward points, scratch card value, "up to X" offers, promo amounts.
+  - Strip the rupee symbol, commas and decimals to an integer (1,250.00 -> 1250).
+  - If several rupee values exist, pick the one tied to the transaction (near the tick / Success / Paid).
+  - null if no transaction amount is visible. Never write 0 and never invent an amount to make the image look like a payment: a payment header with the amount cropped out is reported with amount null.
+
+PAYEE (payeeName) - the RECEIVER of the money
+  - Labels: "Paid to", "To:", "Sent to", or the merchant/person name next to the amount on a success screen.
+  - On Paytm "Verified Name: X" prefer X over the display name above it.
+  - Preserve the original script (Hindi/Tamil/etc.) and spacing. No translations.
+  - null if not clearly visible. Never the app name.
+PAYEE UPI ID (payeeUpiId): the receiver's UPI id only (name@bank). null if absent or masked (ab***@ybl). Never the payer's id.
+
+PAYER (payerName) - the SENDER of the money
+  - Labels: "From", "Paid by", "Debited from". null if not shown. Never the app name. Never confuse with the payee.
+
+UTR (utr): the UTR / UPI reference / RRN / transaction id exactly as printed. null if absent or partly masked. Never a chat or message id.
+APP (app): the payment app if identifiable, else null.
+NOTE (note): the payment note/remark if one is shown, else null.
+
+STATUS (status)
+  - "success" only if a tick or the words "Success", "Completed", "Paid successfully" are visible.
+  - "failed" only if a cross or "Failed", "Declined", "Cancelled" is visible.
+  - "pending" if the screen says processing / pending / in progress.
+  - "unknown" otherwise or when signals conflict.
+  - isPayment: true for confirmation / receipt / bank debit screens; false for chat, home screens, ads; null if you cannot tell.
+
+TIME (copy exactly what is printed)
+  - dateDay and dateMonth: the day digits and month (Jul -> 7) shown for the transaction. Never default to day 1.
+  - dateYear: the year ONLY if the image shows one; otherwise null. Never invent a year.
+  - clock24: the transaction clock converted to 24 h (05:36 PM -> 17:36, 12:05 AM -> 00:05, 12:30 PM -> 12:30). Ignore the phone status-bar clock.
+  - timeRaw: the visible date/time copied verbatim.
+  - Output only a date or clock you can actually read; null for anything else.
+
+TEXT
+  - All readable text from the image, newline separated, top to bottom, in the original language. Include amount, names, time and any reference/UTR numbers.
+
+FAKE MARKERS
+  - disclaimerPhrases: copy VERBATIM any text saying the transaction is not real, such as "not a real transaction", "for entertainment purposes only", "sample", "demo", "prank". Never paraphrase. [] if none.
+  - aiWatermarkPresent: true if a small four-pointed sparkle/star or an "AI generated" mark is visible; give aiWatermarkLocation (e.g. bottom-right) and a short factual aiWatermarkEvidence. false if you looked and saw none; null if you cannot tell.
+
+CONFIDENCE (decimal 0.0-1.0)
+  - 0.95 amount, payee, time and status all clear. 0.7 clearly a payment but one field ambiguous. 0.5 unclear image, major fields missing. 0.3 probably not a payment screenshot.
+  - NEVER a word such as "high"; always a decimal.
+
+=== OUTPUT RULES ===
+Return strictly valid JSON matching the schema. No markdown, no code fences, no prose. Use null for anything not clearly visible.`;
+/** Analysis prompt for the json_object providers: same text plus the keys block generated from the schema. */
+function analysisPromptWithKeys(keysBlock) {
+    return `${ANALYSIS_PROMPT}\n\n${keysBlock}`;
+}
+/** Second-opinion prompt (design section 5), single instruction, blind to the first answer. */
+const VERIFICATION_PROMPT = "Look at this payment screenshot. Answer only from what is visible. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. Return null for anything not clearly visible.";
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/contract/schema.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/contract/schema.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CLOCK24_PATTERN: () => (/* binding */ CLOCK24_PATTERN),
+/* harmony export */   VERIFY_FIELDS: () => (/* binding */ VERIFY_FIELDS),
+/* harmony export */   WIRE_FIELDS: () => (/* binding */ WIRE_FIELDS),
+/* harmony export */   WIRE_KEYS: () => (/* binding */ WIRE_KEYS),
+/* harmony export */   toGeminiSchema: () => (/* binding */ toGeminiSchema),
+/* harmony export */   toGemmaSchema: () => (/* binding */ toGemmaSchema),
+/* harmony export */   toKeysBlock: () => (/* binding */ toKeysBlock),
+/* harmony export */   toVerifySchema: () => (/* binding */ toVerifySchema)
+/* harmony export */ });
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+// Canonical wire schema (design 3.3) with three emitters: Gemini native, Gemma native (constraint-stripped), and the
+// "keys block" for json_object providers (nvidia, mistral). One definition, so prompt, schema and parser cannot drift.
+// The legacy MSS converter (getGeminiSchema) dropped items/enum/maxItems/nullable; these emitters keep them.
+
+const CLOCK24_PATTERN = '^\\d{2}:\\d{2}(:\\d{2})?$';
+const WIRE_FIELDS = [
+    { key: 'isPayment', type: 'boolean', nullable: true, description: 'true=payment/UPI screen, false=not payment, null=ambiguous' },
+    { key: 'status', type: 'string', nullable: false, enum: ['success', 'failed', 'pending', 'unknown'], description: 'success only if a tick/Success/Completed/Paid successfully is visible; failed only for cross/Failed/Declined/Cancelled; pending for processing; else unknown' },
+    { key: 'amount', type: 'integer', nullable: true, minimum: _rules_amount__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT, maximum: _rules_amount__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT, description: 'Transaction amount in rupees (Paid/Sent/Received/Amount). IGNORE balance, cashback, rewards, offers. null if not visible.' },
+    { key: 'currency', type: 'string', nullable: true, description: 'Currency code as shown, e.g. INR. null if not shown.' },
+    { key: 'dateDay', type: 'integer', nullable: true, minimum: 1, maximum: 31, description: 'Day of month digits of the transaction date as displayed. null if not visible.' },
+    { key: 'dateMonth', type: 'integer', nullable: true, minimum: 1, maximum: 12, description: 'Month number 1-12 of the transaction date as displayed. null if not visible.' },
+    { key: 'dateYear', type: 'integer', nullable: true, description: 'Four-digit year ONLY if the image shows a year; null otherwise (never guess).' },
+    { key: 'clock24', type: 'string', nullable: true, pattern: CLOCK24_PATTERN, description: 'Transaction clock time in 24 h HH:MM or HH:MM:SS (12:05 AM -> 00:05). null if not visible. Ignore the phone status-bar clock.' },
+    { key: 'timeRaw', type: 'string', nullable: true, maxLength: 60, description: 'The visible transaction date/time copied verbatim (e.g. "21 Jul, 05:36 PM"). null if none.' },
+    { key: 'payeeName', type: 'string', nullable: true, maxLength: 100, description: 'Receiver of the money (Paid to / To). Preserve script. Never the app name. null if not visible.' },
+    { key: 'payeeUpiId', type: 'string', nullable: true, maxLength: 80, description: "Receiver's UPI id (VPA) only, never the payer's. null if absent or masked." },
+    { key: 'payerName', type: 'string', nullable: true, maxLength: 100, description: 'Sender (From / Paid by). Never the app name. null if not visible.' },
+    { key: 'utr', type: 'string', nullable: true, maxLength: 40, description: 'UTR / UPI reference / RRN / transaction id exactly as shown. null if absent or partially masked.' },
+    { key: 'app', type: 'string', nullable: true, maxLength: 30, description: 'Payment app name if identifiable (PhonePe, Paytm, GPay...). null otherwise.' },
+    { key: 'note', type: 'string', nullable: true, maxLength: 200, description: 'Payment note/remark/message if shown. null if none.' },
+    { key: 'text', type: 'string', nullable: true, description: 'All readable text, newline separated, top to bottom, original language.' },
+    { key: 'disclaimerPhrases', type: 'array', nullable: false, maxItems: 5, items: { type: 'string', maxLength: 120 }, description: 'Verbatim disclaimer/sample/demo/prank strings visible on the image (e.g. "not a real transaction"). [] if none.' },
+    { key: 'aiWatermarkPresent', type: 'boolean', nullable: true, description: 'true if a small four-pointed sparkle/star or "AI generated" mark is visible; false if looked and none; null if cannot tell.' },
+    { key: 'aiWatermarkLocation', type: 'string', nullable: true, maxLength: 60, description: 'Where the mark is (e.g. bottom-right). null if no mark.' },
+    { key: 'aiWatermarkEvidence', type: 'string', nullable: true, maxLength: 120, description: 'One short factual phrase of what was seen. null if no mark.' },
+    { key: 'isInappropriate', type: 'boolean', nullable: true, description: 'true=explicit/hate/scam content. null=benign.' },
+    { key: 'confidence', type: 'number', nullable: true, minimum: 0, maximum: 1, description: '0-1 decimal: 0.95 all critical fields clear, 0.7 one ambiguous, 0.5 unclear image, 0.3 probably not a payment. Always numeric.' },
+];
+const WIRE_KEYS = WIRE_FIELDS.map((f) => f.key);
+const NATIVE_TYPE = {
+    boolean: 'BOOLEAN', string: 'STRING', integer: 'INTEGER', number: 'NUMBER', array: 'ARRAY',
+};
+function emitField(f, withConstraints) {
+    const out = { type: NATIVE_TYPE[f.type] };
+    if (f.nullable)
+        out.nullable = true;
+    out.description = f.description;
+    if (f.enum)
+        out.enum = [...f.enum];
+    if (f.items) {
+        const items = { type: NATIVE_TYPE[f.items.type] };
+        if (withConstraints && f.items.maxLength !== undefined)
+            items.maxLength = f.items.maxLength;
+        out.items = items;
+    }
+    if (withConstraints) {
+        if (f.minimum !== undefined)
+            out.minimum = f.minimum;
+        if (f.maximum !== undefined)
+            out.maximum = f.maximum;
+        if (f.pattern !== undefined)
+            out.pattern = f.pattern;
+        if (f.maxLength !== undefined)
+            out.maxLength = f.maxLength;
+        if (f.maxItems !== undefined)
+            out.maxItems = f.maxItems;
+    }
+    return out;
+}
+function emitNative(withConstraints) {
+    const properties = {};
+    for (const f of WIRE_FIELDS)
+        properties[f.key] = emitField(f, withConstraints);
+    return { type: 'OBJECT', properties, required: [...WIRE_KEYS] };
+}
+/** Gemini `responseSchema`: items, enum, nullable and the numeric/string constraints preserved. */
+function toGeminiSchema() {
+    return emitNative(true);
+}
+/**
+ * Gemma `responseSchema`: type/nullable/description/enum/items only. The proven production Gemma schema carried no
+ * minimum/maximum/pattern (and no arrays); constraints are re-applied by normalizeWire. UNVERIFIED against the live
+ * Gemma API: see scripts/smoke-schema.mts.
+ */
+function toGemmaSchema() {
+    return emitNative(false);
+}
+function keyType(f) {
+    let t;
+    if (f.enum)
+        t = f.enum.map((e) => `"${e}"`).join(' | ');
+    else if (f.type === 'array')
+        t = `array of strings (max ${f.maxItems ?? 5}; [] when none)`;
+    else if (f.type === 'integer')
+        t = `integer${f.minimum !== undefined && f.maximum !== undefined ? ` ${f.minimum}-${f.maximum}` : ''}`;
+    else if (f.type === 'number')
+        t = `number${f.minimum !== undefined && f.maximum !== undefined ? ` ${f.minimum}-${f.maximum}` : ''}`;
+    else
+        t = f.type;
+    return f.nullable ? `${t} or null` : t;
+}
+/** "Return JSON with EXACTLY these keys" block for json_object providers (nvidia, mistral). */
+function toKeysBlock() {
+    const lines = WIRE_FIELDS.map((f, i) => `  "${f.key}": ${keyType(f)}${i === WIRE_FIELDS.length - 1 ? '' : ','}`);
+    return `Return JSON with EXACTLY these keys (all keys present; use null for anything not clearly visible, never invent values):\n{\n${lines.join('\n')}\n}\nconfidence MUST be a decimal (0.95 high, 0.7 medium, 0.5 low), never a word. Do not include any prose outside the JSON.`;
+}
+/** Second-opinion verifier answer (design section 5). Small flat schema. */
+const VERIFY_FIELDS = [
+    { key: 'watermarkPresent', type: 'boolean', nullable: true, description: 'true if a small four-pointed sparkle/star or "AI generated" mark is visible; false if none; null if unclear' },
+    { key: 'watermarkLocation', type: 'string', nullable: true, description: 'where the mark is; null if none' },
+    { key: 'disclaimerPhrases', type: 'array', nullable: false, items: { type: 'string' }, description: 'verbatim text saying the transaction is not real/sample/demo/prank/entertainment; [] if none' },
+    { key: 'amount', type: 'integer', nullable: true, description: 'paid amount in rupees; null if not clearly visible' },
+    { key: 'status', type: 'string', nullable: false, enum: ['success', 'failed', 'pending', 'unknown'], description: 'success only if a success tick/word is visible' },
+    { key: 'utr', type: 'string', nullable: true, description: 'UTR / transaction id; null if not clearly visible' },
+    { key: 'payeeUpiId', type: 'string', nullable: true, description: "receiver's UPI id; null if not clearly visible" },
+    { key: 'looksEdited', type: 'boolean', nullable: true, description: 'true if the image looks digitally edited; null if unclear' },
+];
+function toVerifySchema() {
+    const properties = {};
+    for (const f of VERIFY_FIELDS)
+        properties[f.key] = emitField(f, false);
+    return { type: 'OBJECT', properties, required: VERIFY_FIELDS.map((f) => f.key) };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/contract/wire-normalize.ts"
+/*!***************************************************************!*\
+  !*** ../../packages/tg-vision/src/contract/wire-normalize.ts ***!
+  \***************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   coerceConfidence: () => (/* binding */ coerceConfidence),
+/* harmony export */   normalizeWire: () => (/* binding */ normalizeWire),
+/* harmony export */   validateWire: () => (/* binding */ validateWire)
+/* harmony export */ });
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _rules_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../rules/time */ "../../packages/tg-vision/src/rules/time.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+
+
+
+const STATUSES = ['success', 'failed', 'pending', 'unknown'];
+const STRING_KEYS = [
+    'currency', 'timeRaw', 'clock24', 'payeeName', 'payerName', 'payeeUpiId', 'utr', 'app', 'note', 'text',
+    'aiWatermarkLocation', 'aiWatermarkEvidence',
+];
+/** R24: string confidence words, absent / non-number / <= 0 -> 0.9. */
+function coerceConfidence(value) {
+    let c = value;
+    if (typeof c === 'string') {
+        const w = c.toLowerCase();
+        c = w.includes('high') ? 0.95 : w.includes('med') ? 0.7 : 0.5;
+    }
+    if (typeof c !== 'number' || c <= 0)
+        c = 0.9;
+    return c;
+}
+/** R08 on the wire object (after R24 coercion). Empty list = valid. */
+function validateWire(raw) {
+    const errors = [];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        return ['response must be an object'];
+    const w = raw;
+    if (w.isPayment !== undefined && w.isPayment !== null && typeof w.isPayment !== 'boolean')
+        errors.push('isPayment must be a boolean or null');
+    if (w.status !== undefined && w.status !== null && !STATUSES.includes(w.status))
+        errors.push('status must be success|failed|pending|unknown');
+    if (w.amount !== undefined && w.amount !== null && (typeof w.amount !== 'number' || !Number.isFinite(w.amount) || w.amount < 0))
+        errors.push('amount must be a non-negative number or null');
+    const c = coerceConfidence(w.confidence);
+    if (typeof c !== 'number' || c < 0 || c > 1)
+        errors.push('confidence must be a number between 0 and 1');
+    for (const key of STRING_KEYS) {
+        const v = w[key];
+        if (v !== undefined && v !== null && typeof v !== 'string')
+            errors.push(`${key} must be a string or null`);
+    }
+    if (w.disclaimerPhrases !== undefined && w.disclaimerPhrases !== null
+        && (!Array.isArray(w.disclaimerPhrases) || w.disclaimerPhrases.some((p) => typeof p !== 'string'))) {
+        errors.push('disclaimerPhrases must be an array of strings');
+    }
+    return errors;
+}
+function str(value) {
+    if (typeof value !== 'string')
+        return null;
+    const t = value.trim();
+    return t ? t : null;
+}
+function bool(value) {
+    return typeof value === 'boolean' ? value : null;
+}
+function fakeMarkers(w) {
+    const phrases = Array.isArray(w.disclaimerPhrases)
+        ? w.disclaimerPhrases
+            .filter((p) => typeof p === 'string')
+            .map((p) => p.trim().slice(0, 120))
+            .filter(Boolean)
+            .slice(0, 5)
+        : [];
+    const present = bool(w.aiWatermarkPresent);
+    const aiWatermark = {
+        present,
+        location: present === true ? str(w.aiWatermarkLocation) : null,
+        evidence: present === true ? str(w.aiWatermarkEvidence) : null,
+    };
+    return { disclaimerPhrases: phrases, aiWatermark };
+}
+/** Build the typed extraction. Call validateWire first; this function is total and never throws on a bad shape. */
+function normalizeWire(raw, ctx) {
+    const v2 = ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES;
+    const w = raw && typeof raw === 'object' ? raw : {};
+    const rulesApplied = [];
+    const fullText = typeof w.text === 'string' ? w.text : '';
+    // amount: R36 null semantics, R30 range, R31 correction, R33 text fallback
+    let amount = null;
+    let amountOutOfRange = null;
+    if (typeof w.amount === 'number' && Number.isFinite(w.amount) && w.amount > 0) {
+        if (w.amount < _rules_amount__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT || w.amount > _rules_amount__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT) {
+            amountOutOfRange = w.amount;
+        }
+        else {
+            const corrected = (0,_rules_amount__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmount)(w.amount, v2);
+            if (corrected !== w.amount)
+                rulesApplied.push('R31');
+            amount = corrected > 0 ? corrected : null;
+        }
+    }
+    else {
+        const fromText = (0,_rules_amount__WEBPACK_IMPORTED_MODULE_0__.processChatGptResponse)(fullText, v2, ctx.dayOfMonth).amount;
+        if (fromText > 0) {
+            amount = fromText;
+            rulesApplied.push('R33');
+        }
+    }
+    const time = (0,_rules_time__WEBPACK_IMPORTED_MODULE_2__.resolveVisionTime)({ timeRaw: w.timeRaw, dateDay: w.dateDay, dateMonth: w.dateMonth, dateYear: w.dateYear, clock24: w.clock24 }, fullText, ctx.nowMs, v2);
+    if (time.source === 'ocr_text')
+        rulesApplied.push('R50');
+    const app = str(w.app);
+    const appKey = app?.toLowerCase() ?? null;
+    const name = (value) => {
+        const s = str(value);
+        return s && s.toLowerCase() !== appKey ? s : null;
+    };
+    const confidence = coerceConfidence(w.confidence);
+    const extraction = {
+        isPayment: bool(w.isPayment),
+        status: STATUSES.includes(w.status) ? w.status : 'unknown',
+        amount,
+        currency: str(w.currency),
+        time,
+        payeeName: name(w.payeeName),
+        payeeUpiId: str(w.payeeUpiId),
+        payerName: name(w.payerName),
+        utr: str(w.utr),
+        app,
+        note: str(w.note),
+        fullText,
+        ocrText: ctx.ocrText ?? '',
+        fakeMarkers: fakeMarkers(w),
+        isInappropriate: bool(w.isInappropriate),
+        provider: ctx.provider,
+        model: ctx.model,
+        confidence: typeof confidence === 'number' ? confidence : 0.9,
+        latencyMs: ctx.latencyMs ?? 0,
+        rulesApplied,
+    };
+    return { extraction: (0,_rules_sanitize__WEBPACK_IMPORTED_MODULE_1__.sanitizeExtraction)(extraction), amountOutOfRange };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/image-hash.ts"
+/*!**************************************************!*\
+  !*** ../../packages/tg-vision/src/image-hash.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HASH_COLS: () => (/* binding */ HASH_COLS),
+/* harmony export */   HASH_ROWS: () => (/* binding */ HASH_ROWS),
+/* harmony export */   dHash: () => (/* binding */ dHash),
+/* harmony export */   hamming: () => (/* binding */ hamming)
+/* harmony export */ });
+/* harmony import */ var jpeg_js__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! jpeg-js */ "../../node_modules/jpeg-js/index.js");
+/* harmony import */ var jpeg_js__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(jpeg_js__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var pngjs__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! pngjs */ "../../node_modules/pngjs/lib/png.js");
+
+
+/**
+ * Pure-JS 256-bit dHash for payment screenshots (design section 7.3). No native modules, so it
+ * bundles into tg-aut (jpeg-js / pngjs are in the webpack allowlist) and needs no VM install.
+ *
+ * LIMIT: a dHash captures LAYOUT. Two genuine receipts from the same app and payee can be within
+ * a few bits of each other, so the hash is NEVER a standalone reuse key; use the UTR for that and
+ * treat a hash match only as corroboration (amount + time) or an annotation.
+ */
+const HASH_COLS = 16;
+const HASH_ROWS = 16;
+/**
+ * A bit is 1 only when left exceeds right by more than this (of 255). Without it, flat or purely
+ * vertical-gradient areas (common in app screenshots) are exact ties that JPEG noise flips at random.
+ */
+const TIE_EPSILON = 2;
+const MAX_PIXELS = 40000000; // refuse decompression bombs before allocating
+function decodeRaster(buf) {
+    if (!buf || buf.length < 8)
+        return null;
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+        const img = (0,jpeg_js__WEBPACK_IMPORTED_MODULE_0__.decode)(buf, { useTArray: true, maxMemoryUsageInMB: 64 });
+        return { width: img.width, height: img.height, data: img.data };
+    }
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+        const png = pngjs__WEBPACK_IMPORTED_MODULE_1__.PNG.sync.read(Buffer.from(buf));
+        return { width: png.width, height: png.height, data: png.data };
+    }
+    return null;
+}
+/** Grayscale, box-average downscale to (cols x rows). */
+function downscaleGray(r, cols, rows) {
+    const out = new Float64Array(cols * rows);
+    const { width, height, data } = r;
+    for (let y = 0; y < rows; y++) {
+        const y0 = Math.floor((y * height) / rows);
+        const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * height) / rows));
+        for (let x = 0; x < cols; x++) {
+            const x0 = Math.floor((x * width) / cols);
+            const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / cols));
+            let sum = 0;
+            let n = 0;
+            for (let yy = y0; yy < y1; yy++) {
+                for (let xx = x0; xx < x1; xx++) {
+                    const i = (yy * width + xx) * 4;
+                    const a = data[i + 3] / 255;
+                    // Composite on white so transparent PNG margins do not read as black.
+                    const R = data[i] * a + 255 * (1 - a);
+                    const G = data[i + 1] * a + 255 * (1 - a);
+                    const B = data[i + 2] * a + 255 * (1 - a);
+                    sum += 0.299 * R + 0.587 * G + 0.114 * B;
+                    n++;
+                }
+            }
+            out[y * cols + x] = sum / n;
+        }
+    }
+    return out;
+}
+/** 64 lowercase hex chars, or null for anything undecodable. Never throws. */
+function dHash(buf) {
+    try {
+        const raster = decodeRaster(buf);
+        if (!raster || raster.width < 1 || raster.height < 1)
+            return null;
+        if (raster.width * raster.height > MAX_PIXELS)
+            return null;
+        const gray = downscaleGray(raster, HASH_COLS + 1, HASH_ROWS);
+        let hex = '';
+        let nibble = 0;
+        let bits = 0;
+        for (let y = 0; y < HASH_ROWS; y++) {
+            for (let x = 0; x < HASH_COLS; x++) {
+                nibble = (nibble << 1) | (gray[y * (HASH_COLS + 1) + x] - gray[y * (HASH_COLS + 1) + x + 1] > TIE_EPSILON ? 1 : 0);
+                if (++bits === 4) {
+                    hex += nibble.toString(16);
+                    nibble = 0;
+                    bits = 0;
+                }
+            }
+        }
+        return hex;
+    }
+    catch {
+        return null;
+    }
+}
+/** Hamming distance between two dHashes; Infinity if either is malformed. */
+function hamming(a, b) {
+    if (a.length !== b.length || a.length === 0)
+        return Number.POSITIVE_INFINITY;
+    let bits = 0;
+    for (let i = 0; i < a.length; i++) {
+        const p = parseInt(a[i], 16);
+        const q = parseInt(b[i], 16);
+        if (Number.isNaN(p) || Number.isNaN(q))
+            return Number.POSITIVE_INFINITY;
+        const x = p ^ q;
+        bits += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
+    }
+    return bits;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/index.ts"
+/*!*********************************************!*\
+  !*** ../../packages/tg-vision/src/index.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ANALYSIS_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.ANALYSIS_PROMPT),
+/* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
+/* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.CURRENCY_REGEX),
+/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.DEFAULT_BUDGETS_MS),
+/* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.DEFAULT_PROVIDER_ORDER),
+/* harmony export */   EnvKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.EnvKeyPool),
+/* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_DEFAULT_MODEL),
+/* harmony export */   GEMMA_MODELS: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.GEMMA_MODELS),
+/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.GEMMA_R07B_BUDGET_MS),
+/* harmony export */   GENERATION_CONFIG: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.GENERATION_CONFIG),
+/* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MAX_PAYMENT_AMOUNT),
+/* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MIN_PAYMENT_AMOUNT),
+/* harmony export */   NOOP_LOGGER: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER),
+/* harmony export */   NO_RULES: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES),
+/* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.OPERATIONAL_CLASSES),
+/* harmony export */   ProviderError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.ProviderError),
+/* harmony export */   TokenBudget: () => (/* reexport safe */ _transport_token_budget__WEBPACK_IMPORTED_MODULE_12__.TokenBudget),
+/* harmony export */   VERIFICATION_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.VERIFICATION_PROMPT),
+/* harmony export */   WIRE_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_FIELDS),
+/* harmony export */   WIRE_KEYS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_KEYS),
+/* harmony export */   advisoryFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.advisoryFlags),
+/* harmony export */   allProvidersFailedMessage: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.allProvidersFailedMessage),
+/* harmony export */   amountOrNull: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.amountOrNull),
+/* harmony export */   analysisPromptWithKeys: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.analysisPromptWithKeys),
+/* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_24__.analyzePaymentProof),
+/* harmony export */   applyProviderTweaks: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.applyProviderTweaks),
+/* harmony export */   classifyError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.classifyError),
+/* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.classifyExhausted),
+/* harmony export */   coerceConfidence: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.coerceConfidence),
+/* harmony export */   combineAll: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.combineAll),
+/* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.combineSecondOpinion),
+/* harmony export */   correctNonStandardAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.correctNonStandardAmount),
+/* harmony export */   countWords: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.countWords),
+/* harmony export */   createGeminiProvider: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.createGeminiProvider),
+/* harmony export */   createGemmaProvider: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.createGemmaProvider),
+/* harmony export */   createMistralProvider: () => (/* reexport safe */ _providers_mistral__WEBPACK_IMPORTED_MODULE_17__.createMistralProvider),
+/* harmony export */   createNvidiaProvider: () => (/* reexport safe */ _providers_nvidia__WEBPACK_IMPORTED_MODULE_16__.createNvidiaProvider),
+/* harmony export */   createOcrSpaceProvider: () => (/* reexport safe */ _providers_ocr_space__WEBPACK_IMPORTED_MODULE_18__.createOcrSpaceProvider),
+/* harmony export */   createProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.createProviders),
+/* harmony export */   createRapidapiProvider: () => (/* reexport safe */ _providers_rapidapi__WEBPACK_IMPORTED_MODULE_19__.createRapidapiProvider),
+/* harmony export */   createRestGenAiClient: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.createRestGenAiClient),
+/* harmony export */   createSecondOpinionRunner: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.createSecondOpinionRunner),
+/* harmony export */   dHash: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.dHash),
+/* harmony export */   extractAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.extractAmount),
+/* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPayeeName),
+/* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPayerName),
+/* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.extractPaymentDataFromText),
+/* harmony export */   getDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.getDefaultProviders),
+/* harmony export */   getNumberFromString: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.getNumberFromString),
+/* harmony export */   hamming: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.hamming),
+/* harmony export */   inferStatusFromText: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.inferStatusFromText),
+/* harmony export */   isFalsePositive: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isFalsePositive),
+/* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.isNoVerifiableAmount),
+/* harmony export */   isRateLimit: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimit),
+/* harmony export */   isRateLimitLegacy: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimitLegacy),
+/* harmony export */   isStrategyFailure: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.isStrategyFailure),
+/* harmony export */   isTransient: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isTransient),
+/* harmony export */   isValidAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isValidAmount),
+/* harmony export */   istEpochMs: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istEpochMs),
+/* harmony export */   istParts: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istParts),
+/* harmony export */   keyFingerprint: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.keyFingerprint),
+/* harmony export */   normalizeWire: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeWire),
+/* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.ocrTextToWire),
+/* harmony export */   parseModelOutput: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.parseModelOutput),
+/* harmony export */   parseRulesV2: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.parseRulesV2),
+/* harmony export */   parseTimeString: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.parseTimeString),
+/* harmony export */   processChatGptResponse: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.processChatGptResponse),
+/* harmony export */   providerBudgetMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.providerBudgetMs),
+/* harmony export */   readKeys: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.readKeys),
+/* harmony export */   requestSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.requestSecondOpinion),
+/* harmony export */   resetDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.resetDefaultProviders),
+/* harmony export */   resolveProviderNames: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.resolveProviderNames),
+/* harmony export */   resolveVisionTime: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.resolveVisionTime),
+/* harmony export */   rulesV2FromEnv: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.rulesV2FromEnv),
+/* harmony export */   runWithKeys: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.runWithKeys),
+/* harmony export */   sanitizeExtraction: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.sanitizeExtraction),
+/* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.secondOpinionTriggers),
+/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_24__.shouldFallbackForPaymentExtraction),
+/* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.smartMergeWire),
+/* harmony export */   statusFromFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusFromFlags),
+/* harmony export */   statusToFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusToFlags),
+/* harmony export */   toGeminiSchema: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toGeminiSchema),
+/* harmony export */   toGemmaSchema: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toGemmaSchema),
+/* harmony export */   toKeysBlock: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toKeysBlock),
+/* harmony export */   toLegacyImageDetails: () => (/* reexport safe */ _contract_legacy__WEBPACK_IMPORTED_MODULE_6__.toLegacyImageDetails),
+/* harmony export */   toVerifySchema: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toVerifySchema),
+/* harmony export */   unknownTime: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.unknownTime),
+/* harmony export */   validateBooleanLogicLegacy: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.validateBooleanLogicLegacy),
+/* harmony export */   validateWire: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.validateWire),
+/* harmony export */   visionTimeToLegacyString: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.visionTimeToLegacyString),
+/* harmony export */   withTimeout: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.withTimeout)
+/* harmony export */ });
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _rules_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./rules/time */ "../../packages/tg-vision/src/rules/time.ts");
+/* harmony import */ var _rules_status__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./rules/status */ "../../packages/tg-vision/src/rules/status.ts");
+/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./contract/wire-normalize */ "../../packages/tg-vision/src/contract/wire-normalize.ts");
+/* harmony import */ var _contract_legacy__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./contract/legacy */ "../../packages/tg-vision/src/contract/legacy.ts");
+/* harmony import */ var _image_hash__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./image-hash */ "../../packages/tg-vision/src/image-hash.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_token_budget__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./transport/token-budget */ "../../packages/tg-vision/src/transport/token-budget.ts");
+/* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
+/* harmony import */ var _providers_gemini__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./providers/gemini */ "../../packages/tg-vision/src/providers/gemini.ts");
+/* harmony import */ var _providers_gemma__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./providers/gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
+/* harmony import */ var _providers_nvidia__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./providers/nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
+/* harmony import */ var _providers_mistral__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./providers/mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
+/* harmony import */ var _providers_ocr_space__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./providers/ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
+/* harmony import */ var _providers_rapidapi__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./providers/rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
+/* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./providers */ "../../packages/tg-vision/src/providers/index.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _chain_config__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./chain/config */ "../../packages/tg-vision/src/chain/config.ts");
+/* harmony import */ var _chain_outcome__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./chain/outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
+/* harmony import */ var _chain_analyze__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./chain/analyze */ "../../packages/tg-vision/src/chain/analyze.ts");
+/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/gemini.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/gemini.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* binding */ GEMINI_DEFAULT_MODEL),
+/* harmony export */   GEMINI_KEY_ENV: () => (/* binding */ GEMINI_KEY_ENV),
+/* harmony export */   createGeminiProvider: () => (/* binding */ createGeminiProvider)
+/* harmony export */ });
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+
+
+
+
+
+const GEMINI_KEY_ENV = ['GEMINI_API_KEYS', 'GEMINI_API_KEY'];
+const GEMINI_DEFAULT_MODEL = 'gemini-flash-lite-latest';
+function createGeminiProvider(opts = {}) {
+    const model = opts.model ?? GEMINI_DEFAULT_MODEL;
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 20000;
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'gemini', envNames: GEMINI_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    const factory = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.cachedFactory)((0,_provider__WEBPACK_IMPORTED_MODULE_4__.clientFactoryFrom)(opts, opts.clientFactory));
+    return {
+        name: 'gemini',
+        kind: 'llm',
+        innerTimeoutMs,
+        confidenceCap: null,
+        confidenceFloor: null,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            const data = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image);
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
+                name: 'gemini',
+                pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2),
+                keyEnvNames: GEMINI_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    const res = await factory(apiKey).generateContent({
+                        model,
+                        contents: [{ parts: [{ text: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.ANALYSIS_PROMPT }, { inlineData: { mimeType: _provider__WEBPACK_IMPORTED_MODULE_4__.IMAGE_MIME, data } }] }],
+                        config: { ..._contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG, responseMimeType: 'application/json', responseSchema: (0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toGeminiSchema)() },
+                        signal: sig,
+                    });
+                    return { text: res.text, model, tokens: res.totalTokens };
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/gemma.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/gemma.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GEMMA_KEY_ENV: () => (/* binding */ GEMMA_KEY_ENV),
+/* harmony export */   GEMMA_MODELS: () => (/* binding */ GEMMA_MODELS),
+/* harmony export */   GEMMA_PER_MODEL_TIMEOUT_MS: () => (/* binding */ GEMMA_PER_MODEL_TIMEOUT_MS),
+/* harmony export */   createGemmaProvider: () => (/* binding */ createGemmaProvider)
+/* harmony export */ });
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+
+
+
+
+
+const GEMMA_KEY_ENV = ['GEMMA_API_KEYS', 'GEMINI_API_KEYS', 'GEMINI_API_KEY'];
+const GEMMA_MODELS = ['models/gemma-4-26b-a4b-it', 'models/gemma-4-31b-it'];
+const GEMMA_PER_MODEL_TIMEOUT_MS = 15000;
+function createGemmaProvider(opts = {}) {
+    const perModel = opts.perModelTimeoutMs ?? GEMMA_PER_MODEL_TIMEOUT_MS;
+    const innerTimeoutMs = opts.innerTimeoutMs ?? (perModel === GEMMA_PER_MODEL_TIMEOUT_MS ? 35000 : perModel * 2 + 5000);
+    const models = opts.models ?? GEMMA_MODELS;
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'gemma', envNames: GEMMA_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    const factory = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.cachedFactory)((0,_provider__WEBPACK_IMPORTED_MODULE_4__.clientFactoryFrom)(opts, opts.clientFactory));
+    return {
+        name: 'gemma',
+        kind: 'llm',
+        innerTimeoutMs,
+        confidenceCap: 0.85,
+        confidenceFloor: null,
+        escalateZeroAmount: true,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            const data = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image);
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
+                name: 'gemma',
+                pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2),
+                keyEnvNames: GEMMA_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    const client = factory(apiKey);
+                    const request = (model, s) => client.generateContent({
+                        model,
+                        contents: [{ parts: [{ inlineData: { mimeType: _provider__WEBPACK_IMPORTED_MODULE_4__.IMAGE_MIME, data } }, { text: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.ANALYSIS_PROMPT }] }],
+                        config: { ..._contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG, responseMimeType: 'application/json', responseSchema: (0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toGemmaSchema)() },
+                        signal: s,
+                    });
+                    const attempt = async (model) => {
+                        const res = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.withTimeout)((s) => request(model, s), perModel, `Gemma ${model}`, sig);
+                        return { text: res.text, model, tokens: res.totalTokens };
+                    };
+                    try {
+                        return await attempt(models[0]);
+                    }
+                    catch (err) {
+                        if (sig?.aborted)
+                            throw err;
+                        opts.logger?.warn(`[gemma] ${models[0]} failed (${err instanceof Error ? err.message : String(err)}); trying ${models[1]}`);
+                        return attempt(models[1]);
+                    }
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/http.ts"
+/*!******************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/http.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   defaultFetch: () => (/* binding */ defaultFetch),
+/* harmony export */   postJson: () => (/* binding */ postJson),
+/* harmony export */   readOrThrow: () => (/* binding */ readOrThrow)
+/* harmony export */ });
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+// Native-fetch helpers shared by the HTTP providers (nvidia, mistral, ocr-space, rapidapi).
+
+function defaultFetch(deps) {
+    return deps.fetch ?? ((input, init) => fetch(input, init));
+}
+/** Throw a ProviderError carrying the HTTP status (R21 classifies on it) for any non-2xx. */
+async function readOrThrow(res) {
+    const raw = await res.text();
+    if (!res.ok) {
+        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_0__.ProviderError(`HTTP ${res.status}: ${raw.replace(/\s+/g, ' ').slice(0, 300)}`, { status: res.status });
+    }
+    return raw;
+}
+async function postJson(fetchFn, url, headers, body, signal) {
+    const res = await fetchFn(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal,
+    });
+    const raw = await readOrThrow(res);
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_0__.ProviderError('Unexpected token in non-JSON response body', { errorClass: 'parse' });
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/index.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/index.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* binding */ DEFAULT_PROVIDER_ORDER),
+/* harmony export */   createProviders: () => (/* binding */ createProviders),
+/* harmony export */   getDefaultProviders: () => (/* binding */ getDefaultProviders),
+/* harmony export */   resetDefaultProviders: () => (/* binding */ resetDefaultProviders)
+/* harmony export */ });
+/* harmony import */ var _gemini__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./gemini */ "../../packages/tg-vision/src/providers/gemini.ts");
+/* harmony import */ var _gemma__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
+/* harmony import */ var _mistral__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./mistral */ "../../packages/tg-vision/src/providers/mistral.ts");
+/* harmony import */ var _nvidia__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./nvidia */ "../../packages/tg-vision/src/providers/nvidia.ts");
+/* harmony import */ var _ocr_space__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
+/* harmony import */ var _rapidapi__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
+
+
+
+
+
+
+const DEFAULT_PROVIDER_ORDER = ['gemini', 'nvidia', 'mistral', 'gemma', 'rapidapi', 'ocr-space'];
+function createProviders(deps = {}) {
+    const providers = [
+        (0,_gemini__WEBPACK_IMPORTED_MODULE_0__.createGeminiProvider)(deps),
+        (0,_nvidia__WEBPACK_IMPORTED_MODULE_3__.createNvidiaProvider)(deps),
+        (0,_mistral__WEBPACK_IMPORTED_MODULE_2__.createMistralProvider)(deps),
+        (0,_gemma__WEBPACK_IMPORTED_MODULE_1__.createGemmaProvider)(deps),
+        (0,_rapidapi__WEBPACK_IMPORTED_MODULE_5__.createRapidapiProvider)(deps),
+        (0,_ocr_space__WEBPACK_IMPORTED_MODULE_4__.createOcrSpaceProvider)(deps),
+    ];
+    return new Map(providers.map((p) => [p.name, p]));
+}
+let defaultRegistry = null;
+/** Shared registry on process.env + global fetch (key pools persist across calls). */
+function getDefaultProviders(v2) {
+    if (!defaultRegistry)
+        defaultRegistry = createProviders({ v2 });
+    return defaultRegistry;
+}
+function resetDefaultProviders() {
+    defaultRegistry = null;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/mistral.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/mistral.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MISTRAL_CHAT_URL: () => (/* binding */ MISTRAL_CHAT_URL),
+/* harmony export */   MISTRAL_DEFAULT_MODEL: () => (/* binding */ MISTRAL_DEFAULT_MODEL),
+/* harmony export */   MISTRAL_KEY_ENV: () => (/* binding */ MISTRAL_KEY_ENV),
+/* harmony export */   MISTRAL_OCR_MODEL: () => (/* binding */ MISTRAL_OCR_MODEL),
+/* harmony export */   MISTRAL_OCR_URL: () => (/* binding */ MISTRAL_OCR_URL),
+/* harmony export */   createMistralProvider: () => (/* binding */ createMistralProvider)
+/* harmony export */ });
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+// Mistral provider (design 2.6): pixtral chat completions (image_url is the data-URL string), then on ANY pixtral
+// error the mistral-ocr-latest markdown (MISTRAL_OCR_FALLBACK=false disables). Key strategy 'front' (R20).
+
+
+
+
+
+
+const MISTRAL_CHAT_URL = 'https://api.mistral.ai/v1/chat/completions';
+const MISTRAL_OCR_URL = 'https://api.mistral.ai/v1/ocr';
+const MISTRAL_KEY_ENV = ['MISTRAL_API_KEYS', 'MISTRAL_API_KEY'];
+const MISTRAL_DEFAULT_MODEL = 'pixtral-large-latest';
+const MISTRAL_OCR_MODEL = 'mistral-ocr-latest';
+function createMistralProvider(opts = {}) {
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 30000;
+    const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'mistral', envNames: MISTRAL_KEY_ENV, strategy: 'front', logger: opts.logger, now: opts.now, random: opts.random });
+    return {
+        name: 'mistral',
+        kind: 'llm',
+        innerTimeoutMs,
+        confidenceCap: null,
+        confidenceFloor: null,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            const env = (0,_provider__WEBPACK_IMPORTED_MODULE_5__.envOf)(opts);
+            const model = env.MISTRAL_VISION_MODEL || MISTRAL_DEFAULT_MODEL;
+            const ocrFallback = env.MISTRAL_OCR_FALLBACK !== 'false';
+            const prompt = (0,_contract_prompt__WEBPACK_IMPORTED_MODULE_0__.analysisPromptWithKeys)((0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toKeysBlock)());
+            const dataUrl = `data:${_provider__WEBPACK_IMPORTED_MODULE_5__.IMAGE_MIME};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_5__.toBase64)(image)}`;
+            const pixtral = async (apiKey, sig) => {
+                const data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, MISTRAL_CHAT_URL, { authorization: `Bearer ${apiKey}` }, {
+                    model,
+                    temperature: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.temperature,
+                    max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
+                    response_format: { type: 'json_object' },
+                    messages: [{ role: 'user', content: [
+                                { type: 'text', text: prompt },
+                                { type: 'image_url', image_url: dataUrl },
+                            ] }],
+                }, sig);
+                const content = data?.choices?.[0]?.message?.content;
+                if (!content)
+                    throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Pixtral returned empty content', { errorClass: 'empty' });
+                const total = data.usage?.total_tokens;
+                return { text: typeof content === 'string' ? content : JSON.stringify(content), model, tokens: typeof total === 'number' ? total : null };
+            };
+            const ocr = async (apiKey, sig) => {
+                const data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, MISTRAL_OCR_URL, { authorization: `Bearer ${apiKey}` }, {
+                    model: MISTRAL_OCR_MODEL,
+                    document: { type: 'image_url', image_url: dataUrl },
+                }, sig);
+                const markdown = (data?.pages ?? []).map((p) => p.markdown).filter(Boolean).join('\n\n');
+                if (!markdown)
+                    throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Mistral OCR returned empty markdown', { errorClass: 'empty' });
+                return { text: markdown, model: MISTRAL_OCR_MODEL, tokens: null };
+            };
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
+                name: 'mistral',
+                pool: pool.get(env, v2),
+                keyEnvNames: MISTRAL_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2: v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    try {
+                        return await pixtral(apiKey, sig);
+                    }
+                    catch (err) {
+                        opts.logger?.warn(`[mistral] Pixtral failed: ${err instanceof Error ? err.message : String(err)}. OCR fallback=${ocrFallback}`);
+                        if (!ocrFallback || sig.aborted)
+                            throw err;
+                        return ocr(apiKey, sig);
+                    }
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/nvidia.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/nvidia.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   NVIDIA_DEFAULT_MODEL: () => (/* binding */ NVIDIA_DEFAULT_MODEL),
+/* harmony export */   NVIDIA_KEY_ENV: () => (/* binding */ NVIDIA_KEY_ENV),
+/* harmony export */   NVIDIA_URL: () => (/* binding */ NVIDIA_URL),
+/* harmony export */   createNvidiaProvider: () => (/* binding */ createNvidiaProvider)
+/* harmony export */ });
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+// NVIDIA NIM provider (design 2.6): OpenAI-compatible chat completions with json_object. Not schema-enforced, so the
+// canonical keys block is appended to the prompt. Confidence capped at 0.85 (R26).
+
+
+
+
+
+
+const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const NVIDIA_KEY_ENV = ['NVIDIA_API_KEYS', 'NVIDIA_API_KEY'];
+const NVIDIA_DEFAULT_MODEL = 'nvidia/nemotron-nano-12b-v2-vl';
+function createNvidiaProvider(opts = {}) {
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 12000;
+    const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'nvidia', envNames: NVIDIA_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    return {
+        name: 'nvidia',
+        kind: 'llm',
+        innerTimeoutMs,
+        confidenceCap: 0.85,
+        confidenceFloor: null,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            const env = (0,_provider__WEBPACK_IMPORTED_MODULE_5__.envOf)(opts);
+            const model = env.NVIDIA_VISION_MODEL || NVIDIA_DEFAULT_MODEL;
+            const prompt = (0,_contract_prompt__WEBPACK_IMPORTED_MODULE_0__.analysisPromptWithKeys)((0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toKeysBlock)());
+            const dataUrl = `data:${_provider__WEBPACK_IMPORTED_MODULE_5__.IMAGE_MIME};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_5__.toBase64)(image)}`;
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
+                name: 'nvidia',
+                pool: pool.get(env, v2),
+                keyEnvNames: NVIDIA_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2: v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    const data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, NVIDIA_URL, { authorization: `Bearer ${apiKey}` }, {
+                        model,
+                        temperature: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.temperature,
+                        max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
+                        response_format: { type: 'json_object' },
+                        messages: [{ role: 'user', content: [
+                                    { type: 'text', text: prompt },
+                                    { type: 'image_url', image_url: { url: dataUrl } },
+                                ] }],
+                    }, sig);
+                    const content = data?.choices?.[0]?.message?.content;
+                    if (!content)
+                        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('NVIDIA returned empty content', { errorClass: 'empty' });
+                    const total = data.usage?.total_tokens;
+                    return { text: typeof content === 'string' ? content : JSON.stringify(content), model, tokens: typeof total === 'number' ? total : null };
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/ocr-space.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/ocr-space.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   OCR_SPACE_KEY_ENV: () => (/* binding */ OCR_SPACE_KEY_ENV),
+/* harmony export */   OCR_SPACE_URL: () => (/* binding */ OCR_SPACE_URL),
+/* harmony export */   createOcrSpaceProvider: () => (/* binding */ createOcrSpaceProvider)
+/* harmony export */ });
+/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+
+
+
+
+
+const OCR_SPACE_URL = 'https://api.ocr.space/parse/image';
+const OCR_SPACE_KEY_ENV = ['OCR_SPACE_API_KEYS', 'OCR_SPACE_API_KEY'];
+function createOcrSpaceProvider(opts = {}) {
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 15000;
+    const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_3__.defaultFetch)(opts);
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_1__.EnvKeyPool({ name: 'ocr-space', envNames: OCR_SPACE_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    async function ocr(image, apiKey, signal) {
+        const form = new FormData();
+        form.append('base64Image', `data:${_provider__WEBPACK_IMPORTED_MODULE_4__.IMAGE_MIME};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image)}`);
+        form.append('OCREngine', '1');
+        form.append('detectOrientation', 'true');
+        form.append('isTable', 'true');
+        form.append('isOverlayRequired', 'false');
+        form.append('apikey', apiKey);
+        const res = await fetchFn(OCR_SPACE_URL, { method: 'POST', body: form, signal });
+        const raw = await (0,_http__WEBPACK_IMPORTED_MODULE_3__.readOrThrow)(res);
+        let data = {};
+        try {
+            data = JSON.parse(raw);
+        }
+        catch {
+            data = {};
+        }
+        return data?.ParsedResults?.[0]?.ParsedText || '';
+    }
+    return {
+        name: 'ocr-space',
+        kind: 'ocr',
+        innerTimeoutMs,
+        confidenceCap: null,
+        confidenceFloor: 0.5,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_2__.runWithKeys)({
+                name: 'ocr-space',
+                pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2),
+                keyEnvNames: OCR_SPACE_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2: v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => ({ text: await ocr(image, apiKey, sig), model: 'ocr-space-engine1', tokens: null }),
+            });
+        },
+        async probeText(image, minWords, timeoutMs, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            try {
+                const p = pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2);
+                if (!p.hasKeys)
+                    return { status: 'unavailable', wordCount: 0, text: '', detail: 'no API keys configured' };
+                p.restoreExpired();
+                const apiKey = p.next();
+                if (!apiKey)
+                    return { status: 'unavailable', wordCount: 0, text: '', detail: 'no valid API key available' };
+                const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_2__.withTimeout)((sig) => ocr(image, apiKey, sig), timeoutMs, 'ocr-space probe');
+                const text = (raw || '').trim();
+                if (!text || text === '{}')
+                    return { status: 'no-text', wordCount: 0, text: '', detail: 'OCR returned empty' };
+                const wordCount = (0,_rules_sanitize__WEBPACK_IMPORTED_MODULE_0__.countWords)(text, v2);
+                if (wordCount < minWords)
+                    return { status: 'no-text', wordCount, text, detail: `below minWords(${minWords})` };
+                return { status: 'text', wordCount, text };
+            }
+            catch (error) {
+                // any failure is "could not get an answer": the caller fails open
+                return { status: 'unavailable', wordCount: 0, text: '', detail: error instanceof Error ? error.message : 'probe failed' };
+            }
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/provider.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/provider.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   IMAGE_MIME: () => (/* binding */ IMAGE_MIME),
+/* harmony export */   applyProviderTweaks: () => (/* binding */ applyProviderTweaks),
+/* harmony export */   cachedFactory: () => (/* binding */ cachedFactory),
+/* harmony export */   clientFactoryFrom: () => (/* binding */ clientFactoryFrom),
+/* harmony export */   createRestGenAiClient: () => (/* binding */ createRestGenAiClient),
+/* harmony export */   envOf: () => (/* binding */ envOf),
+/* harmony export */   parseModelOutput: () => (/* binding */ parseModelOutput),
+/* harmony export */   toBase64: () => (/* binding */ toBase64)
+/* harmony export */ });
+/* harmony import */ var _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/wire-normalize */ "../../packages/tg-vision/src/contract/wire-normalize.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+
+
+
+
+function envOf(deps) {
+    return deps.env ?? process.env;
+}
+function toBase64(image) {
+    return Buffer.from(image.buffer, image.byteOffset, image.byteLength).toString('base64');
+}
+const IMAGE_MIME = 'image/jpeg';
+function extractJsonObject(text) {
+    const direct = text.trim();
+    try {
+        return JSON.parse(direct);
+    }
+    catch {
+        // fall through to fence / prose stripping
+    }
+    const cleaned = direct.replace(/```json\n?/gi, '').replace(/```\n?/g, '');
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+        try {
+            return JSON.parse(cleaned.slice(start, end + 1));
+        }
+        catch {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+/**
+ * R24 + convertToImageDetails: valid JSON (also fenced or surrounded by prose) is the wire object with the confidence
+ * coerced (string words -> 0.95/0.7/0.5, absent/<= 0 -> 0.9); anything else is treated as OCR text (R43).
+ */
+function parseModelOutput(text, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_2__.NO_RULES) {
+    const parsed = extractJsonObject(text);
+    if (parsed !== undefined && parsed !== null && typeof parsed === 'object') {
+        if (Array.isArray(parsed))
+            return { wire: parsed, source: 'json' };
+        const wire = { ...parsed };
+        const c = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.coerceConfidence)(wire.confidence);
+        wire.confidence = c;
+        return { wire, source: 'json' };
+    }
+    return { wire: (0,_rules_text__WEBPACK_IMPORTED_MODULE_1__.ocrTextToWire)(text, v2), source: 'ocr_text' };
+}
+/** R26 on the wire object. Throws the benign escalation for gemma; caps / floors confidence. */
+function applyProviderTweaks(provider, wire) {
+    const out = { ...wire };
+    let c = typeof out.confidence === 'number' ? out.confidence : NaN;
+    if (provider.confidenceCap !== null && (typeof c !== 'number' || Number.isNaN(c) || c > provider.confidenceCap))
+        c = provider.confidenceCap;
+    if (provider.confidenceFloor !== null)
+        c = Math.max(Number.isNaN(c) ? 0 : c, provider.confidenceFloor);
+    if (!Number.isNaN(c))
+        out.confidence = c;
+    if (provider.escalateZeroAmount && out.isPayment === true && !(typeof out.amount === 'number' && out.amount > 0)) {
+        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError(`BENIGN_ESCALATION: ${provider.name} returned isPayment=true with amount=0; escalating for fallback`, { errorClass: 'escalated' });
+    }
+    return out;
+}
+const GENAI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+function errorFromBody(status, body) {
+    let snippet = body.replace(/\s+/g, ' ').slice(0, 300);
+    let code;
+    try {
+        const parsed = JSON.parse(body);
+        if (parsed?.error?.status)
+            code = parsed.error.status;
+        if (parsed?.error?.message)
+            snippet = `${parsed.error.status ?? ''} ${parsed.error.message}`.trim().slice(0, 300);
+    }
+    catch {
+        // keep the raw snippet
+    }
+    return new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError(`HTTP ${status}: ${snippet}`, { status, code });
+}
+function createRestGenAiClient(apiKey, fetchFn = (i, init) => fetch(i, init)) {
+    return {
+        async generateContent(req) {
+            const model = req.model.replace(/^models\//, '');
+            const res = await fetchFn(`${GENAI_BASE}/models/${model}:generateContent`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+                body: JSON.stringify({ contents: req.contents, generationConfig: req.config }),
+                signal: req.signal,
+            });
+            const raw = await res.text();
+            if (!res.ok)
+                throw errorFromBody(res.status, raw);
+            let data;
+            try {
+                data = JSON.parse(raw);
+            }
+            catch {
+                throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Unexpected token in non-JSON response body', { errorClass: 'parse' });
+            }
+            const parts = data.candidates?.[0]?.content?.parts ?? [];
+            const text = parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('').trim();
+            const total = data.usageMetadata?.totalTokenCount;
+            return { text, totalTokens: typeof total === 'number' ? total : null };
+        },
+    };
+}
+function clientFactoryFrom(deps, injected) {
+    if (injected)
+        return injected;
+    return (apiKey) => createRestGenAiClient(apiKey, deps.fetch);
+}
+/** Per-key client cache so a pool does not rebuild clients each call. */
+function cachedFactory(factory) {
+    const cache = new Map();
+    return (apiKey) => {
+        let c = cache.get(apiKey);
+        if (!c) {
+            c = factory(apiKey);
+            cache.set(apiKey, c);
+        }
+        return c;
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/providers/rapidapi.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-vision/src/providers/rapidapi.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RAPIDAPI_HOST: () => (/* binding */ RAPIDAPI_HOST),
+/* harmony export */   RAPIDAPI_KEY_ENV: () => (/* binding */ RAPIDAPI_KEY_ENV),
+/* harmony export */   RAPIDAPI_URL: () => (/* binding */ RAPIDAPI_URL),
+/* harmony export */   createRapidapiProvider: () => (/* binding */ createRapidapiProvider),
+/* harmony export */   rapidapiText: () => (/* binding */ rapidapiText)
+/* harmony export */ });
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
+/* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
+// RapidAPI handwriting-OCR provider (design 2.6). Multipart srcImg + Session; OCR text goes through R43.
+
+
+
+
+const RAPIDAPI_URL = 'https://pen-to-print-handwriting-ocr.p.rapidapi.com/recognize/';
+const RAPIDAPI_HOST = 'pen-to-print-handwriting-ocr.p.rapidapi.com';
+const RAPIDAPI_KEY_ENV = ['RAPID_API_KEYS', 'RAPID_API_KEY'];
+/** The response shape varies: value|text, data.value|data.text, else the JSON string. */
+function rapidapiText(body) {
+    if (typeof body === 'string')
+        return body;
+    const d = body;
+    if (d?.value || d?.text)
+        return d.value || d.text || '';
+    if (d?.data?.value || d?.data?.text)
+        return d.data.value || d.data.text || '';
+    return JSON.stringify(body);
+}
+function createRapidapiProvider(opts = {}) {
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 15000;
+    const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_2__.defaultFetch)(opts);
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_0__.EnvKeyPool({ name: 'rapidapi', envNames: RAPIDAPI_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    return {
+        name: 'rapidapi',
+        kind: 'ocr',
+        innerTimeoutMs,
+        confidenceCap: null,
+        confidenceFloor: null,
+        escalateZeroAmount: false,
+        async call(image, signal, v2Call) {
+            const v2 = v2Call ?? opts.v2;
+            return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_1__.runWithKeys)({
+                name: 'rapidapi',
+                pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_3__.envOf)(opts), v2),
+                keyEnvNames: RAPIDAPI_KEY_ENV,
+                timeoutMs: innerTimeoutMs,
+                v2: v2,
+                sleep: opts.sleep,
+                logger: opts.logger,
+                signal,
+                isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
+                call: async (apiKey, sig) => {
+                    const form = new FormData();
+                    form.append('srcImg', new Blob([image], { type: _provider__WEBPACK_IMPORTED_MODULE_3__.IMAGE_MIME }), 'image.jpg');
+                    form.append('Session', 'string');
+                    const res = await fetchFn(RAPIDAPI_URL, {
+                        method: 'POST',
+                        headers: { 'X-RapidAPI-Key': apiKey, 'X-RapidAPI-Host': RAPIDAPI_HOST },
+                        body: form,
+                        signal: sig,
+                    });
+                    const raw = await (0,_http__WEBPACK_IMPORTED_MODULE_2__.readOrThrow)(res);
+                    let body = raw;
+                    try {
+                        body = JSON.parse(raw);
+                    }
+                    catch {
+                        body = raw;
+                    }
+                    return { text: rapidapiText(body), model: 'pen-to-print', tokens: null };
+                },
+            });
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/amount.compat.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/amount.compat.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AMOUNT_PATTERNS_LEGACY: () => (/* binding */ AMOUNT_PATTERNS_LEGACY),
+/* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* binding */ MAX_PAYMENT_AMOUNT),
+/* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* binding */ MIN_PAYMENT_AMOUNT),
+/* harmony export */   OCR_ERROR_MAP: () => (/* binding */ OCR_ERROR_MAP),
+/* harmony export */   correctNonStandardAmountLegacy: () => (/* binding */ correctNonStandardAmountLegacy),
+/* harmony export */   extractAmountLegacy: () => (/* binding */ extractAmountLegacy),
+/* harmony export */   extractAmountWithPatterns: () => (/* binding */ extractAmountWithPatterns),
+/* harmony export */   getNumberFromStringLegacy: () => (/* binding */ getNumberFromStringLegacy),
+/* harmony export */   isFalsePositive: () => (/* binding */ isFalsePositive),
+/* harmony export */   isValidAmount: () => (/* binding */ isValidAmount),
+/* harmony export */   processChatGptResponseLegacy: () => (/* binding */ processChatGptResponseLegacy)
+/* harmony export */ });
+// Legacy-exact port of mySuperSever amount rules (R30-R35). Parity-pinned by the U0b goldens.
+// Sources (MSS = mySuperSever-local/src/common/services):
+//   amount-correction.service.ts  (correctNonStandardAmount, getNumberFromString, processChatGptResponse)
+//   payment-patterns.service.ts   (amountPatterns, isFalsePositive, bounds)
+//   text-extraction.service.ts    (extractAmount)
+// Do NOT "improve" anything here; V2 variants live in amount.ts. Return 0 means "no amount" (legacy).
+const MIN_PAYMENT_AMOUNT = 1;
+const MAX_PAYMENT_AMOUNT = 15000;
+function isValidAmount(amount) {
+    return amount >= MIN_PAYMENT_AMOUNT && amount <= MAX_PAYMENT_AMOUNT;
+}
+const OCR_ERROR_MAP = {
+    825: 25, 725: 25, 225: 25, 815: 25, 715: 25, 215: 25, 820: 25, 720: 25, 220: 25,
+    250: 50, 850: 50, 750: 50,
+    8100: 100, 7100: 100, 2100: 100,
+    8150: 150, 7150: 150, 2150: 150,
+    8200: 200, 7200: 200, 2200: 200,
+    8250: 250, 7250: 250, 2250: 250,
+    8300: 300, 7300: 300, 2300: 300,
+    8350: 350, 7350: 350, 2350: 350,
+};
+/** R31 legacy. Keys >= 1000 are unreachable (early return) exactly as in MSS. */
+function correctNonStandardAmountLegacy(amount) {
+    if (amount < MIN_PAYMENT_AMOUNT || amount > MAX_PAYMENT_AMOUNT) {
+        return 0;
+    }
+    if (amount < 15 || amount >= 1000) {
+        return amount;
+    }
+    if (OCR_ERROR_MAP[amount]) {
+        return OCR_ERROR_MAP[amount];
+    }
+    return amount;
+}
+const LEGACY_SYMBOLS = ['₹', '€', '¥', '₽', '£', 'e', '*'];
+/** R32 legacy. `dayOfMonth` is `new Date().getDate()` in MSS; injected so tests can pin it. */
+function getNumberFromStringLegacy(input, dayOfMonth = new Date().getDate()) {
+    if (!input || typeof input !== 'string') {
+        return 0;
+    }
+    const regex = new RegExp(`(?:^|\\s)(?:${dayOfMonth === 25 ? '' : '25|225|725|'}215|715|r15|50|r50|750|250|r150|r100|7150|2150|7100|r200|r250|2100|r350|r300|7350|2350|7250|2250|7200|2200|7300)\\b`, 'g');
+    for (const symbol of LEGACY_SYMBOLS) {
+        let symbolRegex;
+        if (symbol === '*') {
+            symbolRegex = /\*\s*([0-9,]+)/;
+        }
+        else {
+            symbolRegex = new RegExp(`(${symbol})\\s*([\\d,]+(?:\\.\\d{2})?)`);
+        }
+        const lines = input.split('\n');
+        for (let line of lines) {
+            line = line.replace(/\*{3}(\d+)/, ' hst');
+            if (line.includes(symbol) && !line.includes('***')) {
+                const match = line.match(symbolRegex);
+                if (match && match[2]) {
+                    const amountStr = match[2].replace(/,/g, '');
+                    const amount = Math.floor(parseFloat(amountStr));
+                    if (amount >= MIN_PAYMENT_AMOUNT && amount <= MAX_PAYMENT_AMOUNT) {
+                        return amount;
+                    }
+                }
+            }
+        }
+    }
+    const lines = input.split('\n');
+    for (const line of lines) {
+        const match = line.match(regex);
+        if (match) {
+            for (let i = 0; i < match.length; i++) {
+                const numberMatch = match[i].match(/\d+/);
+                if (numberMatch && numberMatch[0]) {
+                    return parseInt(numberMatch[0]);
+                }
+            }
+        }
+    }
+    return 0;
+}
+/** R33 legacy. */
+function processChatGptResponseLegacy(text, dayOfMonth) {
+    const returnText = { amount: 0, text: text || '' };
+    const number = getNumberFromStringLegacy(text, dayOfMonth);
+    returnText.amount = number;
+    if (number < MIN_PAYMENT_AMOUNT || number > MAX_PAYMENT_AMOUNT) {
+        returnText.amount = 0;
+        return returnText;
+    }
+    returnText.amount = correctNonStandardAmountLegacy(number);
+    return returnText;
+}
+/** Ordered amount patterns (payment-patterns.service.ts:27-59). Index 3 is the labelled pattern with balance|value|sum. */
+const AMOUNT_PATTERNS_LEGACY = [
+    /[₹₨]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g,
+    /(?:Rs\.?|INR|rupees?)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
+    /[₹₨]\s*(\d{1,6}(?:\.\d{2})?)/g,
+    /(?:amount|paid|received|total|balance|value|sum)[:\s]+(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
+    /(?:pay|paying|payment|transfer|sent|credited|debited)[:\s]+(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
+    /(?:राशि|भुगतान|रकम|कुल)[:\s]+(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
+    /(?:தொகை|பணம்)[:\s]+(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
+    /(?:^|\s|:|\n)(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*[₹₨]/g,
+    /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:Rs\.?|INR|rupees?)/gi,
+    /\b(\d{2,4})\s*(?:only|\/\-|rupees?|rs)/gi,
+    /(?:of|for)\s+(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:₹|Rs\.?|INR)?/gi,
+    /[\(\[]\s*(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*[\)\]]/gi,
+    /(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{3})*\.\d{1,2})/g,
+    /[₹₨]\s*(\d{1,3}[.,]\d{3})/g,
+];
+/** R35 legacy. */
+function isFalsePositive(match) {
+    const cleaned = match.replace(/[₹₨,.\s]/g, '');
+    if (/\d{10,}/.test(cleaned))
+        return true;
+    if (/[A-Z0-9]{12,}/.test(cleaned) && /\d{8,}/.test(cleaned))
+        return true;
+    if (/[X*]{3,}/.test(cleaned))
+        return true;
+    if (/@[a-z]+/i.test(match))
+        return true;
+    if (/\d{10,}/.test(match.replace(/[^\d]/g, '')))
+        return true;
+    return false;
+}
+function ensureGlobalFlag(pattern) {
+    if (pattern.global)
+        return pattern;
+    const flags = pattern.flags || '';
+    return new RegExp(pattern.source, flags.includes('g') ? flags : flags + 'g');
+}
+/** R34 legacy, parameterised on the pattern list so V2 can swap it without duplicating the scorer. */
+function extractAmountWithPatterns(text, patterns) {
+    if (!text)
+        return 0;
+    const candidates = [];
+    for (const pattern of patterns) {
+        const globalPattern = ensureGlobalFlag(pattern);
+        const matches = text.matchAll(globalPattern);
+        for (const match of matches) {
+            if (!match[1])
+                continue;
+            const amountStr = match[1].replace(/,/g, '').replace(/\s/g, '');
+            const amount = Math.floor(parseFloat(amountStr));
+            const fullMatch = match[0];
+            if (isFalsePositive(fullMatch))
+                continue;
+            if (!isValidAmount(amount))
+                continue;
+            let confidence = 1.0;
+            if (/[₹₨]/.test(fullMatch)) {
+                confidence = 0.95;
+            }
+            else if (/(?:Rs\.?|INR|rupees?)/i.test(fullMatch)) {
+                confidence = 0.90;
+            }
+            else if (/(?:amount|paid|received|total)/i.test(fullMatch)) {
+                confidence = 0.85;
+            }
+            else {
+                confidence = 0.70;
+            }
+            candidates.push({ amount, confidence, match: fullMatch });
+        }
+    }
+    if (candidates.length > 0) {
+        candidates.sort((a, b) => b.confidence - a.confidence);
+        return candidates[0].amount;
+    }
+    return 0;
+}
+function extractAmountLegacy(text) {
+    return extractAmountWithPatterns(text, AMOUNT_PATTERNS_LEGACY);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/amount.ts"
+/*!****************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/amount.ts ***!
+  \****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT),
+/* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT),
+/* harmony export */   amountOrNull: () => (/* binding */ amountOrNull),
+/* harmony export */   correctNonStandardAmount: () => (/* binding */ correctNonStandardAmount),
+/* harmony export */   extractAmount: () => (/* binding */ extractAmount),
+/* harmony export */   getNumberFromString: () => (/* binding */ getNumberFromString),
+/* harmony export */   isFalsePositive: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.isFalsePositive),
+/* harmony export */   isValidAmount: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount),
+/* harmony export */   processChatGptResponse: () => (/* binding */ processChatGptResponse)
+/* harmony export */ });
+/* harmony import */ var _amount_compat__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./amount.compat */ "../../packages/tg-vision/src/rules/amount.compat.ts");
+/* harmony import */ var _v2__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+// Amount rules R30-R36 with explicit V2 variants (design section 2.3). With an empty rule set every
+// function here returns exactly what the mySuperSever legacy code returns (amount.compat.ts, golden-pinned).
+//
+// Return convention: these rule functions keep the legacy "0 = no amount" convention. The contract
+// level conversion to `null` (3.2: amount 0 is never produced) happens in contract/wire-normalize.ts
+// via amountOrNull().
+//
+// V2 ids used here (owner decisions: legacy stays default; R03 stays hard; 250->50 stays):
+//   R31-4digit  the >=1000 early return made the 4-digit OCR_ERROR_MAP entries dead; V2 lets them fire
+//               (2150->150, 2100->100, 2350->350 ...). The 3-digit map (incl. 250->50) is unchanged.
+//   R32         text fallback: no `e`/`*` symbols, `Rs`/`INR` accepted, no day-25 special case,
+//               range-checked ladder pass.
+//   R34         label pattern drops balance|value|sum.
+
+
+
+/** `0` (legacy "none") or out-of-range -> null; otherwise the amount. */
+function amountOrNull(amount) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount))
+        return null;
+    return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount)(amount) ? amount : null;
+}
+/** R31. */
+function correctNonStandardAmount(amount, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES) {
+    if (!v2.has('R31-4digit'))
+        return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmountLegacy)(amount);
+    if (amount < _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT || amount > _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT)
+        return 0;
+    if (amount < 15)
+        return amount;
+    return _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] ? _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] : amount;
+}
+const V2_SYMBOL_REGEXES = [
+    /₹\s*([\d,]+(?:\.\d{2})?)/,
+    /€\s*([\d,]+(?:\.\d{2})?)/,
+    /¥\s*([\d,]+(?:\.\d{2})?)/,
+    /₽\s*([\d,]+(?:\.\d{2})?)/,
+    /£\s*([\d,]+(?:\.\d{2})?)/,
+    /\bRs\.?\s*([\d,]+(?:\.\d{2})?)/i,
+    /\bINR\s*([\d,]+(?:\.\d{2})?)/i,
+];
+const V2_LADDER = new RegExp('(?:^|\\s)(?:25|225|725|215|715|r15|50|r50|750|250|r150|r100|7150|2150|7100|r200|r250|2100|r350|r300|7350|2350|7250|2250|7200|2200|7300)\\b', 'g');
+function getNumberFromStringV2(input) {
+    const lines = input.split('\n');
+    for (const symbolRegex of V2_SYMBOL_REGEXES) {
+        for (let line of lines) {
+            line = line.replace(/\*{3}(\d+)/, ' hst');
+            if (line.includes('***'))
+                continue;
+            const match = line.match(symbolRegex);
+            if (match && match[1]) {
+                const amount = Math.floor(parseFloat(match[1].replace(/,/g, '')));
+                if ((0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount)(amount))
+                    return amount;
+            }
+        }
+    }
+    for (const line of lines) {
+        const match = line.match(V2_LADDER);
+        if (match) {
+            for (let i = 0; i < match.length; i++) {
+                const numberMatch = match[i].match(/\d+/);
+                if (numberMatch && numberMatch[0]) {
+                    const value = parseInt(numberMatch[0]);
+                    if ((0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount)(value))
+                        return value;
+                }
+            }
+        }
+    }
+    return 0;
+}
+/** R32. `dayOfMonth` only matters in legacy mode (the day-25 exception). */
+function getNumberFromString(input, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES, dayOfMonth) {
+    if (!input || typeof input !== 'string')
+        return 0;
+    if (!v2.has('R32'))
+        return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.getNumberFromStringLegacy)(input, dayOfMonth);
+    return getNumberFromStringV2(input);
+}
+/** R33: text fallback then R31. */
+function processChatGptResponse(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES, dayOfMonth) {
+    const out = { amount: 0, text: text || '' };
+    const number = getNumberFromString(text, v2, dayOfMonth);
+    if (number < _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT || number > _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT)
+        return out;
+    out.amount = correctNonStandardAmount(number, v2);
+    return out;
+}
+const V2_PATTERNS = _amount_compat__WEBPACK_IMPORTED_MODULE_0__.AMOUNT_PATTERNS_LEGACY.map((pattern, index) => index === 3
+    ? new RegExp(pattern.source.replace('|balance|value|sum', ''), pattern.flags)
+    : pattern);
+/** R34 (R35 inside). */
+function extractAmount(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES) {
+    if (!v2.has('R34'))
+        return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.extractAmountLegacy)(text);
+    return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.extractAmountWithPatterns)(text, V2_PATTERNS);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/sanitize.ts"
+/*!******************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/sanitize.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   countWords: () => (/* binding */ countWords),
+/* harmony export */   countWordsLegacy: () => (/* binding */ countWordsLegacy),
+/* harmony export */   countWordsUnicode: () => (/* binding */ countWordsUnicode),
+/* harmony export */   sanitizeExtraction: () => (/* binding */ sanitizeExtraction)
+/* harmony export */ });
+/* harmony import */ var _v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+/** R05 legacy (text-extraction.service.ts:389-395), quirks included: Latin letters only, one newline replaced. */
+function countWordsLegacy(text) {
+    if (!text)
+        return 0;
+    const cleanedText = text.replace(/[^a-zA-Z\n]+/g, ' ').toLowerCase();
+    const trimmedText = cleanedText.trim().replace('\n', ' ');
+    return trimmedText.split(' ').filter((word) => word.length > 2).length;
+}
+/** V2:R05-unicode: tokens of >= 2 letters (combining marks included) or digits in any script. */
+function countWordsUnicode(text) {
+    if (!text)
+        return 0;
+    return text.split(/[^\p{L}\p{M}\p{N}]+/u).filter((token) => token.length >= 2).length;
+}
+function countWords(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
+    return v2.has('R05-unicode') ? countWordsUnicode(text) : countWordsLegacy(text);
+}
+/**
+ * R10 on the typed extraction: (e) a non-payment carries no status and no amount (time and names untouched,
+ * as in legacy); confidence is clamped to [0,1]. (a) text replacement, (b) note copy, (d) isFinished and
+ * (f) short-text supplement are legacy-shape concerns and live in contract/legacy.ts.
+ * (c) success+failed conflict cannot occur on the enum; the flag-to-enum collapse is statusFromFlags (R10c).
+ */
+function sanitizeExtraction(extraction) {
+    const out = { ...extraction, rulesApplied: [...extraction.rulesApplied] };
+    const c = Number.isFinite(out.confidence) ? out.confidence : 0;
+    out.confidence = Math.max(0, Math.min(1, c));
+    if (out.isPayment !== true) {
+        if (out.status !== 'unknown' || out.amount !== null)
+            out.rulesApplied.push('R10e');
+        out.status = 'unknown';
+        out.amount = null;
+    }
+    return out;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/status.ts"
+/*!****************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/status.ts ***!
+  \****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FAILURE_INDICATORS: () => (/* binding */ FAILURE_INDICATORS),
+/* harmony export */   PENDING_INDICATORS: () => (/* binding */ PENDING_INDICATORS),
+/* harmony export */   STRONG_SUCCESS: () => (/* binding */ STRONG_SUCCESS),
+/* harmony export */   SUCCESS_INDICATORS: () => (/* binding */ SUCCESS_INDICATORS),
+/* harmony export */   advisoryFlags: () => (/* binding */ advisoryFlags),
+/* harmony export */   inferStatusFlagsLegacy: () => (/* binding */ inferStatusFlagsLegacy),
+/* harmony export */   inferStatusFromText: () => (/* binding */ inferStatusFromText),
+/* harmony export */   statusFromFlags: () => (/* binding */ statusFromFlags),
+/* harmony export */   statusToFlags: () => (/* binding */ statusToFlags),
+/* harmony export */   validateBooleanLogicLegacy: () => (/* binding */ validateBooleanLogicLegacy)
+/* harmony export */ });
+/* harmony import */ var _v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+// payment-patterns.service.ts:139-141, copied verbatim
+const SUCCESS_INDICATORS = /success|successful|paid|sent\s+from|completed|pay\s+again|completed|paid\s+to|share\s+receipt|done|paid\s+successfully|payment\s+complete|credited|debited|transaction\s+successful|payment\s+successful|successfully\s+paid|✓|✔|✅|completed\s+successfully|payment\s+received|money\s+sent|transfer\s+successful/i;
+const FAILURE_INDICATORS = /fail|failed|declined|rejected|error|unsuccessful|payment\s+failed|transaction\s+failed|cancelled|canceled|❌|✗|❎|declined|rejected|insufficient|timeout|expired|invalid|error\s+occurred|could\s+not\s+complete|unable\s+to\s+process/i;
+const PENDING_INDICATORS = /pending|processing|initiated|in\s+progress|awaiting|queued|under\s+process|being\s+processed|waiting|processing\s+payment|initiating|pending\s+verification/i;
+/** V2:R42 strong success evidence. "success" alone is too weak ("unsuccessful" contains it). */
+const STRONG_SUCCESS = /✓|✔|✅|(?<!un)successful|(?<!un)successfully|payment\s+complete|(?<![a-z])completed(?![a-z])/i;
+/** R42 legacy (text-extraction.service.ts detectPaymentStatus / text-to-json converter). null = no indicator matched. */
+function inferStatusFlagsLegacy(text) {
+    if (SUCCESS_INDICATORS.test(text))
+        return { isSuccess: true, isFailed: false, isFinished: true };
+    if (FAILURE_INDICATORS.test(text))
+        return { isSuccess: false, isFailed: true, isFinished: true };
+    if (PENDING_INDICATORS.test(text))
+        return { isSuccess: false, isFailed: false, isFinished: false };
+    return null;
+}
+/** R42. */
+function inferStatusFromText(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
+    if (!text)
+        return 'unknown';
+    if (!v2.has('R42')) {
+        const f = inferStatusFlagsLegacy(text);
+        if (!f)
+            return 'unknown';
+        if (f.isSuccess)
+            return 'success';
+        if (f.isFailed)
+            return 'failed';
+        return 'pending';
+    }
+    const weakSuccess = SUCCESS_INDICATORS.test(text);
+    const failure = FAILURE_INDICATORS.test(text);
+    if (failure && weakSuccess)
+        return 'unknown';
+    if (failure)
+        return 'failed';
+    if (weakSuccess)
+        return STRONG_SUCCESS.test(text) ? 'success' : 'unknown';
+    if (PENDING_INDICATORS.test(text))
+        return 'pending';
+    return 'unknown';
+}
+/**
+ * R41 legacy validateBooleanLogic (image-details-validator.service.ts:106-140), in place on the flag subset.
+ * The legacy version also blanks names/time/amount when !isPayment; that part is sanitize.ts (R10e).
+ */
+function validateBooleanLogicLegacy(details) {
+    if (!details.isPayment) {
+        details.isSuccess = false;
+        details.isFailed = false;
+        details.isFinished = false;
+        return;
+    }
+    if (details.isSuccess || details.isFailed)
+        details.isFinished = true;
+    if (details.isSuccess && details.isFailed) {
+        const d = (details.description || '').toLowerCase();
+        if (d.includes('success') || d.includes('completed')) {
+            details.isFailed = false;
+        }
+        else {
+            details.isSuccess = false;
+        }
+    }
+    if (details.isSuccess || details.isFailed)
+        details.isFinished = true;
+}
+/** Collapse legacy booleans into the status enum. Both set: V2:R10c -> 'unknown', legacy R10 -> 'success'. */
+function statusFromFlags(flags, v2 = _v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
+    if (flags.isSuccess && flags.isFailed)
+        return v2.has('R10c') ? 'unknown' : 'success';
+    if (flags.isSuccess)
+        return 'success';
+    if (flags.isFailed)
+        return 'failed';
+    return flags.isFinished === false ? 'pending' : 'unknown';
+}
+/** Legacy flag triple for a status (design 3.2). */
+function statusToFlags(status) {
+    return {
+        isSuccess: status === 'success',
+        isFailed: status === 'failed',
+        isFinished: status !== 'pending' && status !== 'unknown',
+    };
+}
+/** R14: advisory only, never blocking. */
+function advisoryFlags(isPayment, isInappropriate, isFailed) {
+    return { suspectedFake: isPayment && isInappropriate, paymentNotSuccessful: isPayment && isFailed };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/text.ts"
+/*!**************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/text.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PAYEE_PATTERNS: () => (/* binding */ PAYEE_PATTERNS),
+/* harmony export */   PAYER_PATTERNS: () => (/* binding */ PAYER_PATTERNS),
+/* harmony export */   PAYMENT_APP_KEYWORDS: () => (/* binding */ PAYMENT_APP_KEYWORDS),
+/* harmony export */   REF_PATTERNS: () => (/* binding */ REF_PATTERNS),
+/* harmony export */   TIME_PATTERNS: () => (/* binding */ TIME_PATTERNS),
+/* harmony export */   extractPayeeName: () => (/* binding */ extractPayeeName),
+/* harmony export */   extractPayerName: () => (/* binding */ extractPayerName),
+/* harmony export */   extractPaymentDataFromText: () => (/* binding */ extractPaymentDataFromText),
+/* harmony export */   extractReference: () => (/* binding */ extractReference),
+/* harmony export */   extractTimeString: () => (/* binding */ extractTimeString),
+/* harmony export */   isValidName: () => (/* binding */ isValidName),
+/* harmony export */   ocrTextToWire: () => (/* binding */ ocrTextToWire),
+/* harmony export */   smartMergeWire: () => (/* binding */ smartMergeWire)
+/* harmony export */ });
+/* harmony import */ var _amount__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _sanitize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _status__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./status */ "../../packages/tg-vision/src/rules/status.ts");
+/* harmony import */ var _v2__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+
+
+
+const PAYEE_PATTERNS = [
+    /(?:paid\s+to|to|sent\s+to|transfer\s+to|credited\s+to)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:recipient|beneficiary|receiver|receiver\s+name)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:merchant|seller|vendor|shop|store|business)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:pay\s+to|paying\s+to|payment\s+to)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:to|for)\s+([A-Z][A-Za-z\s]{2,30})(?:\s+on|\s+at|\s+via|\s+using|$)/i,
+    /(?:received\s+by|collected\s+by)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:upi\s+id|vpa|virtual\s+payment\s+address)[:\s]+([A-Za-z0-9._-]+@[A-Za-z]+)/i,
+    /([A-Za-z0-9._-]+@[A-Za-z]+)\s*(?:upi|vpa)/i,
+];
+const PAYER_PATTERNS = [
+    /(?:from|paid\s+by|sent\s+by|transfer\s+from|debited\s+from)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:sender|payer|payer\s+name|sender\s+name)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:account\s+holder|account\s+name|from\s+account)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:your\s+name|your\s+account|my\s+name)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:from|by)\s+([A-Z][A-Za-z\s]{2,30})(?:\s+on|\s+at|\s+via|$)/i,
+    /(?:debited\s+from|charged\s+from)[:\s]+([A-Za-z][A-Za-z\s@._-]{2,49})/i,
+    /(?:account\s+no|a\/c\s+no)[:\s]+\d+\s+(?:in\s+name\s+of|name)[:\s]+([A-Za-z][A-Za-z\s]{2,49})/i,
+];
+const TIME_PATTERNS = [
+    /(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)/,
+    /(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)/,
+    /(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?)/,
+    /(\d{4}[/-]\d{2}[/-]\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?)/,
+    /(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm|A\.M\.|P\.M\.))/,
+    /(\d{1,2}\.\d{2}\s*(?:AM|PM|am|pm))/,
+    /(\d{2}:\d{2}(?::\d{2})?)\s*(?:hrs|hours|HRS|HOURS)?/,
+    /(\d{2}\.\d{2}(?::\d{2})?)/,
+    /(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/,
+    /(\d{4}[/-]\d{2}[/-]\d{2})/,
+    /(\d{2}[/-]\d{2}[/-]\d{4})/,
+    /(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})/i,
+    /((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4})/i,
+    /(\d{1,2}:\d{2}(?::\d{2})?\s*(?:IST|UTC|GMT|AM|PM|am|pm))/i,
+    /(?:at|on|time)[:\s]+(\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?)/i,
+    /(?:date|dt)[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
+];
+const REF_PATTERNS = [
+    /(?:ref(?:erence)?|transaction|utr|txn)[:\s#]*([A-Z0-9]{10,25})/i,
+    /(?:order|payment)\s*(?:id|no)[:\s#]*([A-Z0-9]{8,25})/i,
+];
+const PAYMENT_APP_KEYWORDS = /gpay|google pay|phonepe|phone pe|paytm|bhim|upi|payment|transaction|paid to|received from/i;
+function isValidName(name) {
+    if (!name || name.length < 2)
+        return false;
+    if (/(account|number|upi\s*id|bank\s*account|a\/c|ac\s*no|account\s*no)/i.test(name))
+        return false;
+    const numCount = (name.match(/\d/g) || []).length;
+    if (numCount > name.length * 0.5)
+        return false;
+    const specialCount = (name.match(/[^A-Za-z0-9\s]/g) || []).length;
+    if (specialCount > name.length * 0.3)
+        return false;
+    if (/^\d{10,}$/.test(name.replace(/[\s-]/g, '')))
+        return false;
+    if (!/[A-Za-z]/.test(name))
+        return false;
+    return true;
+}
+function cleanName(input) {
+    if (!input)
+        return '';
+    let name = input.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '');
+    name = name.replace(/\s+/g, ' ');
+    name = name.replace(/[|]/g, 'I');
+    name = name.replace(/[0O]/g, (m, offset) => {
+        const before = name[offset - 1];
+        const after = name[offset + 1];
+        if ((before && /[A-Za-z]/.test(before)) || (after && /[A-Za-z]/.test(after)))
+            return 'O';
+        return m;
+    });
+    name = name.replace(/\s+[^\w\s]+\s+/g, ' ');
+    name = name.split(' ').map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w)).join(' ');
+    return name.trim();
+}
+function globalOf(pattern) {
+    return pattern.global ? pattern : new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+}
+function bestName(text, patterns, strong, medium, weak) {
+    if (!text)
+        return '';
+    const candidates = [];
+    for (const pattern of patterns) {
+        for (const match of text.matchAll(globalOf(pattern))) {
+            if (!match[1])
+                continue;
+            const name = cleanName(match[1].trim().replace(/\s+/g, ' '));
+            if (!isValidName(name))
+                continue;
+            const full = match[0].toLowerCase();
+            let confidence = 0.8;
+            if (strong.test(full))
+                confidence = 0.95;
+            else if (medium.test(full))
+                confidence = 0.90;
+            else if (weak.test(full))
+                confidence = 0.85;
+            candidates.push({ name, confidence });
+        }
+    }
+    if (candidates.length === 0)
+        return '';
+    candidates.sort((a, b) => b.confidence - a.confidence);
+    return candidates[0].name;
+}
+function extractPayeeName(text) {
+    return bestName(text, PAYEE_PATTERNS, /(?:paid\s+to|to|sent\s+to)/i, /(?:recipient|beneficiary)/i, /(?:merchant|seller)/i);
+}
+function extractPayerName(text) {
+    return bestName(text, PAYER_PATTERNS, /(?:from|paid\s+by|sent\s+by)/i, /(?:sender|payer)/i, /(?:account\s+holder)/i);
+}
+function isValidTimeFormat(timeStr) {
+    if (!timeStr || timeStr.length < 3)
+        return false;
+    if (!/\d/.test(timeStr))
+        return false;
+    const digits = timeStr.replace(/[^\d]/g, '');
+    if (/^\d+$/.test(digits) && digits.length > 8)
+        return false;
+    if (!/[:/-]/.test(timeStr) && !/(AM|PM|IST|UTC|hrs|hours|date|time)/i.test(timeStr))
+        return false;
+    return true;
+}
+function extractTimeString(text) {
+    if (!text)
+        return '';
+    for (const pattern of TIME_PATTERNS) {
+        for (const match of text.matchAll(globalOf(pattern))) {
+            if (match[1]) {
+                const t = match[1].trim();
+                if (isValidTimeFormat(t))
+                    return t;
+            }
+        }
+    }
+    return '';
+}
+function extractReference(text) {
+    for (const pattern of REF_PATTERNS) {
+        const m = text.match(pattern);
+        if (m && m[1])
+            return m[1];
+    }
+    return null;
+}
+/** extractPaymentDataFromText: amount (R34), names, time, status (R42), payment-app keyword. */
+function extractPaymentDataFromText(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES) {
+    const status = (0,_status__WEBPACK_IMPORTED_MODULE_2__.inferStatusFromText)(text, v2);
+    const hasStatus = status !== 'unknown';
+    return {
+        amount: (0,_amount__WEBPACK_IMPORTED_MODULE_0__.extractAmount)(text, v2),
+        payeeName: extractPayeeName(text),
+        payerName: extractPayerName(text),
+        time: extractTimeString(text),
+        status: hasStatus ? status : null,
+        isPayment: hasStatus || PAYMENT_APP_KEYWORDS.test(text),
+    };
+}
+/**
+ * R44 smartMergePaymentData on the wire object. error / confidence < 0.3: text values OVERRIDE and confidence is
+ * recomputed (cap 0.75); otherwise only missing values are filled.
+ */
+function smartMergeWire(wire, text, isError = false) {
+    const merged = { ...wire };
+    const conf = typeof wire.confidence === 'number' ? wire.confidence : 0;
+    const low = isError || conf < 0.3;
+    const has = (v) => typeof v === 'string' && v.trim().length > 0;
+    if (low) {
+        if (text.amount > 0)
+            merged.amount = text.amount;
+        if (text.payeeName)
+            merged.payeeName = text.payeeName;
+        if (text.payerName)
+            merged.payerName = text.payerName;
+        if (text.time)
+            merged.timeRaw = text.time;
+        merged.isPayment = text.isPayment;
+        if (text.status)
+            merged.status = text.status;
+    }
+    else {
+        if (!(typeof merged.amount === 'number' && merged.amount > 0) && text.amount > 0)
+            merged.amount = text.amount;
+        if (!has(merged.payeeName) && text.payeeName)
+            merged.payeeName = text.payeeName;
+        if (!has(merged.payerName) && text.payerName)
+            merged.payerName = text.payerName;
+        if (!has(merged.timeRaw) && !(has(merged.clock24) || merged.dateDay) && text.time)
+            merged.timeRaw = text.time;
+    }
+    if (low) {
+        let c = 0.3;
+        if (typeof merged.amount === 'number' && merged.amount > 0)
+            c += 0.15;
+        if (has(merged.payeeName))
+            c += 0.1;
+        if (has(merged.payerName))
+            c += 0.1;
+        if (merged.status === 'success' || merged.status === 'failed')
+            c += 0.2;
+        if (has(merged.timeRaw) || has(merged.clock24))
+            c += 0.05;
+        merged.confidence = Math.min(0.75, Math.max(conf, c));
+    }
+    return merged;
+}
+/**
+ * R43 parseOcrTextToJson on the wire shape: word count < 5 -> not a payment; payment-app keyword, amount, names,
+ * time, reference and status each raise the confidence from 0.3 (cap 0.85).
+ */
+function ocrTextToWire(ocrText, v2 = _v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES) {
+    const wire = {
+        isPayment: false, status: 'unknown', amount: null, payeeName: null, payerName: null, timeRaw: null,
+        text: ocrText.slice(0, 500), utr: null, confidence: 0.3, disclaimerPhrases: [],
+    };
+    if ((0,_sanitize__WEBPACK_IMPORTED_MODULE_1__.countWords)(ocrText, v2) < 5)
+        return wire;
+    let confidence = 0.3;
+    if (PAYMENT_APP_KEYWORDS.test(ocrText)) {
+        wire.isPayment = true;
+        confidence += 0.2;
+    }
+    const ex = extractPaymentDataFromText(ocrText, v2);
+    if (ex.amount > 0) {
+        wire.amount = ex.amount;
+        confidence += 0.15;
+    }
+    if (ex.payeeName) {
+        wire.payeeName = ex.payeeName;
+        confidence += 0.1;
+    }
+    if (ex.payerName) {
+        wire.payerName = ex.payerName;
+        confidence += 0.1;
+    }
+    if (ex.time) {
+        wire.timeRaw = ex.time;
+        confidence += 0.05;
+    }
+    const ref = extractReference(ocrText);
+    if (ref) {
+        // the legacy pattern also matches words ("transaction successful"): keep its confidence bump, but a UTR needs a digit
+        if (/\d/.test(ref))
+            wire.utr = ref;
+        confidence += 0.15;
+    }
+    if (ex.status === 'success' || ex.status === 'failed') {
+        wire.status = ex.status;
+        confidence += 0.2;
+    }
+    else if (ex.status === 'pending') {
+        wire.status = 'pending';
+        confidence += 0.1;
+    }
+    if (ex.isPayment)
+        wire.isPayment = true;
+    wire.confidence = Math.min(0.85, confidence);
+    return wire;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/time.compat.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/time.compat.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MONTH_PATTERN: () => (/* binding */ MONTH_PATTERN),
+/* harmony export */   STATUS_BAR: () => (/* binding */ STATUS_BAR),
+/* harmony export */   TRANSACTION_CONTEXT: () => (/* binding */ TRANSACTION_CONTEXT),
+/* harmony export */   hasTransactionContext: () => (/* binding */ hasTransactionContext),
+/* harmony export */   monthNumber: () => (/* binding */ monthNumber),
+/* harmony export */   monthToNumLegacy: () => (/* binding */ monthToNumLegacy),
+/* harmony export */   normalizeTimeLegacy: () => (/* binding */ normalizeTimeLegacy),
+/* harmony export */   validateAndFormatTimeLegacy: () => (/* binding */ validateAndFormatTimeLegacy)
+/* harmony export */ });
+// Legacy-exact port of mySuperSever time-validation.service.ts (R50-R54 as shipped, bugs included):
+//  - OCR cleanup replaces EVERY o/O with 0 (so "Oct"/"Nov" never match in the first pass, R51)
+//  - a date without a clock gets T00:00:00 (R53)
+//  - new Date(str) / local getters: host timezone (R56)
+// Kept only for parity goldens and red/green proof against the fixed implementation in time.ts.
+// `now` is injected (MSS uses new Date()).
+const MONTH_TO_NUM = {
+    Jan: '01', January: '01', Feb: '02', February: '02', Mar: '03', March: '03',
+    Apr: '04', April: '04', May: '05', Jun: '06', June: '06', Jul: '07', July: '07',
+    Aug: '08', August: '08', Sep: '09', Sept: '09', September: '09',
+    Oct: '10', October: '10', Nov: '11', November: '11', Dec: '12', December: '12',
+};
+const MONTH_PATTERN = '(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:\\.)?|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+const STATUS_BAR = /\b(4g|5g|lte|wifi|battery|signal|\d{1,3}%)\b/i;
+const TRANSACTION_CONTEXT = /\b(on|at|date|time|transaction|payment|paid|sent|received|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|success|transfer|debit|credit|upi|utr|successfully|receipt)\b/i;
+function monthToNumLegacy(monthStr) {
+    if (!monthStr)
+        return '01';
+    const key = monthStr.replace(/\./g, '').trim();
+    return MONTH_TO_NUM[key] || MONTH_TO_NUM[key.slice(0, 3)] || '01';
+}
+/** Lookup used by time.ts; null when unknown (legacy silently used '01'). */
+function monthNumber(monthStr) {
+    const key = (monthStr || '').replace(/\./g, '').trim();
+    const cap = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+    const v = MONTH_TO_NUM[cap] || MONTH_TO_NUM[cap.slice(0, 3)];
+    return v ? parseInt(v, 10) : null;
+}
+function hasTransactionContext(text, start, matchLen) {
+    const before = text.slice(Math.max(0, start - 50), start).toLowerCase();
+    const after = text.slice(start + matchLen, start + matchLen + 50).toLowerCase();
+    const context = before + after;
+    if (STATUS_BAR.test(context))
+        return false;
+    return TRANSACTION_CONTEXT.test(context);
+}
+function formatToISO(date) {
+    const Y = date.getFullYear(), M = String(date.getMonth() + 1).padStart(2, '0'), D = String(date.getDate()).padStart(2, '0');
+    const h = String(date.getHours()).padStart(2, '0'), min = String(date.getMinutes()).padStart(2, '0'), s = String(date.getSeconds()).padStart(2, '0');
+    return `${Y}-${M}-${D}T${h}:${min}:${s}`;
+}
+function parseDateString(timeStr) {
+    try {
+        const date = new Date(timeStr);
+        return !isNaN(date.getTime()) ? date : null;
+    }
+    catch {
+        return null;
+    }
+}
+function parseManualFormats(timeStr, now) {
+    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+    let match = timeStr.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM|am|pm))?$/i);
+    if (match) {
+        const day = parseInt(match[1], 10), month = parseInt(match[2], 10) - 1;
+        let year = parseInt(match[3], 10);
+        if (year < 100)
+            year += 2000;
+        let h = parseInt(match[4], 10);
+        const min = parseInt(match[5], 10), sec = match[6] ? parseInt(match[6], 10) : 0;
+        const ampm = match[7]?.toUpperCase();
+        if (ampm === 'PM' && h !== 12)
+            h += 12;
+        if (ampm === 'AM' && h === 12)
+            h = 0;
+        return new Date(year, month, day, h, min, sec);
+    }
+    match = timeStr.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)$/i);
+    if (match) {
+        let h = parseInt(match[1], 10);
+        const min = parseInt(match[2], 10), sec = match[3] ? parseInt(match[3], 10) : 0;
+        const ampm = match[4]?.toUpperCase();
+        if (ampm === 'PM' && h !== 12)
+            h += 12;
+        if (ampm === 'AM' && h === 12)
+            h = 0;
+        return new Date(y, m, d, h, min, sec);
+    }
+    match = timeStr.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (match) {
+        const h = parseInt(match[1], 10), min = parseInt(match[2], 10), sec = match[3] ? parseInt(match[3], 10) : 0;
+        if (h >= 0 && h < 24 && min >= 0 && min < 60)
+            return new Date(y, m, d, h, min, sec);
+    }
+    match = timeStr.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (match) {
+        const day = parseInt(match[1], 10), month = parseInt(match[2], 10) - 1;
+        let year = parseInt(match[3], 10);
+        if (year < 100)
+            year += 2000;
+        return new Date(year, month, day, 0, 0, 0);
+    }
+    match = timeStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match)
+        return new Date(parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10), 0, 0, 0);
+    return null;
+}
+function validateAndFormatTimeLegacy(timeStr, now = new Date()) {
+    if (!timeStr || typeof timeStr !== 'string')
+        return '';
+    const trimmed = timeStr.trim();
+    if (!trimmed)
+        return '';
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(trimmed))
+        return trimmed;
+    try {
+        let date = parseDateString(trimmed);
+        if (date && !isNaN(date.getTime()))
+            return formatToISO(date);
+        date = parseManualFormats(trimmed, now);
+        if (date && !isNaN(date.getTime()))
+            return formatToISO(date);
+        return '';
+    }
+    catch {
+        return '';
+    }
+}
+function getSearchableTextLegacy(text) {
+    const cleaned = text.replace(/[Oo]/g, '0').replace(/\bl\b/g, '1');
+    const lines = cleaned.split(/\r?\n/).filter(Boolean);
+    const skipLines = lines.length > 1 ? Math.min(3, lines.length - 1) : 0;
+    const body = lines.length > 1 ? lines.slice(skipLines).join('\n') : cleaned.slice(10);
+    return body.replace(/\s+/g, ' ').trim();
+}
+function extractFromContextLegacy(currentTimeIso, contextText) {
+    const timePart = (currentTimeIso || '').match(/T(\d{2}:\d{2}:\d{2})$/)?.[1] ?? '00:00:00';
+    const searchable = getSearchableTextLegacy(contextText);
+    for (const text of [searchable, contextText.replace(/\s+/g, ' ').trim()]) {
+        if (!text)
+            continue;
+        const dateFirst = text.match(new RegExp(`(\\d{1,2})\\s+${MONTH_PATTERN}\\s+(\\d{4})[,]?\\s*(?:at\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, 'i'));
+        if (dateFirst && hasTransactionContext(text, dateFirst.index, dateFirst[0].length)) {
+            let hour = parseInt(dateFirst[4], 10);
+            if (dateFirst[6].toLowerCase() === 'pm' && hour !== 12)
+                hour += 12;
+            if (dateFirst[6].toLowerCase() === 'am' && hour === 12)
+                hour = 0;
+            const mon = monthToNumLegacy(dateFirst[2]);
+            return `${dateFirst[3]}-${mon}-${dateFirst[1].padStart(2, '0')}T${String(hour).padStart(2, '0')}:${dateFirst[5]}:00`;
+        }
+        const fullDatetime = text.match(new RegExp(`(\\d{1,2}):(\\d{2})\\s*(am|pm)\\s+(?:on\\s+)?(\\d{1,2})\\s+${MONTH_PATTERN}\\s+(\\d{4})`, 'i'));
+        if (fullDatetime && hasTransactionContext(text, fullDatetime.index, fullDatetime[0].length)) {
+            let hour = parseInt(fullDatetime[1], 10);
+            if (fullDatetime[3].toLowerCase() === 'pm' && hour !== 12)
+                hour += 12;
+            if (fullDatetime[3].toLowerCase() === 'am' && hour === 12)
+                hour = 0;
+            const mon = monthToNumLegacy(fullDatetime[5]);
+            return `${fullDatetime[6]}-${mon}-${fullDatetime[4].padStart(2, '0')}T${String(hour).padStart(2, '0')}:${fullDatetime[2]}:00`;
+        }
+        const dateFirst24 = text.match(new RegExp(`(\\d{1,2})\\s+${MONTH_PATTERN}\\s+(\\d{4})\\s+(\\d{1,2}):(\\d{2})\\b`, 'i'));
+        if (dateFirst24 && hasTransactionContext(text, dateFirst24.index, dateFirst24[0].length)) {
+            const hour = parseInt(dateFirst24[4], 10);
+            if (hour >= 0 && hour < 24) {
+                const mon = monthToNumLegacy(dateFirst24[2]);
+                return `${dateFirst24[3]}-${mon}-${dateFirst24[1].padStart(2, '0')}T${String(hour).padStart(2, '0')}:${dateFirst24[5]}:00`;
+            }
+        }
+        const dmyWithTime = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\s+(\d{1,2}):(\d{2})(?:\s*(am|pm))?/i);
+        if (dmyWithTime && hasTransactionContext(text, dmyWithTime.index, dmyWithTime[0].length)) {
+            let hour = parseInt(dmyWithTime[4], 10);
+            const min = dmyWithTime[5];
+            const ampm = dmyWithTime[6]?.toUpperCase();
+            if (ampm) {
+                if (ampm === 'PM' && hour !== 12)
+                    hour += 12;
+                if (ampm === 'AM' && hour === 12)
+                    hour = 0;
+            }
+            if (hour >= 0 && hour < 24) {
+                const day = dmyWithTime[1].padStart(2, '0'), month = dmyWithTime[2].padStart(2, '0');
+                return `${dmyWithTime[3]}-${month}-${day}T${String(hour).padStart(2, '0')}:${min}:00`;
+            }
+        }
+        const dateOnly = text.match(new RegExp(`(\\d{1,2})\\s+${MONTH_PATTERN}\\s+(\\d{4})`, 'i'));
+        if (dateOnly && hasTransactionContext(text, dateOnly.index, dateOnly[0].length)) {
+            const mon = monthToNumLegacy(dateOnly[2]);
+            return `${dateOnly[3]}-${mon}-${dateOnly[1].padStart(2, '0')}T${timePart}`;
+        }
+        const isoDate = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (isoDate && hasTransactionContext(text, isoDate.index, isoDate[0].length)) {
+            return `${isoDate[1]}-${isoDate[2]}-${isoDate[3]}T${timePart}`;
+        }
+        const dmy = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+        if (dmy && hasTransactionContext(text, dmy.index, dmy[0].length)) {
+            const day = dmy[1].padStart(2, '0'), month = dmy[2].padStart(2, '0');
+            return `${dmy[3]}-${month}-${day}T${timePart}`;
+        }
+    }
+    return '';
+}
+function correctImplausibleYearLegacy(iso, contextText, now) {
+    if (!iso || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(iso))
+        return iso;
+    const year = parseInt(iso.slice(0, 4), 10);
+    const currentYear = now.getFullYear();
+    if (year >= currentYear - 1 && year <= currentYear + 1)
+        return iso;
+    if (contextText && new RegExp(`\\b${year}\\b`).test(contextText))
+        return iso;
+    return `${currentYear}${iso.slice(4)}`;
+}
+/** MSS TimeValidationService.normalizeTime, verbatim semantics. Returns '' or 'YYYY-MM-DDTHH:MM:SS'. */
+function normalizeTimeLegacy(timeStr, contextText, now = new Date()) {
+    const trimmed = (timeStr || '').trim();
+    let result;
+    if (contextText?.trim()) {
+        const fromContext = extractFromContextLegacy(trimmed, contextText);
+        result = fromContext ? fromContext : validateAndFormatTimeLegacy(trimmed || '', now);
+    }
+    else {
+        result = validateAndFormatTimeLegacy(trimmed || '', now);
+    }
+    return correctImplausibleYearLegacy(result, contextText, now);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/time.ts"
+/*!**************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/time.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   daysInMonth: () => (/* binding */ daysInMonth),
+/* harmony export */   extractFromContext: () => (/* binding */ extractFromContext),
+/* harmony export */   isValidYmd: () => (/* binding */ isValidYmd),
+/* harmony export */   istEpochMs: () => (/* binding */ istEpochMs),
+/* harmony export */   istParts: () => (/* binding */ istParts),
+/* harmony export */   parseClock24: () => (/* binding */ parseClock24),
+/* harmony export */   parseTimeString: () => (/* binding */ parseTimeString),
+/* harmony export */   resolveVisionTime: () => (/* binding */ resolveVisionTime),
+/* harmony export */   searchableText: () => (/* binding */ searchableText),
+/* harmony export */   unknownTime: () => (/* binding */ unknownTime),
+/* harmony export */   visionTimeToLegacyString: () => (/* binding */ visionTimeToLegacyString)
+/* harmony export */ });
+/* harmony import */ var _time_compat__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./time.compat */ "../../packages/tg-vision/src/rules/time.compat.ts");
+/* harmony import */ var _v2__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+// Time rules R50-R56 with an explicit VisionTime (design 2.5 and 3.1).
+//  - Wall-clock values are IST. All math is done on UTC getters of (epoch + 5h30), so the result never
+//    depends on the host TZ (R56). `new Date(string)` is only used for strings that carry an explicit zone.
+//  - A date without a clock is state 'date_only' with clock null; '00:00:00' is never produced (R53).
+//  - R50 precedence kept: a transaction-context date found in the text overrides the model's date.
+//  - V2 ids: R51 (O->0 cleanup only next to digits, so "Oct"/"Nov" survive), R54 (year-boundary roll-back
+//    for an inferred year). Without them the legacy text cleanup and year handling are kept.
+
+
+const IST_OFFSET_MS = 330 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+function unknownTime(raw = null) {
+    return { state: 'unknown', date: null, clock: null, epochMs: null, raw, source: null, yearInferred: false };
+}
+const p2 = (n) => String(n).padStart(2, '0');
+function daysInMonth(y, mo) {
+    return new Date(Date.UTC(y, mo, 0)).getUTCDate();
+}
+function isValidYmd(y, mo, d) {
+    return Number.isInteger(y) && Number.isInteger(mo) && Number.isInteger(d)
+        && y >= 1970 && y <= 2200 && mo >= 1 && mo <= 12 && d >= 1 && d <= daysInMonth(y, mo);
+}
+function isValidHms(h, mi, s) {
+    return Number.isInteger(h) && Number.isInteger(mi) && Number.isInteger(s)
+        && h >= 0 && h < 24 && mi >= 0 && mi < 60 && s >= 0 && s < 60;
+}
+/** IST wall-clock components of a UTC epoch. */
+function istParts(epochMs) {
+    const d = new Date(epochMs + IST_OFFSET_MS);
+    return {
+        y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(),
+        h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds(),
+    };
+}
+/** UTC epoch of an IST wall-clock moment, or null if the components are not a real moment. */
+function istEpochMs(y, mo, d, h = 0, mi = 0, s = 0) {
+    if (!isValidYmd(y, mo, d) || !isValidHms(h, mi, s))
+        return null;
+    return Date.UTC(y, mo - 1, d, h, mi, s) - IST_OFFSET_MS;
+}
+function fmtDate(v) { return `${v.y}-${p2(v.mo)}-${p2(v.d)}`; }
+function fmtClock(v) { return `${p2(v.h)}:${p2(v.mi)}:${p2(v.s)}`; }
+function parseClock24(value) {
+    if (!value)
+        return null;
+    const m = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m)
+        return null;
+    const v = { h: parseInt(m[1], 10), mi: parseInt(m[2], 10), s: m[3] ? parseInt(m[3], 10) : 0 };
+    return isValidHms(v.h, v.mi, v.s) ? v : null;
+}
+function to24h(hour, ampm) {
+    const a = ampm?.toUpperCase();
+    if (a === 'PM' && hour !== 12)
+        return hour + 12;
+    if (a === 'AM' && hour === 12)
+        return 0;
+    return hour;
+}
+/** R51. */
+function searchableText(text, v2) {
+    const cleaned = (v2.has('R51')
+        ? text.replace(/(?<=\d)[Oo]|[Oo](?=\d)/g, '0')
+        : text.replace(/[Oo]/g, '0')).replace(/\bl\b/g, '1');
+    const lines = cleaned.split(/\r?\n/).filter(Boolean);
+    const skipLines = lines.length > 1 ? Math.min(3, lines.length - 1) : 0;
+    const body = lines.length > 1 ? lines.slice(skipLines).join('\n') : cleaned.slice(10);
+    return body.replace(/\s+/g, ' ').trim();
+}
+function ymd(y, mo, d) {
+    return { y: Number(y), mo: Number(mo), d: Number(d) };
+}
+/** R50: transaction-context date (and clock when printed with it) from free text. First valid match wins, patterns in legacy order. */
+function extractFromContext(contextText, v2) {
+    const searchable = searchableText(contextText, v2);
+    for (const text of [searchable, contextText.replace(/\s+/g, ' ').trim()]) {
+        if (!text)
+            continue;
+        const found = extractFromText(text);
+        if (found)
+            return found;
+    }
+    return null;
+}
+function extractFromText(text) {
+    const ok = (m) => (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.hasTransactionContext)(text, m.index, m[0].length);
+    const build = (date, clock) => isValidYmd(date.y, date.mo, date.d) && (!clock || isValidHms(clock.h, clock.mi, clock.s)) ? { date, clock } : null;
+    let m;
+    let f;
+    m = text.match(new RegExp(`(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})[,]?\\s*(?:at\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, 'i'));
+    if (m && ok(m)) {
+        const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[2]);
+        if (mon && (f = build(ymd(m[3], mon, m[1]), { h: to24h(parseInt(m[4], 10), m[6]), mi: parseInt(m[5], 10), s: 0 })))
+            return f;
+    }
+    m = text.match(new RegExp(`(\\d{1,2}):(\\d{2})\\s*(am|pm)\\s+(?:on\\s+)?(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})`, 'i'));
+    if (m && ok(m)) {
+        const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[5]);
+        if (mon && (f = build(ymd(m[6], mon, m[4]), { h: to24h(parseInt(m[1], 10), m[3]), mi: parseInt(m[2], 10), s: 0 })))
+            return f;
+    }
+    m = text.match(new RegExp(`(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})\\s+(\\d{1,2}):(\\d{2})\\b`, 'i'));
+    if (m && ok(m)) {
+        const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[2]);
+        if (mon && (f = build(ymd(m[3], mon, m[1]), { h: parseInt(m[4], 10), mi: parseInt(m[5], 10), s: 0 })))
+            return f;
+    }
+    m = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\s+(\d{1,2}):(\d{2})(?:\s*(am|pm))?/i);
+    if (m && ok(m)) {
+        if ((f = build(ymd(m[3], m[2], m[1]), { h: to24h(parseInt(m[4], 10), m[6]), mi: parseInt(m[5], 10), s: 0 })))
+            return f;
+    }
+    m = text.match(new RegExp(`(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})`, 'i'));
+    if (m && ok(m)) {
+        const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[2]);
+        if (mon && (f = build(ymd(m[3], mon, m[1]), null)))
+            return f;
+    }
+    m = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (m && ok(m)) {
+        if ((f = build(ymd(m[1], m[2], m[3]), null)))
+            return f;
+    }
+    m = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (m && ok(m)) {
+        if ((f = build(ymd(m[3], m[2], m[1]), null)))
+            return f;
+    }
+    return null;
+}
+/** Manual (host-TZ independent) parse of a model-supplied time string. Zone-carrying ISO strings are converted to IST. */
+function parseTimeString(raw, nowMs) {
+    const s = raw.trim();
+    if (!s)
+        return null;
+    const now = istParts(nowMs);
+    let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?$/i);
+    if (m) {
+        const zone = m[7];
+        if (zone) {
+            const t = Date.parse(s.replace(' ', 'T'));
+            if (Number.isNaN(t))
+                return null;
+            const p = istParts(t);
+            return { date: { y: p.y, mo: p.mo, d: p.d }, yearMissing: false, clock: { h: p.h, mi: p.mi, s: p.s } };
+        }
+        const date = ymd(m[1], m[2], m[3]);
+        const clock = { h: parseInt(m[4], 10), mi: parseInt(m[5], 10), s: m[6] ? parseInt(m[6], 10) : 0 };
+        return isValidYmd(date.y, date.mo, date.d) && isValidHms(clock.h, clock.mi, clock.s)
+            ? { date, yearMissing: false, clock } : null;
+    }
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+        const date = ymd(m[1], m[2], m[3]);
+        return isValidYmd(date.y, date.mo, date.d) ? { date, yearMissing: false, clock: null } : null;
+    }
+    m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM))?)?$/i);
+    if (m) {
+        let year = parseInt(m[3], 10);
+        if (year < 100)
+            year += 2000;
+        const date = ymd(year, m[2], m[1]);
+        if (!isValidYmd(date.y, date.mo, date.d))
+            return null;
+        if (m[4] === undefined)
+            return { date, yearMissing: false, clock: null };
+        const clock = { h: to24h(parseInt(m[4], 10), m[7]), mi: parseInt(m[5], 10), s: m[6] ? parseInt(m[6], 10) : 0 };
+        return isValidHms(clock.h, clock.mi, clock.s) ? { date, yearMissing: false, clock } : null;
+    }
+    m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+    if (m && (m[4] || m[1].length === 2)) {
+        const clock = { h: to24h(parseInt(m[1], 10), m[4]), mi: parseInt(m[2], 10), s: m[3] ? parseInt(m[3], 10) : 0 };
+        return isValidHms(clock.h, clock.mi, clock.s) ? { date: null, yearMissing: false, clock } : null;
+    }
+    // "21 Jul 2026, 05:36 PM" / "21 Jul, 05:36 PM" / "21st Jul 17:36" / "21 Jul 2026"
+    m = s.match(new RegExp(`^(\\d{1,2})(?:st|nd|rd|th)?\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\.?(?:,?\\s+(\\d{4}))?(?:,?\\s*(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(am|pm)?)?$`, 'i'));
+    if (m)
+        return fromNamedMonth(m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+    // "Jul 21, 2026, 5:36 PM"
+    m = s.match(new RegExp(`^${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?(?:,?\\s*(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(am|pm)?)?$`, 'i'));
+    if (m)
+        return fromNamedMonth(m[2], m[1], m[3], m[4], m[5], m[6], m[7]);
+    return null;
+}
+function fromNamedMonth(day, monthName, year, hh, mm, ss, ampm) {
+    const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(monthName);
+    const d = parseInt(day, 10);
+    if (!mon || d < 1 || d > 31)
+        return null;
+    let clock = null;
+    if (hh !== undefined) {
+        clock = { h: to24h(parseInt(hh, 10), ampm), mi: parseInt(mm, 10), s: ss ? parseInt(ss, 10) : 0 };
+        if (!isValidHms(clock.h, clock.mi, clock.s))
+            return null;
+    }
+    if (year) {
+        const date = ymd(year, mon, d);
+        return isValidYmd(date.y, date.mo, date.d) ? { date, yearMissing: false, clock } : null;
+    }
+    // validate against a leap year so 29 Feb survives until the year is chosen
+    if (d > daysInMonth(2024, mon))
+        return null;
+    return { date: null, yearMissing: true, month: mon, day: d, clock };
+}
+/** Legacy correctImplausibleYear (R54 first half): an invented year far from now is replaced unless the text literally shows it. */
+function correctImplausibleYear(date, contextText, currentYear) {
+    if (date.y >= currentYear - 1 && date.y <= currentYear + 1)
+        return date;
+    if (contextText && new RegExp(`\\b${date.y}\\b`).test(contextText))
+        return date;
+    return { ...date, y: currentYear };
+}
+/**
+ * Resolve the model's time fields plus text context into a VisionTime.
+ * @param contextText the text the legacy code searched (the model's full text); '' when none
+ */
+function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES) {
+    const raw = input.timeRaw && input.timeRaw.trim() ? input.timeRaw.trim() : null;
+    const nowIst = istParts(nowMs);
+    const currentYear = nowIst.y;
+    // 1. model-side date / clock
+    let modelDate = null;
+    let yearInferred = false;
+    let modelClock = parseClock24(input.clock24);
+    const day = input.dateDay, month = input.dateMonth;
+    if (Number.isInteger(day) && Number.isInteger(month) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        if (Number.isInteger(input.dateYear)) {
+            modelDate = { y: input.dateYear, mo: month, d: day };
+        }
+        else if (day <= daysInMonth(2024, month)) {
+            modelDate = { y: currentYear, mo: month, d: day };
+            yearInferred = true;
+        }
+    }
+    else if (raw) {
+        const parsed = parseTimeString(raw, nowMs);
+        if (parsed) {
+            if (parsed.date)
+                modelDate = parsed.date;
+            else if (parsed.yearMissing) {
+                modelDate = { y: currentYear, mo: parsed.month, d: parsed.day };
+                yearInferred = true;
+            }
+            if (!modelClock)
+                modelClock = parsed.clock;
+        }
+    }
+    // 2. R50: context date overrides the model's date; its clock wins when printed with the date
+    const ctx = contextText.trim() ? extractFromContext(contextText, v2) : null;
+    let date;
+    let clock;
+    let source;
+    if (ctx) {
+        date = ctx.date;
+        clock = ctx.clock ?? modelClock;
+        source = 'ocr_text';
+        yearInferred = false;
+    }
+    else {
+        date = modelDate;
+        clock = modelClock;
+        source = date || clock ? 'model' : null;
+    }
+    // 3. year handling (R54)
+    if (date) {
+        if (yearInferred) {
+            if (v2.has('R54')) {
+                const at = istEpochMs(date.y, date.mo, date.d, clock?.h ?? 0, clock?.mi ?? 0, clock?.s ?? 0);
+                if (at !== null && at > nowMs + DAY_MS && isValidYmd(date.y - 1, date.mo, date.d)) {
+                    date = { ...date, y: date.y - 1 };
+                }
+            }
+        }
+        else if (!ctx) {
+            date = correctImplausibleYear(date, contextText, currentYear);
+        }
+        if (!isValidYmd(date.y, date.mo, date.d)) {
+            // e.g. 29 Feb moved into a non-leap year: no honest date
+            date = null;
+        }
+    }
+    // 4. assemble
+    if (date && clock) {
+        return {
+            state: 'known', date: fmtDate(date), clock: fmtClock(clock),
+            epochMs: istEpochMs(date.y, date.mo, date.d, clock.h, clock.mi, clock.s),
+            raw, source, yearInferred,
+        };
+    }
+    if (date) {
+        return { state: 'date_only', date: fmtDate(date), clock: null, epochMs: null, raw, source, yearInferred };
+    }
+    if (clock) {
+        return { state: 'clock_only', date: null, clock: fmtClock(clock), epochMs: null, raw, source: source ?? 'model', yearInferred: false };
+    }
+    return unknownTime(raw);
+}
+/** Legacy string form: 'YYYY-MM-DDTHH:MM:SS' | ''. date_only emits T00:00:00 only when `legacyMidnight` (flag R53 off). */
+function visionTimeToLegacyString(time, nowMs, legacyMidnight) {
+    if (time.state === 'known')
+        return `${time.date}T${time.clock}`;
+    if (time.state === 'clock_only') {
+        const t = istParts(nowMs);
+        return `${fmtDate(t)}T${time.clock}`;
+    }
+    if (time.state === 'date_only' && legacyMidnight)
+        return `${time.date}T00:00:00`;
+    return '';
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/rules/v2.ts"
+/*!************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/v2.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   NO_RULES: () => (/* binding */ NO_RULES),
+/* harmony export */   parseRulesV2: () => (/* binding */ parseRulesV2),
+/* harmony export */   rulesV2FromEnv: () => (/* binding */ rulesV2FromEnv)
+/* harmony export */ });
+// VISION_RULES_V2 flag handling (design D3). Default (empty set) = byte-for-byte legacy behaviour.
+const NO_RULES = new Set();
+/** Parse `VISION_RULES_V2="R32,R51"`; unknown ids are kept (callers only test the ids they know). */
+function parseRulesV2(value) {
+    if (!value)
+        return NO_RULES;
+    return new Set(value
+        .split(/[\s,]+/)
+        .map((id) => id.trim().replace(/^V2:/i, ''))
+        .filter(Boolean));
+}
+/** Read the flag from an env-like object at call time (so remote config changes apply). */
+function rulesV2FromEnv(env = process.env) {
+    return parseRulesV2(env.VISION_RULES_V2);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/second-opinion.ts"
+/*!******************************************************!*\
+  !*** ../../packages/tg-vision/src/second-opinion.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SECOND_OPINION_MODEL: () => (/* binding */ SECOND_OPINION_MODEL),
+/* harmony export */   SECOND_OPINION_TIMEOUT_MS: () => (/* binding */ SECOND_OPINION_TIMEOUT_MS),
+/* harmony export */   combineAll: () => (/* binding */ combineAll),
+/* harmony export */   combineSecondOpinion: () => (/* binding */ combineSecondOpinion),
+/* harmony export */   createSecondOpinionRunner: () => (/* binding */ createSecondOpinionRunner),
+/* harmony export */   getDefaultSecondOpinionRunner: () => (/* binding */ getDefaultSecondOpinionRunner),
+/* harmony export */   requestSecondOpinion: () => (/* binding */ requestSecondOpinion),
+/* harmony export */   secondAvailable: () => (/* binding */ secondAvailable),
+/* harmony export */   secondOpinionTriggers: () => (/* binding */ secondOpinionTriggers)
+/* harmony export */ });
+/* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _providers_gemma__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./providers/gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
+/* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _transport_token_budget__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./transport/token-budget */ "../../packages/tg-vision/src/transport/token-budget.ts");
+// Second opinion on Gemma 4 31B (design section 5). Confirms a flag the cheap first pass raised; it adds NO rejection
+// path: any skip / timeout / error is fail-open and requestSecondOpinion NEVER throws.
+
+
+
+
+
+
+
+
+
+const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_2__.GEMMA_MODELS[1];
+const SECOND_OPINION_TIMEOUT_MS = 12000;
+const isMasked = (vpa) => /\*|x{2,}/i.test(vpa);
+const normVpa = (vpa) => (vpa ?? '').trim().toLowerCase();
+/** Which flags of the first pass call for a second opinion (design table S1-S5). */
+function secondOpinionTriggers(e, ctx = {}) {
+    const out = [];
+    if (e.fakeMarkers.aiWatermark.present === true)
+        out.push('S1');
+    const isLong = ctx.isLongDisclaimer ?? (() => false);
+    const phrases = e.fakeMarkers.disclaimerPhrases;
+    if (phrases.length > 0 && !phrases.some((p) => isLong(p)))
+        out.push('S2');
+    const vpa = e.payeeUpiId;
+    if (vpa && !isMasked(vpa) && ctx.isOwnUpi && !ctx.isOwnUpi(vpa))
+        out.push('S3');
+    const ocrAmount = e.ocrText ? (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.extractAmount)(e.ocrText, ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_5__.NO_RULES) : 0;
+    if (e.amount !== null && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(e.amount) && ocrAmount > 0 && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(ocrAmount) && ocrAmount !== e.amount)
+        out.push('S4');
+    if (e.status === 'success' && e.confidence < 0.6)
+        out.push('S5');
+    return out;
+}
+const STATUSES = ['success', 'failed', 'pending', 'unknown'];
+function skipped(reason, model) {
+    return {
+        skipped: reason, model, watermarkPresent: null, watermarkLocation: null, disclaimerPhrases: [],
+        amount: null, status: null, utr: null, payeeUpiId: null, looksEdited: null,
+    };
+}
+const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+const bool = (v) => (typeof v === 'boolean' ? v : null);
+function fromJson(text, model, v2) {
+    const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.parseModelOutput)(text, v2);
+    if (parsed.source !== 'json' || !parsed.wire || Array.isArray(parsed.wire))
+        return skipped('error', model);
+    const w = parsed.wire;
+    const amount = typeof w.amount === 'number' && Number.isFinite(w.amount) && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(w.amount) ? w.amount : null;
+    return {
+        skipped: null,
+        model,
+        watermarkPresent: bool(w.watermarkPresent),
+        watermarkLocation: bool(w.watermarkPresent) === true ? str(w.watermarkLocation) : null,
+        disclaimerPhrases: Array.isArray(w.disclaimerPhrases)
+            ? w.disclaimerPhrases.filter((p) => typeof p === 'string').map((p) => p.trim().slice(0, 120)).filter(Boolean).slice(0, 5)
+            : [],
+        amount,
+        status: typeof w.status === 'string' && STATUSES.includes(w.status) ? w.status : null,
+        utr: str(w.utr),
+        payeeUpiId: str(w.payeeUpiId),
+        looksEdited: bool(w.looksEdited),
+    };
+}
+/** The verifier call. Blind to the first answer. Never throws; every failure is a `skipped` marker. */
+async function requestSecondOpinion(image, deps) {
+    const model = deps.model ?? SECOND_OPINION_MODEL;
+    try {
+        const env = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.envOf)(deps);
+        const v2 = deps.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_5__.NO_RULES;
+        const pool = deps.pool.get(env, v2);
+        pool.restoreExpired();
+        const byId = new Map();
+        for (const key of pool.active())
+            byId.set((0,_transport_key_pool__WEBPACK_IMPORTED_MODULE_6__.keyFingerprint)(key), key);
+        const reservation = deps.budget.reserveOn([...byId.keys()], 'second_opinion');
+        if (!reservation)
+            return skipped('budget', model);
+        const apiKey = byId.get(reservation.keyId);
+        try {
+            const res = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_7__.withTimeout)((signal) => deps.factory(apiKey).generateContent({
+                model,
+                contents: [{ parts: [{ inlineData: { mimeType: _providers_provider__WEBPACK_IMPORTED_MODULE_3__.IMAGE_MIME, data: (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.toBase64)(image) } }, { text: _contract_prompt__WEBPACK_IMPORTED_MODULE_1__.VERIFICATION_PROMPT }] }],
+                config: { ..._contract_prompt__WEBPACK_IMPORTED_MODULE_1__.GENERATION_CONFIG, responseMimeType: 'application/json', responseSchema: (0,_contract_schema__WEBPACK_IMPORTED_MODULE_0__.toVerifySchema)() },
+                signal,
+            }), deps.timeoutMs ?? SECOND_OPINION_TIMEOUT_MS, 'second opinion');
+            deps.budget.settle(reservation, res.totalTokens);
+            return fromJson(res.text, model, v2);
+        }
+        catch (error) {
+            if ((0,_transport_retry__WEBPACK_IMPORTED_MODULE_7__.isRateLimit)(error, v2)) {
+                deps.budget.release(reservation);
+                pool.remove(apiKey);
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            return skipped(/timed out/i.test(message) ? 'timeout' : 'error', model);
+        }
+    }
+    catch {
+        return skipped('error', model);
+    }
+}
+/** Runner for tg-aut / the chain: null when no flag fired, a SecondOpinion (maybe `skipped`) otherwise. */
+function createSecondOpinionRunner(deps = {}) {
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_6__.EnvKeyPool({ name: 'gemma-second-opinion', envNames: _providers_gemma__WEBPACK_IMPORTED_MODULE_2__.GEMMA_KEY_ENV, strategy: 'round-robin', logger: deps.logger, now: deps.now, random: deps.random });
+    const budget = deps.budget ?? new _transport_token_budget__WEBPACK_IMPORTED_MODULE_8__.TokenBudget({ now: deps.now });
+    const factory = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.cachedFactory)((0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.clientFactoryFrom)(deps, deps.clientFactory));
+    return async (image, extraction, ctx = {}) => {
+        try {
+            const env = ctx.env ?? (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.envOf)(deps);
+            if (secondOpinionTriggers(extraction, ctx).length === 0)
+                return null;
+            if (env.VISION_SECOND_OPINION !== 'on')
+                return skipped('disabled', deps.model ?? SECOND_OPINION_MODEL);
+            return await requestSecondOpinion(image, { ...deps, env, v2: ctx.v2 ?? deps.v2, pool, budget, factory });
+        }
+        catch {
+            return skipped('error', deps.model ?? SECOND_OPINION_MODEL);
+        }
+    };
+}
+let defaultRunner = null;
+function getDefaultSecondOpinionRunner() {
+    if (!defaultRunner)
+        defaultRunner = createSecondOpinionRunner();
+    return defaultRunner;
+}
+function secondAvailable(second) {
+    return !!second && second.skipped === null;
+}
+/** Combine ONE trigger with the second opinion (`null` / `skipped` = unavailable, fail-open). */
+function combineSecondOpinion(trigger, first, second, ctx = {}) {
+    const ok = secondAvailable(second);
+    switch (trigger) {
+        case 'S1':
+            if (!ok)
+                return { trigger, confirmation: 'unavailable', decision: 'ask_proof', reason: 'AI_WATERMARK', alert: true };
+            if (second.watermarkPresent === true)
+                return { trigger, confirmation: 'confirmed', decision: 'ask_proof', reason: 'AI_WATERMARK', alert: true };
+            return { trigger, confirmation: 'refuted', decision: 'unchanged', reason: 'AI_WATERMARK_UNCONFIRMED', alert: false };
+        case 'S2': {
+            if (!ok) {
+                const ocr = (ctx.ocrText ?? first.ocrText ?? '').toLowerCase();
+                const inOcr = first.fakeMarkers.disclaimerPhrases.some((p) => p.trim().length > 0 && ocr.includes(p.trim().toLowerCase()));
+                return inOcr
+                    ? { trigger, confirmation: 'unavailable', decision: 'ask_proof', reason: 'DISCLAIMER_SHORT', alert: true }
+                    : { trigger, confirmation: 'unavailable', decision: 'accept', reason: 'DISCLAIMER_SHORT_UNCONFIRMED', alert: false };
+            }
+            if (second.disclaimerPhrases.length > 0)
+                return { trigger, confirmation: 'confirmed', decision: 'ask_proof', reason: 'DISCLAIMER_SHORT', alert: true };
+            return { trigger, confirmation: 'refuted', decision: 'accept', reason: 'DISCLAIMER_SHORT_UNCONFIRMED', alert: false };
+        }
+        case 'S3': {
+            if (!ok)
+                return { trigger, confirmation: 'unavailable', decision: 'ask_proof', reason: 'UPI_NOT_OURS', alert: true };
+            const s = normVpa(second.payeeUpiId);
+            if (s && s === normVpa(first.payeeUpiId))
+                return { trigger, confirmation: 'confirmed', decision: 'ask_proof', reason: 'UPI_NOT_OURS', alert: true };
+            if (!s || (ctx.isOwnUpi && ctx.isOwnUpi(second.payeeUpiId))) {
+                return { trigger, confirmation: 'refuted', decision: 'accept', reason: 'UPI_NOT_OURS_UNCONFIRMED', alert: false };
+            }
+            // second read a DIFFERENT foreign VPA: not stated in the design, treated as "not ours" (ask proof, never reject)
+            return { trigger, confirmation: 'confirmed', decision: 'ask_proof', reason: 'UPI_NOT_OURS', alert: true };
+        }
+        case 'S4':
+            return { trigger, confirmation: 'not_applicable', decision: 'log_only', reason: 'AMOUNT_DISAGREE', alert: false };
+        case 'S5': {
+            if (!ok)
+                return { trigger, confirmation: 'unavailable', decision: 'unchanged', reason: 'LOW_CONFIDENCE_SUCCESS', alert: false };
+            if (second.status === 'success') {
+                if (first.amount !== null && second.amount !== null && first.amount === second.amount) {
+                    return { trigger, confirmation: 'confirmed', decision: 'confidence_raised', reason: 'LOW_CONFIDENCE_SUCCESS_CONFIRMED', alert: false, confidence: Math.max(first.confidence, 0.8) };
+                }
+                return { trigger, confirmation: 'refuted', decision: 'unchanged', reason: 'LOW_CONFIDENCE_SUCCESS_AMOUNT_DISAGREE', alert: false };
+            }
+            // second.status is failed|pending|unknown, or unreadable (null): "!== success" -> unknown (no credit)
+            return { trigger, confirmation: 'refuted', decision: 'status_downgraded', reason: 'LOW_CONFIDENCE_SUCCESS_REFUTED', alert: false, status: 'unknown' };
+        }
+    }
+}
+/** Combine every fired trigger. */
+function combineAll(first, second, ctx = {}) {
+    return secondOpinionTriggers(first, ctx).map((t) => combineSecondOpinion(t, first, second, ctx));
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/transport/key-pool.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-vision/src/transport/key-pool.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ApiKeyPool: () => (/* binding */ ApiKeyPool),
+/* harmony export */   EnvKeyPool: () => (/* binding */ EnvKeyPool),
+/* harmony export */   keyFingerprint: () => (/* binding */ keyFingerprint),
+/* harmony export */   readKeys: () => (/* binding */ readKeys)
+/* harmony export */ });
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+class ApiKeyPool {
+    constructor(opts) {
+        this.removedAt = new Map();
+        this.cursor = 0;
+        this.name = opts.name;
+        this.originalKeys = [...opts.keys];
+        this.activeKeys = [...opts.keys];
+        this.strategy = opts.strategy ?? 'round-robin';
+        this.cooldownMs = opts.cooldownMs ?? ONE_HOUR_MS;
+        this.now = opts.now ?? Date.now;
+        this.logger = opts.logger;
+        this.onRemove = opts.onRemove;
+        this.onRestore = opts.onRestore;
+        if (opts.randomStart && this.strategy === 'round-robin' && this.activeKeys.length > 1) {
+            const r = (opts.random ?? Math.random)();
+            this.cursor = Math.min(this.activeKeys.length - 1, Math.floor(r * this.activeKeys.length));
+        }
+    }
+    get size() { return this.activeKeys.length; }
+    get hasKeys() { return this.activeKeys.length > 0; }
+    get originalSize() { return this.originalKeys.length; }
+    /** Restore keys whose cooldown has elapsed. Call at the start of each request. */
+    restoreExpired() {
+        const now = this.now();
+        for (const [key, removedTime] of this.removedAt.entries()) {
+            if (now - removedTime >= this.cooldownMs && this.originalKeys.includes(key) && !this.activeKeys.includes(key)) {
+                this.activeKeys.push(key);
+                this.removedAt.delete(key);
+                this.onRestore?.(key);
+                this.logger?.log(`[${this.name}] restored API key after cooldown`);
+            }
+        }
+    }
+    /** round-robin advances a cursor; front always returns key[0]. */
+    next() {
+        if (this.activeKeys.length === 0)
+            return null;
+        if (this.strategy === 'front')
+            return this.activeKeys[0];
+        if (this.cursor >= this.activeKeys.length)
+            this.cursor = 0;
+        const key = this.activeKeys[this.cursor];
+        this.cursor = (this.cursor + 1) % this.activeKeys.length;
+        return key;
+    }
+    indexOf(key) { return this.activeKeys.indexOf(key); }
+    /** Snapshot of active keys (second opinion picks the key with token-budget room). */
+    active() { return [...this.activeKeys]; }
+    removeAt(index) {
+        if (index < 0 || index >= this.activeKeys.length)
+            return;
+        const key = this.activeKeys[index];
+        this.activeKeys.splice(index, 1);
+        this.removedAt.set(key, this.now());
+        this.onRemove?.(key);
+        this.logger?.warn(`[${this.name}] removed API key (index ${index}), ${this.activeKeys.length} remaining; auto-restore after cooldown`);
+        if (this.cursor > index)
+            this.cursor--;
+        else if (this.cursor >= this.activeKeys.length)
+            this.cursor = 0;
+    }
+    remove(key) {
+        const idx = this.activeKeys.indexOf(key);
+        if (idx >= 0)
+            this.removeAt(idx);
+    }
+}
+/** Opaque id for a key in logs and token-budget maps (FNV-1a over the whole key); never reveals the secret. */
+function keyFingerprint(key) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < key.length; i++) {
+        h ^= key.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return `key:${h.toString(16).padStart(8, '0')}`;
+}
+/** Legacy env resolution: the FIRST non-empty env var wins; comma separated. */
+function readKeys(env, names) {
+    for (const name of names) {
+        const raw = env[name];
+        if (raw)
+            return raw.split(',').map((k) => k.trim()).filter((k) => k.length > 0);
+    }
+    return [];
+}
+/**
+ * Pool that follows the environment: keys are read at call time (remote config can change), the pool (and its
+ * cooldown state) is rebuilt only when the key string changes.
+ */
+class EnvKeyPool {
+    constructor(opts) {
+        this.pool = null;
+        this.signature = null;
+        this.opts = opts;
+    }
+    get(env, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
+        const keys = readKeys(env, this.opts.envNames);
+        const signature = keys.join('\u0000');
+        if (!this.pool || signature !== this.signature) {
+            this.pool = new ApiKeyPool({
+                keys,
+                name: this.opts.name,
+                strategy: this.opts.strategy,
+                cooldownMs: this.opts.cooldownMs,
+                logger: this.opts.logger,
+                now: this.opts.now,
+                random: this.opts.random,
+                randomStart: v2.has('R20-start'),
+            });
+            this.signature = signature;
+        }
+        return this.pool;
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/transport/retry.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-vision/src/transport/retry.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   NOOP_LOGGER: () => (/* binding */ NOOP_LOGGER),
+/* harmony export */   ProviderError: () => (/* binding */ ProviderError),
+/* harmony export */   classifyError: () => (/* binding */ classifyError),
+/* harmony export */   delay: () => (/* binding */ delay),
+/* harmony export */   isRateLimit: () => (/* binding */ isRateLimit),
+/* harmony export */   isRateLimitLegacy: () => (/* binding */ isRateLimitLegacy),
+/* harmony export */   isTransient: () => (/* binding */ isTransient),
+/* harmony export */   runWithKeys: () => (/* binding */ runWithKeys),
+/* harmony export */   withTimeout: () => (/* binding */ withTimeout)
+/* harmony export */ });
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
+const NOOP_LOGGER = { debug() { }, log() { }, warn() { }, error() { } };
+/** Error carrying the HTTP status / SDK code (so R21 can classify on them first) and the attempt class. */
+class ProviderError extends Error {
+    constructor(message, init) {
+        super(message);
+        this.name = 'ProviderError';
+        if (init?.status !== undefined)
+            this.status = init.status;
+        if (init?.code !== undefined)
+            this.code = init.code;
+        if (init?.errorClass !== undefined)
+            this.errorClass = init.errorClass;
+    }
+}
+function messageOf(err) {
+    if (typeof err === 'string')
+        return err;
+    if (err && typeof err === 'object' && 'message' in err && typeof err.message === 'string') {
+        return err.message || 'Unknown error';
+    }
+    return 'Unknown error';
+}
+function statusOf(err) {
+    if (!err || typeof err !== 'object')
+        return undefined;
+    const e = err;
+    for (const v of [e.status, e.statusCode, e.code]) {
+        if (typeof v === 'number' && Number.isFinite(v))
+            return v;
+    }
+    return undefined;
+}
+function codeOf(err) {
+    if (!err || typeof err !== 'object')
+        return undefined;
+    const e = err;
+    if (typeof e.code === 'string')
+        return e.code;
+    if (typeof e.status === 'string')
+        return e.status;
+    return undefined;
+}
+/** R21 legacy: over-broad ("generateContent" matches `rate`; 403 parks a key for an hour). */
+function isRateLimitLegacy(message) {
+    return /quota|limit|429|403|rate/i.test(message);
+}
+/**
+ * R21. Legacy (flag off): regex over the message. V2:R21: HTTP status / SDK code first (429, 403,
+ * RESOURCE_EXHAUSTED); any other numeric status is definitively NOT a rate limit; the narrowed regex is only a
+ * fallback when no status is available.
+ */
+function isRateLimit(err, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
+    const message = messageOf(err);
+    if (!v2.has('R21'))
+        return isRateLimitLegacy(message);
+    const status = statusOf(err);
+    if (status === 429 || status === 403)
+        return true;
+    const code = codeOf(err);
+    if (code && /RESOURCE_EXHAUSTED/i.test(code))
+        return true;
+    if (status !== undefined)
+        return false;
+    return /\b(429|403)\b|quota|rate.?limit|resource.?exhausted/i.test(message);
+}
+/** R22: transient server/network hiccup worth one same-key retry. */
+function isTransient(err) {
+    return /\b5\d\d\b|status code 5|ECONN|ETIMEDOUT|EAI_AGAIN|socket hang up|network|timed out|fetch failed|internal-server-error|internal server error/i
+        .test(messageOf(err));
+}
+/**
+ * Map any thrown value to an attempt class (R60 structured alerting). quota/rate/network/server/timeout/config are
+ * OPERATIONAL (alert); the rest are expected outcomes of untrusted uploads. Unknown errors map to 'server' so a real
+ * bug surfaces to ops (legacy regex would have stayed silent: flagged in the unit report).
+ */
+function classifyError(err) {
+    if (err && typeof err === 'object' && err.errorClass)
+        return err.errorClass;
+    const message = messageOf(err);
+    const status = statusOf(err);
+    if (/^BENIGN_ESCALATION/.test(message) || /BENIGN_ESCALATION/.test(message))
+        return 'escalated';
+    if (status === 429)
+        return 'rate';
+    if (status === 403)
+        return 'quota';
+    if (typeof status === 'number' && status >= 500 && status < 600)
+        return 'server';
+    if (/timed out|timeout|ETIMEDOUT|aborted/i.test(message))
+        return 'timeout';
+    if (/not configured|not initialized|disabled in configuration|No valid .* API key/i.test(message))
+        return 'config';
+    if (/empty or minimal|returned empty|empty content|empty markdown/i.test(message))
+        return 'empty';
+    if (/quota|exhausted|resource.?exhausted/i.test(message))
+        return 'quota';
+    if (/rate.?limit|\b429\b|\b403\b/i.test(message))
+        return 'rate';
+    if (/\b5\d\d\b|internal.server.error/i.test(message))
+        return 'server';
+    if (/ECONN|EAI_AGAIN|socket hang up|network|fetch failed/i.test(message))
+        return 'network';
+    if (/JSON|Unexpected token|parse/i.test(message))
+        return 'parse';
+    return 'server';
+}
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Race `fn` against a timer. The timer is always cleared (no leak), the timeout aborts the AbortSignal handed to
+ * `fn` (so a fetch is actually cancelled), and a parent signal propagates down.
+ */
+async function withTimeout(fn, ms, label, parent) {
+    const controller = new AbortController();
+    let timer;
+    const onParentAbort = () => controller.abort();
+    if (parent) {
+        if (parent.aborted)
+            controller.abort();
+        else
+            parent.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            // reject FIRST: aborting first would let the aborted call's own rejection win the race and hide the timeout
+            reject(new ProviderError(`${label} timed out after ${ms}ms`, { errorClass: 'timeout' }));
+            controller.abort();
+        }, ms);
+    });
+    try {
+        return await Promise.race([fn(controller.signal), timeout]);
+    }
+    finally {
+        if (timer !== undefined)
+            clearTimeout(timer);
+        parent?.removeEventListener('abort', onParentAbort);
+    }
+}
+/**
+ * Bounded key rotation (R20-R23): at most ONE pass over the keys; a rate-limited key is removed (cooldown) and the
+ * next tried; a transient error is retried exactly ONCE on the same key after 400 ms without consuming the key budget.
+ */
+async function runWithKeys(opts) {
+    const { name, pool } = opts;
+    const v2 = opts.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES;
+    const sleep = opts.sleep ?? delay;
+    if (!pool.hasKeys) {
+        throw new ProviderError(`${name} API key(s) not configured${opts.keyEnvNames?.length ? `. Set ${opts.keyEnvNames.join(' or ')}.` : ''}`, { errorClass: 'config' });
+    }
+    const maxAttempts = Math.max(1, pool.originalSize || pool.size || 1);
+    const maxTransientRetries = 1;
+    let transientRetries = 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        pool.restoreExpired();
+        const apiKey = pool.next();
+        if (!apiKey)
+            throw new ProviderError(`No valid ${name} API key available`, { errorClass: 'config' });
+        const keyIndex = pool.indexOf(apiKey);
+        try {
+            const value = await withTimeout((signal) => opts.call(apiKey, signal), opts.timeoutMs, name, opts.signal);
+            if (opts.isEmpty ? opts.isEmpty(value) : false) {
+                throw new ProviderError(`${name} returned empty or minimal response`, { errorClass: 'empty' });
+            }
+            return value;
+        }
+        catch (error) {
+            const message = messageOf(error);
+            opts.logger?.warn(`[${name}] error: ${message}`);
+            if (isRateLimit(error, v2) && keyIndex >= 0) {
+                pool.removeAt(keyIndex);
+                if (!pool.hasKeys) {
+                    throw new ProviderError(`All ${name} API keys expired due to rate limiting or quota exceeded`, { errorClass: 'quota' });
+                }
+                continue;
+            }
+            if (isTransient(error) && transientRetries < maxTransientRetries) {
+                transientRetries++;
+                await sleep((opts.retryDelayMs ?? 400) * transientRetries);
+                attempt--;
+                continue;
+            }
+            throw new ProviderError(`${name} analysis failed: ${message}`, {
+                status: statusOf(error),
+                errorClass: classifyError(error),
+            });
+        }
+    }
+    throw new ProviderError(`${name}: exhausted ${maxAttempts} key(s) on rate-limit/quota; giving up for fallback`, { errorClass: 'quota' });
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-vision/src/transport/token-budget.ts"
+/*!**************************************************************!*\
+  !*** ../../packages/tg-vision/src/transport/token-budget.ts ***!
+  \**************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TokenBudget: () => (/* binding */ TokenBudget)
+/* harmony export */ });
+// Per-key sliding-window token budget (design section 5). Free-tier Gemma 4: 16K TPM per key. Ceiling 12000 TPM
+// (75%), of which second opinion may use at most 6000; the Gemma first-pass fallback keeps the rest.
+class TokenBudget {
+    constructor(opts = {}) {
+        this.nextId = 1;
+        this.entries = new Map();
+        this.byReservation = new WeakMap();
+        this.ceilingTpm = opts.ceilingTpm ?? 12000;
+        this.secondOpinionShareTpm = opts.secondOpinionShareTpm ?? 6000;
+        this.windowMs = opts.windowMs ?? 60000;
+        this.alpha = opts.alpha ?? 0.2;
+        this.avg = opts.initialEstimate ?? 1850;
+        this.now = opts.now ?? Date.now;
+    }
+    live(keyId) {
+        const cutoff = this.now() - this.windowMs;
+        const list = (this.entries.get(keyId) ?? []).filter((e) => e.at > cutoff);
+        if (list.length > 0)
+            this.entries.set(keyId, list);
+        else
+            this.entries.delete(keyId);
+        return list;
+    }
+    /** Tokens spent in the window for a key (optionally one purpose only). */
+    used(keyId, purpose) {
+        return this.live(keyId).reduce((sum, e) => (purpose && e.purpose !== purpose ? sum : sum + e.tokens), 0);
+    }
+    /** Current per-call estimate (moving average of observed usage). */
+    estimate() {
+        return Math.round(this.avg);
+    }
+    canSpend(keyId, tokens, purpose) {
+        if (this.used(keyId) + tokens > this.ceilingTpm)
+            return false;
+        if (purpose === 'second_opinion' && this.used(keyId, 'second_opinion') + tokens > this.secondOpinionShareTpm)
+            return false;
+        return true;
+    }
+    /** Reserve `tokens` (default: the moving-average estimate) on the key; null when the window has no room. */
+    reserve(keyId, purpose, tokens = this.estimate()) {
+        if (!this.canSpend(keyId, tokens, purpose))
+            return null;
+        const entry = { at: this.now(), tokens, purpose, id: this.nextId++ };
+        const list = this.live(keyId);
+        list.push(entry);
+        this.entries.set(keyId, list);
+        const reservation = { keyId, purpose, tokens, at: entry.at };
+        this.byReservation.set(reservation, entry.id);
+        return reservation;
+    }
+    /** First key (in order) that has room; reserves on it. */
+    reserveOn(keyIds, purpose, tokens = this.estimate()) {
+        for (const keyId of keyIds) {
+            const r = this.reserve(keyId, purpose, tokens);
+            if (r)
+                return r;
+        }
+        return null;
+    }
+    /** Replace the estimate with the observed `usageMetadata.totalTokenCount` and learn the average. */
+    settle(reservation, actualTokens) {
+        if (typeof actualTokens !== 'number' || !Number.isFinite(actualTokens) || actualTokens <= 0)
+            return;
+        const id = this.byReservation.get(reservation);
+        const list = this.entries.get(reservation.keyId);
+        const entry = list?.find((e) => e.id === id);
+        if (entry)
+            entry.tokens = actualTokens;
+        this.avg = this.avg * (1 - this.alpha) + actualTokens * this.alpha;
+    }
+    /** The call never reached the model (e.g. 429 before processing): give the tokens back. */
+    release(reservation) {
+        const id = this.byReservation.get(reservation);
+        const list = this.entries.get(reservation.keyId);
+        if (!list)
+            return;
+        const idx = list.findIndex((e) => e.id === id);
+        if (idx >= 0)
+            list.splice(idx, 1);
     }
 }
 
@@ -46886,24 +55645,25 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../messages/standardMessages */ "./src/messages/standardMessages.ts");
 /* harmony import */ var _helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../helpers/parseImage */ "./src/helpers/parseImage.ts");
 /* harmony import */ var _helpers_imageDetails__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../helpers/imageDetails */ "./src/helpers/imageDetails.ts");
-/* harmony import */ var _utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/isWithinPastTenMinutes */ "./src/utils/isWithinPastTenMinutes.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
-/* harmony import */ var _telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/forwardToChannel */ "./src/telegram-utils/forwardToChannel.ts");
-/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
-/* harmony import */ var _downloadMedia__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./downloadMedia */ "./src/imageUtils/downloadMedia.ts");
-/* harmony import */ var _normaliseAmount__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./normaliseAmount */ "./src/imageUtils/normaliseAmount.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _helpers__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./helpers */ "./src/imageUtils/helpers.ts");
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
-/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
-/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+/* harmony import */ var _payments_vision_shadow__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../payments/vision-shadow */ "./src/payments/vision-shadow.ts");
+/* harmony import */ var _utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/isWithinPastTenMinutes */ "./src/utils/isWithinPastTenMinutes.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
+/* harmony import */ var _telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram-utils/forwardToChannel */ "./src/telegram-utils/forwardToChannel.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _downloadMedia__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./downloadMedia */ "./src/imageUtils/downloadMedia.ts");
+/* harmony import */ var _normaliseAmount__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./normaliseAmount */ "./src/imageUtils/normaliseAmount.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _helpers__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./helpers */ "./src/imageUtils/helpers.ts");
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
+/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
+/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
 
 
 
@@ -46931,17 +55691,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__.Logger("tg-aut:process-image");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:process-image");
 const MAX_PAYMENT_AMOUNT = 10000;
 function scheduleProcessImageTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_25__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, context);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, context);
         });
     }, delayMs);
 }
-function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.INFO, details) {
-    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, {
+function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO, details) {
+    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, {
         severity,
         title,
         summary,
@@ -46950,10 +55711,10 @@ function notifyProcessImage(context, title, summary, fields = [], severity = _tg
         tags: ["process-image", "payment-image"],
     }).then((sent) => {
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
         }
     }).catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `ProcessImage.notification.${context}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `ProcessImage.notification.${context}`, false);
     });
 }
 function imageUserFields(chatId, broadcastName, fields = []) {
@@ -46971,7 +55732,7 @@ function imageUserFields(chatId, broadcastName, fields = []) {
  */
 function canSendPicsScore(userDetails, chatId) {
     const picCount = userDetails.picCount || 0; // Use database picCount instead of Redis
-    const pleaseRequestCount = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getPleaseRequestCount(chatId);
+    const pleaseRequestCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getPleaseRequestCount(chatId);
     return (picCount * 2) + (pleaseRequestCount * 1);
 }
 /**
@@ -47121,7 +55882,7 @@ async function holdForLaterAnalysis(event, chatId) {
         }, delay);
     }
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, `IMAGE ANALYSIS UNAVAILABLE @${(process.env.clientId || '').toUpperCase()}\nChatId: ${chatId}\nMsg: ${msgId}\n${note}`);
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, `IMAGE ANALYSIS UNAVAILABLE @${(process.env.clientId || '').toUpperCase()}\nChatId: ${chatId}\nMsg: ${msgId}\n${note}`);
     }
     catch (error) {
         logger.error('[ProcessImage] analysis-unavailable notice failed', error);
@@ -47131,8 +55892,15 @@ async function processImage(event) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     try {
         const chatId = event.message.chatId.toString();
-        const photoBuffer = await (0,_downloadMedia__WEBPACK_IMPORTED_MODULE_15__.downloadMedia)(event);
-        const imageDetails = await (0,_helpers_imageDetails__WEBPACK_IMPORTED_MODULE_8__.getImageDetails)(photoBuffer);
+        const photoBuffer = await (0,_downloadMedia__WEBPACK_IMPORTED_MODULE_16__.downloadMedia)(event);
+        // IMAGE_ANALYSIS_SOURCE=remote (default): this IS getImageDetails' own result; tg-vision runs on the same
+        // bytes in the background (shadow, log-only). See payments/vision-shadow.ts.
+        const imageDetails = await (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_9__.analyzeImage)(photoBuffer, {
+            clientId: process.env.clientId || "",
+            chatId,
+            msgId: Number(event.message.id) || 0,
+            getRepositories: () => db.getRepositories?.() ?? null,
+        }, _helpers_imageDetails__WEBPACK_IMPORTED_MODULE_8__.getImageDetails);
         logger.log("RAW Image Details: ", imageDetails);
         if (imageDetails.analysisUnavailable) {
             // Our analysis service is down: not the user's fault. Never delete, never count it as an
@@ -47144,26 +55912,26 @@ async function processImage(event) {
         const sanitizedData = (0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__.parseImage)(imageDetails);
         logger.log(sanitizedData);
         let userDetails = await db.read(chatId);
-        const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_16__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
+        const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_17__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
         const text = imageDetails.text.toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
         imageDetails.text = text;
         // Track "please" in payment messages (desperation indicator)
         const messageText = event.message.text?.toLowerCase() || "";
         if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(messageText, ['please', 'pls', 'plz', 'plss'])) {
-            _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementPleaseRequestCount(chatId);
+            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementPleaseRequestCount(chatId);
             logger.debug(`[ProcessImage] User said "please" in payment message - incremented pleaseRequestCount`);
         }
         const senderJson = await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getSenderJson)(event);
         const broadcastName = senderJson.username
             ? `@${senderJson.username}`
             : [senderJson.firstName, senderJson.lastName].filter(Boolean).join(" ");
-        const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getUserState(chatId);
-        const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getInvalidPhotoCount(chatId);
+        const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
+        const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
         if (invalidPhotoCount > 4) {
             if (invalidPhotoCount > 6) {
                 // Single message: image + analysis in one caption (was forward + separate text card).
-                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
+                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
                     caption: `BANNED (invalid pics x${invalidPhotoCount})\nChatId:${chatId} Name:${broadcastName}\nAmount:${userDetails.payAmount} DemoGiven:${userDetails.demoGiven}\nDescription: ${imageDetails.description}`.slice(0, 500),
                 });
                 // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
@@ -47174,7 +55942,7 @@ async function processImage(event) {
                 userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
             }
             else {
-                (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                     message: `Dont send Other Pics/Screenshots, I am Warning you!!!\n\n<b>I will BLOCK You</b>, If u send random pics again!\n\n\n<b>Pay Me!!\nI will Show you Boobs in video Call Now Itself!!\nQR:</b> ${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe1}`,
                     parseMode: "html",
                 });
@@ -47186,7 +55954,7 @@ async function processImage(event) {
             (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine)) {
             // Single message: the image WITH the analysis as its caption. (Previously this both
             // forwarded the image AND sent a separate text-only card — the same info twice.)
-            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
+            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
             if (!paymentEvidenceSent) {
                 logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
             }
@@ -47198,14 +55966,14 @@ async function processImage(event) {
             // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
             // Fallback ONLY then: bot photo on UNVDS (never CLIENT_UPDATES; no bot is a member of @unwantedupdates1).
             try {
-                await (0,_telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_13__.forwardToChannel)(event, "@unwantedupdates1");
+                await (0,_telegram_utils_forwardToChannel__WEBPACK_IMPORTED_MODULE_14__.forwardToChannel)(event, "@unwantedupdates1");
                 await event.client.sendMessage("@unwantedupdates1", {
                     message: msg.slice(0, 1000),
                 });
             }
             catch (error) {
                 logger.error(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
-                const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.UNVDS, photoBuffer, { caption: msg.slice(0, 900) } // headroom: sendMedia prepends "CLIENTID: <id>"; Telegram caps captions at 1024
+                const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.UNVDS, photoBuffer, { caption: msg.slice(0, 900) } // headroom: sendMedia prepends "CLIENTID: <id>"; Telegram caps captions at 1024
                 );
                 if (!unwantedSent) {
                     logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
@@ -47213,7 +55981,7 @@ async function processImage(event) {
             }
         }
         if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
-            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.proceedWithCall)(userDetails, chatId, "Image Processed");
+            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
                 return true;
             }
@@ -47221,20 +55989,20 @@ async function processImage(event) {
         if (imageDetails && sanitizedData.isPaymentRelated) {
             if (text?.startsWith("payment to") &&
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ["phonepe", "transfer details"])) {
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                         "It's a Failed payment, Don't play Games!!",
                         "Stop trying to fool me with fake payments!!",
                         "That's a failed screenshot baby, pay properly!!"
                     ]),
                 });
-                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Trying to Scam!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Trying to Scam!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
             }
             else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text.toLowerCase(), [
                 `${process.env.name} connecting`,
                 "failed to connect",
             ])) {
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                         "Wait baby...\ntrying to connect again",
                         "Network issue...\nlet me fix this for you",
@@ -47247,21 +56015,21 @@ async function processImage(event) {
                 logger.log("isLocalFailedImg: ", isLocalFailedImg);
                 if ((sanitizedData.isFinishedPayment ||
                     (!sanitizedData.isFinishedPayment && isLocalFailedImg)) &&
-                    (0,_helpers__WEBPACK_IMPORTED_MODULE_18__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
+                    (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
                         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                             message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                 "**Oye....!! Payment Failed??**",
                                 "**Baby... your payment didn't go through!!**",
                                 "**Darling!! This payment failed, try again!**"
                             ]),
                         });
-                        await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Failed Payment, Number SENT`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
-                        await (0,_index__WEBPACK_IMPORTED_MODULE_17__.respToFailedMSg)(event, imageDetails.text, chatId);
+                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Failed Payment, Number SENT`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.respToFailedMSg)(event, imageDetails.text, chatId);
                         scheduleProcessImageTask(async () => {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "Don't send me failed screenshots baby, send only success ones!!\n\nTry **SCANNING** QR with **another phone**!!\nThen it will work perfectly!!",
                                     "Only successful payment screenshots darling!!\n\n**Use different mobile** to scan QR!!\nThat's the trick baby!!",
@@ -47272,15 +56040,15 @@ async function processImage(event) {
                         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.sendImageToChannel)(photoBuffer);
                     }
                     else {
-                        if ((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_24__.detectFakeScreenshot)(imageDetails.text)) {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                        if ((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_25__.detectFakeScreenshot)(imageDetails.text)) {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "Hatt...\nFake screenshot!!\n\nI'm Blocking you Now!!",
                                     "Stop sending fake payments!!\n\nYou're Blocked Now!!",
                                     "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
                                 ]),
                             });
-                            await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told Fake Screenshot!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Fake Screenshot!!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                             scheduleProcessImageTask(async () => {
                                 await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.limitTime, Date.now() + 10 * 60 * 1000);
                                 await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
@@ -47289,9 +56057,9 @@ async function processImage(event) {
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
                             if (!(amount > 0 && amount <= MAX_PAYMENT_AMOUNT)) {
                                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`AmountNotInRange:MESSAGE_DELETED\nTold seems like fake`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`AmountNotInRange:MESSAGE_DELETED\nTold seems like fake`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                 scheduleProcessImageTask(async () => {
-                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                             "This looks like fake payment baby\n\nsend me detailed screenshot from **Transaction History**\nDon't send same pic again",
                                             "Seems fake darling\n\nI need proper screenshot from **Payment History**\nSend a different one sweetie",
@@ -47318,10 +56086,10 @@ async function processImage(event) {
                                         notifyProcessImage("crossClientPayment", "Cross-client payment suspicion", "User may have paid another client", imageUserFields(chatId, broadcastName, [
                                             { label: "Paid", value: didPayOthersResp.paid || "none" },
                                             { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
-                                        ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.WARNING, reply);
+                                        ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING, reply);
                                         didPayOthers = true;
                                     }
-                                    let isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_9__["default"])(imageDetails.time, userDetails);
+                                    let isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_10__["default"])(imageDetails.time, userDetails);
                                     // if (!isWithinPastTenMinutesImage.result) {
                                     //   logger.log("Extracting timestamps from image text for validation...");
                                     //   const possibleTimeStamps = extractTimestamps(
@@ -47339,15 +56107,15 @@ async function processImage(event) {
                                     //     }
                                     //   }
                                     // }
-                                    const isPaymentProperlyMine = await (0,_helpers__WEBPACK_IMPORTED_MODULE_18__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers);
+                                    const isPaymentProperlyMine = await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers);
                                     if (isPaymentProperlyMine.isvalid) {
                                         logger.log("Valid payment confirmed and processed.");
                                         // Smart state reset based on payment
                                         const oldPayAmount = userDetails.payAmount;
-                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnPayment)(chatId, userDetails, amount);
+                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnPayment)(chatId, userDetails, amount);
                                         // Check if this is an upgrade
                                         if (amount > oldPayAmount && oldPayAmount > 0) {
-                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
+                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
                                         }
                                         if (amount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, amount);
@@ -47356,11 +56124,11 @@ async function processImage(event) {
                                             logger.log("Processing low amount payment for pics/demo logic.");
                                             if (userDetails.picsSent > 0) {
                                                 const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getDemoPicsSentTimestamp(chatId);
+                                                const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getDemoPicsSentTimestamp(chatId);
                                                 const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount, true // this branch only runs when amount !== payAmount
                                                 );
                                                 if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "Wait baby....!! ",
                                                             "Just a moment Babyy...!!",
@@ -47371,29 +56139,29 @@ async function processImage(event) {
                                                         demoGiven: false,
                                                         payAmount: 50,
                                                     });
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.initiateCall)(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
                                                     // Reset counters
                                                     userChatState.pleaseRequestCount = 0;
                                                     // picCount reset handled in database via state reset helper
                                                 }
                                                 else {
                                                     // Tell user pics already sent
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
                                                             "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
                                                             "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
                                                         ]),
                                                     });
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                     // Pic request count handled in database (userDetails.picCount)
                                                 }
                                             }
                                             else {
                                                 // Send demo pics (first time or weighted score >= 3)
-                                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`PICS SENT (weighted logic)\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`PICS SENT (weighted logic)\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 try {
-                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                             "Wait baby....\nSending you my hot pics!! 🔥",
                                                             "Hold on darling...\nPreparing my sexiest pics for you!! 💋",
@@ -47401,8 +56169,8 @@ async function processImage(event) {
                                                         ]),
                                                     });
                                                     scheduleProcessImageTask(async () => {
-                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
-                                                            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_12__.fileSender.getFileHandles([
+                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandles([
                                                                 "dmp1.jpg",
                                                                 "dmp2.jpg",
                                                                 "dmp3.jpg",
@@ -47423,11 +56191,11 @@ async function processImage(event) {
                                                         // Increment picsSent count in DB
                                                         userDetails = await db.update(chatId, updatedData);
                                                         // Update timestamp in UserState
-                                                        _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.setDemoPicsSent(chatId, true);
+                                                        _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.setDemoPicsSent(chatId, true);
                                                     }, 6000, `processImage.demoPicsFollowup.${chatId}`);
                                                 }
                                                 catch (error) {
-                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error);
+                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error);
                                                 }
                                             }
                                         }
@@ -47435,7 +56203,7 @@ async function processImage(event) {
                                             if (amount >= 30 &&
                                                 amount >= userDetails.payAmount + 20 &&
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canStartService)(userDetails, amount)) {
-                                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.initiateCall)(amount, userDetails, "Reg");
+                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(amount, userDetails, "Reg");
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                             }
                                             else {
@@ -47453,16 +56221,16 @@ async function processImage(event) {
                                                     if (amount > userDetails.highestPayAmount) {
                                                         updatedData['highestPayAmount'] = amount;
                                                     }
-                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_26__.inHouseCallsActive)();
+                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__.inHouseCallsActive)();
                                                     // VCUI path: link first, exactly as before.
                                                     if (!inHouse)
-                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
+                                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
                                                     userDetails = await db.update(chatId, updatedData);
                                                     // In-house: after the update, so the re-call sees the new amount.
                                                     if (inHouse) {
-                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_26__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_27__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
                                                     }
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
                                                 else {
                                                     if (amount < 30 &&
@@ -47470,14 +56238,14 @@ async function processImage(event) {
                                                             (amount > 25 && !userDetails.picsSent))) {
                                                         if (userDetails.picsSent > 0) {
                                                             const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                            const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getDemoPicsSentTimestamp(chatId);
+                                                            const picsSentTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getDemoPicsSentTimestamp(chatId);
                                                             const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount);
                                                             // Already sent pics, check weighted score
                                                             if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
                                                                 // High score, upgrade to demo call
                                                                 userDetails.demoGiven = false;
                                                                 if (userDetails.payAmount <= 50) {
-                                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.initiateCall)(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
+                                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
                                                                 }
                                                                 // Reset counters
                                                                 userChatState.pleaseRequestCount = 0;
@@ -47485,23 +56253,23 @@ async function processImage(event) {
                                                             }
                                                             else {
                                                                 // Tell user pics already sent
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
                                                                         "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
                                                                         "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
                                                                     ]),
                                                                 });
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Pics Already Sent (score: ${weightedScore})${isSameImageRecently ? ' - Same image detected' : ''}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                                 // Increment counters
-                                                                _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementPleaseRequestCount(chatId);
+                                                                _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementPleaseRequestCount(chatId);
                                                                 // picCount handled in database (userDetails.picCount)
                                                             }
                                                         }
                                                         else {
                                                             // Send demo pics (first time or weighted score >= 3)
                                                             try {
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "Wait baby....\nSending you my Nude pics!! 🔥",
                                                                         "Hold on darling...\nTaking my Sexy pics for you!! 💋",
@@ -47509,8 +56277,8 @@ async function processImage(event) {
                                                                     ]),
                                                                 });
                                                                 scheduleProcessImageTask(async () => {
-                                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
-                                                                        file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_12__.fileSender.getFileHandles([
+                                                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                        file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandles([
                                                                             "dmp1.jpg",
                                                                             "dmp2.jpg",
                                                                             "dmp3.jpg",
@@ -47534,11 +56302,11 @@ async function processImage(event) {
                                                                     }
                                                                     userDetails = await db.update(chatId, updatedData);
                                                                     // Update timestamp in UserState
-                                                                    _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.setDemoPicsSent(chatId, true);
+                                                                    _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.setDemoPicsSent(chatId, true);
                                                                 }, 6000, `processImage.firstDemoPicsFollowup.${chatId}`);
                                                             }
                                                             catch (error) {
-                                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error);
+                                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error);
                                                             }
                                                         }
                                                     }
@@ -47552,20 +56320,20 @@ async function processImage(event) {
                                                             userDetails.callTime < Date.now() - 3 * 60 * 1000) {
                                                             if (amount < 50) {
                                                                 userDetails.demoGiven = false;
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.initiateCall)(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
                                                             }
                                                             else {
                                                                 let updatedAmount = userDetails.payAmount;
                                                                 if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
                                                                     updatedAmount = userDetails.payAmount + 100;
                                                                 }
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_17__.initiateCall)(updatedAmount, userDetails, "Re-initiated Call for Full Show");
+                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_18__.initiateCall)(updatedAmount, userDetails, "Re-initiated Call for Full Show");
                                                             }
                                                             (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                                             // await sendMessageWithButton(`, ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`)
                                                         }
                                                         else {
-                                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                                 message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                     "**Your call is over baby!!**\nPay again if you want more**\n\nNo MONEY? then No SERVICE!!\nDon't WASTE your time dear!!**",
                                                                     "**Your Call finished baby!!**\nPay again for more**\n\nMoney first, then service!!\nStop wasting time Dear!!**"
@@ -47584,11 +56352,11 @@ async function processImage(event) {
                                                                     msg =
                                                                         "**30 Mins VideoCall   :  350₹/-\n1 Hour Full show with Face!!   :   600₹/-** 💋\n\nI'm all alone in my room waiting for you!!\nLet's enjoy together darling...\nPay me and message!! 😘";
                                                                 }
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([msg]),
                                                                 });
                                                                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(15000);
-                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                                                         "**Send me new payment screenshot baby** 💋",
                                                                         "**Show me fresh payment proof darling** 😘",
@@ -47596,17 +56364,17 @@ async function processImage(event) {
                                                                     ]),
                                                                 });
                                                             }, 15000, `processImage.callOverFollowup.${chatId}`);
-                                                            await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told His Call is Over!! ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told His Call is Over!! ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                         }
                                                         // Decrement invalid photo count (user sent valid payment)
-                                                        const currentInvalidCount = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getInvalidPhotoCount(chatId);
+                                                        const currentInvalidCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
                                                         if (currentInvalidCount > 0) {
                                                             userChatState.invalidPhotoCount = currentInvalidCount - 1;
                                                             userChatState.invalidPhotoTimestamp = Date.now();
                                                         }
                                                     }
                                                     else {
-                                                        await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Ignored PIC - Weird Case`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Ignored PIC - Weird Case`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                     }
                                                 }
                                                 if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ["fmp"])) {
@@ -47617,13 +56385,13 @@ async function processImage(event) {
                                                 if (amount <= userDetails.payAmount &&
                                                     !isWithinPastTenMinutesImage.result) {
                                                     await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`UnWanted Pic Deleted(same/less Amount)\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`UnWanted Pic Deleted(same/less Amount)\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
                                             }
                                         }
                                         else {
                                             await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                                            await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`WeirdCase Pic Deleted\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`WeirdCase Pic Deleted\nPrev:${userDetails.payAmount}\nNow:${amount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                         }
                                         // Centralized payAmount update - ensures payAmount is updated for all valid payments
                                         // This handles cases where payAmount might not be updated in specific code paths above
@@ -47651,7 +56419,7 @@ async function processImage(event) {
                                             }
                                             catch (creditError) {
                                                 // A ledger failure must never break the payment flow the user is watching.
-                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
+                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
                                             }
                                         }
                                         if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
@@ -47670,37 +56438,37 @@ async function processImage(event) {
                                         }
                                         catch (error) {
                                             // Payment service must not be withheld because analytics is unavailable.
-                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
+                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
                                         }
                                     }
                                     else {
-                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                             message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([isPaymentProperlyMine.msg]),
                                         });
                                         scheduleProcessImageTask(async () => {
-                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                                 message: `${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.qr}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.link}`,
-                                                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_12__.fileSender.getFileHandle("./QR.jpg"),
+                                                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle("./QR.jpg"),
                                             });
                                         }, 20000, `processImage.paymentValidationQr.${chatId}`);
-                                        await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told: \n${isPaymentProperlyMine.msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                        await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told: \n${isPaymentProperlyMine.msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                     }
                                 }
                                 else {
-                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                             `Aww baby...\n\nNot just **${amount}₹**!! 💔\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo,
                                             `Come on darling...\n\n**${amount}₹** is too less!! 😔\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo,
                                             `Sweetie... **${amount}₹** won't be enough!!  💸\n\n` + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.demo
                                         ]),
                                     });
-                                    await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`Told Not Just - ${amount}₹`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                    await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`Told Not Just - ${amount}₹`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                 }
                             }
                         }
                         else {
                             await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
-                            await (0,_index__WEBPACK_IMPORTED_MODULE_17__.sendMessageWithButton)(`PaymentNotMine:MESSAGE_DELETED\nAsked to Pay me!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                            await (0,_index__WEBPACK_IMPORTED_MODULE_18__.sendMessageWithButton)(`PaymentNotMine:MESSAGE_DELETED\nAsked to Pay me!`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                             scheduleProcessImageTask(async () => {
                                 const msg = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                     "What baby?? **That's not my payment!!** 💔\n\nPay me properly and I'll Suck your Dick 🍆💦",
@@ -47710,7 +56478,7 @@ async function processImage(event) {
                                     "**its Not my Payment darling!!** 💔\n\nSend MY payment and I'll make you cum 🍆💦",
                                     "Oh darling..?? **Wrong screenshot baby!!** 😞\n\nPay ME and I'll be your slut tonight 😈🔥"
                                 ]);
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                                         `${msg}\n\nComplete **my payment** and send me the screenshot darling!! 💋`,
                                         `${msg}\n\nFinish **my payment** and show me proof baby!! 😘`,
@@ -47719,23 +56487,23 @@ async function processImage(event) {
                                 });
                             }, 10000, `processImage.paymentNotMineReminder.${chatId}`);
                             // Increment invalid photo count
-                            _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementInvalidPhotoCount(chatId);
+                            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementInvalidPhotoCount(chatId);
                         }
                     }
                 }
                 else {
-                    await (0,_helpers__WEBPACK_IMPORTED_MODULE_18__.askToFinishPayment)(event);
+                    await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.askToFinishPayment)(event);
                 }
             }
         }
         else {
             if (sanitizedData.isPaymentMine) {
-                await (0,_helpers__WEBPACK_IMPORTED_MODULE_18__.askToFinishPayment)(event);
+                await (0,_helpers__WEBPACK_IMPORTED_MODULE_19__.askToFinishPayment)(event);
             }
             else {
-                const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getInvalidPhotoCount(chatId);
+                const invalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
                 if (invalidPhotoCount <= 4) {
-                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                             "Nice 😘",
                             "Looks Good",
@@ -47747,7 +56515,7 @@ async function processImage(event) {
                             "Mmm... 💋"
                         ]),
                     });
-                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithTimeout)(event.client, chatId, {
+                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
                             (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
                             (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_6__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
@@ -47760,14 +56528,14 @@ async function processImage(event) {
                 }
                 // Increment invalid photo count if inappropriate
                 if (!imageDetails.isPayment) {
-                    _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementInvalidPhotoCount(chatId);
+                    _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementInvalidPhotoCount(chatId);
                 }
             }
         }
-        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
+        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error Processing image");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error Processing image");
     }
 }
 
@@ -60912,6 +69680,853 @@ const unpaidPatterns = [
         }
     },
 ];
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/blocklist.ts"
+/*!***********************************************!*\
+  !*** ./src/payments/proof-check/blocklist.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TIER_A_PHRASES: () => (/* binding */ TIER_A_PHRASES),
+/* harmony export */   TIER_B_PHRASES: () => (/* binding */ TIER_B_PHRASES),
+/* harmony export */   bankingNameNeedle: () => (/* binding */ bankingNameNeedle),
+/* harmony export */   isBlockedFakeScreenshot: () => (/* binding */ isBlockedFakeScreenshot),
+/* harmony export */   matchBlocklist: () => (/* binding */ matchBlocklist),
+/* harmony export */   prepText: () => (/* binding */ prepText)
+/* harmony export */ });
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/**
+ * Migrated `fakeScreenshotText` (utils/common.ts) with word-boundary matching (design 2.8.1).
+ * Tier A = BLOCK (unique fake-app strings). Tier B = ASK_PROOF (could collide with genuine screens).
+ */
+
+const NO_DIGIT_BEFORE = '(?<![a-z0-9])';
+/** Tier A phrases, matched with boundaries. */
+const TIER_A_PHRASES = [
+    '115289349823', '2028010000234', 'p2032484594584584538', 'fmpibi2147483647', '7070979668',
+    'fmpib1731',
+    'type...', 'get inked', 'photext', 'bak stat', 'futures &', 'getaway!', 'win 5 lucky',
+    'matlab no more', 'no pin upto 500₹',
+];
+/** Tier B phrases (marketing/footer strings, unverified against genuine screens). */
+const TIER_B_PHRASES = [
+    'payments successful', 'do more with', 'the best of upi', 'lightning-fast', 'unlock rewards >',
+    'unlock rewards>', 'purchase confirmed', 'money sitting idle', 'chance to grow', 'your coupons!',
+    'updated wallet', 'wallet txn', 'indi-home', 'suncrypto', 'prepkod', 'preprod', 'himan37922',
+    'june 2020',
+];
+const ACCOUNT_CONTEXT = /(a\/c|account|debited from)/;
+const MASKED_TAILS = ['1143', '1920', '6325', '2068', '1072', '621933'];
+const TIER_B_PATTERNS = [
+    { id: 'rs10', re: new RegExp(`${NO_DIGIT_BEFORE}rs\\.?\\s?10(?!\\d)`) },
+    { id: 'rs300', re: new RegExp(`${NO_DIGIT_BEFORE}rs\\.?\\s?300(?!\\d)`) },
+    { id: '10911', re: /(?<!\d)10911(?!\d)/ },
+    { id: 'balance 120', re: new RegExp(`${NO_DIGIT_BEFORE}balance 120(?!\\d)`) },
+    { id: 'wallet balance 12', re: new RegExp(`${NO_DIGIT_BEFORE}wallet balance 12(?!\\d)`) },
+    { id: 'tn=', re: new RegExp(`${NO_DIGIT_BEFORE}tn=`) },
+];
+/** Lowercase, newlines to spaces (what processImage does before calling the old check). */
+function prepText(text) {
+    return (0,_disclaimers__WEBPACK_IMPORTED_MODULE_0__.normalizeForMatch)(text);
+}
+function bankingNameNeedle(dbcoll) {
+    const v = (dbcoll ?? '').toLowerCase().replace(/\s+/g, '').slice(0, 5);
+    return v || null;
+}
+function matchBlocklist(text, opts = {}) {
+    const t = prepText(text);
+    const tierA = [];
+    const tierB = [];
+    if (!t)
+        return { tierA, tierB };
+    for (const p of TIER_A_PHRASES)
+        if ((0,_disclaimers__WEBPACK_IMPORTED_MODULE_0__.matchesPhrase)(t, p))
+            tierA.push(p);
+    const needle = bankingNameNeedle(opts.dbcoll);
+    if (needle) {
+        const compact = t.replace(/\s+/g, '');
+        if (new RegExp(`bankingname:?${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(compact)) {
+            tierA.push(`bankingname:${needle}`);
+        }
+    }
+    for (const p of TIER_B_PHRASES)
+        if ((0,_disclaimers__WEBPACK_IMPORTED_MODULE_0__.matchesPhrase)(t, p))
+            tierB.push(p);
+    for (const p of TIER_B_PATTERNS)
+        if (p.re.test(t))
+            tierB.push(p.id);
+    if (ACCOUNT_CONTEXT.test(t)) {
+        for (const tail of MASKED_TAILS) {
+            if (new RegExp(`${NO_DIGIT_BEFORE}x{1,}${tail}(?!\\d)`).test(t))
+                tierB.push(`x${tail}`);
+        }
+    }
+    return { tierA, tierB };
+}
+/** Boundary-safe drop-in for the old boolean `detectFakeScreenshot` (BLOCK tier only). */
+function isBlockedFakeScreenshot(text, dbcoll) {
+    return matchBlocklist(text, { dbcoll }).tierA.length > 0;
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/decision.ts"
+/*!**********************************************!*\
+  !*** ./src/payments/proof-check/decision.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildOcrAndText: () => (/* binding */ buildOcrAndText),
+/* harmony export */   decide: () => (/* binding */ decide)
+/* harmony export */ });
+/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+
+
+
+/** Lowercased OCR-Space text + model fullText, whitespace collapsed. Payee matching elsewhere keeps using the whole text. */
+function buildOcrAndText(vision) {
+    const e = vision.extraction;
+    if (!e)
+        return '';
+    return `${e.ocrText ?? ''} ${e.fullText ?? ''}`.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+/**
+ * Pure rule engine (design 6). BLOCK only on LONG disclaimer text found in the image text, or tier-A
+ * blocklist. Everything else that looks wrong is ASK_PROOF. A model judgement alone never BLOCKs.
+ */
+function decide(input) {
+    const { vision, reuse } = input;
+    const e = vision.extraction;
+    if (!e)
+        return { decision: 'ACCEPT', reasons: ['NO_EXTRACTION'], alert: false };
+    const text = buildOcrAndText(vision);
+    const so = vision.secondOpinion && !vision.secondOpinion.skipped ? vision.secondOpinion : null;
+    const block = [];
+    const ask = [];
+    const info = [];
+    const modelPhrases = [...(e.fakeMarkers?.disclaimerPhrases ?? []), ...(so?.disclaimerPhrases ?? [])];
+    const d = (0,_disclaimers__WEBPACK_IMPORTED_MODULE_1__.scanDisclaimers)(text, modelPhrases);
+    if (d.longInText.length)
+        block.push('DISCLAIMER_LONG');
+    if (d.short.length)
+        ask.push('DISCLAIMER_SHORT');
+    if (d.longModelOnly.length)
+        ask.push('DISCLAIMER_MODEL_ONLY');
+    const bl = (0,_blocklist__WEBPACK_IMPORTED_MODULE_0__.matchBlocklist)(text, { dbcoll: input.dbcoll });
+    if (bl.tierA.length)
+        block.push('BLOCKLIST_A');
+    if (bl.tierB.length)
+        ask.push('BLOCKLIST_B');
+    if (e.fakeMarkers?.aiWatermark?.present === true || so?.watermarkPresent === true)
+        ask.push('AI_WATERMARK');
+    if (reuse?.otherChatOrPersona)
+        ask.push(reuse.by === 'imageHash' ? 'IMAGE_NEAR_DUPLICATE_OTHER_CHAT' : 'UTR_REUSED');
+    else if (reuse?.sameChatRepeat)
+        info.push('UTR_REPEAT_SAME_CHAT');
+    if ((0,_upi_ownership__WEBPACK_IMPORTED_MODULE_2__.checkPayeeUpi)(e.payeeUpiId, input.ownUpiIds) === 'not_ours')
+        ask.push('UPI_NOT_OURS');
+    const dup = input.duplicate;
+    const dupReasons = dup ? ['DUPLICATE_PROOF', `DUPLICATE_BY_${dup.by === 'imageSha256' ? 'IMAGE_SHA256' : dup.by === 'imageHash' ? 'IMAGE_DHASH' : 'UTR'}`] : [];
+    const reasons = [...block, ...dupReasons, ...ask, ...info];
+    if (block.length)
+        return { decision: 'BLOCK', reasons, alert: true };
+    // A served proof is the reference. Same-chat re-send needs no ops alert; cross-chat/persona does.
+    if (dup)
+        return { decision: 'REJECT_DUPLICATE', reasons, alert: !dup.sameChat };
+    if (ask.length)
+        return { decision: 'ASK_PROOF', reasons, alert: true };
+    return { decision: 'ACCEPT', reasons, alert: false };
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/disclaimers.ts"
+/*!*************************************************!*\
+  !*** ./src/payments/proof-check/disclaimers.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LONG_DISCLAIMERS: () => (/* binding */ LONG_DISCLAIMERS),
+/* harmony export */   SHORT_DISCLAIMERS: () => (/* binding */ SHORT_DISCLAIMERS),
+/* harmony export */   findPhrases: () => (/* binding */ findPhrases),
+/* harmony export */   matchesPhrase: () => (/* binding */ matchesPhrase),
+/* harmony export */   normalizeForMatch: () => (/* binding */ normalizeForMatch),
+/* harmony export */   scanDisclaimers: () => (/* binding */ scanDisclaimers)
+/* harmony export */ });
+/**
+ * Disclaimer phrase tiers (design 6, P1/P3).
+ * LONG: specific generator-app text, deterministic BLOCK when found in the OCR text.
+ * SHORT: single words a genuine screen can contain by accident: ASK_PROOF only.
+ */
+const LONG_DISCLAIMERS = [
+    'not a real transaction', 'not a real payment', 'this is not a real',
+    'for entertainment purposes only', 'for entertainment purpose only',
+    'for fun purposes only', 'for prank purposes', 'dummy transaction', 'fake transaction',
+    'sample transaction', 'this is a sample', 'not an actual transaction',
+    'simulated transaction', 'for demonstration purposes only',
+];
+const SHORT_DISCLAIMERS = [
+    'sample', 'demo', 'dummy', 'prank', 'fake', 'mock', 'test transaction', 'just for fun', 'for fun',
+];
+function normalizeForMatch(text) {
+    return String(text ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+const reCache = new Map();
+/**
+ * Boundary matcher: letters/digits directly outside the needle break the match, unless the needle
+ * itself starts/ends with punctuation. Needle and haystack are whitespace-collapsed and lowercased.
+ */
+function matchesPhrase(haystack, needle) {
+    const n = normalizeForMatch(needle);
+    if (!n)
+        return false;
+    let re = reCache.get(n);
+    if (!re) {
+        const pre = /^[a-z0-9]/.test(n) ? '(?<![a-z0-9])' : '';
+        const post = /[a-z0-9]$/.test(n) ? '(?![a-z0-9])' : '';
+        re = new RegExp(pre + escapeRe(n) + post);
+        reCache.set(n, re);
+    }
+    return re.test(normalizeForMatch(haystack));
+}
+function findPhrases(haystack, phrases) {
+    return phrases.filter(p => matchesPhrase(haystack, p));
+}
+function scanDisclaimers(ocrAndText, modelPhrases) {
+    const longInText = findPhrases(ocrAndText, LONG_DISCLAIMERS);
+    const short = new Set(findPhrases(ocrAndText, SHORT_DISCLAIMERS));
+    const longModelOnly = new Set();
+    for (const phrase of modelPhrases) {
+        for (const w of findPhrases(phrase, SHORT_DISCLAIMERS))
+            short.add(w);
+        for (const l of findPhrases(phrase, LONG_DISCLAIMERS)) {
+            if (!longInText.includes(l))
+                longModelOnly.add(l);
+        }
+    }
+    return { longInText, short: [...short], longModelOnly: [...longModelOnly] };
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/index.ts"
+/*!*******************************************!*\
+  !*** ./src/payments/proof-check/index.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.LONG_DISCLAIMERS),
+/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_5__.OLD_PAYMENT_MESSAGES),
+/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.SHORT_DISCLAIMERS),
+/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.buildDuplicateQuery),
+/* harmony export */   buildOcrAndText: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.buildOcrAndText),
+/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.checkPayeeUpi),
+/* harmony export */   decide: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.decide),
+/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.imageSha256),
+/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_1__.isBlockedFakeScreenshot),
+/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.isMaskedVpa),
+/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.lookupReuse),
+/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.lookupServedDuplicate),
+/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_1__.matchBlocklist),
+/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.matchesPhrase),
+/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.normalizeVpa),
+/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.ownIdsFrom),
+/* harmony export */   proofCheck: () => (/* binding */ proofCheck),
+/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.scanDisclaimers),
+/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.withinOneEdit)
+/* harmony export */ });
+/* harmony import */ var _decision__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decision */ "./src/payments/proof-check/decision.ts");
+/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
+
+/** Entry point: pure, synchronous, never throws (a failure degrades to ACCEPT so genuine payers are not hurt). */
+function proofCheck(input) {
+    try {
+        return (0,_decision__WEBPACK_IMPORTED_MODULE_0__.decide)(input);
+    }
+    catch {
+        return { decision: 'ACCEPT', reasons: ['PROOF_CHECK_ERROR'], alert: false };
+    }
+}
+
+
+
+
+
+
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/messages.ts"
+/*!**********************************************!*\
+  !*** ./src/payments/proof-check/messages.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ASK_PROOF_EXPIRED_MESSAGES: () => (/* binding */ ASK_PROOF_EXPIRED_MESSAGES),
+/* harmony export */   ASK_PROOF_MESSAGES: () => (/* binding */ ASK_PROOF_MESSAGES),
+/* harmony export */   ASK_PROOF_RETRY_MESSAGES: () => (/* binding */ ASK_PROOF_RETRY_MESSAGES),
+/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* binding */ OLD_PAYMENT_MESSAGES)
+/* harmony export */ });
+/** Persona texts for the ASK_PROOF flow (design 8). Multi-line, same voice as ../../messages pools. */
+// Owner: users mostly cannot type a UTR, so ask for a fresh clear screenshot or the bank SMS first; a typed UTR is the optional third way.
+const ASK_PROOF_MESSAGES = [
+    "Baby, I can't see this one properly!!\n\nSend me a fresh clear screenshot of the payment\nor the **bank SMS** screenshot\n\nAs soon as I see it, I'll check it right away",
+    "Hmm darling, the screenshot isn't clear enough for me!!\n\nSend the payment screenshot once more, full screen and clear\nor the **SMS from your bank**\n\nThen I'll verify it and we continue sweetie",
+    "Sweetie, I need one more thing to confirm this payment!!\n\nSend a clear screenshot of the payment details page\nor a screenshot of the **bank SMS**\n\nIf you can, type the **UTR number** too (you'll see \"UTR\" or \"Transaction ID\" in the details)\n\nI'll check it quickly baby",
+];
+/** Sent on a failed attempt. */
+const ASK_PROOF_RETRY_MESSAGES = [ASK_PROOF_MESSAGES[1]];
+const ASK_PROOF_EXPIRED_MESSAGES = [
+    "Proof time is over baby\n\nSend a fresh clear screenshot when you pay",
+    "Time is over darling, I couldn't confirm it\n\nWhen you pay, send me a fresh clear screenshot okay",
+];
+/** REJECT_DUPLICATE reply: says it is an OLD payment and asks for a fresh one (never "duplicate" / "already used"). */
+const OLD_PAYMENT_MESSAGES = [
+    "This is an old payment baby \u{1F648}\n\nPay now and send me the fresh screenshot \u{1F618}",
+    "Ye purana payment hai \u{1F605}\n\nAbhi pay karke naya screenshot bhejo na \u{1F48B}",
+    "Hmm sweetie, this one is from before\n\nPay again right now and send me the new screenshot, then we start \u{1F618}",
+];
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/reuse.ts"
+/*!*******************************************!*\
+  !*** ./src/payments/proof-check/reuse.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildDuplicateQuery: () => (/* binding */ buildDuplicateQuery),
+/* harmony export */   imageSha256: () => (/* binding */ imageSha256),
+/* harmony export */   lookupReuse: () => (/* binding */ lookupReuse),
+/* harmony export */   lookupServedDuplicate: () => (/* binding */ lookupServedDuplicate)
+/* harmony export */ });
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+
+/** sha256 hex of the exact downloaded image bytes. */
+function imageSha256(bytes) {
+    return (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(bytes).digest('hex');
+}
+/** Duplicate-lookup keys from a vision result: UTR as read by the model, bytes hash, dHash + amount + KNOWN time + payee. */
+function buildDuplicateQuery(vision, ctx) {
+    const e = vision.extraction;
+    if (!e)
+        return null;
+    return {
+        chatId: ctx.chatId, profile: ctx.profile, telegramMsgId: ctx.telegramMsgId,
+        ...(e.utr ? { utr: e.utr } : {}),
+        ...(ctx.imageSha256 ? { imageSha256: ctx.imageSha256 } : {}),
+        ...(ctx.imageHash ? { imageHash: ctx.imageHash } : {}),
+        ...(typeof e.amount === 'number' ? { amount: e.amount } : {}),
+        ...(e.time?.state === 'known' && typeof e.time.epochMs === 'number' ? { timeEpochMs: e.time.epochMs } : {}),
+        ...(e.payeeUpiId ? { payeeUpiId: e.payeeUpiId } : {}),
+    };
+}
+/** Never throws; a failed lookup fails open (no friction for genuine payers). */
+async function lookupServedDuplicate(repo, q) {
+    if (!repo || !q)
+        return null;
+    try {
+        const m = await repo.findServedDuplicate(q);
+        if (!m)
+            return null;
+        return { by: m.by, sameChat: m.sameChat, matchedProofId: m.doc._id !== undefined ? String(m.doc._id) : undefined };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Look up reuse for one proof. Never throws: a lookup failure returns null (fail open, no friction
+ * for genuine payers). `findReuse` already excludes the same chat+persona.
+ */
+async function lookupReuse(repo, q) {
+    if (!repo)
+        return null;
+    try {
+        const match = await repo.findReuse({
+            chatId: q.chatId, profile: q.profile,
+            ...(q.utr ? { utr: q.utr } : {}),
+            ...(q.imageHash ? { imageHash: q.imageHash } : {}),
+        });
+        if (match) {
+            return {
+                otherChatOrPersona: true,
+                by: match.by,
+                matchedProofId: match.doc._id !== undefined ? String(match.doc._id) : undefined,
+            };
+        }
+        if (q.utr) {
+            const recent = await repo.recentForChat(q.chatId, 20);
+            const repeat = recent.some(r => r.utr === q.utr && r.profile === q.profile && r.telegramMsgId !== q.telegramMsgId);
+            if (repeat)
+                return { otherChatOrPersona: false, sameChatRepeat: true };
+        }
+        return null;
+    }
+    catch {
+        return null;
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/upi-ownership.ts"
+/*!***************************************************!*\
+  !*** ./src/payments/proof-check/upi-ownership.ts ***!
+  \***************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   checkPayeeUpi: () => (/* binding */ checkPayeeUpi),
+/* harmony export */   isMaskedVpa: () => (/* binding */ isMaskedVpa),
+/* harmony export */   normalizeVpa: () => (/* binding */ normalizeVpa),
+/* harmony export */   ownIdsFrom: () => (/* binding */ ownIdsFrom),
+/* harmony export */   withinOneEdit: () => (/* binding */ withinOneEdit)
+/* harmony export */ });
+/** Payee VPA ownership (design 6, P6). */
+function normalizeVpa(v) {
+    return String(v ?? '').trim().toLowerCase().replace(/\s+/g, '');
+}
+/** Masked VPAs (`ab****@ybl`, `xxxx12@ok...`) cannot be compared. */
+function isMaskedVpa(v) {
+    const n = normalizeVpa(v);
+    return n.includes('*') || /^x{3,}/.test(n) || n.includes('•');
+}
+/** True when Levenshtein distance between a and b is <= 1 (substitution, insertion or deletion). */
+function withinOneEdit(a, b) {
+    if (a === b)
+        return true;
+    const la = a.length;
+    const lb = b.length;
+    if (Math.abs(la - lb) > 1)
+        return false;
+    let i = 0;
+    while (i < la && i < lb && a[i] === b[i])
+        i++;
+    if (la === lb)
+        return a.slice(i + 1) === b.slice(i + 1);
+    if (la > lb)
+        return a.slice(i + 1) === b.slice(i);
+    return a.slice(i) === b.slice(i + 1);
+}
+/** `unknown` = we have no own-id list, so nothing can be concluded (never ask every payer). */
+function checkPayeeUpi(payee, ownIds) {
+    const p = normalizeVpa(payee);
+    if (!p)
+        return 'absent';
+    if (isMaskedVpa(p))
+        return 'masked';
+    const own = (ownIds ?? []).map(normalizeVpa).filter(id => id.includes('@'));
+    if (own.length === 0)
+        return 'unknown';
+    return own.some(id => withinOneEdit(p, id)) ? 'own' : 'not_ours';
+}
+/** Adapter over `UpiIds` from services/payment/UpiClass (only `.allIds` is read). */
+function ownIdsFrom(source) {
+    const ids = source?.allIds;
+    return Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x.length > 0) : [];
+}
+
+
+/***/ },
+
+/***/ "./src/payments/vision-shadow-core.ts"
+/*!********************************************!*\
+  !*** ./src/payments/vision-shadow-core.ts ***!
+  \********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildShadowDoc: () => (/* binding */ buildShadowDoc),
+/* harmony export */   classifyDiff: () => (/* binding */ classifyDiff),
+/* harmony export */   failedLocal: () => (/* binding */ failedLocal),
+/* harmony export */   legacyWouldDecision: () => (/* binding */ legacyWouldDecision),
+/* harmony export */   snapshotLocal: () => (/* binding */ snapshotLocal),
+/* harmony export */   snapshotRemote: () => (/* binding */ snapshotRemote)
+/* harmony export */ });
+/**
+ * The decision the legacy credit path reaches from an IimageDetails: credit needs isPayment && isSuccess && amount,
+ * an outage is held, everything else (not a payment, failed/pending, no readable amount, suspected fake) is a reject.
+ * Applied to BOTH sides so the comparison is like for like. Logging only.
+ */
+function legacyWouldDecision(d) {
+    if (d.analysisUnavailable)
+        return 'hold';
+    if (d.isPayment && d.isSuccess && !d.suspectedFake && typeof d.amount === 'number' && d.amount > 0)
+        return 'accept';
+    return 'reject';
+}
+const REJECT_GROUP = new Set(['reject', 'block']);
+/**
+ * `local`/`remote` null means that side produced nothing (error/timeout). Amounts are the raw, sanitised amounts.
+ * agree is true only for both_accept / both_reject / both_ask_proof.
+ */
+function classifyDiff(remote, local, remoteAmount, localAmount) {
+    if (local === null || local === 'hold')
+        return { agree: false, diffKind: 'local_unavailable' };
+    if (remote === null || remote === 'hold')
+        return { agree: false, diffKind: 'remote_unavailable' };
+    if (remote === 'accept' && local === 'accept') {
+        return remoteAmount === localAmount
+            ? { agree: true, diffKind: 'both_accept' }
+            : { agree: false, diffKind: 'amount_diff' };
+    }
+    if (remote === 'accept') {
+        if (REJECT_GROUP.has(local))
+            return { agree: false, diffKind: 'local_rejects_remote_accepts' };
+        if (local === 'ask_proof')
+            return { agree: false, diffKind: 'local_asks_remote_accepts' };
+    }
+    if (local === 'accept' && REJECT_GROUP.has(remote))
+        return { agree: false, diffKind: 'local_accepts_remote_rejects' };
+    if (REJECT_GROUP.has(remote) && REJECT_GROUP.has(local))
+        return { agree: true, diffKind: 'both_reject' };
+    if (remote === 'ask_proof' && local === 'ask_proof')
+        return { agree: true, diffKind: 'both_ask_proof' };
+    return { agree: false, diffKind: 'other_diff' };
+}
+const clip = (s, n) => (s.length > n ? s.slice(0, n) : s);
+/** Copy of what the remote decided, taken BEFORE the payment path mutates the object. `thrown` = getImageDetails threw. */
+function snapshotRemote(d, durationMs, thrown) {
+    if (!d) {
+        return {
+            isPayment: false, amount: 0, isSuccess: false, isFailed: false, isFinished: false, noVerifiableAmount: false,
+            suspectedFake: false, paymentNotSuccessful: false, isInappropriate: false, confidence: 0, provider: null,
+            error: true, errorMessage: clip(String(thrown?.message ?? thrown ?? 'unknown'), 200),
+            analysisUnavailable: false, durationMs, wouldDecision: null,
+        };
+    }
+    return {
+        isPayment: !!d.isPayment, amount: typeof d.amount === 'number' ? d.amount : 0,
+        isSuccess: !!d.isSuccess, isFailed: !!d.isFailed, isFinished: !!d.isFinished,
+        noVerifiableAmount: !!d.noVerifiableAmount, suspectedFake: !!d.suspectedFake,
+        paymentNotSuccessful: !!d.paymentNotSuccessful, isInappropriate: !!d.isInappropriate,
+        confidence: typeof d.confidence === 'number' ? d.confidence : 0,
+        provider: typeof d.provider === 'string' ? d.provider : null,
+        error: !!d.error, errorMessage: null, analysisUnavailable: !!d.analysisUnavailable, durationMs,
+        wouldDecision: legacyWouldDecision(d),
+    };
+}
+/**
+ * Build the local snapshot from a VisionResult, its legacy-adapted details and the proof-check outcome.
+ * Stores no text: only the short verbatim disclaimer phrases the model flagged (max 5 x 120 chars), UTR and payee VPA.
+ */
+function snapshotLocal(vision, legacy, proof, durationMs) {
+    const e = vision.extraction;
+    const outage = vision.outcome === 'all_providers_failed' || vision.outcome === 'no_providers';
+    let would = outage ? 'hold' : legacyWouldDecision(legacy);
+    if (!outage && proof) {
+        if (proof.decision === 'BLOCK')
+            would = 'block';
+        else if (proof.decision === 'ASK_PROOF' && would === 'accept')
+            would = 'ask_proof';
+    }
+    return {
+        outcome: vision.outcome, provider: e?.provider ?? null, model: e?.model ?? null,
+        isPayment: !!legacy.isPayment, amount: typeof legacy.amount === 'number' ? legacy.amount : 0,
+        isSuccess: !!legacy.isSuccess, isFailed: !!legacy.isFailed, isFinished: !!legacy.isFinished,
+        noVerifiableAmount: !!legacy.noVerifiableAmount, confidence: typeof legacy.confidence === 'number' ? legacy.confidence : 0,
+        attempts: (vision.attempts ?? []).slice(0, 8).map((a) => ({ provider: a.provider, errorClass: a.errorClass, ms: a.latencyMs })),
+        watermarkPresent: e?.fakeMarkers?.aiWatermark?.present ?? null,
+        disclaimerPhrases: (e?.fakeMarkers?.disclaimerPhrases ?? []).slice(0, 5).map((p) => clip(String(p), 120)),
+        utr: e?.utr ?? null, payeeUpiId: e?.payeeUpiId ?? null, rulesApplied: (e?.rulesApplied ?? []).slice(0, 10),
+        proofDecision: proof?.decision ?? null, proofReasons: (proof?.reasons ?? []).slice(0, 6),
+        durationMs, error: null, wouldDecision: would,
+    };
+}
+function failedLocal(error, durationMs) {
+    return {
+        outcome: null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
+        isFinished: false, noVerifiableAmount: false, confidence: 0, attempts: [], watermarkPresent: null,
+        disclaimerPhrases: [], utr: null, payeeUpiId: null, rulesApplied: [], proofDecision: null, proofReasons: [],
+        durationMs, error: clip(String(error?.message ?? error ?? 'unknown'), 200), wouldDecision: null,
+    };
+}
+function buildShadowDoc(args) {
+    const { remote, local } = args;
+    const cls = classifyDiff(remote.wouldDecision, local.wouldDecision, remote.amount, local.amount);
+    return {
+        clientId: args.ctx.clientId, chatId: args.ctx.chatId, msgId: args.ctx.msgId, createdAt: args.now,
+        imageSha256: args.sha256, dHash: args.dHash, imageBytes: args.imageBytes,
+        remote, local,
+        wouldDecision: { remote: remote.wouldDecision, local: local.wouldDecision },
+        agree: cls.agree, diffKind: cls.diffKind,
+        wouldDuplicate: args.duplicate ?? null, wouldReuse: args.reuse ?? null,
+    };
+}
+
+
+/***/ },
+
+/***/ "./src/payments/vision-shadow.ts"
+/*!***************************************!*\
+  !*** ./src/payments/vision-shadow.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_IN_FLIGHT: () => (/* binding */ MAX_IN_FLIGHT),
+/* harmony export */   SHADOW_TIMEOUT_MS: () => (/* binding */ SHADOW_TIMEOUT_MS),
+/* harmony export */   analyzeImage: () => (/* binding */ analyzeImage),
+/* harmony export */   awaitShadowIdle: () => (/* binding */ awaitShadowIdle),
+/* harmony export */   getShadowStats: () => (/* binding */ getShadowStats),
+/* harmony export */   imageAnalysisSource: () => (/* binding */ imageAnalysisSource),
+/* harmony export */   scheduleShadow: () => (/* binding */ scheduleShadow),
+/* harmony export */   setShadowDeps: () => (/* binding */ setShadowDeps)
+/* harmony export */ });
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _proof_check__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./proof-check */ "./src/payments/proof-check/index.ts");
+/* harmony import */ var _proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./proof-check/reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./vision-shadow-core */ "./src/payments/vision-shadow-core.ts");
+// Vision shadow + source switch (design U11). IMAGE_ANALYSIS_SOURCE is read at call time:
+//   remote (default)          today's remote result is the decision; tg-vision runs on the same bytes in the background
+//   off-shadow | remote-only  remote only, no shadow
+//   local                     tg-vision's legacy-adapted result is the decision (falls back to remote on outage/error)
+// The shadow is never awaited by the payment path, cannot throw into it, is capped at MAX_IN_FLIGHT per process
+// (excess is dropped and counted) and bounded by SHADOW_TIMEOUT_MS. It writes one `visionShadow` row per screenshot
+// (no image bytes) and runs the duplicate lookup log-only: no markServed, no crediting change.
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:vision-shadow');
+const MAX_IN_FLIGHT = 2;
+const SHADOW_TIMEOUT_MS = 60000;
+/** Unknown/empty values mean `remote`: a typo must never silently switch the decision to local. */
+function imageAnalysisSource(env = process.env) {
+    const v = String(env.IMAGE_ANALYSIS_SOURCE ?? '').trim().toLowerCase();
+    return v === 'local' || v === 'off-shadow' || v === 'remote-only' ? v : 'remote';
+}
+const defaultDeps = () => ({
+    analyze: (image) => (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.analyzePaymentProof)(image),
+    getRepositories: () => null,
+    now: Date.now,
+    maxInFlight: MAX_IN_FLIGHT,
+    timeoutMs: SHADOW_TIMEOUT_MS,
+});
+let deps = defaultDeps();
+/** Test hook. Pass nothing to restore the defaults. */
+function setShadowDeps(over) {
+    deps = { ...defaultDeps(), ...(over ?? {}) };
+    inFlight = 0;
+    dropped = 0;
+    started = 0;
+    completed = 0;
+    failed = 0;
+    timedOut = 0;
+    pending.clear();
+}
+let inFlight = 0;
+let dropped = 0;
+let started = 0;
+let completed = 0;
+let failed = 0;
+let timedOut = 0;
+const pending = new Set();
+function getShadowStats() {
+    return { inFlight, dropped, started, completed, failed, timedOut };
+}
+/** Test hook: resolves when every scheduled shadow has settled. */
+async function awaitShadowIdle() {
+    while (pending.size)
+        await Promise.allSettled([...pending]);
+}
+/** Resolves true if `work` finished, false on timeout. Never rejects. */
+function raceTimeout(work, ms) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), ms);
+        if (typeof timer === 'object' && typeof timer.unref === 'function')
+            timer.unref();
+        work.then(() => { clearTimeout(timer); resolve(true); }, () => { clearTimeout(timer); resolve(true); });
+    });
+}
+async function shadowBody(image, ctx, remote) {
+    const t0 = deps.now();
+    const sha256 = (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(image).digest('hex');
+    let hash = null;
+    try {
+        hash = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.dHash)(image);
+    }
+    catch {
+        hash = null;
+    }
+    let local;
+    let vision = null;
+    try {
+        vision = await deps.analyze(image);
+        const nowMs = deps.now();
+        const legacy = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs });
+        const profile = (process.env.dbcoll || '').toLowerCase();
+        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_3__.proofCheck)({
+            vision,
+            ctx: { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: nowMs },
+            dbcoll: process.env.dbcoll ?? null,
+        });
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotLocal)(vision, legacy, proof, deps.now() - t0);
+    }
+    catch (error) {
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.failedLocal)(error, deps.now() - t0);
+    }
+    // Log-only duplicate lookup (read methods only; never markServed).
+    let duplicate = null;
+    let reuse = null;
+    try {
+        const repo = (deps.getRepositories()?.paymentProofs ?? null);
+        if (repo) {
+            const profile = (process.env.dbcoll || '').toLowerCase();
+            const pctx = { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: deps.now() };
+            const q = (vision ? (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.buildDuplicateQuery)(vision, pctx) : null) ?? {
+                chatId: ctx.chatId, profile, telegramMsgId: ctx.msgId,
+                imageSha256: sha256, ...(hash ? { imageHash: hash } : {}),
+            };
+            const dup = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.lookupServedDuplicate)(repo, q);
+            if (dup)
+                duplicate = { by: dup.by, sameChat: dup.sameChat, ...(dup.matchedProofId ? { matchedProofId: dup.matchedProofId } : {}) };
+            const r = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.lookupReuse)(repo, { chatId: ctx.chatId, profile, telegramMsgId: ctx.msgId, utr: local.utr, imageHash: hash });
+            if (r)
+                reuse = { otherChatOrPersona: r.otherChatOrPersona, ...(r.by ? { by: r.by } : {}), ...(r.sameChatRepeat ? { sameChatRepeat: true } : {}) };
+        }
+    }
+    catch { /* log-only */ }
+    const doc = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.buildShadowDoc)({
+        ctx, now: new Date(deps.now()), sha256, dHash: hash, imageBytes: image.length, remote, local, duplicate, reuse,
+    });
+    const store = deps.getRepositories()?.visionShadow;
+    if (store)
+        await store.insert(doc);
+    logger.log(`[vision-shadow] chat=${ctx.chatId} msg=${ctx.msgId} diff=${doc.diffKind} remote=${doc.wouldDecision.remote} local=${doc.wouldDecision.local} localMs=${local.durationMs}`);
+}
+/**
+ * Fire-and-forget. Returns immediately; never throws. Drops (and counts) when MAX_IN_FLIGHT shadows are running.
+ * `remote` must be a snapshot taken before the payment path mutates the details object.
+ */
+function scheduleShadow(image, ctx, remote) {
+    try {
+        if (!Buffer.isBuffer(image) || image.length === 0)
+            return;
+        if (inFlight >= deps.maxInFlight) {
+            dropped++;
+            logger.warn(`[vision-shadow] dropped (in flight ${inFlight}, dropped total ${dropped})`);
+            return;
+        }
+        inFlight++;
+        started++;
+        const run = (async () => {
+            const finished = await raceTimeout(shadowBody(image, ctx, remote).then(() => { completed++; }, (e) => { failed++; logger.warn(`[vision-shadow] failed: ${String(e?.message ?? e)}`); }), deps.timeoutMs);
+            if (!finished) {
+                timedOut++;
+                logger.warn(`[vision-shadow] timed out after ${deps.timeoutMs}ms`);
+            }
+        })().finally(() => { inFlight--; });
+        pending.add(run);
+        void run.finally(() => pending.delete(run));
+    }
+    catch (error) {
+        logger.warn(`[vision-shadow] schedule failed: ${String(error?.message ?? error)}`);
+    }
+}
+/**
+ * Entry point used by processImage. `remoteFn` is getImageDetails (injected so this module stays light and
+ * the remote path is untouched). In the default mode the returned object IS the remote's own object.
+ */
+async function analyzeImage(photoBuffer, ctx, remoteFn) {
+    const source = imageAnalysisSource();
+    if (ctx.getRepositories)
+        deps.getRepositories = ctx.getRepositories;
+    if (source === 'local') {
+        const local = await tryLocalDecision(photoBuffer);
+        if (local)
+            return local;
+        // outage / error: fall through to the remote result (its own retry + hold handling applies)
+    }
+    const t0 = deps.now();
+    let details;
+    try {
+        details = await remoteFn(photoBuffer);
+    }
+    catch (error) {
+        if (source === 'remote') {
+            try {
+                scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - t0, error));
+            }
+            catch { /* never */ }
+        }
+        throw error;
+    }
+    if (source === 'remote') {
+        try {
+            scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(details, deps.now() - t0));
+        }
+        catch { /* never */ }
+    }
+    return details;
+}
+/** Local decision, or null when tg-vision had an outage / threw / timed out (caller then uses remote). */
+async function tryLocalDecision(photoBuffer) {
+    try {
+        let timer;
+        const vision = await Promise.race([
+            deps.analyze(photoBuffer),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('local analysis timeout')), deps.timeoutMs); }),
+        ]).finally(() => { if (timer)
+            clearTimeout(timer); });
+        if (vision.outcome === 'all_providers_failed' || vision.outcome === 'no_providers')
+            return null;
+        return (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs: deps.now() });
+    }
+    catch (error) {
+        logger.warn(`[vision-shadow] local decision failed, using remote: ${String(error?.message ?? error)}`);
+        return null;
+    }
+}
 
 
 /***/ },
@@ -78558,6 +88173,17 @@ module.exports = require("bson");
 
 /***/ },
 
+/***/ "buffer"
+/*!*************************!*\
+  !*** external "buffer" ***!
+  \*************************/
+(module) {
+
+"use strict";
+module.exports = require("buffer");
+
+/***/ },
+
 /***/ "chalk"
 /*!************************!*\
   !*** external "chalk" ***!
@@ -78866,6 +88492,28 @@ module.exports = require("telegram/tl");
 
 /***/ },
 
+/***/ "util"
+/*!***********************!*\
+  !*** external "util" ***!
+  \***********************/
+(module) {
+
+"use strict";
+module.exports = require("util");
+
+/***/ },
+
+/***/ "assert"
+/*!*************************!*\
+  !*** external "assert" ***!
+  \*************************/
+(module) {
+
+"use strict";
+module.exports = require("assert");
+
+/***/ },
+
 /***/ "child_process"
 /*!********************************!*\
   !*** external "child_process" ***!
@@ -79009,6 +88657,17 @@ module.exports = require("os");
 
 /***/ },
 
+/***/ "stream"
+/*!*************************!*\
+  !*** external "stream" ***!
+  \*************************/
+(module) {
+
+"use strict";
+module.exports = require("stream");
+
+/***/ },
+
 /***/ "url"
 /*!**********************!*\
   !*** external "url" ***!
@@ -79028,6 +88687,17 @@ module.exports = require("url");
 
 "use strict";
 module.exports = require("v8");
+
+/***/ },
+
+/***/ "zlib"
+/*!***********************!*\
+  !*** external "zlib" ***!
+  \***********************/
+(module) {
+
+"use strict";
+module.exports = require("zlib");
 
 /***/ }
 
