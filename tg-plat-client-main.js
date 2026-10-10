@@ -23407,6 +23407,21 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), update, { upsert: false });
         return result.acknowledged && result.matchedCount === 1;
     }
+    /**
+     * $set bookkeeping fields on an EXISTING row WITHOUT touching lastMsgTimeStamp and without
+     * creating a row. lastMsgTimeStamp means "last inbound message": the 30-day idle sweep and the
+     * replier read it, so an outbound reminder stamp must not refresh it (setField does).
+     * True when exactly one row matched. Throws; callers catch.
+     */
+    async setBookkeepingFields(chatId, identity, fields) {
+        const safe = { ...fields };
+        for (const key of INBOUND_FORBIDDEN_KEYS)
+            delete safe[key];
+        if (Object.keys(safe).length === 0)
+            return false;
+        const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { $set: safe }, { upsert: false });
+        return result.acknowledged && result.matchedCount === 1;
+    }
     /** Delete the persona row(s) of chatId. Throws. */
     async deleteForPersona(chatId, identity) {
         return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
@@ -33954,6 +33969,27 @@ class UserDataDtoCrud {
     async readOtherPersonaRows(chatId) {
         return await this.userDataRepository().findInOtherPersonas(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
+    /** Stamp lastReminderAt / reminderBackoffUntil (bookkeeping only: never refreshes lastMsgTimeStamp). Never throws. */
+    async setReminderBookkeeping(chatId, fields) {
+        try {
+            return await this.userDataRepository().setBookkeepingFields(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), fields);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error recording reminder bookkeeping for ${chatId}`, false);
+            return false;
+        }
+    }
+    /** Newest lastReminderAt across this user's rows on OTHER personas (0 when none). Never throws. */
+    async lastReminderByOtherPersonas(chatId) {
+        try {
+            const rows = await this.userDataRepository().findInOtherPersonas(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
+            return rows.reduce((max, row) => Math.max(max, Number(row.lastReminderAt) || 0), 0);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error reading other-persona reminders for ${chatId}`, false);
+            return 0;
+        }
+    }
     /** This persona's real payers, most recently active first (throws on DB failure). */
     async listPaidChatIds(limit) {
         return this.userDataRepository().listPaidChatIds((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), limit);
@@ -36974,6 +37010,10 @@ function swapDaysForCurrentSpamState(now = Date.now()) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REMINDER_COOLDOWN_MS: () => (/* binding */ REMINDER_COOLDOWN_MS),
+/* harmony export */   REMINDER_MAX_SENDS_PER_RUN: () => (/* binding */ REMINDER_MAX_SENDS_PER_RUN),
+/* harmony export */   REMINDER_RUN_BUDGET_MS: () => (/* binding */ REMINDER_RUN_BUDGET_MS),
+/* harmony export */   REMINDER_UNRESOLVED_BACKOFF_MS: () => (/* binding */ REMINDER_UNRESOLVED_BACKOFF_MS),
 /* harmony export */   asktoPay: () => (/* binding */ asktoPay),
 /* harmony export */   callToPaid: () => (/* binding */ callToPaid),
 /* harmony export */   calloff: () => (/* binding */ calloff),
@@ -37191,35 +37231,71 @@ async function replyUnread(client, unreadUserDialogs) {
         }
     }
 }
+/** Max auto-calls queued per callToPaid run (each is spaced AUTO_CALL_SPACING_MS apart). */
+const AUTO_CALL_MAX_PER_RUN = 10;
+const AUTO_CALL_SPACING_MS = 120000;
+/** Do not auto-call the same user again within this window (the job runs every 3 hours). */
+const AUTO_CALL_COOLDOWN_MS = 3 * 60 * 60 * 1000;
+let autoCalling = false;
 async function callToPaid() {
-    logger.log("Calls Initiated");
-    const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-    const ids = (await db.readRecentPaidPpl());
-    await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-        title: "Auto calls initiated",
-        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
-        summary: "tg-aut started auto-call outreach for recent paid users.",
-        fields: [
-            { label: "Users", value: ids?.length ?? 0 },
-        ],
-        tags: ["tg-aut", "calls", "paid-users"],
-    }, "TgAutCoreUtils.notification.autoCalls");
-    if (ids !== undefined) {
-        logger.log("CallIds:", ids?.length);
+    if (autoCalling) {
+        logger.warn("callToPaid skipped: previous run is still active");
+        return;
+    }
+    autoCalling = true;
+    try {
+        logger.log("Calls Initiated");
+        const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
+        // stats2 (not the legacy `stats` list): respToPaidPplfn deletes legacy `stats` rows for every
+        // paid user earlier in the same hourly job, so reading them here always yielded zero users.
+        const ids = await db.readRecentPaidPpl2();
+        if (ids === undefined) {
+            logger.log("Ids are undefined");
+            return;
+        }
+        const now = Date.now();
+        const due = [];
+        const seen = new Set();
         for (const id of ids) {
-            logger.log("call Id: ", id.chatId.toString());
-            const user = await db.read(id.chatId.toString());
-            if (!user.demoGiven) {
-                await new Promise((resolve) => {
-                    scheduleCoreUtilsTask(async () => {
-                        await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_18__.requestCall)(id.chatId.toString(), false, "Auto Call to Paid Users");
-                    }, 120000, `callToPaid.${id.chatId}`, resolve);
-                });
+            const chatId = id?.chatId?.toString().trim();
+            if (!chatId || seen.has(chatId))
+                continue;
+            seen.add(chatId);
+            try {
+                const user = await db.read(chatId);
+                if (!user || user.canReply === 0)
+                    continue;
+                if (!hasPendingPaidService(user) || !canProceedWithService(user))
+                    continue;
+                if ((user.callTime ?? 0) > now - AUTO_CALL_COOLDOWN_MS)
+                    continue;
+                due.push(user);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `callToPaid.read.${chatId}`, false);
             }
         }
+        logger.log("CallIds:", due.length);
+        await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            title: "Auto calls initiated",
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
+            summary: "tg-aut started auto-call outreach for recent paid users.",
+            fields: [
+                { label: "Users", value: Math.min(due.length, AUTO_CALL_MAX_PER_RUN) },
+            ],
+            tags: ["tg-aut", "calls", "paid-users"],
+        }, "TgAutCoreUtils.notification.autoCalls");
+        for (const user of due.slice(0, AUTO_CALL_MAX_PER_RUN)) {
+            logger.log("call Id: ", user.chatId.toString());
+            await new Promise((resolve) => {
+                scheduleCoreUtilsTask(async () => {
+                    await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_18__.requestCall)(user.chatId.toString(), false, "Auto Call to Paid Users");
+                }, AUTO_CALL_SPACING_MS, `callToPaid.${user.chatId}`, resolve);
+            });
+        }
     }
-    else {
-        logger.log("Ids are undefined");
+    finally {
+        autoCalling = false;
     }
 }
 /**
@@ -37266,6 +37342,15 @@ async function sendVideoToChannel(videoBuffer) {
     }
 }
 let askingtopay = false;
+/** No more than one tempter/reminder per user within this window (any persona). The cron fires at
+ *  07:15 13:15 16:15 21:15 23:15 IST (gaps 6/3/5/2/8h); 5h gives at most 3 a day (07, 13, 21) and,
+ *  unlike 6h, is not defeated by the per-send stagger + instance jitter drifting the stamp. */
+const REMINDER_COOLDOWN_MS = 5 * 60 * 60 * 1000;
+/** A user this account cannot address is skipped for this long instead of being retried every run. */
+const REMINDER_UNRESOLVED_BACKOFF_MS = 24 * 60 * 60 * 1000;
+/** Per-run ceilings so one run can never reach the next cron fire (smallest gap is 2h). */
+const REMINDER_MAX_SENDS_PER_RUN = 100;
+const REMINDER_RUN_BUDGET_MS = 60 * 60 * 1000;
 async function asktoPay(client, time) {
     if (!client) {
         logger.warn("asktoPay skipped: Telegram client is not available");
@@ -37284,7 +37369,10 @@ async function asktoPay(client, time) {
             return;
         }
         logger.log(`asking to PAy for : ${ids.length}`);
+        const startedAt = Date.now();
         const seenChatIds = new Set();
+        // Phase 1: pick who is due (no delays). Phase 2 paces only the real sends.
+        const due = [];
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             let chatId;
@@ -37318,9 +37406,45 @@ async function asktoPay(client, time) {
                     logger.warn(`asktoPay skipped ${chatId}: stats2 marks the user paid but userData payAmount is below 15`);
                     continue;
                 }
-                // Preserve the existing per-user pacing. A paid user with service still pending
-                // receives the service-init path; once service is complete, restart engagement.
-                const staggerMs = i * (time + Math.floor(Math.random() * 3000));
+                if (!hasPendingPaidService(user)) {
+                    // Tempter path only: cooldowns do not gate the pending-service call request,
+                    // which has its own guards (canProceedWithService + requestCall).
+                    const now = Date.now();
+                    if ((user.reminderBackoffUntil ?? 0) > now) {
+                        logger.debug(`asktoPay skipped ${chatId}: unresolved-user backoff active`);
+                        continue;
+                    }
+                    if ((user.lastReminderAt ?? 0) > now - REMINDER_COOLDOWN_MS) {
+                        logger.debug(`asktoPay skipped ${chatId}: reminded less than ${REMINDER_COOLDOWN_MS / 3600000}h ago`);
+                        continue;
+                    }
+                    if ((await db.lastReminderByOtherPersonas(chatId)) > now - REMINDER_COOLDOWN_MS) {
+                        logger.log(`asktoPay skipped ${chatId}: another persona reminded this user recently`);
+                        continue;
+                    }
+                }
+                due.push(user);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `asktoPay.${chatId}`, false);
+            }
+        }
+        // Longest-since-last-reminder first, so a capped run does not starve the tail.
+        due.sort((a, b) => (a.lastReminderAt ?? 0) - (b.lastReminderAt ?? 0));
+        if (due.length > REMINDER_MAX_SENDS_PER_RUN) {
+            logger.warn(`asktoPay: ${due.length} due, capping this run at ${REMINDER_MAX_SENDS_PER_RUN}; the rest wait for the next run`);
+        }
+        let sends = 0;
+        for (const user of due) {
+            if (sends >= REMINDER_MAX_SENDS_PER_RUN || Date.now() - startedAt > REMINDER_RUN_BUDGET_MS) {
+                logger.warn(`asktoPay: run ceiling reached after ${sends} sends; remaining users wait for the next run`);
+                break;
+            }
+            const chatId = user.chatId.toString();
+            // Constant per-send pacing (was i * pacing, i.e. quadratic total runtime).
+            const staggerMs = sends === 0 ? 0 : time + Math.floor(Math.random() * 3000);
+            sends++;
+            try {
                 await new Promise((resolve) => {
                     scheduleCoreUtilsTask(async () => {
                         if (hasPendingPaidService(user)) {
@@ -37335,8 +37459,16 @@ async function asktoPay(client, time) {
                         }
                         else {
                             logger.log(`Restarting paid-user engagement for ${user.chatId}`);
-                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__.initMsg)({ tempters: true }) });
+                            let outcome;
+                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__.initMsg)({ tempters: true }) }, (o) => { outcome = o; });
                             logger.log(`Paid-user engagement init ${sent ? "sent" : "failed"} for ${user.chatId}`);
+                            if (sent) {
+                                await db.setReminderBookkeeping(chatId, { lastReminderAt: Date.now() });
+                            }
+                            else if (outcome === 'unresolved') {
+                                logger.warn(`asktoPay: ${chatId} cannot be resolved by this account; backing off ${REMINDER_UNRESOLVED_BACKOFF_MS / 3600000}h`);
+                                await db.setReminderBookkeeping(chatId, { reminderBackoffUntil: Date.now() + REMINDER_UNRESOLVED_BACKOFF_MS });
+                            }
                         }
                     }, staggerMs, `asktoPay.${chatId}`, resolve);
                 });
@@ -60804,6 +60936,18 @@ class ReplierQueueManager {
                 waitTime,
                 pushedAt: Date.now()
             };
+            // One pending reply per chat while a PEER_FLOOD deferral is active: the newest context
+            // replaces the parked content but INHERITS the parked backoff (notBefore/floodRetries), so a
+            // new inbound message never causes an earlier retry to a peer Telegram is throttling.
+            const parked = this.queue.find(item => item.chatId === chatId && (item.floodRetries ?? 0) > 0);
+            if (parked) {
+                parked.msg = msg;
+                parked.file = file;
+                parked.msgId = replyMessageId;
+                parked.waitTime = waitTime;
+                parked.pushedAt = replyItem.pushedAt;
+                return;
+            }
             // Deduplication: If no file, merge with existing text-only item
             if (!file) {
                 const existingIndex = this.queue.findIndex(item => item.chatId === chatId && !item.file);
@@ -60838,8 +60982,36 @@ class ReplierQueueManager {
     /**
      * Remove and return first item from queue
      */
-    shift() {
-        return this.queue.shift();
+    shift(now = Date.now()) {
+        // Skip items parked by a PEER_FLOOD backoff. Prefer never-flooded items (users actively
+        // talking) over due retries, so retries never delay a live conversation.
+        let idx = -1;
+        for (let i = 0; i < this.queue.length; i++) {
+            const item = this.queue[i];
+            if (item.notBefore !== undefined && item.notBefore > now)
+                continue;
+            if (!item.floodRetries) {
+                idx = i;
+                break;
+            }
+            if (idx === -1)
+                idx = i;
+        }
+        if (idx === -1)
+            return undefined;
+        return this.queue.splice(idx, 1)[0];
+    }
+    /** True when at least one item is eligible to be attempted now. */
+    hasDue(now = Date.now()) {
+        return this.queue.some(item => item.notBefore === undefined || item.notBefore <= now);
+    }
+    /** Count of items eligible now (parked PEER_FLOOD retries excluded). */
+    getDueLength(now = Date.now()) {
+        return this.queue.filter(item => item.notBefore === undefined || item.notBefore <= now).length;
+    }
+    /** Items eligible now, in queue order. */
+    getDueItems(now = Date.now()) {
+        return this.queue.filter(item => item.notBefore === undefined || item.notBefore <= now);
     }
     /**
      * Add item to front of queue
@@ -60851,6 +61023,18 @@ class ReplierQueueManager {
      * Add item to end of queue
      */
     pushItem(item) {
+        // A deferred retry must not duplicate a chat that already has a pending item (a newer
+        // inbound reply may have been queued while this one was in flight): newest content wins,
+        // the deferral (backoff) is kept.
+        if (item.floodRetries) {
+            const existing = this.queue.find(q => q.chatId === item.chatId);
+            if (existing) {
+                existing.floodRetries = Math.max(existing.floodRetries ?? 0, item.floodRetries);
+                existing.notBefore = Math.max(existing.notBefore ?? 0, item.notBefore ?? 0);
+                existing.retryCount = Math.max(existing.retryCount ?? 0, item.retryCount ?? 0) || existing.retryCount;
+                return;
+            }
+        }
         this.queue.push(item);
     }
     /**
@@ -60888,7 +61072,9 @@ class ReplierQueueManager {
             msgId: item.msgId,
             waitTime: item.waitTime,
             pushedAt: item.pushedAt,
-            retryCount: item.retryCount
+            retryCount: item.retryCount,
+            ...(item.floodRetries ? { floodRetries: item.floodRetries } : {}),
+            ...(item.notBefore !== undefined ? { notBefore: item.notBefore } : {}),
         }));
     }
     /**
@@ -61093,6 +61279,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:replier");
+// Circuit breaker: this many PEER_FLOOD hits within the window = account-level throttle.
+const PEER_FLOOD_BREAKER_HITS = 3;
+const PEER_FLOOD_BREAKER_WINDOW_MS = 15 * 60 * 1000;
 /** A deactivated recipient cannot recover; retrying only burns account send attempts. */
 function isRecipientDeactivatedError(error) {
     const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_1__.parseTelegramError)(error);
@@ -61150,6 +61339,7 @@ class Replier {
         this.pendingStateSaveTimeout = null;
         this.lastQueueUpdateSave = 0;
         this.processInterval = null;
+        this.peerFloodHits = [];
         this.updateCount = 0; // Track updates for periodic cleanup
         this.config = config;
         this.rateLimitConfig = rateLimitConfig;
@@ -61311,7 +61501,7 @@ class Replier {
      * Process replies from queue
      */
     async processReplies(client) {
-        while (!this.queueManager.isEmpty()) {
+        while (this.queueManager.hasDue()) {
             // Also honour the per-instance flood/slowmode backoff (`this.sleepTime`).
             // Without this, a FLOOD_WAIT/PEER_FLOOD backoff (sleepTime set minutes
             // ahead) would not pause the loop: it would shift each queued reply,
@@ -61397,7 +61587,7 @@ class Replier {
             }
             else {
                 // Send typing indicators while waiting (limit to first 10 to avoid blocking)
-                const items = this.queueManager.getAllItems();
+                const items = this.queueManager.getDueItems();
                 const typingLimit = Math.min(items.length, 10);
                 for (let i = 0; i < typingLimit; i++) {
                     await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_15__.handleTyping)(client, items[i].chatId), { timeout: 5000, errorMessage: "SetTyping Timeout" });
@@ -61411,7 +61601,7 @@ class Replier {
      * Check replier health
      */
     async checkHealth() {
-        const queueLength = this.queueManager.getLength();
+        const queueLength = this.queueManager.getDueLength();
         const queueSizes = this.rateLimiter.getQueueSizes();
         await this.healthChecker.checkHealth(queueLength, queueSizes.minute, queueSizes.tenMinutes, queueSizes.hour, this.globalSleepTime, this.sleepTime, this.rateLimitConfig, () => this.rateLimiter.canSendMessage(), () => this.replier(true));
     }
@@ -61465,7 +61655,16 @@ class Replier {
             case 'PEER_FLOOD': {
                 // PEER_FLOOD is a user-level throttle that can persist for minutes.
                 // 30-60s gets hit again immediately — use 5-10 minutes instead.
-                const gapMs = 5 * 60 * 1000 + Math.random() * 5 * 60 * 1000;
+                // PEER_FLOOD is per-peer: the failing reply is parked on its own chat by reply-processor
+                // (5/15/30/60 min backoff), so one hit only paces the loop briefly. Several hits in a
+                // short window mean the account itself is being throttled -> full 5-10 min stop.
+                const now = Date.now();
+                this.peerFloodHits = this.peerFloodHits.filter((t) => now - t < PEER_FLOOD_BREAKER_WINDOW_MS);
+                this.peerFloodHits.push(now);
+                const tripped = this.peerFloodHits.length >= PEER_FLOOD_BREAKER_HITS;
+                const gapMs = tripped
+                    ? 5 * 60 * 1000 + Math.random() * 5 * 60 * 1000
+                    : 60 * 1000 + Math.random() * 60 * 1000;
                 void sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                     title: "Replier peer flood",
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
@@ -61475,7 +61674,7 @@ class Replier {
                     ],
                     tags: ["tg-aut", "replier", "peer-flood"],
                 }, `Replier.notification.peerFlood.${clientId}`);
-                this.sleepTime = Date.now() + gapMs;
+                this.sleepTime = Math.max(this.sleepTime, Date.now() + gapMs);
                 break;
             }
             default:
@@ -61595,7 +61794,10 @@ class Replier {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PEER_FLOOD_BACKOFF_MS: () => (/* binding */ PEER_FLOOD_BACKOFF_MS),
+/* harmony export */   PEER_FLOOD_MAX_AGE_MS: () => (/* binding */ PEER_FLOOD_MAX_AGE_MS),
 /* harmony export */   handleTyping: () => (/* binding */ handleTyping),
+/* harmony export */   peerFloodDelayMs: () => (/* binding */ peerFloodDelayMs),
 /* harmony export */   processSingleReply: () => (/* binding */ processSingleReply)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -61614,10 +61816,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_maskSensitiveWords__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/maskSensitiveWords */ "./src/utils/maskSensitiveWords.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
 
 
 
@@ -61747,6 +61951,23 @@ async function handleTyping(client, chatId) {
 const RECENT_MAX_AGE_MS = 20 * 60 * 1000;
 // In-memory retried items are not covered by state-persistence's STALE_CUTOFF_MS (load-time only).
 const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
+// PEER_FLOOD is per-peer and intermittent (fleet 2026-10-10: 1,662 PEER_FLOOD sends vs 9,223 successes
+// in 24h, other chats kept succeeding). A reply that hits it is parked on its own chat and retried
+// with a growing, jittered backoff (never faster than 5 min) until delivered or this age. 3h: each
+// step is slower than the previous one (5,15,30,60,60... min) so a reply gets ~6 attempts, and a
+// reply to the user's last message is still relevant to a user who is waiting for hours.
+const PEER_FLOOD_BACKOFF_MS = [5, 15, 30, 60].map((m) => m * 60 * 1000);
+const PEER_FLOOD_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+/** Backoff before the next attempt after the Nth PEER_FLOOD (1-based), +-20% jitter, capped at 60 min base. */
+function peerFloodDelayMs(floodRetries, random = Math.random()) {
+    const base = PEER_FLOOD_BACKOFF_MS[Math.min(Math.max(floodRetries, 1), PEER_FLOOD_BACKOFF_MS.length) - 1];
+    return Math.round(base * (0.8 + 0.4 * random));
+}
+function maxAgeFor(item) {
+    if ((item.floodRetries ?? 0) > 0)
+        return PEER_FLOOD_MAX_AGE_MS;
+    return (item.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
+}
 /**
  * Process a single reply
  */
@@ -61765,7 +61986,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             // Transient DB error: NOT a missing user. Retry without consuming the drop budget
             // (retryCount is unchanged); the item's age bounds how long it can keep retrying.
             const ageMs = Date.now() - replyObj.pushedAt;
-            const maxAgeMs = (replyObj.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
+            const maxAgeMs = maxAgeFor(replyObj);
             const errorMessage = userRead.error instanceof Error ? userRead.error.message : String(userRead.error);
             if (ageMs < maxAgeMs) {
                 logger.warn('[replier] reply deferred: user lookup failed (transient)', {
@@ -61798,11 +62019,11 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             msgs = rawMsgs ? rawMsgs : null;
             const hasOthersMsg = !msgs || (Array.isArray(msgs) && msgs.some((msg) => msg?.fromId == null));
             const ageMs = Date.now() - replyObj.pushedAt;
-            const isRetry = (replyObj.retryCount ?? 0) > 0;
+            const isRetry = (replyObj.retryCount ?? 0) > 0 || (replyObj.floodRetries ?? 0) > 0;
             // Fresh items must be < 20 min old. Items already retried (e.g. after PEER_FLOOD, whose
             // backoff can outlast the fresh window) keep their original pushedAt, so they are bounded by the
             // 1h cap instead; otherwise every retried reply would be silently dropped as stale.
-            const isRecent = ageMs < (isRetry ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS);
+            const isRecent = ageMs < maxAgeFor(replyObj);
             if (!isRecent && isRetry) {
                 logger.warn(`Dropping stale retried reply: chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} ageMs=${ageMs} retryCount=${replyObj.retryCount}`);
             }
@@ -61842,6 +62063,21 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         }
     }
     catch (error) {
+        if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error).type === 'PEER_FLOOD') {
+            // Keep the reply: park it on its own chat (see PEER_FLOOD_BACKOFF_MS). Not counted against
+            // the 5-try budget, which would drop it within ~45 min.
+            const floodRetries = (replyObj.floodRetries ?? 0) + 1;
+            const ageMs = Date.now() - replyObj.pushedAt;
+            const delayMs = peerFloodDelayMs(floodRetries);
+            if (ageMs + delayMs <= PEER_FLOOD_MAX_AGE_MS) {
+                logger.warn(`[replier] PEER_FLOOD: reply deferred chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} floodRetries=${floodRetries} retryInMs=${delayMs} ageMs=${ageMs}`);
+                onRequeue({ ...replyObj, floodRetries, notBefore: Date.now() + delayMs });
+            }
+            else {
+                logger.warn(`[replier] PEER_FLOOD: reply dropped, would exceed max age chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} floodRetries=${floodRetries} ageMs=${ageMs} maxAgeMs=${PEER_FLOOD_MAX_AGE_MS}`);
+            }
+            return;
+        }
         logger.warn(`Error processing single reply (requeue handled):`, error);
         const currentRetries = (replyObj.retryCount ?? 0) + 1;
         if (currentRetries <= 5) {
@@ -62102,7 +62338,8 @@ const moduleDirname =  true
     : 0;
 // Constants
 const STATE_TTL_SECONDS = 1 * 24 * 60 * 60; // 1 day
-const STALE_CUTOFF_MS = 60 * 60 * 1000; // 1 hour
+// Must cover reply-processor's PEER_FLOOD_MAX_AGE_MS (3h) so deferred replies survive a restart.
+const STALE_CUTOFF_MS = 3 * 60 * 60 * 1000; // 3 hours
 /**
  * Get persistence key using mobile and clientId
  */
@@ -74339,39 +74576,66 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   trySendingMsg: () => (/* binding */ trySendingMsg)
 /* harmony export */ });
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
 
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-aut:send-message');
-async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj) {
-    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_4__.isChatOnCall)(chatId)) {
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:send-message');
+const UNRESOLVED_ERROR = /input entity|PEER_ID_INVALID|USER_ID_INVALID|USER_DEACTIVATED|INPUT_USER_DEACTIVATED/i;
+/**
+ * Last-resort addressing from the id + accessHash stored on the userData row. Only valid for a
+ * plain positive user id with a non-empty numeric hash; anything else returns null.
+ */
+function inputPeerFromStoredHash(chatId, accessHash) {
+    if (!accessHash || !/^\d+$/.test(String(chatId)) || !/^-?\d+$/.test(String(accessHash)))
+        return null;
+    return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPeerUser({ userId: big_integer__WEBPACK_IMPORTED_MODULE_1___default()(String(chatId)), accessHash: big_integer__WEBPACK_IMPORTED_MODULE_1___default()(String(accessHash)) });
+}
+async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, onOutcome) {
+    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_6__.isChatOnCall)(chatId)) {
         logger.log(`Skipping message to ${username ?? chatId}: on an in-house call`);
+        onOutcome?.('on_call');
         return false;
     }
     logger.log(`Attempting message send to ${username ?? chatId}`);
-    const dialogsManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().dialogManager;
+    const dialogsManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance().dialogManager;
     try {
-        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_2__.resolveEntity)(client, dialogsManager, chatId);
-        await client.sendMessage(entity || chatId, msgObj);
+        // swallowMiss: a total miss is handled below (stored accessHash) instead of throwing.
+        const resolved = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_4__.resolveEntity)(client, dialogsManager, chatId, { swallowMiss: true });
+        const peer = resolved ?? inputPeerFromStoredHash(chatId, accessHash);
+        if (!peer) {
+            logger.warn(`Cannot resolve ${username ?? chatId}: no entity and no stored accessHash`);
+            onOutcome?.('unresolved');
+            return false;
+        }
+        await client.sendMessage(peer, msgObj);
         logger.log(`Sent message successfully to ${username ?? chatId}`);
+        onOutcome?.('sent');
         try {
             await dialogsManager.markAsRead(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `ErrorMarkAsRead for Chat : ${chatId} | Username: @${username}}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `ErrorMarkAsRead for Chat : ${chatId} | Username: @${username}}`);
         }
         return true;
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error Sending msg: ${msgObj.message} to ${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error Sending msg: ${msgObj.message} to ${chatId}`);
         logger.error(`Message send failed for ${username ?? chatId}`);
+        const text = error instanceof Error ? error.message : String(error);
+        onOutcome?.(UNRESOLVED_ERROR.test(text) ? 'unresolved' : 'failed');
         return false;
     }
 }
