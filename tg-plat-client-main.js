@@ -1020,17 +1020,24 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
     }
     createFeeder(call, command) {
         const { StreamDevice } = this.ntgLib;
+        let feedErrors = 0;
         return new _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioFeeder({
             command,
             sampleRate: this.audio.sampleRate,
             channels: this.audio.channels,
             echo: this.echo,
-            send: (frame) => this.ntg.sendExternalFrame(call.userId, StreamDevice.MICROPHONE, frame, {
+            // Byte fields go to the binding as number[] (toByteArray): a Buffer here fails every frame
+            // with "An array was expected" (seen live on VM1, 2026-10-10) and the show is silent.
+            send: (frame) => this.ntg.sendExternalFrame(call.userId, StreamDevice.MICROPHONE, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(frame), {
                 absoluteCaptureTimestampMs: BigInt(Date.now()), rotation: 0, width: 0, height: 0,
             }),
             onEnd: () => this.trackEnded(call, 'audio'),
             onError: (error) => {
-                this.logger.warn('[tg-calls] echo audio feed error', error?.message ?? error);
+                // A send error repeats every 10 ms frame: log the first and then every 500th.
+                feedErrors += 1;
+                if (error instanceof _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioSourceError || feedErrors % 500 === 1) {
+                    this.logger.warn(`[tg-calls] echo audio feed error (x${feedErrors})`, error?.message ?? error);
+                }
                 // The audio source died: end the call as a media failure instead of idling until the cap.
                 if (error instanceof _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioSourceError)
                     void this.localHangup(call, 'media_failed', false);
@@ -1095,7 +1102,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             if (!feeder)
                 return;
             for (const frame of frames)
-                feeder.pushRemote(frame.data);
+                feeder.pushRemote(Buffer.from(frame.data));
         });
         this.ntg.onRemoteSourceChange((chatId, source) => {
             const call = this.calls.get(chatId.toString());
