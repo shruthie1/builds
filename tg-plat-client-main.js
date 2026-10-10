@@ -681,13 +681,15 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
     constructor(client, options = {}) {
         super();
         this.callerFilter = null;
-        this.active = null;
+        /** Live calls by peer user id. ntgcalls keys every call and callback by that id. */
+        this.calls = new Map();
         this.started = false;
         this.rawBuilder = new telegram_events__WEBPACK_IMPORTED_MODULE_4__.Raw({});
         this.onUpdate = (update) => { void this.handleUpdate(update); };
         this.lastAccessHash = new Map();
         this.client = client;
-        this.ntgLib = loadNtgCalls();
+        this.ntgLib = options.ntgModule ?? loadNtgCalls();
+        this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrentCalls ?? 1));
         this.ntg = new this.ntgLib.NTgCalls();
         this.logger = options.logger ?? console;
         this.audio = { ..._media__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_AUDIO, ...options.audio };
@@ -720,10 +722,9 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         this.client.addEventHandler(this.onUpdate, this.rawBuilder);
         this.started = true;
     }
-    /** Hang up any active call and unsubscribe. */
+    /** Hang up every active call and unsubscribe. */
     async stop() {
-        if (this.active)
-            await this.hangup();
+        await this.hangup();
         if (this.started)
             this.client.removeEventHandler(this.onUpdate, this.rawBuilder);
         this.started = false;
@@ -756,11 +757,22 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             return false;
         }
     }
+    /** True when no further call can start (maxConcurrentCalls reached). */
     isBusy() {
-        return this.active !== null;
+        return this.calls.size >= this.maxConcurrent;
+    }
+    activeCallCount() {
+        return this.calls.size;
+    }
+    isInCallWith(userId) {
+        return this.calls.has(userId.toString());
     }
     getActiveCall() {
-        return this.active ? { ...this.active.record } : null;
+        const first = this.calls.values().next().value;
+        return first ? { ...first.record } : null;
+    }
+    getActiveCalls() {
+        return Array.from(this.calls.values(), (call) => ({ ...call.record }));
     }
     /**
      * Ring `user` and stream `media` once answered. Resolves with the call record when the call
@@ -768,16 +780,28 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
      */
     async call(user, media, options = {}) {
         this.start();
-        if (this.active)
+        if (this.isBusy())
             throw new Error('CallEngine is busy with another call');
         const entity = await this.client.getEntity(user);
         if (!(entity instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User))
             throw new Error('Can only call users');
+        if (this.calls.has(entity.id.toString()))
+            throw new Error('CallEngine is already in a call with this user');
+        if (this.isBusy())
+            throw new Error('CallEngine is busy with another call');
         const call = this.createActive('outgoing', (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(entity.id), entity.username ?? null, media, options);
         const done = new Promise((resolve) => { call.resolve = resolve; });
         try {
             const accepted = new Promise((resolve) => { call.onAccepted = resolve; });
             const gAHash = await this.prepareMedia(call, media, null);
+            // Hung up while preparing: nothing has rung yet; release the media instance created meanwhile.
+            if (call.finished) {
+                try {
+                    await this.ntg.stop(call.userId);
+                }
+                catch { /* not created / already stopped */ }
+                return done;
+            }
             const req = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.RequestCall({
                 userId: await this.client.getInputEntity(entity),
                 randomId: (0,crypto__WEBPACK_IMPORTED_MODULE_1__.randomInt)(1, 2 ** 31 - 1),
@@ -790,10 +814,17 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             }
             call.inputCall = new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: req.phoneCall.id, accessHash: req.phoneCall.accessHash });
             call.record.callId = req.phoneCall.id.toString();
+            if (call.finished) {
+                // Hung up while RequestCall was in flight: the phone is ringing now, so discard it.
+                await this.discard(call.inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonHangup(), 0);
+                return done;
+            }
             this.emit('ringing', { ...call.record });
-            call.timers.push(setTimeout(() => { void this.localHangup(call, 'no_answer', true); }, call.options.answerTimeoutMs));
-            const pc = await accepted;
-            if (call.finished)
+            call.answerTimer = setTimeout(() => { void this.localHangup(call, 'no_answer', true); }, call.options.answerTimeoutMs);
+            call.timers.push(call.answerTimer);
+            // Ends either way: answered, or finished first (no answer, declined, missed, hung up).
+            const pc = await Promise.race([accepted, done.then(() => null)]);
+            if (!pc || call.finished)
                 return done;
             this.markAnswered(call);
             const auth = await this.ntg.exchangeKeys(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(pc.gB), 0n);
@@ -811,10 +842,10 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         }
         return done;
     }
-    /** Hang up the active call, if any. */
-    async hangup() {
-        if (this.active)
-            await this.localHangup(this.active, 'local_hangup', false);
+    /** Hang up the call with `userId`, or every active call when omitted. */
+    async hangup(userId) {
+        const targets = userId === undefined ? Array.from(this.calls.values()) : [this.calls.get(userId.toString())];
+        await Promise.all(targets.map((call) => (call ? this.localHangup(call, 'local_hangup', false) : undefined)));
     }
     /** Submit a star rating for a finished call (Telegram asks when record.needRating). */
     async rateCall(record, rating, comment = '') {
@@ -835,7 +866,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (!(await this.isAllowedCaller(pc.adminId.toString())))
             return;
         const inputCall = new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: pc.id, accessHash: pc.accessHash });
-        if (this.active) {
+        if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
             this.logger.log('[tg-calls] busy; declining incoming call', pc.id.toString());
             await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
             this.emit('busy-declined', { callId: pc.id.toString(), peerUserId: pc.adminId.toString(), peerUsername: null, video: !!pc.video });
@@ -858,8 +889,13 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
             return;
         }
-        if (this.active)
-            return; // another call won the race while the policy ran
+        if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
+            // Another call won the race while the policy ran: decline busy and report it, so a
+            // policy that already reserved state for this caller can release it.
+            await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
+            this.emit('busy-declined', info);
+            return;
+        }
         // A voice call gets audio only even if the policy hands over a video file.
         const media = { ...decision.media, video: info.video && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(decision.media) };
         const call = this.createActive('incoming', (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(pc.adminId), info.peerUsername, media, decision.options ?? {});
@@ -910,7 +946,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 emojis: null, p2pAllowed: null, relayCount: null, libraryVersions: [], remoteSources: [], error: null,
             },
         };
-        this.active = call;
+        this.calls.set(userId.toString(), call);
         return call;
     }
     /** Creates the ntgcalls p2p instance, attaches the ffmpeg sources, runs the first DH step. */
@@ -945,27 +981,34 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         call.record.libraryVersions = versions;
         call.record.emojis = await this.ntg.getEmojisFingerprint(call.userId).catch(() => null);
         this.lastAccessHash.set(pc.id.toString(), pc.accessHash);
+        if (this.lastAccessHash.size > 1000)
+            this.lastAccessHash.delete(this.lastAccessHash.keys().next().value);
         await this.ntg.connectP2p(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toRtcServers)(pc.connections), versions, !!pc.p2pAllowed, 
         // ntgcalls parses this as JSON; an empty string throws "incomplete JSON".
         pc.customParameters?.data || '{}');
+        if (call.finished)
+            return;
         call.timers.push(setTimeout(() => { void this.localHangup(call, 'max_duration', false); }, call.options.maxDurationMs));
     }
     markAnswered(call) {
+        if (call.answerTimer)
+            clearTimeout(call.answerTimer);
+        call.answerTimer = undefined;
         call.record.answeredAt = Date.now();
         call.record.ringToAnswerMs = call.record.answeredAt - call.record.requestedAt;
         this.emit('answered', { ...call.record });
     }
     wireNtgCallbacks() {
         const { ConnectionState, StreamDevice, StreamStatus } = this.ntgLib;
-        this.ntg.onSignalingData((_chatId, data) => {
-            const call = this.active;
+        this.ntg.onSignalingData((chatId, data) => {
+            const call = this.calls.get(chatId.toString());
             if (!call?.inputCall)
                 return;
             this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.SendSignalingData({ peer: call.inputCall, data: Buffer.from(data) }))
                 .catch((e) => this.logger.warn('[tg-calls] signaling send failed', e?.message ?? e));
         });
-        this.ntg.onConnectionChange((_chatId, info) => {
-            const call = this.active;
+        this.ntg.onConnectionChange((chatId, info) => {
+            const call = this.calls.get(chatId.toString());
             if (!call)
                 return;
             if (info.state === ConnectionState.CONNECTED && !call.record.connectedAt) {
@@ -977,8 +1020,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 void this.localHangup(call, 'media_failed', false);
             }
         });
-        this.ntg.onStreamEnd((_chatId, _type, device) => {
-            const call = this.active;
+        this.ntg.onStreamEnd((chatId, _type, device) => {
+            const call = this.calls.get(chatId.toString());
             if (!call)
                 return;
             const track = device === StreamDevice.CAMERA ? 'video' : 'audio';
@@ -991,8 +1034,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 }
             }
         });
-        this.ntg.onRemoteSourceChange((_chatId, source) => {
-            const call = this.active;
+        this.ntg.onRemoteSourceChange((chatId, source) => {
+            const call = this.calls.get(chatId.toString());
             if (!call)
                 return;
             const event = {
@@ -1007,8 +1050,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
     async handleUpdate(update) {
         try {
             if (update instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.UpdatePhoneCallSignalingData) {
-                const call = this.active;
-                if (call?.inputCall && update.phoneCallId.equals(call.inputCall.id)) {
+                const call = this.byPhoneCallId(update.phoneCallId);
+                if (call) {
                     await this.ntg.sendSignalingData(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(update.data));
                 }
                 return;
@@ -1020,8 +1063,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 await this.handleIncoming(pc);
                 return;
             }
-            const call = this.active;
-            if (!call?.inputCall || !pc.id.equals(call.inputCall.id))
+            const call = this.byPhoneCallId(pc.id);
+            if (!call)
                 return;
             if (pc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallAccepted) {
                 call.onAccepted?.(pc);
@@ -1074,8 +1117,9 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         r.endReason = reason;
         r.endedBy = by;
         r.talkMs = r.connectedAt ? r.endedAt - r.connectedAt : null;
-        if (this.active === call)
-            this.active = null;
+        const key = call.userId.toString();
+        if (this.calls.get(key) === call)
+            this.calls.delete(key);
         call.onAccepted = undefined;
         this.emit('ended', { ...r });
         call.resolve({ ...r });
@@ -1087,6 +1131,13 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         catch (error) {
             this.logger.warn('[tg-calls] discardCall failed', error?.message ?? error);
         }
+    }
+    byPhoneCallId(id) {
+        for (const call of this.calls.values()) {
+            if (call.inputCall && id.equals(call.inputCall.id))
+                return call;
+        }
+        return undefined;
     }
     protocol() {
         // Advertise exactly what the bundled ntgcalls speaks (layer 92, tgcalls 8.0.0+).
@@ -26336,6 +26387,9 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildInHouseEventLadder: () => (/* binding */ buildInHouseEventLadder),
+/* harmony export */   buildInHouseFollowUp: () => (/* binding */ buildInHouseFollowUp),
+/* harmony export */   buildInHousePrivacyProbes: () => (/* binding */ buildInHousePrivacyProbes),
 /* harmony export */   buildPaidEventLadder: () => (/* binding */ buildPaidEventLadder)
 /* harmony export */ });
 const MIN = 60 * 1000;
@@ -26409,6 +26463,61 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
         call(20), msg(20.5, callMe()),
         call(30), msg(30.5, callMe()),
         call(45), msg(45.5, callMe()),
+    ];
+}
+function vcuiLink(chatId, clientId) {
+    const link = `https://ZomCall.netlify.app/${clientId}/${chatId}`;
+    return Math.random() < 0.5 ? link : `<a href="${link}">Zoom Link</a>`;
+}
+/**
+ * Ladder for accounts that ring with in-house Telegram video calls. Each `call` rings again with the
+ * real show, with exponential back-off between rings (1, 2.5, 5, 10, 20, 40 min) so an unanswered
+ * user is not spammed; only four messages: two "pick up" nudges, the VCUI link once mid-way as a
+ * fallback and once at the end. Pending events are deleted as soon as a show call connects.
+ */
+function buildInHouseEventLadder(chatId, clientId, type, now) {
+    const call = (mins) => ({ type: 'call', chatId, clientId, time: now + Math.round(mins * MIN), payload: {}, attempts: 0 });
+    const msg = (mins, message) => ({ type: 'message', chatId, clientId, time: now + Math.round(mins * MIN), payload: { message }, attempts: 0 });
+    const zoom = vcuiLink(chatId, clientId);
+    const firstNudge = type === '1'
+        ? "Baby <b>pick up</b> na 🥺\n\nI'm calling you\non Telegram 📞"
+        : "Calling you again baby 📞\n\n<b>Pick up</b> na 😘";
+    return [
+        call(1),
+        call(2.5), msg(3, firstNudge),
+        call(5), msg(5.5, "Are you busy? 🥺\n\nI'm <b>waiting</b> for you only..\n\nPick up when I call"),
+        call(10), msg(10.5, `If my Telegram call\nis not coming..\n\n<b>Call me here</b> 👇\n\n${zoom}`),
+        call(20),
+        call(40), msg(40.5, `Whenever you're free baby 💋\n\n<b>Call me here</b> 👇\n\n${zoom}`),
+    ];
+}
+/**
+ * After an in-house show was cut short: ring again after `delayMs` (it resumes where it stopped),
+ * then back off (+2, +6, +15 min) with one nudge, and the VCUI link once at the end as the fallback.
+ */
+function buildInHouseFollowUp(chatId, clientId, now, delayMs = 3 * MIN) {
+    const call = (ms) => ({ type: 'call', chatId, clientId, time: now + ms, payload: {}, attempts: 0 });
+    const msg = (ms, message) => ({ type: 'message', chatId, clientId, time: now + ms, payload: { message }, attempts: 0 });
+    return [
+        call(delayMs),
+        call(delayMs + 2 * MIN),
+        msg(delayMs + 2.5 * MIN, "Baby <b>pick up</b> na 🥺\n\nI'm calling you\nto finish the show 😘"),
+        call(delayMs + 6 * MIN),
+        call(delayMs + 15 * MIN),
+        msg(delayMs + 16 * MIN, `Not getting my call? 🥺\n\n<b>Call me here</b> 👇\n\n${vcuiLink(chatId, clientId)}\n\nI'll continue\nfrom where we stopped 😘`),
+    ];
+}
+/**
+ * Our call was blocked by the user's call privacy: a few quiet re-tries (5, 15, 45 min) in case they
+ * fixed it, and the VCUI link at 10 min for a payer who can't or won't change the setting.
+ */
+function buildInHousePrivacyProbes(chatId, clientId, now) {
+    const call = (mins) => ({ type: 'call', chatId, clientId, time: now + mins * MIN, payload: {}, attempts: 0 });
+    return [
+        call(5),
+        { type: 'message', chatId, clientId, time: now + 10 * MIN, payload: { message: `Can't change the setting? 🥺\n\n<b>Call me here</b> 👇\n\n${vcuiLink(chatId, clientId)}\n\nI'm waiting baby 😘` }, attempts: 0 },
+        call(15),
+        call(45),
     ];
 }
 
@@ -26619,6 +26728,11 @@ class EventStore {
     async reschedule(id, time, attempts) {
         await this.collection.updateOne({ _id: id }, { $set: { time, attempts } });
     }
+    /** Push every pending event for the chat back by `ms` (the user is waiting in the call queue). */
+    async deferByChat(chatId, clientId, ms) {
+        const res = await this.collection.updateMany({ chatId, clientId }, { $inc: { time: ms } });
+        return res.modifiedCount ?? 0;
+    }
     async existsForChat(chatId, clientId) {
         const n = await this.collection.countDocuments({ chatId, clientId });
         return n > 0;
@@ -26742,6 +26856,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   EventScheduler: () => (/* reexport safe */ _event_scheduler__WEBPACK_IMPORTED_MODULE_4__.EventScheduler),
 /* harmony export */   EventStore: () => (/* reexport safe */ _event_store__WEBPACK_IMPORTED_MODULE_2__.EventStore),
 /* harmony export */   MAX_EVENT_ATTEMPTS: () => (/* reexport safe */ _event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS),
+/* harmony export */   buildInHouseEventLadder: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHouseEventLadder),
+/* harmony export */   buildInHouseFollowUp: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHouseFollowUp),
+/* harmony export */   buildInHousePrivacyProbes: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHousePrivacyProbes),
 /* harmony export */   buildPaidEventLadder: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildPaidEventLadder),
 /* harmony export */   classifyError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.classifyError),
 /* harmony export */   decideEventAction: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.decideEventAction),
@@ -36709,7 +36826,9 @@ async function replyUnread(client, unreadUserDialogs) {
                                 //     await client.sendMessage(chat.entity,{ message: `Wait...\nI'm verifying your Payment again!!\n${didPaidToOthers.paid !== "" ? (`I think U paid to ${didPaidToOthers.paid} and U also`) : "I think U"}  ${didPaidToOthers.demoGiven !== "" ? (` took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
                                 // } else {
                                 await client.sendMessage(chat.entity, { message: "Dont Speak Okay!!\nI'm in **Bathroom**\nMute yourself!! I will show you Okay..!!" });
-                                await client.sendMessage(chat.entity, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` });
+                                // Lazy: call-me imports this module.
+                                const { offerCallOrLink } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts"));
+                                await offerCallOrLink(userDetails.chatId.toString(), () => client.sendMessage(chat.entity, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` }), (text) => client.sendMessage(chat.entity, { message: text }));
                                 // }
                             }
                             else {
@@ -36949,7 +37068,8 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                             if (user.demoGiven && canProceedWithService(user)) {
                                                 const didPaidToOthers = await db.checkIfPaidToOthers(user.chatId.toString());
                                                 if (didPaidToOthers.paid !== "" || didPaidToOthers.demoGiven !== "") {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}\n\nCall me now!!`, linkPreview: false });
+                                                    const { offerCallOrLink } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts"));
+                                                    await offerCallOrLink(id.chatId.toString(), () => (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}\n\nCall me now!!`, linkPreview: false }), (text) => (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: text }));
                                                     // await trySendingMsg(user, client, { message: `Wait...\nI'm verifying your Payment again!!\nI think U paid to ${didPaidToOthers.paid} ${didPaidToOthers.demoGiven !== "" ? (`and U also took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
                                                 }
                                                 else {
@@ -37563,6 +37683,19 @@ function evaluatePlaybackCompletion(data) {
     }
     return { recorded: false, reason: 'incomplete' };
 }
+/**
+ * They paid for the next show after the demo (e.g. mid-demo, set up once it ended): the demo leaves
+ * payAmount at most 50, so a higher amount is new money, and the post-demo pitches would ask for it twice.
+ */
+async function paidForNextShow(chatId) {
+    try {
+        const fresh = await _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId);
+        return !!fresh && (Number(fresh.payAmount) || 0) > 50;
+    }
+    catch {
+        return false;
+    }
+}
 async function executehs(client, chatId, data) {
     const playback = evaluatePlaybackCompletion(data);
     if (!playback.recorded) {
@@ -37578,6 +37711,9 @@ async function executehs(client, chatId, data) {
             logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.feedback.${chatId}`, false));
         }
         scheduleCoreUtilsTask(async () => {
+            // They paid for the next show meanwhile (e.g. mid-demo, set up once it ended): don't pitch it.
+            if (await paidForNextShow(chatId))
+                return;
             try {
                 await client.sendMessage(chatId, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
             }
@@ -37585,6 +37721,8 @@ async function executehs(client, chatId, data) {
                 logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.fullShowPrompt.${chatId}`, false));
             }
             scheduleCoreUtilsTask(async () => {
+                if (await paidForNextShow(chatId))
+                    return;
                 try {
                     await client.sendMessage(chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_22__.getUpsellMessage)(50)) });
                 }
@@ -38241,6 +38379,25 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg
 async function initiateCall(amount, userDetails, reason = "Default") {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const chatId = userDetails.chatId;
+    // Paid again while their in-house show is playing (upsell): setting up now would text "calling
+    // you", rebuild the ladder and ring mid-show, and the show's completion would then overwrite the
+    // new amount. Run the whole setup once the call is over instead.
+    const callManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance()?.callManager;
+    if (callManager?.isOnInHouseCall?.(chatId)) {
+        // A chat re-request ("please", "fake", ...) carries the amount they already have: the show they
+        // are on IS that call. Re-running it afterwards would ask a just-served user to pay again.
+        if (amount <= (Number(userDetails.payAmount) || 0)) {
+            logger.log(`[CALL] ${chatId} re-requested a call (${amount}) during their in-house show; ignored (${reason})`);
+            return false;
+        }
+        logger.log(`[CALL] ${chatId} paid ${amount} during an in-house call; setting up after it ends (${reason})`);
+        callManager.runAfterCall(chatId, async () => {
+            const fresh = await db.read(chatId);
+            if (fresh)
+                await initiateCall(amount, fresh, reason);
+        });
+        return false;
+    }
     const limitTime = Date.now() + (5 * 60 * 1000); // 5 minutes
     // Adjust amount if needed
     let adjustedAmount = amount;
@@ -38287,17 +38444,40 @@ async function initiateCall(amount, userDetails, reason = "Default") {
  * @returns Promise<boolean> - true if call was successfully requested, false otherwise
  */
 async function proceedWithCall(userDetails, chatId, reason) {
+    // Direct callers (e.g. an unrelated photo mid-show) skip initiateCall's guard: never text
+    // "calling you" or rebuild the ladder while their in-house show is ringing or playing.
+    const callManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance()?.callManager;
+    if (callManager?.isOnInHouseCall?.(chatId)) {
+        logger.log(`[CALL] ${chatId} is on an in-house call; not starting another (${reason})`);
+        return false;
+    }
+    const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts"));
+    const inHouse = await inHouseCallsActive(callManager);
     try {
         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.setTyping)(userDetails.chatId);
-        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient().sendMessage(userDetails.chatId, {
-            message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_5__.selectRandomElements)([
-                "Wait, I am Calling you!!",
-                "Wait Baby!! Checking",
-                "Wait, Calling",
-                "One minute Baby, Checking",
-            ], 1)[0],
-        });
-        logger.debug(`[CALL] Call initiation message sent - chatId: ${chatId}`);
+        // Every in-house slot busy: queueing sends "I'm on another call, give me N mins" instead.
+        if (!(inHouse && callManager?.isInHouseBusy?.())) {
+            await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient().sendMessage(userDetails.chatId, {
+                message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_5__.selectRandomElements)([
+                    "Wait, I am Calling you!!",
+                    "Wait Baby!! Checking",
+                    "Wait, Calling",
+                    "One minute Baby, Checking",
+                ], 1)[0],
+            });
+            logger.debug(`[CALL] Call initiation message sent - chatId: ${chatId}`);
+        }
+        // In-house demo: the show starts the moment they pick up, so say "stay on mute" before it rings
+        // (the ladder's mute line would come minutes later, and is deleted once the call connects).
+        // Once only: a re-call resumes a show they have already started.
+        const progress = userDetails.callProgress;
+        if (!userDetails.demoGiven && !(progress && Object.keys(progress).length > 0)) {
+            if (inHouse) {
+                await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient().sendMessage(userDetails.chatId, {
+                    message: "Don't talk when we connect okk..!! 🙈\n\nI'm in the **Bathroom**\n\nKeep yourself on **Mute**\nI'll show you everything 😉",
+                });
+            }
+        }
     }
     catch (error) {
         logger.error(`[ERROR] Error sending call initiation message - chatId: ${chatId}:`, error);
@@ -40070,10 +40250,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _EventAggregationService__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../EventAggregationService */ "./src/event-handlers/EventAggregationService.ts");
 /* harmony import */ var _PictureEventQueue__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../PictureEventQueue */ "./src/event-handlers/PictureEventQueue.ts");
 /* harmony import */ var _helpers_abuseDetectionHelper__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../../helpers/abuseDetectionHelper */ "./src/helpers/abuseDetectionHelper.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
 /**
  * Existing User Handler
  * Handles messages from existing users
  */
+
 
 
 
@@ -40297,9 +40479,9 @@ async function handleCheatResponse(event, userDetails, chatId) {
 async function sendCheatResponseMessage(event, userDetails) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(2000);
     const msgElement = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["No Dear", "Not at All", "No Baby, Please Wait!!", "Network issue baby", "I Love you Babyyy😚", "I Want to kiss you😚", "Its me only baby😚😚", "No Dear, Please understand"], 1)[0];
-    await event.message.respond({
+    await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => event.message.respond({
         message: `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-    });
+    }), (text) => event.message.respond({ message: `**${msgElement}**\n\n${text}` }));
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(2000);
 }
 /**
@@ -40382,9 +40564,9 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
     if (userDetails.payAmount >= 15) {
         if (userDetails.payAmount >= 30) {
             logger.debug(`[EDGE CASE] Cheat without demo - sending call message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-            await event.message.respond({
+            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => event.message.respond({
                 message: `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-            });
+            }), (text) => event.message.respond({ message: text }));
         }
         else if ((userDetails.payAmount < 30 && userDetails.cheatCount > 2) || userDetails.cheatCount > 3) {
             logger.debug(`[EDGE CASE] Cheat without demo - initiating call - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, cheatCount: ${userDetails.cheatCount}`);
@@ -45697,6 +45879,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
 /* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+
 
 
 
@@ -46152,12 +46336,10 @@ async function processImage(event) {
                                             }
                                             else {
                                                 if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canStartService)(userDetails, amount)) {
-                                                    await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithTimeout)(event.client, chatId, {
-                                                        message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
-                                                            `Baby, you can call me here 💋\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now darling!! I'm so horny for you 🔥`,
-                                                            `Click here to video call me baby 😘\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nI'm Naked and waiting for you sweetie!! 💦`,
-                                                        ]),
-                                                    });
+                                                    const linkMessage = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
+                                                        `Baby, you can call me here 💋\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now darling!! I'm so horny for you 🔥`,
+                                                        `Click here to video call me baby 😘\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nI'm Naked and waiting for you sweetie!! 💦`,
+                                                    ]);
                                                     const updatedData = {
                                                         limitTime: Date.now() + 2 * 60 * 60 * 1000
                                                     };
@@ -46167,7 +46349,15 @@ async function processImage(event) {
                                                     if (amount > userDetails.highestPayAmount) {
                                                         updatedData['highestPayAmount'] = amount;
                                                     }
+                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_25__.inHouseCallsActive)();
+                                                    // VCUI path: link first, exactly as before.
+                                                    if (!inHouse)
+                                                        await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
                                                     userDetails = await db.update(chatId, updatedData);
+                                                    // In-house: after the update, so the re-call sees the new amount.
+                                                    if (inHouse) {
+                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_25__.offerCallOrLink)(chatId, () => (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+                                                    }
                                                     await (0,_index__WEBPACK_IMPORTED_MODULE_16__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
                                                 else {
@@ -46688,10 +46878,17 @@ function getMemoryStats() {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   callDeclinedMessages: () => (/* binding */ callDeclinedMessages),
+/* harmony export */   callDroppedMessages: () => (/* binding */ callDroppedMessages),
+/* harmony export */   callMediaFailedMessages: () => (/* binding */ callMediaFailedMessages),
+/* harmony export */   callNotEligibleMessages: () => (/* binding */ callNotEligibleMessages),
 /* harmony export */   callPayAgainMessage: () => (/* binding */ callPayAgainMessage),
 /* harmony export */   callPitchFollowUps: () => (/* binding */ callPitchFollowUps),
 /* harmony export */   callPrivacyBlockedMessages: () => (/* binding */ callPrivacyBlockedMessages),
 /* harmony export */   callPrivacyMessage: () => (/* binding */ callPrivacyMessage),
+/* harmony export */   callStatusMessage: () => (/* binding */ callStatusMessage),
+/* harmony export */   callUserEndedMessages: () => (/* binding */ callUserEndedMessages),
+/* harmony export */   callWaitMessages: () => (/* binding */ callWaitMessages),
+/* harmony export */   inHouseRecallMessages: () => (/* binding */ inHouseRecallMessages),
 /* harmony export */   pickVariation: () => (/* binding */ pickVariation)
 /* harmony export */ });
 /* harmony import */ var _upsellMessages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./upsellMessages */ "./src/messages/upsellMessages.ts");
@@ -46777,13 +46974,56 @@ function pickVariation(pool, chatId, poolKey, random = Math.random) {
 }
 /** Opener + the price menu for the user's tier. */
 function callPayAgainMessage(kind, chatId, payAmount, random = Math.random) {
-    const opener = pickVariation(kind === 'declined' ? callDeclinedMessages : callPitchFollowUps, chatId, kind, random);
+    const pool = kind === 'declined' ? callDeclinedMessages : kind === 'pitch' ? callPitchFollowUps : callNotEligibleMessages;
+    const opener = pickVariation(pool, chatId, kind, random);
     const menus = (0,_upsellMessages__WEBPACK_IMPORTED_MODULE_0__.getUpsellMenu)(payAmount);
     const menu = menus[Math.floor(random() * menus.length)];
     return menu ? `${opener}\n\n${menu}` : opener;
 }
 function callPrivacyMessage(chatId, random = Math.random) {
     return pickVariation(callPrivacyBlockedMessages, chatId, 'privacy', random);
+}
+/** Outgoing call reached a payer the show rules don't serve yet (e.g. the amount doesn't cover the next show). */
+const callNotEligibleMessages = [
+    `Baby this payment is **not enough** 🥺\n\nFor the next show..\n\nPay the rest na\nI'll call you **straight away**`,
+    `Almost there baby 😘\n\nJust **complete the payment**\n\nAnd I'll call you\nright away`,
+    `I'm ready for you 🔥\n\nBut **pay for the show** first na..\n\nThen I'll call`,
+    `Baby your last show is done 🙈\n\n**Pay again**\n\nAnd I'll give you more`,
+];
+/** The user hung up the show early: we call back in a few minutes and resume. */
+const callUserEndedMessages = [
+    `Why did you cut the call baby? 🥺\n\nI'll **call you again**\nin a few mins..\n\nPick up na\nWe'll continue 😘`,
+    `Arey you cut it in the middle 🙈\n\nI'll call you back soon..\n\n**Show is still pending**\nfor you`,
+    `Baby come back 🥺\n\nI'll **call you again** in a bit\n\nI'll start from\nwhere it stopped`,
+    `You left so soon? 😏\n\nI'll call you back baby..\n\n**Pick up** this time 💋`,
+];
+/** The show was cut by the network: we call back shortly and resume. */
+const callDroppedMessages = [
+    `Call got cut baby 😩\n\n**Calling you back** now..\n\nI'll continue\nfrom where we stopped 😘`,
+    `Network cut the call yaar 🥺\n\nI'm **calling you again**\n\nSame place\nDon't worry`,
+    `Uff call dropped 🙈\n\n**Pick up** baby\nI'm calling you back..\n\nYour show is still pending`,
+];
+/** The user answered but the video never started (old or desktop Telegram, media failure). */
+const callMediaFailedMessages = [
+    `Baby my video is **not coming**\non your Telegram 😕\n\nCall me here instead 👇\n\n{link}`,
+    `Video is not starting\non your phone yaar 🥺\n\n**Call me here** 👇\n\n{link}`,
+    `Your Telegram is not showing\nmy video 🙈\n\nOpen this and call me 👇\n\n{link}`,
+];
+/** Payer is queued behind another show. {mins} is the expected wait. */
+const callWaitMessages = [
+    `I'm on another call baby 🙈\n\nGive me **{mins} mins**..\n\nI'll call you\nright after 😘`,
+    `Just finishing with someone 🔥\n\n**{mins} mins** baby..\n\nYou're next\nDon't go anywhere`,
+    `Wait na baby 🥺\n\nI'm busy for **{mins} mins**\n\nThen I'll call you\nstraight away`,
+];
+/** "Call me" replies when this account rings with in-house Telegram calls instead of the VCUI link. */
+const inHouseRecallMessages = [
+    `Calling you **on Telegram** now baby 📞\n\nPick up na 😘`,
+    `Wait..\n\nI'm calling you 📞\n\n**Pick up** baby`,
+    `I'll call you **right now**\non Telegram 😘\n\nPick up when it rings`,
+    `Calling you baby 🔥\n\n**Pick up**\n\nAnd I'll show you everything`,
+];
+function callStatusMessage(pool, chatId, poolKey, vars = {}, random = Math.random) {
+    return pickVariation(pool, chatId, poolKey, random).replace(/\{(\w+)\}/g, (m, key) => (key in vars ? String(vars[key]) : m));
 }
 
 
@@ -48565,6 +48805,15 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:call-manager");
 /** When the engine is busy with an incoming in-house call, re-check the queue after this. */
 const IN_HOUSE_BUSY_WAIT_MS = 5000;
+/** Switch-off waits this long at most for playing shows to finish before stopping the service. */
+const IN_HOUSE_DRAIN_MAX_MS = 35 * 60000;
+const IN_HOUSE_DRAIN_POLL_MS = 2000;
+/** Deferred work (a payment made mid-show) runs this long after the call ends, after the show's own messages start. */
+const AFTER_CALL_DELAY_MS = 10000;
+/** Safety net: deferred work runs by then even if the call-ended signal was lost. */
+const AFTER_CALL_MAX_WAIT_MS = 40 * 60000;
+/** Gap between starting parallel in-house calls (lets each claim its slot; rings never fire in one burst). */
+const IN_HOUSE_DISPATCH_GAP_MS = 1500;
 // Default timeouts and call config
 const TIMEOUTS = {
     PHONE_CALL_TIMEOUT: 60000,
@@ -48579,6 +48828,14 @@ class CallManager {
         this.MAX_QUEUE_SIZE = 1000; // Maximum queue size to prevent unbounded growth
         this.inHouse = null;
         this.inHouseLoading = null;
+        /** In-house calls running in parallel, by chat. */
+        this.inFlight = new Map();
+        /** Work to run once the chat's in-house call is over, by chat (latest wins), with its safety timer. */
+        this.afterCall = new Map();
+        /** Wakes the parallel queue loop when a chat is queued while it waits on running calls. */
+        this.wake = null;
+        /** The legacy ring holds a single line: fallback rings from parallel in-house calls go one at a time. */
+        this.legacyLine = Promise.resolve();
         if (CallManager.activeInstances.has(options.instanceId)) {
             logger.debug(`[${options.instanceId}] CallManager instance already exists, returning existing`);
             return CallManager.activeInstances.get(options.instanceId);
@@ -48616,12 +48873,20 @@ class CallManager {
             logger.log(`[CallManager] ChatId ${chatId} already in queue, skipping`);
             return;
         }
+        if (this.inFlight.has(chatId) || this.inHouse?.isInCall?.(chatId)) {
+            logger.log(`[CallManager] ChatId ${chatId} is already on a call, skipping`);
+            return;
+        }
         // Enforce maximum queue size
         if (this.callQueue.length >= this.MAX_QUEUE_SIZE) {
             logger.warn(`[CallManager] Queue size limit reached (${this.MAX_QUEUE_SIZE}), removing oldest entry`);
             this.callQueue.shift(); // Remove oldest entry
         }
+        // Every in-house slot is taken: tell this payer roughly how long.
+        if (this.inHouse?.isBusy?.())
+            this.inHouse.noticeQueued?.(chatId);
         this.callQueue.push(chatId);
+        this.wake?.();
         logger.log(`[CallManager] Added to call queue:`, chatId);
         logger.log("Queue length:", this.callQueue.length);
         this.processQueue();
@@ -48634,6 +48899,59 @@ class CallManager {
         }
         return false;
     }
+    /** Resolves when a running in-house call finishes or a chat is queued. */
+    waitForChange() {
+        const woken = new Promise((resolve) => { this.wake = resolve; });
+        return Promise.race([...this.inFlight.values(), woken]).finally(() => { this.wake = null; });
+    }
+    /** True when every in-house slot is taken (a new payer would wait). */
+    isInHouseBusy() {
+        return this.inHouse?.isBusy?.() ?? false;
+    }
+    /** True while chatId is on (or being set up for) an in-house call with this account. */
+    isOnInHouseCall(chatId) {
+        // The service covers planning → ringing → show; a chat only waiting on the legacy fallback ring is not on one.
+        return this.inHouse?.isInCall?.(chatId) ?? false;
+    }
+    /**
+     * Run `fn` once chatId's in-house call is over (e.g. a payment made mid-show: setting it up now
+     * would ring/ladder during the show, and the show's completion would overwrite the new amount).
+     */
+    runAfterCall(chatId, fn) {
+        const previous = this.afterCall.get(chatId);
+        if (previous)
+            clearTimeout(previous.safety);
+        const safety = setTimeout(() => { void this.runDeferred(chatId, fn); }, AFTER_CALL_MAX_WAIT_MS);
+        safety.unref?.();
+        this.afterCall.set(chatId, { fn, safety });
+    }
+    onInHouseCallEnded(chatId) {
+        this.wake?.(); // a slot may have freed (incoming calls are not in inFlight)
+        const entry = this.afterCall.get(chatId);
+        if (!entry)
+            return;
+        const timer = setTimeout(() => { void this.runDeferred(chatId, entry.fn); }, AFTER_CALL_DELAY_MS);
+        timer.unref?.();
+    }
+    async runDeferred(chatId, fn) {
+        const entry = this.afterCall.get(chatId);
+        if (entry?.fn !== fn)
+            return; // already ran, or replaced by a newer one
+        clearTimeout(entry.safety);
+        this.afterCall.delete(chatId);
+        try {
+            await fn();
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[CallManager] deferred after-call work failed for ${chatId}`, false);
+        }
+    }
+    /** The user started the show another way (VCUI join): drop the queued call and hang up an in-house ring not yet answered. */
+    async cancelCallRequest(chatId) {
+        const removed = this.removeFromQueue(chatId);
+        const cancelled = (await this.inHouse?.cancelRinging?.(chatId)) ?? false;
+        return removed || cancelled;
+    }
     getQueueLength() {
         return this.callQueue.length;
     }
@@ -48642,7 +48960,37 @@ class CallManager {
             return;
         this.processing = true;
         try {
-            while (this.callQueue.length > 0) {
+            while (this.callQueue.length > 0 || this.inFlight.size > 0) {
+                if (this.callQueue.length === 0) {
+                    // Stay alive while parallel calls run, so chats queued meanwhile are picked up at once.
+                    await this.waitForChange();
+                    continue;
+                }
+                const inHouse = await this.getInHouse();
+                if (inHouse && typeof inHouse.isBusy === 'function' && (await inHouse.isAvailable?.())) {
+                    // In-house: one call per free slot, in parallel; wait for a slot to free when full.
+                    if (this.isCallActive() || inHouse.isBusy()) {
+                        // Slots held by incoming calls (not in inFlight): their end wakes us; the sleep is a backstop.
+                        if (this.inFlight.size > 0)
+                            await this.waitForChange();
+                        else
+                            await Promise.race([(0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(IN_HOUSE_BUSY_WAIT_MS), this.waitForChange()]);
+                        continue;
+                    }
+                    const chatId = this.callQueue.shift();
+                    if (this.inFlight.has(chatId)) {
+                        // Its previous attempt is still winding down (e.g. put back after 'busy'): keep it, retry after.
+                        this.callQueue.unshift(chatId);
+                        await this.waitForChange();
+                        continue;
+                    }
+                    const run = this.dispatchCall(chatId)
+                        .catch((error) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[CallManager] in-house dispatch failed for ${chatId}`, false); })
+                        .finally(() => { this.inFlight.delete(chatId); });
+                    this.inFlight.set(chatId, run);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(IN_HOUSE_DISPATCH_GAP_MS);
+                    continue;
+                }
                 if (!this.isCallActive()) {
                     const chatId = this.callQueue.shift();
                     if (chatId) {
@@ -48680,6 +49028,15 @@ class CallManager {
             catch (error) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[CallManager] in-house call failed for ${chatId}; using legacy ring`, false);
             }
+            // The legacy ring holds a single line: fallback rings from parallel in-house calls queue up.
+            const ring = this.legacyLine.then(async () => {
+                while (this.isCallActive())
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(500);
+                await this.requestCall(chatId, true);
+            });
+            this.legacyLine = ring.catch(() => undefined);
+            await ring;
+            return;
         }
         await this.requestCall(chatId, true);
     }
@@ -48698,6 +49055,8 @@ class CallManager {
                         timer.unref?.();
                     },
                     isLineBusy: () => this.isCallActive(),
+                    callEnded: (chatId) => this.onInHouseCallEnded(chatId),
+                    dequeue: (chatId) => { this.removeFromQueue(chatId); },
                 });
                 return this.inHouse;
             })
@@ -48717,8 +49076,9 @@ class CallManager {
     async attachClient(client) {
         if (client === this.client)
             return;
-        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "[CallManager] stopping stale in-house service", false));
+        // Swap first, so a service built while the old one stops binds to the live client.
         this.client = client;
+        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "[CallManager] stopping stale in-house service", false));
     }
     /** Test seam / explicit wiring. */
     setInHouseCallService(service) {
@@ -48726,21 +49086,38 @@ class CallManager {
     }
     /** Subscribe for incoming in-house calls when the switch is on. */
     async startInHouse() {
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_7__.isInHouseCallsEnabled)()) {
+            // Switched off (e.g. config set off + restart): don't leave paid users able to ring us.
+            if (!this.client)
+                return;
+            const { restoreCallPrivacyIfLeftOpen } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./inhouse/privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts"));
+            await restoreCallPrivacyIfLeftOpen(this.client, (message) => logger.log(message));
+            return;
+        }
         const inHouse = await this.getInHouse();
         await inHouse?.start();
     }
     /**
-     * Operator switch-off: stop the in-house service and put calls back to Nobody, so paid users'
-     * calls do not ring an account that no longer answers them.
+     * Operator switch-off: calls back to Nobody now (paid users can't ring an account that will stop
+     * answering), no new in-house calls (the switch is already off), and shows already playing finish
+     * before the service is stopped.
      */
     async closeInHouse() {
+        if (this.client) {
+            await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({
+                key: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyKeyPhoneCall(),
+                rules: [new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueDisallowAll()],
+            }));
+        }
+        void this.drainThenDisposeInHouse();
+    }
+    async drainThenDisposeInHouse() {
+        const deadline = Date.now() + IN_HOUSE_DRAIN_MAX_MS;
+        while (this.inHouse?.hasActiveCalls?.() && Date.now() < deadline)
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(IN_HOUSE_DRAIN_POLL_MS);
+        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_7__.isInHouseCallsEnabled)())
+            return; // switched back on meanwhile: keep the service
         await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "[CallManager] stopping in-house service", false));
-        if (!this.client)
-            return;
-        await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({
-            key: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyKeyPhoneCall(),
-            rules: [new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueDisallowAll()],
-        }));
     }
     /** Hang up any in-house call and unsubscribe. Call before the Telegram client is torn down. */
     async disposeInHouse() {
@@ -48903,6 +49280,7 @@ class CallManager {
         this.currentCall = null;
         logger.log(`[CallManager] Ending call`);
         (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.destroyPhoneCallState)();
+        this.wake?.(); // the legacy line is free: the parallel queue may proceed
     }
     generateRandomInt() {
         return (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.readBigIntFromBuffer)((0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.generateRandomBytes)(4), true, true).toJSNumber();
@@ -48933,6 +49311,80 @@ class CallManager {
 }
 CallManager.instanceCounter = 0;
 CallManager.activeInstances = new Map();
+
+
+/***/ },
+
+/***/ "./src/modules/calls/call-me.ts"
+/*!**************************************!*\
+  !*** ./src/modules/calls/call-me.ts ***!
+  \**************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   inHouseCallsActive: () => (/* binding */ inHouseCallsActive),
+/* harmony export */   offerCallOrLink: () => (/* binding */ offerCallOrLink)
+/* harmony export */ });
+/* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../messages/messageUtils */ "./src/messages/messageUtils.ts");
+/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../messages/callMessages */ "./src/messages/callMessages.ts");
+/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:call-me');
+const RECALL_GAP_MS = 4 * 60 * 1000;
+/** True when this account's calls go out as in-house Telegram video calls (switch on and host able). */
+async function inHouseCallsActive(callManager) {
+    if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_6__.isInHouseCallsEnabled)())
+        return false;
+    try {
+        const service = await (callManager ?? _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager)?.getInHouse?.();
+        return service ? await service.isAvailable() : false;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * "Call me here <VCUI link>" replies. With in-house calls active and a show pending, ring the user
+ * on Telegram instead (and say so) — a VCUI link after a working Telegram call contradicts it.
+ * Otherwise, or when the user can't be called right now, send the link exactly as before.
+ */
+async function offerCallOrLink(chatId, sendLink, sendText) {
+    // They are on the show right now: no "calling you" text, no link.
+    if (_core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.instanceExist() && _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager?.isOnInHouseCall?.(chatId))
+        return 'on_call';
+    if (await inHouseCallsActive()) {
+        try {
+            const user = await _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(chatId);
+            const callManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance().callManager;
+            // Their call privacy just blocked us: "calling you now" would be followed by nothing.
+            const blocked = (await callManager.getInHouse())?.isPrivacyBlocked?.(chatId) ?? false;
+            if (!blocked && user && (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(user) && (user.callTime ?? 0) < Date.now() - RECALL_GAP_MS) {
+                // Every slot busy: queueing sends the "give me N mins" text instead; never promise "calling now".
+                if (!callManager.isInHouseBusy?.())
+                    await sendText((0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_0__.pickOneMsg)(_messages_callMessages__WEBPACK_IMPORTED_MODULE_1__.inHouseRecallMessages));
+                callManager.addToQueue(chatId);
+                return 'rang';
+            }
+        }
+        catch (error) {
+            logger.warn(`in-house re-call for ${chatId} failed; sending the link`, error instanceof Error ? error.message : String(error));
+        }
+    }
+    await sendLink();
+    return 'link';
+}
 
 
 /***/ },
@@ -49143,20 +49595,61 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AUTO_RETRY_WINDOW_MS: () => (/* binding */ AUTO_RETRY_WINDOW_MS),
 /* harmony export */   DROPPED_RECALL_MS: () => (/* binding */ DROPPED_RECALL_MS),
 /* harmony export */   InHouseCallService: () => (/* binding */ InHouseCallService),
+/* harmony export */   MEDIA_FAILED_WINDOW_MS: () => (/* binding */ MEDIA_FAILED_WINDOW_MS),
 /* harmony export */   PAY_PROMPT_COOLDOWN_MS: () => (/* binding */ PAY_PROMPT_COOLDOWN_MS),
 /* harmony export */   PITCH_LIMITS: () => (/* binding */ PITCH_LIMITS),
+/* harmony export */   POST_SHOW_QUIET_MS: () => (/* binding */ POST_SHOW_QUIET_MS),
 /* harmony export */   PRIVACY_MESSAGE: () => (/* binding */ PRIVACY_MESSAGE),
-/* harmony export */   UNANSWERED_RETRY_MS: () => (/* binding */ UNANSWERED_RETRY_MS)
+/* harmony export */   PRIVACY_NOTICE_COOLDOWN_MS: () => (/* binding */ PRIVACY_NOTICE_COOLDOWN_MS),
+/* harmony export */   PROBE_FAILURE_CACHE_MS: () => (/* binding */ PROBE_FAILURE_CACHE_MS),
+/* harmony export */   PROGRESS_CHECKPOINT_MS: () => (/* binding */ PROGRESS_CHECKPOINT_MS),
+/* harmony export */   SAFETY_FOLLOW_UP_SLACK_MS: () => (/* binding */ SAFETY_FOLLOW_UP_SLACK_MS),
+/* harmony export */   STOP_SETTLE_WAIT_MS: () => (/* binding */ STOP_SETTLE_WAIT_MS),
+/* harmony export */   UNANSWERED_RETRY_MS: () => (/* binding */ UNANSWERED_RETRY_MS),
+/* harmony export */   USER_ENDED_RECALL_MS: () => (/* binding */ USER_ENDED_RECALL_MS),
+/* harmony export */   WAIT_NOTICE_COOLDOWN_MS: () => (/* binding */ WAIT_NOTICE_COOLDOWN_MS),
+/* harmony export */   WARN_DEDUPE_MS: () => (/* binding */ WARN_DEDUPE_MS)
 /* harmony export */ });
-/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
+/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
+/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
 
+
+function defaultTimer(fn, ms) {
+    const timer = setInterval(fn, ms);
+    timer.unref?.();
+    return () => clearInterval(timer);
+}
 const PRIVACY_MESSAGE = "Change Your Call Settings\n\nPrivacy Settings... I'm unable to call..!!";
 const UNANSWERED_RETRY_MS = 3 * 60 * 1000;
+/** Re-call after a show was cut: soon after a network drop, a little later after the user hung up. */
 const DROPPED_RECALL_MS = 30 * 1000;
+const USER_ENDED_RECALL_MS = 3 * 60 * 1000;
 /** At most one automatic retry per chat in this window. */
 const AUTO_RETRY_WINDOW_MS = 30 * 60 * 1000;
 /** A paid caller with nothing pending gets at most one pay-again prompt per window. */
 const PAY_PROMPT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+/**
+ * After a delivered show executehs/executehsl run their own feedback (+8s), offer (+28s) and upsell
+ * (+3.5 min): no pay-again prompt from us until that sequence is done.
+ */
+const POST_SHOW_QUIET_MS = 5 * 60 * 1000;
+/** The privacy-blocked text goes out at most once per chat in this window (the ladder re-rings). */
+const PRIVACY_NOTICE_COOLDOWN_MS = 30 * 60 * 1000;
+/** "On another call, give me N mins": at most once per chat in this window. */
+const WAIT_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
+/** After the video failed on an answered call, ring through the legacy path for this long. */
+const MEDIA_FAILED_WINDOW_MS = 30 * 60 * 1000;
+const PROGRESS_CHECKPOINT_MS = 15 * 1000;
+/** A video whose length can't be read is not retried for this long (each probe can take 20s). */
+const PROBE_FAILURE_CACHE_MS = 2 * 60 * 1000;
+/** stop() waits at most this long for hung-up calls to settle. */
+const STOP_SETTLE_WAIT_MS = 10 * 1000;
+/** Safety follow-up at connect starts this long after the show's expected end. */
+const SAFETY_FOLLOW_UP_SLACK_MS = 2 * 60 * 1000;
+/** The same ops warning (kind + chat) goes out at most once per this window. */
+const WARN_DEDUPE_MS = 10 * 60 * 1000;
+/** Ring time assumed when estimating when the current show ends. */
+const RING_ALLOWANCE_MS = 60 * 1000;
 /** Matches the allow-list: a real payer. */
 const PAID_THRESHOLD = 15;
 /**
@@ -49182,6 +49675,25 @@ class InHouseCallService {
         this.pitchHistory = new Map();
         this.lastClip = new Map();
         this.pitchCalls = new Map();
+        /** Outgoing calls in progress: chats holding a slot (from play() start), plans by peer id, expected end per chat. */
+        this.outgoing = new Set();
+        this.outgoingPlans = new Map();
+        this.showEnds = new Map();
+        this.outgoingPeers = new Map();
+        this.connectedChats = new Set();
+        this.cancelled = new Set();
+        this.deliveredAt = new Map();
+        this.probeFailures = new Map();
+        /** play() calls in progress, so stop() can let them settle. */
+        this.plays = new Set();
+        this.stopped = false;
+        this.warnNotices = new Map();
+        this.privacyNotices = new Map();
+        this.waitNotices = new Map();
+        this.mediaFailures = new Map();
+        this.legacyLadders = new Map();
+        /** Running progress checkpoints per chat. */
+        this.checkpoints = new Map();
         /**
          * Engine incoming policy. Only paid users can reach the account (allow-list):
          *  - show pending  → answer and play it (resumed where they left off);
@@ -49192,13 +49704,25 @@ class InHouseCallService {
             if (!this.isEnabled() || this.deps.isLineBusy?.())
                 return { action: 'ignore' };
             const chatId = info.peerUserId;
+            // Already being called by us (slot reserved, not yet ringing): let the outgoing call win.
+            if (this.isInCall(chatId))
+                return { action: 'ignore' };
+            // Every slot taken (incl. outgoing calls still being set up): busy, like a phone on a call.
+            if (this.isBusy())
+                return { action: 'decline' };
             try {
                 const user = await this.deps.readUser(chatId);
                 if (!user)
                     return { action: 'ignore' };
-                const plan = await this.planFor(chatId, user);
+                const { plan } = await this.planFor(chatId, user);
+                // Re-check after the awaits: another call may have taken the last slot meanwhile.
+                if (this.isInCall(chatId))
+                    return { action: 'ignore' };
+                if (this.isBusy())
+                    return { action: 'decline' };
                 if (plan) {
                     this.incomingPlans.set(chatId, plan);
+                    this.showEnds.set(chatId, this.now() + this.remainingMs(plan));
                     return { action: 'answer', media: { file: plan.url, video: true, startSec: plan.startSec }, options: this.callOptions(plan) };
                 }
                 if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
@@ -49207,6 +49731,7 @@ class InHouseCallService {
                 if (clip) {
                     // Voice-only pitch; the text menu follows when the call ends (see the 'ended' listener).
                     this.pitchCalls.set(chatId, user);
+                    this.showEnds.set(chatId, this.now() + PITCH_MAX_MS);
                     return {
                         action: 'answer',
                         media: { file: clip, video: false },
@@ -49225,6 +49750,7 @@ class InHouseCallService {
         this.deps = deps;
         this.now = deps.now ?? Date.now;
         this.logger = deps.logger ?? console;
+        this.maxCalls = Math.max(1, Math.floor(deps.maxConcurrentCalls ?? 1));
     }
     isEnabled() {
         return this.deps.isEnabled();
@@ -49245,8 +49771,15 @@ class InHouseCallService {
         }
         return this.supported;
     }
+    /** No free slot: outgoing plays (incl. ones still planning), incoming shows and pitches, or the engine itself. */
     isBusy() {
-        return this.engine?.isBusy() ?? false;
+        const held = this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size;
+        return held >= this.maxCalls || (this.engine?.isBusy() ?? false);
+    }
+    /** True while chatId is on (or being set up for) a call with this account. */
+    isInCall(chatId) {
+        return this.outgoing.has(chatId) || this.incomingPlans.has(chatId) || this.pitchCalls.has(chatId)
+            || (this.engine?.isInCallWith?.(chatId) ?? false);
     }
     /** Subscribe for incoming calls (answer eligible paid users). Safe to call repeatedly. */
     async start() {
@@ -49259,12 +49792,20 @@ class InHouseCallService {
     async closeIncoming() {
         await this.deps.allowList?.close();
     }
+    /** True while any outgoing or incoming call (show or pitch) is in progress. */
+    hasActiveCalls() {
+        return this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size > 0;
+    }
     /** Hang up any live call and unsubscribe from updates. Never leaves a call connected. */
     async stop() {
+        this.stopped = true;
         const engine = this.engine;
         this.engine = null;
         this.incomingPlans.clear();
         this.pitchCalls.clear();
+        for (const stop of this.checkpoints.values())
+            void stop();
+        this.checkpoints.clear();
         this.deps.allowList?.stop();
         if (engine) {
             try {
@@ -49274,37 +49815,157 @@ class InHouseCallService {
                 this.logger.warn('[in-house-calls] engine stop failed', error?.message ?? error);
             }
         }
+        // Hung-up calls settle now (progress, follow-up, executehs): give them a moment before the client goes.
+        if (this.plays.size > 0) {
+            await Promise.race([
+                Promise.allSettled([...this.plays]),
+                new Promise((resolve) => { const t = setTimeout(resolve, STOP_SETTLE_WAIT_MS); t.unref?.(); }),
+            ]);
+        }
     }
     /**
      * Ring `chatId` and stream their show. Resolves when the call is over (or was not placed).
      * 'fallback' tells the caller to run the legacy ring path instead.
      */
     async play(chatId) {
+        // Reserve the slot before any await, so a queue dispatching calls in parallel never overshoots.
+        if (this.isInCall(chatId))
+            return { status: 'already_in_call' };
+        if (this.isBusy()) {
+            this.noticeQueued(chatId);
+            return { status: 'busy_engine' };
+        }
+        this.outgoing.add(chatId);
+        const run = this.playReserved(chatId);
+        this.plays.add(run);
+        try {
+            const result = await run;
+            await this.leaveInHouseLadder(chatId, result);
+            return result;
+        }
+        finally {
+            this.plays.delete(run);
+            this.outgoing.delete(chatId);
+            this.showEnds.delete(chatId);
+            this.outgoingPeers.delete(chatId);
+            this.connectedChats.delete(chatId);
+            this.cancelled.delete(chatId);
+            this.notifyCallEnded(chatId);
+        }
+    }
+    /**
+     * The user started the show another way (VCUI join → /deletecallrequest): hang up our call if it
+     * is still ringing (or about to), so they never get two shows. A connected show is left alone.
+     */
+    async cancelRinging(chatId) {
+        if (!this.outgoing.has(chatId) || this.connectedChats.has(chatId))
+            return false;
+        this.cancelled.add(chatId);
+        const peer = this.outgoingPeers.get(chatId);
+        if (peer && this.engine?.hangup) {
+            try {
+                await this.engine.hangup(peer);
+            }
+            catch (error) {
+                this.logger.warn(`[in-house-calls] cancelling the ring to ${chatId} failed`, error?.message ?? error);
+            }
+        }
+        return true;
+    }
+    /**
+     * The in-house path could not carry this show (video missing/unreadable, setup error, answered
+     * but no media, never connected): the in-house ladder's "pick up, I'm calling you" nudges would
+     * now sit on top of bare legacy rings. Swap the chat to the legacy ladder (rings + VCUI link)
+     * once per MEDIA_FAILED_WINDOW_MS.
+     */
+    async leaveInHouseLadder(chatId, result) {
+        if (!this.deps.legacyLadder || !result.videoType)
+            return;
+        if (result.status !== 'fallback' && result.status !== 'media_failed')
+            return;
+        if (!this.claimWindow(this.legacyLadders, chatId, MEDIA_FAILED_WINDOW_MS))
+            return;
+        try {
+            await this.deps.legacyLadder(chatId, result.videoType);
+        }
+        catch (error) {
+            this.logger.warn(`[in-house-calls] legacy ladder for ${chatId} failed`, error?.message ?? error);
+        }
+    }
+    /** Our last ring to chatId was blocked by their call privacy (within the notice window): ringing again is pointless. */
+    isPrivacyBlocked(chatId) {
+        return this.withinWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS);
+    }
+    async playReserved(chatId) {
         if (!(await this.isAvailable()))
             return { status: 'fallback', reason: 'unsupported' };
-        let plan;
+        if (this.withinWindow(this.mediaFailures, chatId, MEDIA_FAILED_WINDOW_MS))
+            return { status: 'fallback', reason: 'media_failed_recently' };
+        let planned;
         try {
-            plan = await this.plan(chatId);
+            planned = await this.plan(chatId);
         }
         catch (error) {
             this.logger.error(`[in-house-calls] planning failed for ${chatId}`, error);
             return { status: 'fallback', reason: 'plan_error' };
         }
-        if (!plan)
-            return { status: 'fallback', reason: 'not_eligible' };
+        const { plan } = planned;
+        if (!plan) {
+            if (planned.reason === 'no_video') {
+                this.safeWarn(`In-house no_video: video unavailable or unreadable for ${chatId}; using the legacy ring`, 'no_video');
+                return { status: 'fallback', reason: 'no_video', videoType: planned.videoType };
+            }
+            // VCUI would show "payment required" here, never a call: ask to pay instead of a bare ring.
+            if (planned.user && (Number(planned.user.highestPayAmount) || 0) >= PAID_THRESHOLD) {
+                this.promptToPayAgain(chatId, planned.user, 'not_eligible');
+                this.safeWarn(`In-house not_eligible: ${chatId} payAmount=${planned.user.payAmount} highest=${planned.user.highestPayAmount}`);
+            }
+            return { status: 'not_eligible' };
+        }
         const engine = this.getEngine();
-        if (engine.isBusy())
-            return { status: 'busy_engine' };
         let record;
+        let peerKey = chatId;
         try {
             const peer = await this.deps.resolvePeer(chatId);
+            peerKey = String(peer?.id ?? chatId);
+            if (this.cancelled.has(chatId) || this.stopped)
+                return { status: 'cancelled' };
+            this.outgoingPeers.set(chatId, peerKey);
+            this.outgoingPlans.set(peerKey, plan);
+            this.showEnds.set(chatId, this.now() + RING_ALLOWANCE_MS + this.remainingMs(plan));
             record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec }, this.callOptions(plan));
         }
         catch (error) {
+            void this.stopCheckpoint(chatId);
+            // An incoming call took the last engine slot while we were planning: retry from the queue.
+            if (/busy/i.test(error?.message ?? ''))
+                return { status: 'busy_engine' };
             this.logger.error(`[in-house-calls] call setup failed for ${chatId}`, error);
-            return { status: 'fallback', reason: 'setup_error', videoId: plan.videoId };
+            this.safeWarn(`In-house fallback: ${chatId} setup_error ${error?.message ?? ''}`);
+            return { status: 'fallback', reason: 'setup_error', videoId: plan.videoId, videoType: plan.videoType };
+        }
+        finally {
+            this.outgoingPlans.delete(peerKey);
         }
         return this.settle(plan, record);
+    }
+    /**
+     * A payer was queued while another show is playing: tell them roughly how long, at most once per
+     * WAIT_NOTICE_COOLDOWN_MS, instead of leaving them with only the ladder.
+     */
+    noticeQueued(chatId) {
+        if (!this.isEnabled() || this.isInCall(chatId))
+            return;
+        if (!this.claimWindow(this.waitNotices, chatId, WAIT_NOTICE_COOLDOWN_MS))
+            return;
+        // The first slot to free up: the earliest expected end among the running shows.
+        const ends = Array.from(this.showEnds.values());
+        const soonest = ends.length ? Math.min(...ends) : null;
+        const mins = soonest ? Math.max(2, Math.ceil((soonest - this.now()) / 60000) + 1) : 5;
+        void this.safeSend(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callWaitMessages, chatId, 'wait', { mins }), true);
+        // Hold their ladder ("pick up, I'm calling") until a slot is expected to be free.
+        if (this.deps.deferEvents)
+            void this.deps.deferEvents(chatId, mins * 60000).catch(() => undefined);
     }
     /** Decide pick-up vs decline for a paid caller with nothing pending; returns the clip to play, or null. */
     nextPitch(chatId) {
@@ -49328,14 +49989,27 @@ class InHouseCallService {
         this.lastClip.set(chatId, clip);
         return clip;
     }
+    onShowConnected(plan) {
+        const { chatId } = plan;
+        if (!this.deps.showConnected)
+            return;
+        void this.deps.showConnected(chatId, this.remainingMs(plan) + SAFETY_FOLLOW_UP_SLACK_MS).catch((error) => {
+            this.logger.warn(`[in-house-calls] clearing pending events for ${chatId} failed`, error?.message ?? error);
+        });
+    }
     promptToPayAgain(chatId, user, kind) {
         if (!this.deps.payAgainPrompt)
+            return;
+        // The show's own upsell (executehs/executehsl) is running: don't pitch on top of it.
+        if (this.withinWindow(this.deliveredAt, chatId, POST_SHOW_QUIET_MS))
             return;
         const last = this.payPrompts.get(chatId);
         const now = this.now();
         if (last !== undefined && now - last < PAY_PROMPT_COOLDOWN_MS)
             return;
         this.payPrompts.set(chatId, now);
+        if (this.payPrompts.size > 5000)
+            this.payPrompts.delete(this.payPrompts.keys().next().value);
         void this.deps.payAgainPrompt(chatId, user, kind).catch((error) => {
             this.logger.warn(`[in-house-calls] pay-again prompt to ${chatId} failed`, error?.message ?? error);
         });
@@ -49344,20 +50018,51 @@ class InHouseCallService {
         if (!this.engine) {
             const engine = this.deps.createEngine();
             engine.setIncomingPolicy(this.incomingPolicy);
+            engine.on('connected', (record) => {
+                const plan = record.direction === 'outgoing' ? this.outgoingPlans.get(record.peerUserId) : this.incomingPlans.get(record.peerUserId);
+                if (!plan)
+                    return; // pitch, not a show
+                this.connectedChats.add(plan.chatId);
+                this.startCheckpoint(plan);
+                this.onShowConnected(plan);
+            });
+            engine.on('ringing', (record) => {
+                // cancelRinging landed before the engine knew the call: hang up as soon as it rings.
+                if (record.direction !== 'outgoing')
+                    return;
+                const plan = this.outgoingPlans.get(record.peerUserId);
+                if (plan && (this.cancelled.has(plan.chatId) || this.stopped))
+                    void engine.hangup?.(record.peerUserId);
+            });
+            engine.on('busy-declined', (info) => {
+                // A redial from someone already on a call with us: their live call keeps its state.
+                if (engine.isInCallWith?.(info.peerUserId))
+                    return;
+                // Our policy answered but the engine was full by then: release what it reserved.
+                if (this.incomingPlans.delete(info.peerUserId) || this.pitchCalls.delete(info.peerUserId)) {
+                    this.showEnds.delete(info.peerUserId);
+                    this.notifyCallEnded(info.peerUserId);
+                }
+            });
             engine.on('ended', (record) => {
                 if (record.direction !== 'incoming')
                     return;
+                this.connectedChats.delete(record.peerUserId);
+                this.showEnds.delete(record.peerUserId);
                 const pitchedUser = this.pitchCalls.get(record.peerUserId);
                 if (pitchedUser) {
                     this.pitchCalls.delete(record.peerUserId);
                     this.promptToPayAgain(record.peerUserId, pitchedUser, 'pitch');
+                    this.notifyCallEnded(record.peerUserId);
                     return;
                 }
                 const plan = this.incomingPlans.get(record.peerUserId);
                 if (!plan)
                     return;
                 this.incomingPlans.delete(record.peerUserId);
-                void this.settle(plan, record).catch((error) => this.logger.error('[in-house-calls] incoming settle failed', error));
+                void this.settle(plan, record)
+                    .catch((error) => this.logger.error('[in-house-calls] incoming settle failed', error))
+                    .finally(() => this.notifyCallEnded(record.peerUserId));
             });
             this.engine = engine;
         }
@@ -49371,25 +50076,36 @@ class InHouseCallService {
     async plan(chatId) {
         const user = await this.deps.readUser(chatId);
         if (!user)
-            return null;
-        return this.planFor(chatId, user);
+            return { plan: null, reason: 'not_eligible' };
+        return { ...(await this.planFor(chatId, user)), user };
     }
     async planFor(chatId, user) {
         const now = this.now();
-        const others = (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.summariseOtherProfiles)(await this.deps.readOtherProfiles(chatId), now);
-        if (!(0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.canCallUser)(user, others, now))
-            return null;
-        const { videoId, videoType } = (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.selectNextVideo)(user, others.videos);
-        const url = (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.videoUrl)(videoId);
-        if (!url)
-            return null;
+        const others = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(await this.deps.readOtherProfiles(chatId), now);
+        if (!(0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(user, others, now))
+            return { plan: null, reason: 'not_eligible' };
+        const { videoId, videoType } = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.selectNextVideo)(user, others.videos);
+        const url = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.videoUrl)(videoId);
+        if (!url || this.deps.videoAvailable?.(url) === false)
+            return { plan: null, reason: 'no_video', videoType };
         const durationSec = await this.duration(url);
-        const startSec = (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.resumeOffset)(user.callProgress?.[String(videoId)], durationSec, now);
-        return { chatId, videoId, videoType, service: (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.classifyService)(videoType, user), url, durationSec, startSec };
+        // Length unreadable (CDN down/404, bad file): ffmpeg would fail too, and an instant stream
+        // end can look like a finished show. Fall back before ringing.
+        if (durationSec === null)
+            return { plan: null, reason: 'no_video', videoType };
+        const progress = user.callProgress?.[String(videoId)];
+        const startSec = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.resumeOffset)(progress, durationSec, now);
+        const attempts = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.priorAttempts)(progress, now) + 1;
+        return { plan: { chatId, videoId, videoType, service: (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.classifyService)(videoType, user), url, durationSec, startSec, attempts, fullShowAtPlan: Number(user.fullShow) || 0 } };
+    }
+    remainingMs(plan) {
+        return plan.durationSec ? Math.max(0, plan.durationSec - plan.startSec) * 1000 : 5 * 60 * 1000;
     }
     async duration(url) {
         if (this.durations.has(url))
             return this.durations.get(url) ?? null;
+        if (this.withinWindow(this.probeFailures, url, PROBE_FAILURE_CACHE_MS))
+            return null;
         let value = null;
         try {
             value = await this.deps.probeDurationSec(url);
@@ -49397,49 +50113,81 @@ class InHouseCallService {
         catch {
             value = null;
         }
-        // Cache only real values; an unknown duration is retried on the next call.
+        // Real values are cached for good; a failure is retried after PROBE_FAILURE_CACHE_MS.
         if (value && value > 0)
             this.durations.set(url, value);
+        else
+            this.claimWindow(this.probeFailures, url, PROBE_FAILURE_CACHE_MS);
         return value && value > 0 ? value : null;
     }
     async settle(plan, record) {
         const { chatId } = plan;
         const connected = record.connectedAt !== null;
+        await this.stopCheckpoint(chatId);
+        if (!connected && this.cancelled.has(chatId))
+            return { status: 'cancelled', videoId: plan.videoId };
         if (!connected) {
             if (record.endReason === 'privacy_restricted') {
-                await this.safeSend(chatId, this.deps.privacyText?.(chatId) ?? PRIVACY_MESSAGE);
+                if (this.claimWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS)) {
+                    await this.safeSend(chatId, this.deps.privacyText?.(chatId) ?? PRIVACY_MESSAGE, true);
+                    this.safeWarn(`In-house privacy_restricted: ${chatId} (calls blocked by the user's settings)`);
+                    try {
+                        await this.deps.privacyBlocked?.(chatId);
+                    }
+                    catch (error) {
+                        this.logger.warn(`[in-house-calls] privacy probes for ${chatId} failed`, error?.message ?? error);
+                    }
+                }
                 return { status: 'privacy_restricted', videoId: plan.videoId };
             }
             if (record.endReason === 'no_answer' || record.endReason === 'busy' || record.endReason === 'missed' || record.endReason === 'hangup') {
-                if (this.claimAutoRetry(chatId))
+                // A decline (hangup) is not re-rung by us, and pending ladder events already retry.
+                if (record.endReason !== 'hangup' && !(await this.hasPendingEvents(chatId)) && this.claimAutoRetry(chatId)) {
                     this.deps.requeue(chatId, UNANSWERED_RETRY_MS);
+                }
                 return { status: 'unanswered', reason: record.endReason ?? undefined, videoId: plan.videoId };
             }
-            // media_failed / error / disconnect before any media: the in-house path could not deliver.
+            if (record.answeredAt) {
+                // Picked up but the video never started (old/desktop client, media failure): a second
+                // bare ring would do the same, so offer the web call and use the legacy path for a while.
+                this.claimWindow(this.mediaFailures, chatId, 0);
+                const link = this.deps.vcuiLink?.(chatId);
+                if (link)
+                    await this.safeSend(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callMediaFailedMessages, chatId, 'media', { link }), true);
+                this.safeWarn(`In-house media_failed: ${chatId} answered but no media (${record.endReason}: ${record.error ?? ''})`);
+                return { status: 'media_failed', reason: record.endReason ?? undefined, videoId: plan.videoId, videoType: plan.videoType };
+            }
+            // media_failed / error / disconnect before any answer: the in-house path could not deliver.
             this.logger.warn(`[in-house-calls] ${chatId} never connected (${record.endReason}: ${record.error ?? ''}); falling back`);
-            return { status: 'fallback', reason: record.endReason ?? 'not_connected', videoId: plan.videoId };
+            this.safeWarn(`In-house fallback: ${chatId} ${record.endReason ?? 'not_connected'}`);
+            return { status: 'fallback', reason: record.endReason ?? 'not_connected', videoId: plan.videoId, videoType: plan.videoType };
         }
-        const outcome = (0,_video_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateCall)({
+        const outcome = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.evaluateCall)({
             connected,
             mediaCompleted: record.mediaCompleted,
             endedBy: record.endedBy,
             endReason: record.endReason,
             talkMs: record.talkMs,
             startSec: plan.startSec,
+            count: plan.attempts,
         }, plan.durationSec);
         await this.safeSaveProgress(chatId, plan.videoId, {
             positionSec: outcome.positionSec,
             durationSec: plan.durationSec,
             updatedAt: this.now(),
             completed: outcome.complete,
+            attempts: plan.attempts,
         });
         if (outcome.complete) {
-            if (plan.service !== 'other') {
+            if (plan.service !== 'other' && (await this.servedElsewhere(plan))) {
+                this.safeWarn(`In-house already served: ${chatId} ${plan.service} recorded by another path during the call; not recording it twice`);
+            }
+            else if (plan.service !== 'other') {
                 const handler = plan.service === 'demo' ? 'executehs' : 'executehsl';
                 try {
                     await this.deps.complete(handler, chatId, {
                         duration: outcome.positionSec,
-                        count: 0,
+                        count: plan.attempts,
                         video: String(plan.videoId),
                         endCall: outcome.endCall,
                         percentage: outcome.percentage,
@@ -49452,13 +50200,118 @@ class InHouseCallService {
                 }
             }
             this.autoRetries.delete(chatId);
+            await this.safeClearEvents(chatId);
+            this.deliveredAt.set(chatId, this.now());
+            if (this.deliveredAt.size > 5000)
+                this.deliveredAt.delete(this.deliveredAt.keys().next().value);
             return { status: 'delivered', videoId: plan.videoId, outcome };
         }
-        // Dropped by the network / media / safety cap, not by the user: call back and resume.
-        if (outcome.endCall === 'VideoStalled' && this.claimAutoRetry(chatId)) {
-            this.deps.requeue(chatId, DROPPED_RECALL_MS);
+        this.safeWarn(`In-house partial: ${chatId} video=${plan.videoId} ${outcome.percentage}% ${outcome.endCall}`);
+        // Served meanwhile by the other path: nothing left to finish.
+        if (plan.service !== 'other' && (await this.servedElsewhere(plan))) {
+            await this.safeClearEvents(chatId);
+            return { status: 'partial', videoId: plan.videoId, outcome };
+        }
+        // Cut short: say we'll call back, and re-call with back-off (persisted events, so a restart
+        // keeps it). The attempts rule bounds this: the third connected attempt counts as delivered.
+        const dropped = outcome.endCall === 'VideoStalled';
+        await this.safeSend(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(dropped ? _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callDroppedMessages : _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callUserEndedMessages, chatId, 'cut'), true);
+        try {
+            await this.deps.followUp?.(chatId, dropped ? DROPPED_RECALL_MS : USER_ENDED_RECALL_MS);
+        }
+        catch (error) {
+            this.logger.warn(`[in-house-calls] follow-up for ${chatId} failed`, error?.message ?? error);
         }
         return { status: 'partial', videoId: plan.videoId, outcome };
+    }
+    startCheckpoint(plan) {
+        void this.stopCheckpoint(plan.chatId);
+        const connectedAt = this.now();
+        let live = true;
+        let writing = Promise.resolve();
+        const cancel = (this.deps.setTimer ?? defaultTimer)(() => {
+            if (!live)
+                return;
+            const positionSec = Math.round(plan.startSec + (this.now() - connectedAt) / 1000);
+            writing = writing.then(() => (live ? this.safeSaveProgress(plan.chatId, plan.videoId, {
+                positionSec: plan.durationSec ? Math.min(positionSec, plan.durationSec) : positionSec,
+                durationSec: plan.durationSec,
+                updatedAt: this.now(),
+                completed: false,
+                attempts: plan.attempts,
+            }) : undefined));
+        }, PROGRESS_CHECKPOINT_MS);
+        // Stopping waits for a checkpoint write already in flight, so it can never land after the final save.
+        this.checkpoints.set(plan.chatId, () => { live = false; cancel(); return writing; });
+    }
+    async stopCheckpoint(chatId) {
+        const stop = this.checkpoints.get(chatId);
+        this.checkpoints.delete(chatId);
+        await stop?.();
+    }
+    /** True when the show this call was for got recorded by another path (VCUI) while we were calling. */
+    async servedElsewhere(plan) {
+        let user;
+        try {
+            user = await this.deps.readUser(plan.chatId);
+        }
+        catch {
+            return false;
+        }
+        if (!user)
+            return false;
+        if (plan.service === 'demo')
+            return !!user.demoGiven;
+        if (plan.service === 'second-show')
+            return !!user.secondShow;
+        if (plan.service === 'full-show')
+            return (Number(user.fullShow) || 0) > plan.fullShowAtPlan;
+        return false;
+    }
+    async hasPendingEvents(chatId) {
+        try {
+            return (await this.deps.hasPendingEvents?.(chatId)) ?? false;
+        }
+        catch {
+            return false;
+        }
+    }
+    withinWindow(map, chatId, windowMs) {
+        const last = map.get(chatId);
+        return last !== undefined && this.now() - last < windowMs;
+    }
+    /** True (and stamps now) when chatId has not claimed this window yet. */
+    claimWindow(map, chatId, windowMs) {
+        if (this.withinWindow(map, chatId, windowMs))
+            return false;
+        map.set(chatId, this.now());
+        if (map.size > 5000)
+            map.delete(map.keys().next().value);
+        return true;
+    }
+    async safeClearEvents(chatId) {
+        try {
+            await this.deps.clearEvents?.(chatId);
+        }
+        catch (error) {
+            this.logger.warn(`[in-house-calls] clearing events for ${chatId} failed`, error?.message ?? error);
+        }
+    }
+    notifyCallEnded(chatId) {
+        try {
+            this.deps.callEnded?.(chatId);
+        }
+        catch (error) {
+            this.logger.warn(`[in-house-calls] callEnded hook failed for ${chatId}`, error?.message ?? error);
+        }
+    }
+    /** Ops warning, at most once per WARN_DEDUPE_MS per key (default: kind + chat, e.g. "In-house partial: 555"). */
+    safeWarn(text, key = text.split(' ').slice(0, 3).join(' ')) {
+        if (!this.deps.warn)
+            return;
+        if (!this.claimWindow(this.warnNotices, key, WARN_DEDUPE_MS))
+            return;
+        void this.deps.warn(text).catch(() => undefined);
     }
     claimAutoRetry(chatId) {
         const last = this.autoRetries.get(chatId);
@@ -49466,6 +50319,8 @@ class InHouseCallService {
         if (last !== undefined && now - last < AUTO_RETRY_WINDOW_MS)
             return false;
         this.autoRetries.set(chatId, now);
+        if (this.autoRetries.size > 5000)
+            this.autoRetries.delete(this.autoRetries.keys().next().value);
         return true;
     }
     async safeSaveProgress(chatId, videoId, progress) {
@@ -49476,9 +50331,9 @@ class InHouseCallService {
             this.logger.error(`[in-house-calls] saving progress failed for ${chatId}`, error);
         }
     }
-    async safeSend(chatId, text) {
+    async safeSend(chatId, text, urgent = false) {
         try {
-            await this.deps.sendMessage(chatId, text);
+            await this.deps.sendMessage(chatId, text, urgent ? { urgent: true } : undefined);
         }
         catch (error) {
             this.logger.warn(`[in-house-calls] message to ${chatId} failed`, error?.message ?? error);
@@ -49525,11 +50380,13 @@ const SEEN_PAUSE_SPREAD_MS = 3500;
 function createHumanSender(deps) {
     const random = deps.random ?? Math.random;
     const now = deps.now ?? Date.now;
-    return async function sendLikeHuman(chatId, text) {
+    /** ignoreCooldown: call-status messages (privacy, cut call, wait) must reach the user even while
+     *  the reply cool-down set by initiateCall is running; a banned user still gets nothing. */
+    return async function sendLikeHuman(chatId, text, opts = {}) {
         const gate = await deps.readGate(chatId).catch(() => null);
         if (gate?.canReply === 0)
             return 'blocked';
-        if (gate?.limitTime && gate.limitTime > now())
+        if (!opts.ignoreCooldown && gate?.limitTime && gate.limitTime > now())
             return 'cooldown';
         await deps.markRead(chatId).catch(() => undefined);
         await deps.sleep(SEEN_PAUSE_MIN_MS + Math.floor(random() * SEEN_PAUSE_SPREAD_MS));
@@ -49551,12 +50408,14 @@ function createHumanSender(deps) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CallAllowList: () => (/* reexport safe */ _CallAllowList__WEBPACK_IMPORTED_MODULE_6__.CallAllowList),
-/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__.InHouseCallService),
+/* harmony export */   CallAllowList: () => (/* reexport safe */ _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList),
+/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_13__.InHouseCallService),
 /* harmony export */   createInHouseCallService: () => (/* binding */ createInHouseCallService),
-/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.inHouseCallsSwitchState),
-/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled),
-/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.setInHouseCallsOverride)
+/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.inHouseCallsSwitchState),
+/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.isInHouseCallsEnabled),
+/* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_15__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_14__.setInHouseCallsOverride)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
@@ -49566,18 +50425,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
-/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
-/* harmony import */ var _CallAllowList__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./CallAllowList */ "./src/modules/calls/inhouse/CallAllowList.ts");
-/* harmony import */ var _human_send__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./human-send */ "./src/modules/calls/inhouse/human-send.ts");
-/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../../replier/human-typing */ "./src/replier/human-typing.ts");
-/* harmony import */ var _tg_calls__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/calls */ "../../packages/tg-calls/src/index.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
-/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
+/* harmony import */ var _CallAllowList__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./CallAllowList */ "./src/modules/calls/inhouse/CallAllowList.ts");
+/* harmony import */ var _human_send__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./human-send */ "./src/modules/calls/inhouse/human-send.ts");
+/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../../replier/human-typing */ "./src/replier/human-typing.ts");
+/* harmony import */ var _tg_calls__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/calls */ "../../packages/tg-calls/src/index.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
+/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
 
 
 
@@ -49596,9 +50455,14 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger('tg-aut:in-house-calls');
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger('tg-aut:in-house-calls');
 const FFPROBE_TIMEOUT_MS = 20000;
+/** Parallel in-house shows per account (each = one ntgcalls call + an ffmpeg audio/video pair). */
+const DEFAULT_MAX_CALLS = 3;
+function maxInHouseCalls(env = process.env) {
+    const n = Math.floor(Number(env.INHOUSE_MAX_CALLS));
+    return Number.isFinite(n) && n >= 1 ? Math.min(n, 10) : DEFAULT_MAX_CALLS;
+}
 const PITCH_CLIPS = ['confirm.mp3', 'takefull.mp3', 'fifty.mp3'];
 const fmt = (args) => args.map((a) => (a instanceof Error ? a.message : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
 const engineLogger = {
@@ -49615,6 +50479,9 @@ function binaryRuns(bin) {
     }
 }
 function probeDurationSec(url) {
+    if (!/^https?:\/\//i.test(url) && !fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(url)) {
+        logger.warn(`[in-house-calls] video file missing: ${url} (set INHOUSE_VIDEO_DIR, or INHOUSE_VIDEO_CDN=on)`);
+    }
     return new Promise((resolve) => {
         (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', url], { timeout: FFPROBE_TIMEOUT_MS }, (error, stdout) => {
             const value = Number(String(stdout ?? '').trim());
@@ -49624,7 +50491,7 @@ function probeDurationSec(url) {
 }
 /** InputUser from local caches only (entity cache, then the session's own cache); never a network call. */
 function cachedInputUser(client, chatId) {
-    const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().get(chatId);
+    const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__.EntityCacheManager.getInstance().get(chatId);
     if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User && entity.accessHash) {
         return new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputUser({ userId: entity.id, accessHash: entity.accessHash });
     }
@@ -49638,31 +50505,34 @@ function cachedInputUser(client, chatId) {
     }
     return null;
 }
+
+
+async function readCallPrivacy(client) {
+    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall() }));
+    // Users already allowed come back with access hashes: cache them so a write keeps them.
+    for (const user of result.users ?? []) {
+        if (user instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User)
+            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__.EntityCacheManager.getInstance().put(user.id.toString(), user);
+    }
+    const allowed = [];
+    let disallowAll = false;
+    for (const rule of result.rules ?? []) {
+        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueAllowUsers)
+            allowed.push(...rule.users.map((id) => id.toString()));
+        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueDisallowAll)
+            disallowAll = true;
+    }
+    return { allowed, disallowAll };
+}
 function createCallAllowList(client) {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
-    const stateFile = path__WEBPACK_IMPORTED_MODULE_2___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_4__.runtimeConfigCacheDir)(), `call-allowlist-${process.env.clientId ?? 'unknown'}.json`);
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_15__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall(), rules }));
-    return new _CallAllowList__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled)(),
+    return new _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList({
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_14__.isInHouseCallsEnabled)(),
         listPaidChatIds: (limit) => db.listPaidChatIds(limit),
         resolvable: (chatIds) => chatIds.filter((id) => cachedInputUser(client, id) !== null),
-        readPrivacy: async () => {
-            const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall() }));
-            // Users already allowed come back with access hashes: cache them so a write keeps them.
-            for (const user of result.users ?? []) {
-                if (user instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User)
-                    _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().put(user.id.toString(), user);
-            }
-            const allowed = [];
-            let disallowAll = false;
-            for (const rule of result.rules ?? []) {
-                if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueAllowUsers)
-                    allowed.push(...rule.users.map((id) => id.toString()));
-                if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueDisallowAll)
-                    disallowAll = true;
-            }
-            return { allowed, disallowAll };
-        },
+        readPrivacy: () => readCallPrivacy(client),
         writeAllowList: async (chatIds) => {
             const users = chatIds.map((id) => cachedInputUser(client, id)).filter((u) => u !== null);
             await setRules([new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyValueAllowUsers({ users }), new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyValueDisallowAll()]);
@@ -49685,31 +50555,34 @@ function createCallAllowList(client) {
 }
 /** Wire the service to this account's Telegram client, its DB scope and the existing completion handlers. */
 function createInHouseCallService(client, hooks) {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance();
+    const maxCalls = maxInHouseCalls();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
-    const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
+    const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_6__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
         markRead: async (chatId) => {
             const { TelegramManager } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../../core/TelegramManager */ "./src/core/TelegramManager.ts"));
             await TelegramManager.getInstance()?.dialogManager?.markAsRead(chatId);
         },
-        typingDurationMs: (text) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.calculateTypingDuration)(text),
-        showTyping: (chatId, ms) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.showHumanTyping)(client, chatId, ms),
+        typingDurationMs: (text) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_7__.calculateTypingDuration)(text),
+        showTyping: (chatId, ms) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_7__.showHumanTyping)(client, chatId, ms),
         send: async (chatId, text) => { await client.sendMessage(chatId, { message: text }); },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     });
-    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__.InHouseCallService({
+    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_13__.InHouseCallService({
         allowList: createCallAllowList(client),
         // The same pay-prompt voice notes the chat flow sends, from the client's working directory.
         pitchClips: () => PITCH_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_2___default().resolve(process.cwd(), file)).filter((file) => fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(file)),
         payAgainPrompt: async (chatId, user, kind) => {
-            await sendLikeHuman(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_5__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0));
+            await sendLikeHuman(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
         },
-        privacyText: (chatId) => (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_5__.callPrivacyMessage)(chatId),
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled)(),
-        isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
-        createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine(client, {
+        privacyText: (chatId) => (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPrivacyMessage)(chatId),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_14__.isInHouseCallsEnabled)(),
+        isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_8__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
+        maxConcurrentCalls: maxCalls,
+        createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_8__.CallEngine(client, {
             logger: engineLogger,
+            maxConcurrentCalls: maxCalls,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
         readOtherProfiles: (chatId) => db.readOtherPersonaRows(chatId),
@@ -49721,21 +50594,109 @@ function createInHouseCallService(client, hooks) {
             const utils = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../../core/utils */ "./src/core/utils.ts"));
             await (handler === 'executehs' ? utils.executehs : utils.executehsl)(client, chatId, data);
         },
-        sendMessage: async (chatId, text) => {
-            await sendLikeHuman(chatId, text);
+        sendMessage: async (chatId, text, opts) => {
+            await sendLikeHuman(chatId, text, { ignoreCooldown: opts?.urgent });
+        },
+        // Lazy imports below: the event executor imports the calls module; a static import would be circular.
+        // Show connected: clear everything that would ring or ping them during it — scheduled events,
+        // a queued duplicate call, and the idle re-ping timer.
+        showConnected: async (chatId, safetyDelayMs) => {
+            hooks.dequeue?.(chatId);
+            const { stateManager } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../../state/UserState */ "./src/state/UserState.ts"));
+            stateManager.clearRepingTimeout(chatId);
+            const { scheduleInHouseFollowUp } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await scheduleInHouseFollowUp(chatId, safetyDelayMs);
+            logger.log(`[in-house-calls] ${chatId} connected: ladder replaced by a safety follow-up in ${Math.round(safetyDelayMs / 1000)}s`);
+        },
+        clearEvents: async (chatId) => {
+            const { deleteEventsForChat } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await deleteEventsForChat(chatId);
+        },
+        callEnded: (chatId) => hooks.callEnded?.(chatId),
+        followUp: async (chatId, delayMs) => {
+            const { scheduleInHouseFollowUp } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await scheduleInHouseFollowUp(chatId, delayMs);
+        },
+        legacyLadder: async (chatId, type) => {
+            const { scheduleLegacyLadder } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await scheduleLegacyLadder(chatId, type);
+        },
+        privacyBlocked: async (chatId) => {
+            const { scheduleInHousePrivacyProbes } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await scheduleInHousePrivacyProbes(chatId);
+        },
+        deferEvents: async (chatId, ms) => {
+            const { deferEventsForChat } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await deferEventsForChat(chatId, ms);
+        },
+        hasPendingEvents: async (chatId) => {
+            const { hasPendingEventsForChat } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            return hasPendingEventsForChat(chatId);
+        },
+        vcuiLink: (chatId) => `https://ZomCall.netlify.app/${process.env.clientId}/${chatId}`,
+        warn: async (text) => {
+            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.VC_WARNINGS, `${process.env.clientId ?? ''}: ${text}`);
         },
         notify: async (text) => {
-            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, `${process.env.clientId ?? ''}: ${text}`);
+            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CLIENT_UPDATES, `${process.env.clientId ?? ''}: ${text}`);
         },
         requeue: hooks.requeue,
         isLineBusy: hooks.isLineBusy,
         resolvePeer: async (chatId) => {
-            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().getEntity(chatId, client);
+            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__.EntityCacheManager.getInstance().getEntity(chatId, client);
             return entity ?? chatId;
         },
         probeDurationSec,
+        videoAvailable: (url) => /^https?:\/\//i.test(url) || fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(url),
         logger: engineLogger,
     });
+}
+
+
+/***/ },
+
+/***/ "./src/modules/calls/inhouse/privacy-restore.ts"
+/*!******************************************************!*\
+  !*** ./src/modules/calls/inhouse/privacy-restore.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   allowListStateFile: () => (/* binding */ allowListStateFile),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* binding */ restoreCallPrivacyIfLeftOpen)
+/* harmony export */ });
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
+
+
+
+
+/** Where CallAllowList persists its write throttle; it exists only on accounts that ran in-house calls. */
+function allowListStateFile(env = process.env) {
+    return path__WEBPACK_IMPORTED_MODULE_1___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__.runtimeConfigCacheDir)(env), `call-allowlist-${env.clientId ?? 'unknown'}.json`);
+}
+/**
+ * In-house calls are off at startup, but this account once ran them (its allow-list state file
+ * exists): if Telegram still lets paid users call, put calls back to Nobody, so they don't ring an
+ * account that no longer answers. Accounts that never ran in-house calls make no Telegram request.
+ */
+async function restoreCallPrivacyIfLeftOpen(client, log = () => undefined, env = process.env) {
+    if (!fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync(allowListStateFile(env)))
+        return false;
+    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall() }));
+    const allowed = (result.rules ?? []).some((rule) => rule instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PrivacyValueAllowUsers && rule.users.length > 0);
+    if (!allowed)
+        return false;
+    await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall(), rules: [new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyValueDisallowAll()] }));
+    log('[in-house-calls] switch is off: call privacy restored to Nobody');
+    return true;
 }
 
 
@@ -49803,18 +50764,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   canCallUser: () => (/* binding */ canCallUser),
 /* harmony export */   classifyService: () => (/* binding */ classifyService),
 /* harmony export */   evaluateCall: () => (/* binding */ evaluateCall),
+/* harmony export */   priorAttempts: () => (/* binding */ priorAttempts),
 /* harmony export */   resumeOffset: () => (/* binding */ resumeOffset),
 /* harmony export */   selectNextVideo: () => (/* binding */ selectNextVideo),
 /* harmony export */   summariseOtherProfiles: () => (/* binding */ summariseOtherProfiles),
 /* harmony export */   videoUrl: () => (/* binding */ videoUrl)
 /* harmony export */ });
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_0__);
 /**
  * In-house video call policy: the VCUI rules (vcui src/utils/callPolicy.ts, pages/Idle.tsx,
  * pages/CallEnded.tsx and CMS getPaymentStats) ported server-side. Pure functions only, so the
  * decision of who gets which video, where it resumes and whether it counts as delivered is made
  * here, not in a browser.
  */
-const VIDEO_BASE = 'https://cdn.jsdelivr.net/gh/ramyared4/stream@ideos/public';
+
+const DEFAULT_CDN_BASE = 'https://cdn.jsdelivr.net/gh/ramyared4/stream@ideos/public';
 const VIDEO_IDS = [
     1, 2, 3, 101, 102, 103, 104, 105, 106, 107,
     201, 202, 203, 204, 205, 206, 207, 302, 305, 1011, 1012, 1013,
@@ -49824,8 +50789,23 @@ const DEMO_VIDEOS = [1, 1012, 1011, 1013, 101, 103, 102, 104, 105, 106, 107];
 const REPEAT_DEMO_VIDEOS = [1012, 1011, 1013];
 const SECOND_SHOW_VIDEOS = [2, 3, 203, 204, 201, 202, 206, 207, 302, 305];
 const FULL_SHOW_VIDEOS = [3, 203, 204, 201, 202, 302, 206, 305];
-function videoUrl(videoId) {
-    return VIDEO_IDS.includes(videoId) ? `${VIDEO_BASE}/video_${videoId}.mp4` : null;
+function cdnEnabled(value) {
+    return ['on', 'true', '1', 'yes', 'enabled'].includes((value ?? '').trim().toLowerCase());
+}
+/**
+ * Where video_<id>.mp4 is read from. Local files by default: INHOUSE_VIDEO_DIR, else <cwd>/videos.
+ * The CDN is used only when INHOUSE_VIDEO_CDN=on (base INHOUSE_VIDEO_CDN_URL, else the jsDelivr repo).
+ */
+function videoUrl(videoId, env = process.env) {
+    if (!VIDEO_IDS.includes(videoId))
+        return null;
+    const file = `video_${videoId}.mp4`;
+    if (cdnEnabled(env.INHOUSE_VIDEO_CDN)) {
+        const base = (env.INHOUSE_VIDEO_CDN_URL?.trim() || DEFAULT_CDN_BASE).replace(/\/+$/, '');
+        return `${base}/${file}`;
+    }
+    const dir = env.INHOUSE_VIDEO_DIR?.trim() || path__WEBPACK_IMPORTED_MODULE_0___default().join(process.cwd(), 'videos');
+    return path__WEBPACK_IMPORTED_MODULE_0___default().join(path__WEBPACK_IMPORTED_MODULE_0___default().resolve(dir), file);
 }
 const DAY_MS = 24 * 60 * 60 * 1000;
 function videoIds(values) {
@@ -49921,25 +50901,38 @@ function resumeOffset(progress, durationSec, now) {
         return 0;
     return Math.floor(start);
 }
+/** Connected attempts already made at this video; a completed or stale (> RESUME_MAX_AGE_MS) entry starts a new cycle. */
+function priorAttempts(progress, now) {
+    if (!progress || progress.completed)
+        return 0;
+    if (now - progress.updatedAt > RESUME_MAX_AGE_MS)
+        return 0;
+    return Math.max(0, Math.floor(Number(progress.attempts) || 0));
+}
 /**
- * Map a finished call to VCUI's completion vocabulary. `count` (VCUI openCount) has no in-house
- * equivalent: a reopened link is not evidence of delivery, so it is never used here.
+ * Map a finished call to VCUI's completion vocabulary, with VCUI's rules: > 90%, natural end,
+ * Manual End > 65%, or count > 2 (VCUI's openCount: the third attempt at the same show counts as
+ * delivered, so repeated early hang-ups do not replay it for free).
  */
 function evaluateCall(facts, durationSec) {
     if (!facts.connected) {
         return { positionSec: facts.startSec, percentage: 0, endCall: 'Call Ended Before Starting', complete: false };
     }
     const played = facts.startSec + Math.max(0, facts.talkMs ?? 0) / 1000;
-    const positionSec = facts.mediaCompleted && durationSec ? durationSec : (durationSec ? Math.min(played, durationSec) : played);
-    const percentage = facts.mediaCompleted ? 100 : (durationSec ? Math.floor((positionSec / durationSec) * 100) : 0);
+    // The media "ended" far sooner than the video's length (source died, ffmpeg exited): a failure,
+    // not a finished show. Allow 20% slack for connect time and clock drift.
+    const expected = durationSec ? Math.max(0, durationSec - facts.startSec) : 0;
+    const mediaCompleted = facts.mediaCompleted && !(durationSec && (Math.max(0, facts.talkMs ?? 0) / 1000) < expected * 0.8);
+    const positionSec = mediaCompleted && durationSec ? durationSec : (durationSec ? Math.min(played, durationSec) : played);
+    const percentage = mediaCompleted ? 100 : (durationSec ? Math.floor((positionSec / durationSec) * 100) : 0);
     let endCall;
-    if (facts.mediaCompleted)
+    if (mediaCompleted)
         endCall = 'videoEnd';
     else if (facts.endedBy === 'remote' && (facts.endReason === 'hangup' || facts.endReason === 'busy'))
         endCall = 'Manual End';
     else
         endCall = 'VideoStalled';
-    const complete = percentage > 90 || endCall === 'videoEnd' || (endCall === 'Manual End' && percentage > 65);
+    const complete = percentage > 90 || endCall === 'videoEnd' || (endCall === 'Manual End' && percentage > 65) || (facts.count ?? 0) > 2;
     return { positionSec: Math.floor(positionSec), percentage, endCall, complete };
 }
 
@@ -49955,9 +50948,14 @@ function evaluateCall(facts, durationSec) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   deferEventsForChat: () => (/* binding */ deferEventsForChat),
 /* harmony export */   deleteEventsForChat: () => (/* binding */ deleteEventsForChat),
 /* harmony export */   executeEvent: () => (/* binding */ executeEvent),
-/* harmony export */   scheduleLadder: () => (/* binding */ scheduleLadder)
+/* harmony export */   hasPendingEventsForChat: () => (/* binding */ hasPendingEventsForChat),
+/* harmony export */   scheduleInHouseFollowUp: () => (/* binding */ scheduleInHouseFollowUp),
+/* harmony export */   scheduleInHousePrivacyProbes: () => (/* binding */ scheduleInHousePrivacyProbes),
+/* harmony export */   scheduleLadder: () => (/* binding */ scheduleLadder),
+/* harmony export */   scheduleLegacyLadder: () => (/* binding */ scheduleLegacyLadder)
 /* harmony export */ });
 /* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
 /* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../calls */ "./src/modules/calls/index.ts");
@@ -50043,9 +51041,44 @@ async function scheduleLadder(chatId, type = '1') {
         logger.log(`Events already exist for ${clientId} | ${chatId}`);
         return;
     }
+    // In-house calls ring with the real show, so their ladder asks the user to pick up instead of
+    // claiming the call is broken; the VCUI link is only a late fallback.
+    const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../calls/call-me */ "./src/modules/calls/call-me.ts"));
+    const inHouse = await inHouseCallsActive();
+    const events = (inHouse ? _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildInHouseEventLadder : _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildPaidEventLadder)(chatId, clientId, type, Date.now());
+    await s.createMultiple(events);
+    logger.log(`Scheduled ${events.length} ${inHouse ? 'in-house ' : ''}events for ${clientId} | ${chatId}`);
+}
+/** An in-house show was cut short: replace the chat's pending events with a backing-off re-call follow-up. */
+async function scheduleInHouseFollowUp(chatId, delayMs) {
+    const clientId = process.env.clientId;
+    const s = store();
+    await s.deleteByChat(chatId, clientId);
+    await s.createMultiple((0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.buildInHouseFollowUp)(chatId, clientId, Date.now(), delayMs));
+    logger.log(`Scheduled in-house follow-up for ${clientId} | ${chatId} (first re-call in ${Math.round(delayMs / 1000)}s)`);
+}
+/** In-house could not carry the show: replace the in-house ladder with the legacy one (rings + VCUI link). */
+async function scheduleLegacyLadder(chatId, type) {
+    const clientId = process.env.clientId;
+    const s = store();
+    await s.deleteByChat(chatId, clientId);
     const events = (0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.buildPaidEventLadder)(chatId, clientId, type, Date.now());
     await s.createMultiple(events);
-    logger.log(`Scheduled ${events.length} events for ${clientId} | ${chatId}`);
+    logger.log(`Switched ${clientId} | ${chatId} to the legacy ladder (${events.length} events)`);
+}
+/** Our call was blocked by the user's call privacy: replace the ladder with a few quiet re-tries. */
+async function scheduleInHousePrivacyProbes(chatId) {
+    const clientId = process.env.clientId;
+    const s = store();
+    await s.deleteByChat(chatId, clientId);
+    await s.createMultiple((0,_tg_events__WEBPACK_IMPORTED_MODULE_0__.buildInHousePrivacyProbes)(chatId, clientId, Date.now()));
+}
+/** The payer is waiting for a free call slot: hold their ladder back by ms. */
+async function deferEventsForChat(chatId, ms) {
+    return store().deferByChat(chatId, process.env.clientId, ms);
+}
+async function hasPendingEventsForChat(chatId) {
+    return store().existsForChat(chatId, process.env.clientId);
 }
 async function deleteEventsForChat(chatId) {
     return store().deleteByChat(chatId, process.env.clientId);
@@ -53163,10 +54196,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _helpers_promoHelper__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../helpers/promoHelper */ "./src/helpers/promoHelper.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
 /**
  * Paid User Specific Pattern Handlers
  * These patterns only apply to users who have paid (payAmount >= 25)
  */
+
 
 
 
@@ -53710,7 +54745,7 @@ const paidPatterns = [
                             "Its me only baby😚😚",
                             "No Dear, Please understand"
                         ], 1)[0];
-                        await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`);
+                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
                         await sleep(2000);
                     }
                     catch (error) {
@@ -53748,7 +54783,7 @@ const paidPatterns = [
                     }
                     else if (userDetails.payAmount >= 25) {
                         if (userDetails.payAmount >= 30) {
-                            await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`);
+                            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
                         }
                         else if ((userDetails.payAmount < 30 && cheatCount > 2) ||
                             cheatCount > 3) {
@@ -68351,7 +69386,9 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
         if (!manager.callManager || typeof manager.callManager.removeFromQueue !== "function") {
             throw new Error("Telegram call manager not available");
         }
-        const removed = Boolean(manager.callManager.removeFromQueue(chatId));
+        const removed = typeof manager.callManager.cancelCallRequest === "function"
+            ? await manager.callManager.cancelCallRequest(chatId)
+            : Boolean(manager.callManager.removeFromQueue(chatId));
         res.status(200).json({
             operation,
             readOnly: false,
