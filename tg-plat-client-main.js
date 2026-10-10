@@ -37836,7 +37836,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   NVIDIA_DEFAULT_MODEL: () => (/* binding */ NVIDIA_DEFAULT_MODEL),
 /* harmony export */   NVIDIA_KEY_ENV: () => (/* binding */ NVIDIA_KEY_ENV),
 /* harmony export */   NVIDIA_URL: () => (/* binding */ NVIDIA_URL),
-/* harmony export */   createNvidiaProvider: () => (/* binding */ createNvidiaProvider)
+/* harmony export */   createNvidiaProvider: () => (/* binding */ createNvidiaProvider),
+/* harmony export */   isNvidiaReasoningModel: () => (/* binding */ isNvidiaReasoningModel),
+/* harmony export */   stripReasoning: () => (/* binding */ stripReasoning)
 /* harmony export */ });
 /* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
 /* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
@@ -37854,9 +37856,18 @@ __webpack_require__.r(__webpack_exports__);
 
 const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const NVIDIA_KEY_ENV = ['NVIDIA_API_KEYS', 'NVIDIA_API_KEY'];
-const NVIDIA_DEFAULT_MODEL = 'nvidia/nemotron-nano-12b-v2-vl';
+// nemotron-nano-12b-v2-vl reached end of life 2026-08-26 (HTTP 410). The omni model, thinking off, reads receipts in 8-11 s.
+const NVIDIA_DEFAULT_MODEL = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
+/** Reasoning-capable omni model: thinking is switched off per request (measured 8-11 s vs 23-77 s with thinking). */
+function isNvidiaReasoningModel(model) {
+    return /nemotron-3-nano-omni/i.test(model);
+}
+/** Drop any reasoning text that leaks into content (<think>...</think>, or a dangling closing tag). */
+function stripReasoning(text) {
+    return text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*?<\/think>/i, '').trim();
+}
 function createNvidiaProvider(opts = {}) {
-    const innerTimeoutMs = opts.innerTimeoutMs ?? 12000;
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 15000; // omni model measured 7.7-11.5 s; outer budget is 20 s
     const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
     const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'nvidia', envNames: NVIDIA_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
     return {
@@ -37888,12 +37899,14 @@ function createNvidiaProvider(opts = {}) {
                         temperature: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.temperature,
                         max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
                         response_format: { type: 'json_object' },
+                        ...(isNvidiaReasoningModel(model) ? { chat_template_kwargs: { enable_thinking: false } } : {}),
                         messages: [{ role: 'user', content: [
                                     { type: 'text', text: prompt },
                                     { type: 'image_url', image_url: { url: dataUrl } },
                                 ] }],
                     }, sig);
-                    const content = data?.choices?.[0]?.message?.content;
+                    const raw = data?.choices?.[0]?.message?.content;
+                    const content = typeof raw === 'string' && isNvidiaReasoningModel(model) ? stripReasoning(raw) : raw;
                     if (!content)
                         throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('NVIDIA returned empty content', { errorClass: 'empty' });
                     const total = data.usage?.total_tokens;
