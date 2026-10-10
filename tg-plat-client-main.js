@@ -51141,7 +51141,7 @@ class InHouseCallService {
                 if (!this.withinWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS)) {
                     // The first notice also carries the VCUI link: a blocked payer must not wait ~10 min with no way to watch.
                     const link = this.deps.vcuiLink?.(chatId);
-                    const text = (this.deps.privacyText?.(chatId) ?? PRIVACY_MESSAGE) + (link ? `\n\n**Or watch here**👇👇\n${link}` : '');
+                    const text = (this.deps.privacyText?.(chatId) ?? PRIVACY_MESSAGE) + (link ? `\n\n**Or call me on Zoom here**👇👇\n${link}` : '');
                     // Stamp only once it went out: a failed send must not silence the notice for 30 min.
                     if (await this.safeSend(chatId, text, true))
                         this.claimWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS);
