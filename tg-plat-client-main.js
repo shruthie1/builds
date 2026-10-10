@@ -37160,6 +37160,7 @@ function swapDaysForCurrentSpamState(now = Date.now()) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AUTOMATED_FLOOD_RETRY_MS: () => (/* binding */ AUTOMATED_FLOOD_RETRY_MS),
 /* harmony export */   REMINDER_MAX_SENDS_PER_RUN: () => (/* binding */ REMINDER_MAX_SENDS_PER_RUN),
 /* harmony export */   REMINDER_RUN_BUDGET_MS: () => (/* binding */ REMINDER_RUN_BUDGET_MS),
 /* harmony export */   asktoPay: () => (/* binding */ asktoPay),
@@ -37513,9 +37514,23 @@ async function sendVideoToChannel(videoBuffer) {
  * cache -> dialogs -> accessHash -> username chain. If nothing resolves it still tries the bare
  * chatId (GramJS may know it) so the caller's own try/catch sees the real Telegram error.
  */
+/** PEER_FLOOD on an automated send is usually brief (replies to the same user go through minutes later). */
+const AUTOMATED_FLOOD_RETRY_MS = { min: 90000, max: 150000 };
 async function sendToUserAutomated(client, chatId, payload) {
     const peer = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.resolveAutomatedPeer)(client, chatId);
-    return client.sendMessage(peer ?? chatId, payload);
+    try {
+        return await client.sendMessage(peer ?? chatId, payload);
+    }
+    catch (error) {
+        if (!/PEER_FLOOD/.test(String(error?.errorMessage ?? error?.message ?? error)))
+            throw error;
+        // Not sent: one more try a little later, so a post-show message isn't silently lost.
+        const { min, max } = AUTOMATED_FLOOD_RETRY_MS;
+        const waitMs = min + Math.floor(Math.random() * (max - min));
+        logger.warn(`[sendToUserAutomated] PEER_FLOOD for ${chatId}; retrying once in ${Math.round(waitMs / 1000)}s`);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(waitMs);
+        return client.sendMessage(peer ?? chatId, payload);
+    }
 }
 let askingtopay = false;
 /** Per-run ceilings so one run can never reach the next cron fire (smallest gap is 2h). */
