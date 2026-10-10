@@ -40090,8 +40090,21 @@ function isRateLimitLegacy(message) {
  * RESOURCE_EXHAUSTED); any other numeric status is definitively NOT a rate limit; the narrowed regex is only a
  * fallback when no status is available.
  */
+/**
+ * A provider-side capacity error (HTTP 5xx, e.g. NVIDIA 503 "Worker local total request limit reached (16/16)") is NOT a
+ * problem with our key: the legacy regex matched its word "limit" and parked the key for an hour, which with a single
+ * NVIDIA key disabled the provider after one busy moment (2026-10-11). Treated as transient instead.
+ */
+function isServerCapacityError(err, message) {
+    const status = statusOf(err);
+    if (status !== undefined && status >= 500 && status <= 599)
+        return true;
+    return /\bHTTP 5\d\d\b|worker local total request limit/i.test(message);
+}
 function isRateLimit(err, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
     const message = messageOf(err);
+    if (isServerCapacityError(err, message))
+        return false;
     if (!v2.has('R21'))
         return isRateLimitLegacy(message);
     const status = statusOf(err);
