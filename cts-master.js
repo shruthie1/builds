@@ -14068,6 +14068,17 @@ class ConnectionManager {
         const clientInfo = this.clients.get(mobile);
         return clientInfo !== undefined && clientInfo.state === 'connected';
     }
+    getReuseState(mobile) {
+        if (this.inFlight.has(mobile))
+            return 'busy';
+        const clientInfo = this.clients.get(mobile);
+        if (!clientInfo)
+            return 'none';
+        return clientInfo.state === 'connected' && this.isClientHealthy(clientInfo) ? 'healthy' : 'busy';
+    }
+    getLastUsed(mobile) {
+        return this.clients.get(mobile)?.lastUsed;
+    }
     getClientState(mobile) {
         const clientInfo = this.clients.get(mobile);
         if (!clientInfo)
@@ -14854,6 +14865,202 @@ class RateLimiter {
     }
 }
 exports.RateLimiter = RateLimiter;
+
+
+/***/ },
+
+/***/ "./src/components/Telegram/utils/spambot-probe.ts"
+/*!********************************************************!*\
+  !*** ./src/components/Telegram/utils/spambot-probe.ts ***!
+  \********************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS = exports.SPAMBOT_TOTAL_TIMEOUT_MS = exports.SPAMBOT_POLL_INTERVAL_MS = exports.SPAMBOT_POLL_TIMEOUT_MS = exports.SPAMBOT_USERNAME = void 0;
+exports.parseLimitedUntil = parseLimitedUntil;
+exports.classifySpamBotReply = classifySpamBotReply;
+exports.probeSpamBot = probeSpamBot;
+const connection_manager_1 = __webpack_require__(/*! ./connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
+exports.SPAMBOT_USERNAME = '@SpamBot';
+exports.SPAMBOT_POLL_TIMEOUT_MS = 15_000;
+exports.SPAMBOT_POLL_INTERVAL_MS = 1_500;
+exports.SPAMBOT_TOTAL_TIMEOUT_MS = 25_000;
+exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS = 7;
+const MONTHS = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+function monthIndex(name) {
+    return MONTHS[name.slice(0, 3).toLowerCase()];
+}
+function buildDate(day, month, year, hour, minute, now) {
+    if (day < 1 || day > 31)
+        return null;
+    const hh = hour ?? 23;
+    const mm = minute ?? 59;
+    const ss = hour === undefined ? 59 : 0;
+    let y = year ?? now.getUTCFullYear();
+    let d = new Date(Date.UTC(y, month, day, hh, mm, ss));
+    if (year === undefined && d.getTime() < now.getTime() - 24 * 60 * 60 * 1000) {
+        y += 1;
+        d = new Date(Date.UTC(y, month, day, hh, mm, ss));
+    }
+    return Number.isNaN(d.getTime()) || d.getUTCDate() !== day ? null : d;
+}
+const TIME_PART = String.raw `(?:,?\s+(\d{1,2}):(\d{2}))?`;
+const DAY_FIRST = new RegExp(String.raw `(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?(?:,?\s+(\d{4}))?` + TIME_PART, 'g');
+const MONTH_FIRST = new RegExp(String.raw `([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?` + TIME_PART, 'g');
+function parseLimitedUntil(text, now = new Date()) {
+    const lower = text.toLowerCase();
+    const keyIdx = [lower.indexOf('limited until'), lower.indexOf('automatically released')]
+        .filter((i) => i >= 0)
+        .sort((a, b) => a - b)[0];
+    const scope = keyIdx === undefined ? text : text.slice(keyIdx);
+    for (const m of scope.matchAll(DAY_FIRST)) {
+        const mi = monthIndex(m[2]);
+        if (mi === undefined)
+            continue;
+        const d = buildDate(+m[1], mi, m[3] ? +m[3] : undefined, m[4] ? +m[4] : undefined, m[5] ? +m[5] : undefined, now);
+        if (d)
+            return d;
+    }
+    for (const m of scope.matchAll(MONTH_FIRST)) {
+        const mi = monthIndex(m[1]);
+        if (mi === undefined)
+            continue;
+        const d = buildDate(+m[2], mi, m[3] ? +m[3] : undefined, m[4] ? +m[4] : undefined, m[5] ? +m[5] : undefined, now);
+        if (d)
+            return d;
+    }
+    return null;
+}
+function classifySpamBotReply(text, now = new Date()) {
+    const reply = (text || '').trim();
+    const lower = reply.toLowerCase();
+    const snippet = reply.slice(0, 300);
+    if (!reply)
+        return { status: 'unknown', limitedUntil: null };
+    if (lower.includes('good news')) {
+        return { status: 'free', limitedUntil: null, replyText: snippet };
+    }
+    if (lower.includes('limited until') || lower.includes('automatically released')) {
+        const until = parseLimitedUntil(reply, now);
+        if (until)
+            return { status: 'limited', limitedUntil: until, replyText: snippet };
+        return {
+            status: 'limited',
+            limitedUntil: new Date(now.getTime() + exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS * 24 * 60 * 60 * 1000),
+            replyText: snippet,
+        };
+    }
+    if (lower.includes('harsh response') || lower.includes('while the account is limited')) {
+        return { status: 'harsh', limitedUntil: null, replyText: snippet };
+    }
+    return { status: 'unknown', limitedUntil: null, replyText: snippet };
+}
+const SEND_CLOCK_SKEW_SEC = 2;
+function messageDateSec(m) {
+    const d = m?.date;
+    if (d instanceof Date)
+        return Math.floor(d.getTime() / 1000);
+    return typeof d === 'number' ? d : undefined;
+}
+function isAfterSend(m, sentId, sentAtSec) {
+    if (sentId !== undefined)
+        return m.id > sentId;
+    const date = messageDateSec(m);
+    return date !== undefined && date >= sentAtSec;
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function probeSpamBot(mobile, options = {}) {
+    const pollTimeoutMs = options.pollTimeoutMs ?? exports.SPAMBOT_POLL_TIMEOUT_MS;
+    const pollIntervalMs = options.pollIntervalMs ?? exports.SPAMBOT_POLL_INTERVAL_MS;
+    const totalTimeoutMs = options.totalTimeoutMs ?? exports.SPAMBOT_TOTAL_TIMEOUT_MS;
+    const nowFn = options.now ?? (() => new Date());
+    const deadline = Date.now() + totalTimeoutMs;
+    const reuseState = connection_manager_1.connectionManager.getReuseState(mobile);
+    if (reuseState === 'busy') {
+        return { status: 'unknown', limitedUntil: null, busy: true, error: 'connection in use by another flow' };
+    }
+    const openedByProbe = reuseState === 'none';
+    let acquired = false;
+    let lastUsedAtAcquire;
+    const release = async () => {
+        if (!openedByProbe || !acquired)
+            return;
+        if (connection_manager_1.connectionManager.getLastUsed(mobile) !== lastUsedAtAcquire)
+            return;
+        try {
+            await connection_manager_1.connectionManager.unregisterClient(mobile);
+        }
+        catch {
+        }
+    };
+    const withDeadline = async (p, what) => {
+        let timer;
+        try {
+            return await Promise.race([
+                p,
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`${what} timed out`)), Math.max(0, deadline - Date.now()));
+                }),
+            ]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+        }
+    };
+    const connecting = connection_manager_1.connectionManager.getClient(mobile, { handler: false });
+    connecting.catch(() => undefined);
+    let manager;
+    try {
+        manager = await withDeadline(connecting, 'connect');
+    }
+    catch (error) {
+        return {
+            status: 'unknown', limitedUntil: null, connectFailed: true,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+    acquired = true;
+    lastUsedAtAcquire = connection_manager_1.connectionManager.getLastUsed(mobile);
+    try {
+        const tg = manager?.client;
+        if (!tg)
+            return { status: 'unknown', limitedUntil: null, connectFailed: true, error: 'no telegram client' };
+        const sentAtSec = Math.floor(Date.now() / 1000) - SEND_CLOCK_SKEW_SEC;
+        const sent = await withDeadline(tg.sendMessage(exports.SPAMBOT_USERNAME, { message: '/start' }), 'send /start');
+        const sentId = typeof sent?.id === 'number' && sent.id > 0 ? sent.id : undefined;
+        const pollUntil = Math.min(deadline, Date.now() + pollTimeoutMs);
+        let lastText = '';
+        while (Date.now() < pollUntil) {
+            await sleep(Math.min(pollIntervalMs, Math.max(0, pollUntil - Date.now())));
+            const messages = await withDeadline(tg.getMessages(exports.SPAMBOT_USERNAME, { limit: 5 }), 'read reply');
+            const incoming = (messages || [])
+                .filter((m) => m && !m.out && typeof m.id === 'number' && isAfterSend(m, sentId, sentAtSec))
+                .sort((a, b) => a.id - b.id);
+            if (incoming.length) {
+                lastText = incoming.map((m) => String(m.message ?? m.text ?? '')).join('\n');
+                const result = classifySpamBotReply(lastText, nowFn());
+                if (result.status !== 'unknown')
+                    return result;
+            }
+        }
+        return {
+            status: 'unknown',
+            limitedUntil: null,
+            replyText: lastText ? lastText.slice(0, 300) : undefined,
+            error: lastText ? 'unrecognized SpamBot reply' : 'no SpamBot reply before timeout',
+        };
+    }
+    catch (error) {
+        return { status: 'unknown', limitedUntil: null, sendFailed: true, error: error instanceof Error ? error.message : String(error) };
+    }
+    finally {
+        await release();
+    }
+}
 
 
 /***/ },
@@ -21793,6 +22000,7 @@ const channels_service_1 = __webpack_require__(/*! ../channels/channels.service 
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const buffer_client_schema_1 = __webpack_require__(/*! ./schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
@@ -23308,6 +23516,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     async getBufferClientsWithMessages() {
         return this.bufferClientModel.find({}, { mobile: 1, status: 1, message: 1, clientId: 1, lastUsed: 1 }).exec();
     }
+    getExtraAvailabilityFilter() {
+        return (0, buffer_client_schema_1.buildSpamEligibleFilter)();
+    }
     async getLeastRecentlyUsedBufferClients(clientId, limit = 1) {
         return await this.getLeastRecentlyUsedClients(clientId, limit);
     }
@@ -23702,6 +23913,26 @@ __decorate([
     (0, class_validator_1.IsString)({ each: true }),
     __metadata("design:type", Array)
 ], UpdateBufferClientDto.prototype, "assignedProfilePics", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ enum: ['free', 'limited', 'harsh'], description: 'Last known SpamBot state.' }),
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsEnum)(['free', 'limited', 'harsh']),
+    __metadata("design:type", String)
+], UpdateBufferClientDto.prototype, "spamStatus", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Date the limit is lifted (null for free/harsh).', nullable: true }),
+    __metadata("design:type", Date)
+], UpdateBufferClientDto.prototype, "limitedUntil", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'When spamStatus was last determined.' }),
+    __metadata("design:type", Date)
+], UpdateBufferClientDto.prototype, "spamCheckedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ enum: ['tg-aut', 'cms-probe'], description: 'Writer of the spam state.' }),
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsEnum)(['tg-aut', 'cms-probe']),
+    __metadata("design:type", String)
+], UpdateBufferClientDto.prototype, "spamCheckSource", void 0);
 
 
 /***/ },
@@ -23754,7 +23985,8 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BufferClientSchema = exports.BufferClient = void 0;
+exports.HARSH_RECHECK_AFTER_MS = exports.BufferClientSchema = exports.BufferClient = void 0;
+exports.buildSpamEligibleFilter = buildSpamEligibleFilter;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mobile_utils_1 = __webpack_require__(/*! ../../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
@@ -23925,6 +24157,26 @@ __decorate([
     __metadata("design:type", Date)
 ], BufferClient.prototype, "sessionRotatedAt", void 0);
 __decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Last known SpamBot state. harsh = indefinite Telegram limit (never lifted).', enum: ['free', 'limited', 'harsh'] }),
+    (0, mongoose_1.Prop)({ required: false, type: String, enum: ['free', 'limited', 'harsh'] }),
+    __metadata("design:type", String)
+], BufferClient.prototype, "spamStatus", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Date the Telegram limit is lifted. Date for dated limits, null for free/harsh.', type: Date, nullable: true }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], BufferClient.prototype, "limitedUntil", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'When spamStatus was last determined.', type: Date }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], BufferClient.prototype, "spamCheckedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Which component wrote the spam state.', enum: ['tg-aut', 'cms-probe'] }),
+    (0, mongoose_1.Prop)({ required: false, type: String, enum: ['tg-aut', 'cms-probe'] }),
+    __metadata("design:type", String)
+], BufferClient.prototype, "spamCheckSource", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Assigned first name from pool', required: false }),
     (0, mongoose_1.Prop)({ required: false, default: null }),
     __metadata("design:type", String)
@@ -23964,6 +24216,23 @@ exports.BufferClientSchema.index({ clientId: 1 }, {
         inUse: true
     }
 });
+exports.HARSH_RECHECK_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+function buildSpamEligibleFilter(now = new Date()) {
+    const harshCutoff = new Date(now.getTime() - exports.HARSH_RECHECK_AFTER_MS);
+    return {
+        $and: [
+            {
+                $or: [
+                    { spamStatus: { $ne: 'harsh' } },
+                    { spamCheckedAt: { $exists: false } },
+                    { spamCheckedAt: null },
+                    { spamCheckedAt: { $lte: harshCutoff } },
+                ],
+            },
+            { $or: [{ limitedUntil: { $exists: false } }, { limitedUntil: null }, { limitedUntil: { $lte: now } }] },
+        ],
+    };
+}
 
 
 /***/ },
@@ -25482,6 +25751,8 @@ const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./sr
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/components/Telegram/manager/helpers.ts");
 const mobile_utils_1 = __webpack_require__(/*! ../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
+const buffer_client_schema_1 = __webpack_require__(/*! ../buffer-clients/schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
+const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
 const CONFIG = {
     REFRESH_INTERVAL: 5 * 60 * 1000,
     CACHE_TTL: 10 * 60 * 1000,
@@ -25492,6 +25763,10 @@ const CONFIG = {
     UPDATE_CLIENT_COOLDOWN: 30000,
     MAP_CLEANUP_INTERVAL: 10 * 60 * 1000,
 };
+const SPAM_FREE_FRESH_MS = 6 * 60 * 60 * 1000;
+const MAX_SETUP_PROBES = 3;
+const SETUP_PROBE_TIME_BUDGET_MS = 45_000;
+const MIN_SETUP_PROBE_MS = 8_000;
 let ClientService = ClientService_1 = class ClientService {
     constructor(clientModel, telegramService, bufferClientService, usersService) {
         this.clientModel = clientModel;
@@ -25898,14 +26173,18 @@ let ClientService = ClientService_1 = class ClientService {
             status: 'active',
             inUse: { $ne: true },
             warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
+            ...(0, buffer_client_schema_1.buildSpamEligibleFilter)(),
         };
+        const newProbeBudget = () => ({ clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] });
+        const probeBudget = newProbeBudget();
+        let fallbackBudget;
         const dueCandidateQuery = {
             ...baseCandidateQuery,
             availableDate: { $lte: today },
         };
         const candidateBufferClients = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
         this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: existingClientMobile, candidateCount: candidateBufferClients.length, query: dueCandidateQuery });
-        let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session);
+        let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session, probeBudget);
         let usedFutureAvailableFallback = false;
         if (!newBufferClient && permanentReplacement) {
             const futureCandidateQuery = {
@@ -25913,7 +26192,8 @@ let ClientService = ClientService_1 = class ClientService {
                 availableDate: { $gt: today },
             };
             const futureCandidateBufferClients = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
-            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session);
+            fallbackBudget = newProbeBudget();
+            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget);
             usedFutureAvailableFallback = !!newBufferClient;
             this.logger.warn(`[${clientId}] Permanent replacement fallback scan completed`, {
                 existingMobile: existingClientMobile,
@@ -25933,7 +26213,11 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.retireReplacedMobile(existingClientMobile, setupClientQueryDto.reason);
                 existingRetired = true;
             }
-            await this.notify(`Buffer not available ${clientId}: no safe buffer clients for swap`);
+            const moreCandidatesPending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending);
+            const pendingNote = moreCandidatesPending
+                ? ' (SpamBot probe budget exhausted; more unprobed candidates remain, retry to check them)'
+                : '';
+            await this.notify(`Buffer not available ${clientId}: no safe buffer clients for swap${pendingNote}${this.formatProbeSkips(probeBudget, fallbackBudget)}`);
             this.logger.log('Buffer Clients not safely available');
             return {
                 status: 'no_candidate',
@@ -25941,7 +26225,8 @@ let ClientService = ClientService_1 = class ClientService {
                 clientId,
                 existingMobile: existingClientMobile,
                 existingRetired,
-                message: 'No safe buffer client is currently available',
+                ...(moreCandidatesPending ? { moreCandidatesPending: true } : {}),
+                message: `No safe buffer client is currently available${pendingNote}`,
             };
         }
         this.setupCooldownMap.set(clientId, Date.now());
@@ -25951,7 +26236,7 @@ let ClientService = ClientService_1 = class ClientService {
                 newMobile: newBufferClient.mobile,
                 usedFutureAvailableFallback,
             });
-            await this.notify(`Swap started ${clientId}: ${existingClient.mobile} (@${existingClient.username}) → ${newBufferClient.mobile}`);
+            await this.notify(`Swap started ${clientId}: ${existingClient.mobile} (@${existingClient.username}) → ${newBufferClient.mobile}${this.formatProbeSkips(probeBudget, fallbackBudget)}`);
             this.telegramService.setActiveClientSetup({
                 ...setupClientQueryDto,
                 clientId,
@@ -26207,11 +26492,22 @@ let ClientService = ClientService_1 = class ClientService {
             await connection_manager_1.connectionManager.unregisterClient(mobile);
         }
     }
+    resolveReturnAvailableDate(bufferClient, days) {
+        const defaultMs = Date.now() + days * 24 * 60 * 60 * 1000;
+        if (bufferClient?.spamStatus === 'limited' && bufferClient.limitedUntil) {
+            const limitedUntilMs = new Date(bufferClient.limitedUntil).getTime();
+            if (Number.isFinite(limitedUntilMs) && limitedUntilMs > defaultMs) {
+                return client_helper_utils_1.ClientHelperUtils.toDateString(limitedUntilMs);
+            }
+        }
+        return client_helper_utils_1.ClientHelperUtils.toDateString(defaultMs);
+    }
     async returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days) {
+        let existingBufferClient = null;
         try {
             await this.assertDistinctUserBackupSession(existingMobile, existingClient.session);
-            const existingBufferClient = await this.bufferClientService.findOne(existingMobile, false);
-            const availableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + days * 24 * 60 * 60 * 1000);
+            existingBufferClient = await this.bufferClientService.findOne(existingMobile, false);
+            const availableDate = this.resolveReturnAvailableDate(existingBufferClient, days);
             const bufferClientDto = {
                 clientId: existingClient.clientId,
                 mobile: existingMobile,
@@ -26237,7 +26533,7 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.retireReplacedMobile(existingMobile, errorDetails.message);
             }
             else {
-                const retryAvailableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + days * 24 * 60 * 60 * 1000);
+                const retryAvailableDate = this.resolveReturnAvailableDate(existingBufferClient, days);
                 await this.bufferClientService.update(existingMobile, {
                     inUse: false,
                     status: 'active',
@@ -26250,7 +26546,7 @@ let ClientService = ClientService_1 = class ClientService {
             }
         }
     }
-    async findSafeSetupBufferCandidate(candidates, existingClientSession) {
+    async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }) {
         for (const candidate of candidates) {
             if (!candidate?.mobile || !candidate?.session)
                 continue;
@@ -26264,6 +26560,8 @@ let ClientService = ClientService_1 = class ClientService {
                     this.logger.warn(`Skipping setup candidate ${candidate.mobile}: backup session is still duplicated`);
                     continue;
                 }
+                if (!(await this.isSpamSafeForSwap(candidate, probeBudget)))
+                    continue;
                 return { mobile: candidate.mobile, session: candidate.session, backupUser };
             }
             catch (error) {
@@ -26272,6 +26570,77 @@ let ClientService = ClientService_1 = class ClientService {
             }
         }
         return null;
+    }
+    formatProbeSkips(...budgets) {
+        const skipped = budgets.flatMap((b) => b?.skipped ?? []);
+        return skipped.length ? `\nSkipped (SpamBot): ${skipped.join('; ')}` : '';
+    }
+    async isSpamSafeForSwap(candidate, budget) {
+        const checkedAt = candidate.spamCheckedAt ? new Date(candidate.spamCheckedAt).getTime() : 0;
+        if (candidate.spamStatus === 'free' && checkedAt > 0 && Date.now() - checkedAt < SPAM_FREE_FRESH_MS) {
+            return true;
+        }
+        const probeTimeoutMs = Math.min(spambot_probe_1.SPAMBOT_TOTAL_TIMEOUT_MS, SETUP_PROBE_TIME_BUDGET_MS - budget.spentMs);
+        if (budget.remaining <= 0 || probeTimeoutMs < MIN_SETUP_PROBE_MS) {
+            this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: per-request SpamBot probe budget exhausted`);
+            budget.moreCandidatesPending = true;
+            return false;
+        }
+        budget.remaining -= 1;
+        const startedAt = Date.now();
+        let result;
+        try {
+            result = await (0, spambot_probe_1.probeSpamBot)(candidate.mobile, { totalTimeoutMs: probeTimeoutMs });
+        }
+        catch (error) {
+            result = { status: 'unknown', limitedUntil: null, error: error instanceof Error ? error.message : String(error) };
+        }
+        budget.spentMs += Date.now() - startedAt;
+        if (result.status === 'unknown' && result.busy) {
+            budget.remaining += 1;
+            budget.moreCandidatesPending = true;
+            this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: connection in use by another flow, not probed`);
+            budget.skipped.push(`${candidate.mobile} busy (not probed)`);
+            return false;
+        }
+        if (result.status === 'unknown' && result.sendFailed) {
+            this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: SpamBot probe send failed (${result.error || 'unknown error'})`);
+            budget.skipped.push(`${candidate.mobile} probe failed: ${(result.error || 'unknown error').slice(0, 60)}`);
+            return false;
+        }
+        if (result.status === 'unknown' && result.connectFailed) {
+            this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: SpamBot probe could not connect (${result.error || 'unknown error'})`);
+            budget.skipped.push(`${candidate.mobile} connect failed`);
+            return false;
+        }
+        if (result.status === 'unknown') {
+            this.logger.warn(`[${budget.clientId}] SpamBot probe inconclusive for ${candidate.mobile} (${result.error || 'unrecognized reply'}); allowing candidate`);
+            return true;
+        }
+        const patch = {
+            spamStatus: result.status,
+            limitedUntil: result.status === 'limited' ? result.limitedUntil : null,
+            spamCheckedAt: new Date(),
+            spamCheckSource: 'cms-probe',
+        };
+        if (result.status === 'limited' && result.limitedUntil) {
+            const limitDate = client_helper_utils_1.ClientHelperUtils.toDateString(result.limitedUntil);
+            patch.availableDate = candidate.availableDate && candidate.availableDate > limitDate ? candidate.availableDate : limitDate;
+        }
+        try {
+            await this.bufferClientService.update(candidate.mobile, patch);
+        }
+        catch (error) {
+            this.logger.warn(`[${budget.clientId}] Failed to persist SpamBot result for ${candidate.mobile}: ${(0, parseError_1.parseError)(error, '', false).message}`);
+        }
+        if (result.status === 'free')
+            return true;
+        const detail = result.status === 'limited' && result.limitedUntil
+            ? `limited until ${result.limitedUntil.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+            : 'harsh limit (indefinite)';
+        this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: SpamBot ${detail}`);
+        budget.skipped.push(`${candidate.mobile} ${detail}`);
+        return false;
     }
     async assertDistinctUserBackupSession(mobile, activeSession) {
         let user;
@@ -41013,6 +41382,9 @@ class BaseClientService {
             lastUsed: doc.lastUsed,
         }));
     }
+    getExtraAvailabilityFilter() {
+        return {};
+    }
     async getLeastRecentlyUsedClients(clientId, limit = 1) {
         const todayInclusive = client_helper_utils_1.ClientHelperUtils.getTodayDateString() + '￿';
         return this.model
@@ -41026,6 +41398,7 @@ class BaseClientService {
                 { availableDate: { $exists: false } },
                 { availableDate: null },
             ],
+            ...this.getExtraAvailabilityFilter(),
         })
             .sort({ lastUsed: 1, _id: 1 })
             .limit(limit)
