@@ -70181,6 +70181,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildShadowDoc: () => (/* binding */ buildShadowDoc),
 /* harmony export */   classifyDiff: () => (/* binding */ classifyDiff),
 /* harmony export */   failedLocal: () => (/* binding */ failedLocal),
+/* harmony export */   isLegacyAccept: () => (/* binding */ isLegacyAccept),
 /* harmony export */   legacyWouldDecision: () => (/* binding */ legacyWouldDecision),
 /* harmony export */   snapshotLocal: () => (/* binding */ snapshotLocal),
 /* harmony export */   snapshotRemote: () => (/* binding */ snapshotRemote)
@@ -70196,6 +70197,10 @@ function legacyWouldDecision(d) {
     if (d.isPayment && d.isSuccess && !d.suspectedFake && typeof d.amount === 'number' && d.amount > 0)
         return 'accept';
     return 'reject';
+}
+/** The legacy credit gate: true only when the legacy credit path would credit this result. */
+function isLegacyAccept(d) {
+    return !!d && legacyWouldDecision(d) === 'accept';
 }
 const REJECT_GROUP = new Set(['reject', 'block']);
 /**
@@ -70285,12 +70290,15 @@ function failedLocal(error, durationMs) {
 }
 function buildShadowDoc(args) {
     const { remote, local } = args;
-    const cls = classifyDiff(remote.wouldDecision, local.wouldDecision, remote.amount, local.amount);
+    const cls = remote
+        ? classifyDiff(remote.wouldDecision, local.wouldDecision, remote.amount, local.amount)
+        : { agree: true, diffKind: 'not_compared' };
     return {
+        ...(args.localMode ?? {}),
         clientId: args.ctx.clientId, chatId: args.ctx.chatId, msgId: args.ctx.msgId, createdAt: args.now,
         imageSha256: args.sha256, dHash: args.dHash, imageBytes: args.imageBytes,
         remote, local,
-        wouldDecision: { remote: remote.wouldDecision, local: local.wouldDecision },
+        wouldDecision: { remote: remote ? remote.wouldDecision : null, local: local.wouldDecision },
         agree: cls.agree, diffKind: cls.diffKind,
         wouldDuplicate: args.duplicate ?? null, wouldReuse: args.reuse ?? null,
     };
@@ -70309,9 +70317,11 @@ function buildShadowDoc(args) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   MAX_IN_FLIGHT: () => (/* binding */ MAX_IN_FLIGHT),
+/* harmony export */   MAX_RECORD_IN_FLIGHT: () => (/* binding */ MAX_RECORD_IN_FLIGHT),
 /* harmony export */   SHADOW_TIMEOUT_MS: () => (/* binding */ SHADOW_TIMEOUT_MS),
 /* harmony export */   analyzeImage: () => (/* binding */ analyzeImage),
 /* harmony export */   awaitShadowIdle: () => (/* binding */ awaitShadowIdle),
+/* harmony export */   getRecordStats: () => (/* binding */ getRecordStats),
 /* harmony export */   getShadowStats: () => (/* binding */ getShadowStats),
 /* harmony export */   imageAnalysisSource: () => (/* binding */ imageAnalysisSource),
 /* harmony export */   scheduleShadow: () => (/* binding */ scheduleShadow),
@@ -70327,7 +70337,12 @@ __webpack_require__.r(__webpack_exports__);
 // Vision shadow + source switch (design U11). IMAGE_ANALYSIS_SOURCE is read at call time:
 //   remote (default)          today's remote result is the decision; tg-vision runs on the same bytes in the background
 //   off-shadow | remote-only  remote only, no shadow
-//   local                     tg-vision's legacy-adapted result is the decision (falls back to remote on outage/error)
+//   local                     tg-vision's legacy-adapted result decides first (falls back to remote on outage/error).
+//                             REJECT CONFIRMATION: when that result would not be a credit-accept, the remote is called on the
+//                             same bytes and, if the REMOTE result would be an accept, the remote result is returned
+//                             (a genuine payer is never false-rejected). Remote failure => the local result stands.
+//   local-only                local decision, no remote call at all (future retirement of the safety net)
+//   Every local-mode decision writes one `visionShadow` row (fire-and-forget, bounded, never awaited, never throws).
 // The shadow is never awaited by the payment path, cannot throw into it, is capped at MAX_IN_FLIGHT per process
 // (excess is dropped and counted) and bounded by SHADOW_TIMEOUT_MS. It writes one `visionShadow` row per screenshot
 // (no image bytes) and runs the duplicate lookup log-only: no markServed, no crediting change.
@@ -70343,7 +70358,7 @@ const SHADOW_TIMEOUT_MS = 60000;
 /** Unknown/empty values mean `remote`: a typo must never silently switch the decision to local. */
 function imageAnalysisSource(env = process.env) {
     const v = String(env.IMAGE_ANALYSIS_SOURCE ?? '').trim().toLowerCase();
-    return v === 'local' || v === 'off-shadow' || v === 'remote-only' ? v : 'remote';
+    return v === 'local' || v === 'local-only' || v === 'off-shadow' || v === 'remote-only' ? v : 'remote';
 }
 const defaultDeps = () => ({
     analyze: (image) => (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.analyzePaymentProof)(image),
@@ -70357,6 +70372,8 @@ let deps = defaultDeps();
 function setShadowDeps(over) {
     deps = { ...defaultDeps(), ...(over ?? {}) };
     inFlight = 0;
+    recordInFlight = 0;
+    recordDropped = 0;
     dropped = 0;
     started = 0;
     completed = 0;
@@ -70388,8 +70405,8 @@ function raceTimeout(work, ms) {
         work.then(() => { clearTimeout(timer); resolve(true); }, () => { clearTimeout(timer); resolve(true); });
     });
 }
-async function shadowBody(image, ctx, remote) {
-    const t0 = deps.now();
+/** Build the stored row (no image data) incl. the log-only duplicate lookup. Never writes. */
+async function composeRow(image, ctx, inp) {
     const sha256 = (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(image).digest('hex');
     let hash = null;
     try {
@@ -70398,22 +70415,21 @@ async function shadowBody(image, ctx, remote) {
     catch {
         hash = null;
     }
+    const { vision } = inp;
     let local;
-    let vision = null;
     try {
-        vision = await deps.analyze(image);
-        const nowMs = deps.now();
-        const legacy = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs });
+        if (!vision || !inp.legacy)
+            throw inp.localError ?? new Error('no local result');
         const profile = (process.env.dbcoll || '').toLowerCase();
         const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_3__.proofCheck)({
             vision,
-            ctx: { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: nowMs },
+            ctx: { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: deps.now() },
             dbcoll: process.env.dbcoll ?? null,
         });
-        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotLocal)(vision, legacy, proof, deps.now() - t0);
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotLocal)(vision, inp.legacy, proof, inp.localMs);
     }
     catch (error) {
-        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.failedLocal)(error, deps.now() - t0);
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.failedLocal)(error, inp.localMs);
     }
     // Log-only duplicate lookup (read methods only; never markServed).
     let duplicate = null;
@@ -70436,13 +70452,30 @@ async function shadowBody(image, ctx, remote) {
         }
     }
     catch { /* log-only */ }
-    const doc = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.buildShadowDoc)({
-        ctx, now: new Date(deps.now()), sha256, dHash: hash, imageBytes: image.length, remote, local, duplicate, reuse,
+    return (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.buildShadowDoc)({
+        ctx, now: new Date(deps.now()), sha256, dHash: hash, imageBytes: image.length, remote: inp.remote, local, duplicate, reuse,
+        localMode: inp.localMode,
     });
+}
+async function shadowBody(image, ctx, remote) {
+    const t0 = deps.now();
+    let vision = null;
+    let legacy = null;
+    let localError;
+    try {
+        vision = await deps.analyze(image);
+        legacy = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs: deps.now() });
+    }
+    catch (error) {
+        localError = error;
+        vision = null;
+        legacy = null;
+    }
+    const doc = await composeRow(image, ctx, { vision, legacy, localError, localMs: deps.now() - t0, remote });
     const store = deps.getRepositories()?.visionShadow;
     if (store)
         await store.insert(doc);
-    logger.log(`[vision-shadow] chat=${ctx.chatId} msg=${ctx.msgId} diff=${doc.diffKind} remote=${doc.wouldDecision.remote} local=${doc.wouldDecision.local} localMs=${local.durationMs}`);
+    logger.log(`[vision-shadow] chat=${ctx.chatId} msg=${ctx.msgId} diff=${doc.diffKind} remote=${doc.wouldDecision.remote} local=${doc.wouldDecision.local} localMs=${doc.local.durationMs}`);
 }
 /**
  * Fire-and-forget. Returns immediately; never throws. Drops (and counts) when MAX_IN_FLIGHT shadows are running.
@@ -70481,11 +70514,34 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
     const source = imageAnalysisSource();
     if (ctx.getRepositories)
         deps.getRepositories = ctx.getRepositories;
-    if (source === 'local') {
-        const local = await tryLocalDecision(photoBuffer);
-        if (local)
-            return local;
-        // outage / error: fall through to the remote result (its own retry + hold handling applies)
+    const localMode = source === 'local' || source === 'local-only';
+    let attempt = null;
+    if (localMode) {
+        attempt = await tryLocalDecision(photoBuffer);
+        if (attempt.ok) {
+            const legacy = attempt.legacy;
+            if (source === 'local-only' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.isLegacyAccept)(attempt.legacy)) {
+                recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'none' });
+                return legacy;
+            }
+            // Reject confirmation: the local result is not a credit-accept. A genuine payer must never be false-rejected.
+            const tr = deps.now();
+            try {
+                const remote = await raceRemote(remoteFn(photoBuffer), deps.timeoutMs);
+                const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(remote, deps.now() - tr);
+                if ((0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.isLegacyAccept)(remote)) {
+                    recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-confirm', finalDecision: 'accept', remoteConfirm: 'ran' });
+                    return remote;
+                }
+                recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'ran' });
+            }
+            catch (error) {
+                logger.warn(`[vision-shadow] reject confirmation failed, keeping local result: ${String(error?.message ?? error)}`);
+                recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - tr, error), { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'failed' });
+            }
+            return legacy;
+        }
+        // outage / error / timeout: fall through to the remote result (its own retry + hold handling applies)
     }
     const t0 = deps.now();
     let details;
@@ -70499,6 +70555,9 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
             }
             catch { /* never */ }
         }
+        else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
+            recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - t0, error), { source, decidedBy: 'remote-fallback', finalDecision: null, remoteConfirm: 'failed' });
+        }
         throw error;
     }
     if (source === 'remote') {
@@ -70507,10 +70566,27 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
         }
         catch { /* never */ }
     }
+    else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
+        const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(details, deps.now() - t0);
+        recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-fallback', finalDecision: snap.wouldDecision, remoteConfirm: 'ran' });
+    }
     return details;
 }
-/** Local decision, or null when tg-vision had an outage / threw / timed out (caller then uses remote). */
+function raceRemote(work, ms) {
+    let timer;
+    return Promise.race([
+        work,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('remote confirmation timeout')), ms); }),
+    ]).finally(() => { if (timer)
+        clearTimeout(timer); });
+}
+/**
+ * Local decision. `ok:false` when tg-vision had an outage (all_providers_failed / no_providers) / threw / timed out:
+ * the caller then uses the remote, whose own retry + `analysisUnavailable` hold handling applies. A local outage never
+ * surfaces as `analysisUnavailable` here, so the hold path is exactly the remote's.
+ */
 async function tryLocalDecision(photoBuffer) {
+    const t0 = deps.now();
     try {
         let timer;
         const vision = await Promise.race([
@@ -70518,13 +70594,56 @@ async function tryLocalDecision(photoBuffer) {
             new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('local analysis timeout')), deps.timeoutMs); }),
         ]).finally(() => { if (timer)
             clearTimeout(timer); });
-        if (vision.outcome === 'all_providers_failed' || vision.outcome === 'no_providers')
-            return null;
-        return (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs: deps.now() });
+        if (vision.outcome === 'all_providers_failed' || vision.outcome === 'no_providers') {
+            return { ok: false, vision, error: new Error(`local outage: ${vision.outcome}`), ms: deps.now() - t0 };
+        }
+        const legacy = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.toLegacyImageDetails)(vision, { nowMs: deps.now() });
+        return { ok: true, vision, legacy, ms: deps.now() - t0 };
     }
     catch (error) {
         logger.warn(`[vision-shadow] local decision failed, using remote: ${String(error?.message ?? error)}`);
-        return null;
+        return { ok: false, vision: null, error, ms: deps.now() - t0 };
+    }
+}
+const MAX_RECORD_IN_FLIGHT = 50;
+let recordInFlight = 0;
+let recordDropped = 0;
+function getRecordStats() { return { recordInFlight, recordDropped }; }
+/**
+ * Fire-and-forget row for a local-mode decision. Never awaited, never throws, bounded (excess dropped and counted),
+ * bounded in time by timeoutMs. `remote` is a snapshot taken before the payment path can mutate the details object.
+ */
+function recordLocalMode(image, ctx, attempt, remote, info) {
+    try {
+        if (!Buffer.isBuffer(image) || image.length === 0)
+            return;
+        if (recordInFlight >= MAX_RECORD_IN_FLIGHT) {
+            recordDropped++;
+            logger.warn(`[vision-shadow] local-mode row dropped (in flight ${recordInFlight}, dropped total ${recordDropped})`);
+            return;
+        }
+        recordInFlight++;
+        const localMode = { ...info, source: info.source === 'local-only' ? 'local-only' : 'local' };
+        const work = (async () => {
+            const doc = await composeRow(image, ctx, {
+                vision: attempt.vision, legacy: attempt.ok ? attempt.legacy : null, localError: attempt.ok ? undefined : attempt.error,
+                localMs: attempt.ms, remote, localMode,
+            });
+            const store = deps.getRepositories()?.visionShadow;
+            if (store)
+                await store.insert(doc);
+            logger.log(`[vision-shadow] local-mode chat=${ctx.chatId} msg=${ctx.msgId} by=${localMode.decidedBy} final=${localMode.finalDecision} diff=${doc.diffKind} localMs=${attempt.ms}`);
+        })();
+        const run = raceTimeout(work.catch((e) => { logger.warn(`[vision-shadow] local-mode row failed: ${String(e?.message ?? e)}`); }), deps.timeoutMs)
+            .then((finished) => { if (!finished)
+            logger.warn(`[vision-shadow] local-mode row timed out after ${deps.timeoutMs}ms`); })
+            .catch(() => { })
+            .finally(() => { recordInFlight--; });
+        pending.add(run);
+        void run.finally(() => pending.delete(run));
+    }
+    catch (error) {
+        logger.warn(`[vision-shadow] local-mode record failed: ${String(error?.message ?? error)}`);
     }
 }
 
