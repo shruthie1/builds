@@ -11889,6 +11889,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ownFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownFilter),
 /* harmony export */   ownershipOnInsert: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownershipOnInsert),
 /* harmony export */   parseError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError),
+/* harmony export */   parseSpamBotReleaseDate: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_34__.parseSpamBotReleaseDate),
 /* harmony export */   parseTelegramError: () => (/* reexport safe */ _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError),
 /* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_39__.percent),
 /* harmony export */   personaFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.personaFilter),
@@ -13231,6 +13232,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
+/* harmony export */   parseSpamBotReleaseDate: () => (/* binding */ parseSpamBotReleaseDate),
 /* harmony export */   readLatestSpamBotReply: () => (/* binding */ readLatestSpamBotReply),
 /* harmony export */   reportManualSpamBotProbe: () => (/* binding */ reportManualSpamBotProbe),
 /* harmony export */   runManualSpamBotProbe: () => (/* binding */ runManualSpamBotProbe),
@@ -13277,7 +13279,10 @@ async function readLatestSpamBotReply(client) {
 /** Classifies the stable phrases used by the existing account-state handlers. */
 function classifySpamBotMessage(text) {
     const normalized = text.toLowerCase();
-    if (normalized.includes("automatically released"))
+    // A readable release date wins over the "harsh response" phrase: a dated limit must never be
+    // recorded as an indefinite harsh limit (CMS excludes harsh accounts from swaps). Same order as
+    // the CMS probe classifier.
+    if (normalized.includes("automatically released") || extractSpamBotReleaseDate(text) !== null)
         return "released";
     if (normalized.includes("good news"))
         return "healthy";
@@ -13285,14 +13290,75 @@ function classifySpamBotMessage(text) {
         return "harsh-warning";
     return "other";
 }
+const MONTH_PATTERN = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+const YEAR_PATTERN = "(?:,?\\s+\\d{4}\\b)";
+const TIME_PATTERN = "(?:,?\\s+(?:at\\s+)?\\d{1,2}:\\d{2}(?:\\s*UTC)?)";
+const DATE_PATTERN = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\s+${MONTH_PATTERN}${YEAR_PATTERN}?|${MONTH_PATTERN}\\s+\\d{1,2}${YEAR_PATTERN}?)`;
+const RELEASE_DATE_REGEX = new RegExp(`\\b(?:limited\\s+until|released\\s+on)\\s+(${DATE_PATTERN}${TIME_PATTERN}?)`, "i");
+const MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 /**
- * Extracts the release date without assuming Telegram's exact capitalization.
- * The optional year keeps both legacy "20 Jun" and current "20 Jun, 2026"
- * responses parseable while refusing unrelated prose.
+ * Extracts the release date text without assuming Telegram's exact capitalization. Accepts
+ * "12 Oct", "12 Oct 2026", "12 Oct, 2026", "Oct 12, 2026" and ISO dates, each optionally followed
+ * by ", 15:58 UTC". Matches "limited until ..." and "automatically released on ...". Unrelated
+ * prose is refused.
  */
 function extractSpamBotReleaseDate(text) {
-    const match = text.match(/\blimited\s+until\s+((?:[a-z]+\s+\d{1,2}(?:\s*,\s*\d{4})?)|(?:\d{1,2}\s+[a-z]+(?:\s*,\s*\d{4})?)|(?:\d{4}-\d{2}-\d{2}))/i);
+    const match = text.match(RELEASE_DATE_REGEX);
     return match?.[1]?.trim() || null;
+}
+/**
+ * Parses the string returned by extractSpamBotReleaseDate into a UTC instant. Without a year the
+ * next occurrence is used (dates up to 1 day past stay in the current year); without a time the
+ * instant is 23:59 UTC of that day.
+ * Returns null for anything unparseable or an impossible calendar date.
+ */
+function parseSpamBotReleaseDate(raw, now = new Date()) {
+    const text = raw.trim();
+    const timeMatch = text.match(/(\d{1,2}):(\d{2})(?:\s*UTC)?\s*$/i);
+    // Without a time, assume the END of that UTC day (same as the CMS probe), so a limit is never
+    // treated as lifted early.
+    const hours = timeMatch ? Number(timeMatch[1]) : 23;
+    const minutes = timeMatch ? Number(timeMatch[2]) : 59;
+    if (hours > 23 || minutes > 59)
+        return null;
+    const datePart = timeMatch ? text.slice(0, timeMatch.index).replace(/[,\s]+(?:at)?\s*$/i, "") : text;
+    let day;
+    let month;
+    let year = null;
+    let m;
+    if ((m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/))) {
+        year = Number(m[1]);
+        month = Number(m[2]) - 1;
+        day = Number(m[3]);
+    }
+    else if ((m = datePart.match(new RegExp(`^(\\d{1,2})\\s+(${MONTH_PATTERN})(?:,?\\s+(\\d{4}))?$`, "i")))) {
+        day = Number(m[1]);
+        month = MONTH_NAMES.indexOf(m[2].slice(0, 3).toLowerCase());
+        year = m[3] ? Number(m[3]) : null;
+    }
+    else if ((m = datePart.match(new RegExp(`^(${MONTH_PATTERN})\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?$`, "i")))) {
+        month = MONTH_NAMES.indexOf(m[1].slice(0, 3).toLowerCase());
+        day = Number(m[2]);
+        year = m[3] ? Number(m[3]) : null;
+    }
+    else {
+        return null;
+    }
+    if (month < 0 || day < 1 || day > 31)
+        return null;
+    if (year === null) {
+        const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        year = now.getUTCFullYear();
+        // Roll to next year only when the date is clearly in the past (> 1 day): a just-passed
+        // yearless date ("9 Oct" read on 10 Oct) must not become a ~365-day limit.
+        if (Date.UTC(year, month, day) < todayUtc - 24 * 60 * 60 * 1000)
+            year += 1;
+    }
+    const result = new Date(Date.UTC(year, month, day, hours, minutes));
+    // Reject overflow such as 31 Feb, which Date.UTC silently rolls into March.
+    if (result.getUTCMonth() !== month || result.getUTCDate() !== day)
+        return null;
+    return result;
 }
 /**
  * Claims a concrete SpamBot reply for notification. The manual endpoint and
@@ -20990,6 +21056,20 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
         if (!mobile?.trim())
             return false;
         return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, () => this.bufferClients.updateOne({ mobile }, { $set: update }));
+    }
+    /** Records the SpamBot-derived spam flag on an existing bufferClients row. No upsert: never creates a row. */
+    async recordSpamStatus(mobile, update) {
+        // bufferClients.mobile is stored without a leading "+" (CMS strips it); match that form.
+        const normalizedMobile = mobile?.trim().replace(/^\+/, '');
+        if (!normalizedMobile)
+            return false;
+        let matched = 0;
+        const written = await this.guardWrite(`bufferClients.recordSpamStatus(${normalizedMobile})`, async () => {
+            const result = await this.bufferClients.updateOne({ mobile: normalizedMobile }, { $set: { ...update } }, { upsert: false });
+            matched = result?.matchedCount ?? 0;
+        });
+        // No upsert by design: a missing row is reported (false), not created.
+        return written && matched > 0;
     }
     /**
      * Active buffer accounts of `clientId` that already hold a persona. Strict: callers merge this
@@ -33457,6 +33537,10 @@ class UserDataDtoCrud {
         if (!ok)
             logger.error(`[Persona] Failed to persist buffer client assignment update for ${mobile}`);
     }
+    /** Never throws; the repository logs failures. Returns whether the row was updated. */
+    async recordSpamStatus(mobile, update) {
+        return (await this.getRepositories()?.clients.recordSpamStatus(mobile, update)) ?? false;
+    }
     async getBufferClientDoc(mobile) {
         logger.debug(`[Persona] Loading buffer client doc for ${mobile}`);
         const doc = (await this.getRepositories()?.clients.findBufferClient(mobile)) ?? null;
@@ -34202,7 +34286,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
 /* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./setup-client */ "./src/core/setup-client.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _spam_state__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./spam-state */ "./src/core/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+
 
 
 
@@ -34838,8 +34924,8 @@ class JobManager {
                     return;
                 }
                 const reason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}`;
-                const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=10&formalities=true&reason=${encodeURIComponent(reason)}`;
-                const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_22__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_23__.fetchWithTimeout, process.env.clientId);
+                const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_spam_state__WEBPACK_IMPORTED_MODULE_23__.swapDaysForCurrentSpamState)()}&formalities=true&reason=${encodeURIComponent(reason)}`;
+                const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_22__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_24__.fetchWithTimeout, process.env.clientId);
                 if (setupResult.swapped) {
                     this.log('info', `Promotion rotation completed 🔄 ${setupResult.existingMobile} → ${setupResult.newMobile}`);
                 }
@@ -35465,7 +35551,7 @@ async function startNewUserProcess(error, context = 'runtime') {
             reason: errorMessage,
             permanentReplacement: true,
         });
-        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId);
+        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
         if (!setupResult.swapped) {
             throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
         }
@@ -35525,7 +35611,11 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup)
+/* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
+/* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
+/* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff)
 /* harmony export */ });
 const VALID_STATUSES = new Set([
     'swapped',
@@ -35535,7 +35625,66 @@ const VALID_STATUSES = new Set([
     'no_candidate',
     'failed',
 ]);
-async function requestClientSetup(url, request, expectedClientId) {
+/** After a no_candidate answer, further swap requests are suppressed this long. */
+const SETUP_CLIENT_BACKOFF_MS = 2 * 60 * 60 * 1000;
+/**
+ * Shorter backoff when CMS still has unprobed candidates: probed limited accounts drop out of its
+ * next scan, so a retry makes progress through the list.
+ */
+const SETUP_CLIENT_PENDING_BACKOFF_MS = 15 * 60 * 1000;
+/** After a successful swap the process is about to be restarted by CMS; don't ask again meanwhile. */
+const SETUP_CLIENT_POST_SWAP_MS = 5 * 60 * 1000;
+let swapSuppressedUntil = 0;
+let inFlight = null;
+function resetSetupClientBackoff() {
+    swapSuppressedUntil = 0;
+    inFlight = null;
+}
+/**
+ * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
+ * no_candidate result, requests from any trigger are answered locally for SETUP_CLIENT_BACKOFF_MS (15 min when CMS reports moreCandidatesPending)
+ * so a no_candidate pool is not re-asked every health cycle.
+ */
+async function requestClientSetup(url, request, expectedClientId, options = {}) {
+    const bypass = options.bypassBackoff === true;
+    const startedAt = Date.now();
+    if (!bypass && startedAt < swapSuppressedUntil) {
+        const remainingMs = swapSuppressedUntil - startedAt;
+        return {
+            status: 'cooldown',
+            swapped: false,
+            clientId: expectedClientId ?? '',
+            message: `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate or swapped result`,
+            cooldownRemainingMs: remainingMs,
+            suppressedLocally: true,
+        };
+    }
+    if (bypass)
+        return requestClientSetupUnguarded(url, request, expectedClientId);
+    // Coalesce concurrent triggers (e.g. a SpamBot reply and a health pass) into one CMS request.
+    if (inFlight)
+        return inFlight;
+    const pending = requestClientSetupUnguarded(url, request, expectedClientId)
+        .then((result) => {
+        // Only "nothing swappable" backs off for long. CMS's own short cooldown or a transient
+        // 'failed' must not block a genuine rotation for hours.
+        if (result.swapped) {
+            swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
+        }
+        else if (result.status === 'no_candidate') {
+            swapSuppressedUntil = Date.now()
+                + (result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS);
+        }
+        return result;
+    })
+        .finally(() => {
+        if (inFlight === pending)
+            inFlight = null;
+    });
+    inFlight = pending;
+    return pending;
+}
+async function requestClientSetupUnguarded(url, request, expectedClientId) {
     const response = await request(url);
     if (!response) {
         throw new Error('setupClient request failed without a response');
@@ -35557,6 +35706,7 @@ async function requestClientSetup(url, request, expectedClientId) {
     const retirementIsValid = data?.existingRetired === undefined || typeof data.existingRetired === 'boolean';
     const futureFallbackIsValid = data?.usedFutureAvailableFallback === undefined
         || typeof data.usedFutureAvailableFallback === 'boolean';
+    const pendingIsValid = data?.moreCandidatesPending === undefined || typeof data.moreCandidatesPending === 'boolean';
     if (!data ||
         typeof data !== 'object' ||
         typeof data.status !== 'string' ||
@@ -35568,10 +35718,67 @@ async function requestClientSetup(url, request, expectedClientId) {
         !swappedMobilesAreValid ||
         !cooldownIsValid ||
         !retirementIsValid ||
-        !futureFallbackIsValid) {
+        !futureFallbackIsValid ||
+        !pendingIsValid) {
         throw new Error('setupClient returned an invalid response contract');
     }
     return data;
+}
+
+
+/***/ },
+
+/***/ "./src/core/spam-state.ts"
+/*!********************************!*\
+  !*** ./src/core/spam-state.ts ***!
+  \********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_SWAP_DAYS: () => (/* binding */ DEFAULT_SWAP_DAYS),
+/* harmony export */   HARSH_SWAP_DAYS: () => (/* binding */ HARSH_SWAP_DAYS),
+/* harmony export */   MIN_LIMIT_DAYS_FOR_SWAP: () => (/* binding */ MIN_LIMIT_DAYS_FOR_SWAP),
+/* harmony export */   daysUntil: () => (/* binding */ daysUntil),
+/* harmony export */   resetSpamState: () => (/* binding */ resetSpamState),
+/* harmony export */   setSpamState: () => (/* binding */ setSpamState),
+/* harmony export */   swapDaysForCurrentSpamState: () => (/* binding */ swapDaysForCurrentSpamState),
+/* harmony export */   swapDaysForLimitedUntil: () => (/* binding */ swapDaysForLimitedUntil)
+/* harmony export */ });
+/**
+ * Process-local record of the last SpamBot verdict, so swap triggers that are not SpamBot message
+ * handlers (promotion health) can size the CMS rest period. Lost on restart; callers then fall back
+ * to DEFAULT_SWAP_DAYS until the next SpamBot reply.
+ */
+const DEFAULT_SWAP_DAYS = 10;
+const HARSH_SWAP_DAYS = 30;
+/** Dated limits shorter than this are waited out rather than swapped. */
+const MIN_LIMIT_DAYS_FOR_SWAP = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
+let current = null;
+function setSpamState(status, limitedUntil) {
+    current = { status, limitedUntil };
+}
+function resetSpamState() {
+    current = null;
+}
+/** Whole days until `limitedUntil`, rounded up. */
+function daysUntil(limitedUntil, now = Date.now()) {
+    return Math.ceil((limitedUntil.getTime() - now) / DAY_MS);
+}
+/** Rest days to request from CMS so the old account is rested until it is actually free. */
+function swapDaysForLimitedUntil(limitedUntil, now = Date.now()) {
+    return daysUntil(limitedUntil, now) + 1;
+}
+/** days= for a swap requested outside a SpamBot handler, from the last known spam state. */
+function swapDaysForCurrentSpamState(now = Date.now()) {
+    if (current?.status === 'harsh')
+        return HARSH_SWAP_DAYS;
+    if (current?.status === 'limited' && current.limitedUntil && current.limitedUntil.getTime() > now) {
+        return swapDaysForLimitedUntil(current.limitedUntil, now);
+    }
+    return DEFAULT_SWAP_DAYS;
 }
 
 
@@ -35635,26 +35842,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_random__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/random */ "../../packages/tg-core/src/utils/random.ts");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_10__);
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram-utils/send-message */ "./src/telegram-utils/send-message.ts");
-/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
-/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
-/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
-/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
-/* harmony import */ var _utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
-/* harmony import */ var _telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../telegram-utils/askToPayByEvent */ "./src/telegram-utils/askToPayByEvent.ts");
-/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _tg_core_utils_random__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/random */ "../../packages/tg-core/src/utils/random.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_11__);
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/send-message */ "./src/telegram-utils/send-message.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
+/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
+/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
+/* harmony import */ var _utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
+/* harmony import */ var _telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../telegram-utils/askToPayByEvent */ "./src/telegram-utils/askToPayByEvent.ts");
+/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./permanent-failure */ "./src/core/permanent-failure/index.ts");
 
 
 
@@ -35682,9 +35890,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger('tg-aut:core-utils');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__.Logger('tg-aut:core-utils');
 function scheduleCoreUtilsTask(callback, delayMs, context, onSettled) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_25__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_26__.scheduleUnrefTimeout)(() => {
         void callback()
             .catch((error) => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, context, false);
@@ -35696,7 +35905,7 @@ function scheduleCoreUtilsTask(callback, delayMs, context, onSettled) {
 }
 async function sendCoreUtilsNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(category, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(category, notification);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(new Error("Core utils notification returned false"), context, false);
             return false;
@@ -35723,7 +35932,7 @@ async function replyUnread(client, unreadUserDialogs) {
     if (client) {
         try {
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-            const dialogsManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getInstance().dialogManager;
+            const dialogsManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getInstance().dialogManager;
             for (const chat of unreadUserDialogs) {
                 try {
                     const userDetails = await db.read(chat.id.toString());
@@ -35766,7 +35975,7 @@ async function replyUnread(client, unreadUserDialogs) {
                                 await client.sendMessage(chat.entity, { message: `I have sent you Pics for your money\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50, _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50two])}` });
                             }
                             else {
-                                await client.sendMessage(chat.entity, { message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_9__.selectRandomElements)(["oyee..", "oye", "haa", "hmm", "??", "hey"], 1)[0] });
+                                await client.sendMessage(chat.entity, { message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_10__.selectRandomElements)(["oyee..", "oye", "haa", "hmm", "??", "hey"], 1)[0] });
                             }
                         }
                         await dialogsManager.markAsRead(chat.id.toString());
@@ -35781,7 +35990,7 @@ async function replyUnread(client, unreadUserDialogs) {
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error at replyUnread");
-            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_27__.startNewUserProcess)(error);
+            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_28__.startNewUserProcess)(error);
         }
     }
 }
@@ -35789,9 +35998,9 @@ async function callToPaid() {
     logger.log("Calls Initiated");
     const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     const ids = (await db.readRecentPaidPpl());
-    await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+    await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
         title: "Auto calls initiated",
-        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.INFO,
+        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
         summary: "tg-aut started auto-call outreach for recent paid users.",
         fields: [
             { label: "Users", value: ids?.length ?? 0 },
@@ -35806,7 +36015,7 @@ async function callToPaid() {
             if (!user.demoGiven) {
                 await new Promise((resolve) => {
                     scheduleCoreUtilsTask(async () => {
-                        await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_17__.requestCall)(id.chatId.toString(), false, "Auto Call to Paid Users");
+                        await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_18__.requestCall)(id.chatId.toString(), false, "Auto Call to Paid Users");
                     }, 120000, `callToPaid.${id.chatId}`, resolve);
                 });
             }
@@ -35830,7 +36039,7 @@ async function callToPaid() {
 async function sendImageToChannel(photoBuffer) {
     logger.log("Forwarding failed-payment image to FAILED_PAYMENTS channel");
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.FAILED_PAYMENTS, photoBuffer, {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.FAILED_PAYMENTS, photoBuffer, {
             extension: 'jpg',
         });
         if (!sent) {
@@ -35848,7 +36057,7 @@ async function sendVideoToChannel(videoBuffer) {
         // admin-bot pool for CHANNEL_NOTIFICATIONS. (Previously pinned to the literal
         // '-1001982401617', which is now a dead channel — a send there fails silently. Same trap
         // sendImageToChannel had.)
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendVideo(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CHANNEL_NOTIFICATIONS, videoBuffer, {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendVideo(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CHANNEL_NOTIFICATIONS, videoBuffer, {
             extension: 'mp4',
         });
         if (!sent) {
@@ -35920,7 +36129,7 @@ async function asktoPay(client, time) {
                         if (hasPendingPaidService(user)) {
                             if (canProceedWithService(user)) {
                                 logger.log(`Requesting pending paid service for ${user.chatId}`);
-                                const requested = await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_17__.requestCall)(user.chatId.toString(), false, "Scheduled pending paid service");
+                                const requested = await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_18__.requestCall)(user.chatId.toString(), false, "Scheduled pending paid service");
                                 logger.log(`Pending paid service call ${requested ? "queued" : "deferred"} for ${user.chatId}`);
                             }
                             else {
@@ -35929,7 +36138,7 @@ async function asktoPay(client, time) {
                         }
                         else {
                             logger.log(`Restarting paid-user engagement for ${user.chatId}`);
-                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_22__.initMsg)({ tempters: true }) });
+                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__.initMsg)({ tempters: true }) });
                             logger.log(`Paid-user engagement init ${sent ? "sent" : "failed"} for ${user.chatId}`);
                         }
                     }, staggerMs, `asktoPay.${chatId}`, resolve);
@@ -35975,11 +36184,11 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                             if (user.demoGiven && canProceedWithService(user)) {
                                                 const didPaidToOthers = await db.checkIfPaidToOthers(user.chatId.toString());
                                                 if (didPaidToOthers.paid !== "" || didPaidToOthers.demoGiven !== "") {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}\n\nCall me now!!`, linkPreview: false });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}\n\nCall me now!!`, linkPreview: false });
                                                     // await trySendingMsg(user, client, { message: `Wait...\nI'm verifying your Payment again!!\nI think U paid to ${didPaidToOthers.paid} ${didPaidToOthers.demoGiven !== "" ? (`and U also took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
                                                 }
                                                 else {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: msg });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: msg });
                                                 }
                                             }
                                             else if (!user.paidReply) {
@@ -35994,7 +36203,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                                         await db.updateSingleKey(user.chatId, 'payAmount', 50);
                                                         await db.updateStatSingleKey(user.chatId, 'payAmount', 50);
                                                     }
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_22__.initMsg)({ tempters: true }) });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__.initMsg)({ tempters: true }) });
                                                 }
                                                 catch (error) {
                                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "ErrReplFunc");
@@ -36006,10 +36215,10 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                         if (user.paidReply) {
                                             try {
                                                 if (!user?.payAmount || user.payAmount < 15) {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: mm + `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo}` });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: mm + `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo}` });
                                                 }
                                                 else {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_22__.initMsg)({ tempters: true }) });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_23__.initMsg)({ tempters: true }) });
                                                 }
                                             }
                                             catch (error) {
@@ -36018,7 +36227,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                         }
                                         else {
                                             const msg = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(['Heyy... there??', `LOGIN here 👇🏻👇🏻\n\n**${process.env.link}**\n**${process.env.link}**\n\nSend me Screenshot After Login!!`, '👀', 'Had Lunch??', 'In mood???', 'Come Online Baby😚', 'Oyyy... there??👀', '😚😚', 'hmmm👀']);
-                                            await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: msg });
+                                            await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: msg });
                                         }
                                     }
                                 }, staggerMs, `respToPaidPplfn.${user.chatId}`, resolve);
@@ -36061,7 +36270,7 @@ async function sendVclinks(client) {
                                 scheduleCoreUtilsTask(async () => {
                                     if (user?.payAmount >= 30) {
                                         if (user.demoGiven && canProceedWithService(user)) {
-                                            await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_12__.trySendingMsg)(user, client, { message: `**Call me Here Man!!**\n\nOpen👇 to Call Now!!\nhttps://ZomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}`, linkPreview: false });
+                                            await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: `**Call me Here Man!!**\n\nOpen👇 to Call Now!!\nhttps://ZomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}`, linkPreview: false });
                                         }
                                     }
                                 }, staggerMs, `sendVclinks.${id.chatId}`, resolve);
@@ -36129,7 +36338,7 @@ async function sendJoinResultMessage(msg, channel) {
         title: isSuccess
             ? (isLeave ? "Telegram group leave succeeded" : "Telegram group join succeeded")
             : (isLeave ? "Telegram group leave failed" : "Telegram group join failed"),
-        severity: isSuccess ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.WARNING,
+        severity: isSuccess ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING,
         summary: `${operation === "leave" ? "Leave" : "Join"} ${result} for ${channel}.`,
         fields: [
             { label: "Operation", value: operation },
@@ -36140,7 +36349,7 @@ async function sendJoinResultMessage(msg, channel) {
         tags: ["telegram-channel", operation, result],
     };
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CHANNEL_NOTIFICATIONS, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CHANNEL_NOTIFICATIONS, notification);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(new Error("Join result notification returned false"), `CoreUtils.joinResultNotification.${operation}.${result}.${channel}`, false);
         }
@@ -36196,7 +36405,7 @@ async function channelInfo(client, sendInChannel = true, sendIds = false, maxDia
                 const chatEntity = chat.entity.toJSON();
                 const { title, id, broadcast, defaultBannedRights, participantsCount, restricted, username, left } = chatEntity;
                 totalCount++;
-                const canSendMsgs = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_26__.computeLiveCanSendMsgs)({
+                const canSendMsgs = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_27__.computeLiveCanSendMsgs)({
                     channelId: id.toString(),
                     broadcast,
                     restricted,
@@ -36245,18 +36454,18 @@ async function channelInfo(client, sendInChannel = true, sendIds = false, maxDia
 }
 async function getChannelEntity(client, channelId) {
     try {
-        const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance();
+        const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance();
         const plainChannelId = channelId?.toString()?.replace(/^-100/, "");
         // Check EntityCacheManager first
         const cached = await entityCache.getEntity(plainChannelId, client);
         if (cached) {
             return cached;
         }
-        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getInstance().dialogManager;
+        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getInstance().dialogManager;
         logger.log(`Fetching channel entity for ID: ${channelId}`);
-        const dialog = await dialogManager.getDialog(channelId, _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__.DialogType.CHANNEL);
+        const dialog = await dialogManager.getDialog(channelId, _tg_dialogs__WEBPACK_IMPORTED_MODULE_16__.DialogType.CHANNEL);
         // dialog resolves on the -100-prefixed id; safeGetEntity fallback needs the stripped id.
-        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_14__.resolveEntity)(client, dialogManager, channelId, { safeFallbackId: plainChannelId });
+        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_15__.resolveEntity)(client, dialogManager, channelId, { safeFallbackId: plainChannelId });
         if (entity) {
             entityCache.put(plainChannelId, entity);
         }
@@ -36268,7 +36477,7 @@ async function getChannelEntity(client, channelId) {
             const channelInfo = (await (0,_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.findActiveChannel(String(channelId))) ?? null;
             if (channelInfo && channelInfo.username) {
                 try {
-                    const ecm = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager.getInstance();
+                    const ecm = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_17__.EntityCacheManager.getInstance();
                     const resolved = await ecm.getEntity(channelInfo.username, client);
                     if (resolved) {
                         ecm.put(channelId?.toString()?.replace(/^-100/, ""), resolved);
@@ -36350,7 +36559,7 @@ async function leaveChannel(client, channel) {
     }
 }
 async function leaveChannels(client) {
-    const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
+    const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
     const dialogs = await dialogManager.getChannelInfo();
     for (let channel of dialogs.channels) {
         if (channel && (channel.restricted || !channel.canSendMsgs)) {
@@ -36361,7 +36570,7 @@ async function leaveChannels(client) {
 }
 async function setTyping(entityLike, sleepTime = 2000) {
     try {
-        await _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
+        await _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
             peer: entityLike,
             action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageTypingAction(),
         }));
@@ -36373,7 +36582,7 @@ async function setTyping(entityLike, sleepTime = 2000) {
 }
 async function setAudioRecord(chatId) {
     try {
-        await _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
+        await _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
             peer: chatId,
             action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageRecordAudioAction(),
         }));
@@ -36441,9 +36650,9 @@ async function removeOtherAuths(client) {
                         try {
                             logger.log(auth);
                             await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.ResetAuthorization({ hash: auth.hash }));
-                            await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.ACCOUNT_LOGINS, {
+                            await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_LOGINS, {
                                 title: "Telegram auth removed",
-                                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.WARNING,
+                                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.WARNING,
                                 summary: "Removed a foreign Telegram authorization from tg-aut account.",
                                 fields: [
                                     { label: "Mobile", value: process.env.mobile || "unknown" },
@@ -36468,33 +36677,26 @@ async function removeOtherAuths(client) {
         checkingAuths = false;
     }
     else {
-        await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.ACCOUNT_LOGINS, {
+        await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_LOGINS, {
             title: "Telegram auth cleanup already running",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.INFO,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
             summary: "Skipped duplicate tg-aut authorization cleanup request.",
             tags: ["tg-aut", "telegram", "auth-cleanup", "duplicate"],
         }, `TgAutCoreUtils.notification.authCleanupDuplicate.${process.env.mobile || "unknown"}`);
     }
 }
 function isAuthMine(auth) {
-    return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_24__.isAuthFingerprintMatch)(process.env.mobile || '', auth);
+    return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_25__.isAuthFingerprintMatch)(process.env.mobile || '', auth);
 }
+/**
+ * Whole days (rounded up) until a SpamBot release date string such as "12 Oct 2026, 15:58 UTC",
+ * "12 Oct" or "Oct 12, 2026". Returns -1 (past / unparseable) rather than NaN.
+ */
 function getdaysLeft(inputDate) {
-    const months = [
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-    ];
-    const dateParts = inputDate.split(' ');
-    const day = parseInt(dateParts[0], 10);
-    const monthIndex = months.indexOf(dateParts[1]);
-    const year = parseInt(dateParts[2], 10);
-    const parsedDate = new Date(year, monthIndex, day);
-    const todaysDate = new Date();
-    const parsedDateTimestamp = parsedDate.getTime();
-    const todaysDateTimestamp = todaysDate.getTime();
-    const timeDifference = parsedDateTimestamp - todaysDateTimestamp;
-    const daysDifference = Math.ceil(timeDifference / (1000 * 60 * 60 * 24));
-    return daysDifference;
+    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.parseSpamBotReleaseDate)(inputDate, new Date());
+    if (!parsed)
+        return -1;
+    return Math.ceil((parsed.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 }
 function parseObjectToString(obj) {
     if (typeof obj !== 'object' || obj === null) {
@@ -36518,7 +36720,7 @@ async function deleteMessage(event) {
 }
 async function deleteMessagesBeforeId(chatId, messageId) {
     scheduleCoreUtilsTask(async () => {
-        const client = await _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getClient();
+        const client = await _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getClient();
         let limit = 100;
         let offsetId = messageId - 4;
         let totalMessages = 0;
@@ -36619,7 +36821,7 @@ async function executehs(client, chatId, data) {
             }
             scheduleCoreUtilsTask(async () => {
                 try {
-                    await client.sendMessage(chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_21__.getUpsellMessage)(50)) });
+                    await client.sendMessage(chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_22__.getUpsellMessage)(50)) });
                 }
                 catch (error) {
                     logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.upsell.${chatId}`, false));
@@ -36643,14 +36845,14 @@ async function executehs(client, chatId, data) {
         payAmount: Math.min(50, Number(userDetails.payAmount) || 0)
     };
     userDetails = await db.update(chatId, updatedData); // Reset states after demo given
-    (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_20__.resetStatesOnDemoGiven)(chatId, userDetails);
+    (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_21__.resetStatesOnDemoGiven)(chatId, userDetails);
     await db.recordDemoGiven(chatId);
     await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
     await db.updateVideos(chatId, data.video);
     const msg = `DEMO-Given : @${userDetails.username}\nChatId : ${chatId}\nClient :${process.env.clientId}\n${parseObjectToString(data)}`;
     await (0,_index__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithButton)(msg, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
     await setTyping(chatId);
-    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_23__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_24__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
     return playback;
 }
 async function executehsl(client, chatId, data) {
@@ -36679,7 +36881,7 @@ async function executehsl(client, chatId, data) {
             if (userDetails.highestPayAmount < 200) {
                 scheduleCoreUtilsTask(async () => {
                     try {
-                        await client.sendMessage(chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_21__.getUpsellMessage)(userDetails.highestPayAmount)) });
+                        await client.sendMessage(chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_22__.getUpsellMessage)(userDetails.highestPayAmount)) });
                     }
                     catch (error) {
                         logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.upsell.${chatId}`, false));
@@ -36707,13 +36909,13 @@ async function executehsl(client, chatId, data) {
     userDetails = await db.update(chatId, updatedData);
     // Reset states based on service level
     if (userDetails.fullShow > 0 || userDetails.highestPayAmount >= 150) {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_20__.resetStatesOnFullShow)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_21__.resetStatesOnFullShow)(chatId, userDetails);
     }
     else if (isSecondShow) {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_20__.resetStatesOnSecondShow)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_21__.resetStatesOnSecondShow)(chatId, userDetails);
     }
     else {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_20__.resetStatesOnDemoGiven)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_21__.resetStatesOnDemoGiven)(chatId, userDetails);
     }
     await db.recordFullShow(chatId);
     await db.updateVideos(chatId, data.video);
@@ -36746,7 +36948,7 @@ async function executehsl(client, chatId, data) {
         }, 60000, `executehsl.reengage.${chatId}`);
     }
     await setTyping(chatId);
-    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_23__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_24__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
     return playback;
 }
 const defaultMessages = [
@@ -36762,7 +36964,7 @@ function getMsgstats() {
 }
 async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, options = {}) {
     try {
-        const client = _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getClient();
+        const client = _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getClient();
         const query = { limit };
         const includeMedia = options.includeMedia !== false;
         if (offset) {
@@ -36775,11 +36977,11 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
             query['maxId'] = parseInt(maxId.toString(), 10);
         }
         logger.log("getMessagesNew query:", query);
-        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_18__.TelegramManager.getInstance().dialogManager;
+        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_19__.TelegramManager.getInstance().dialogManager;
         const cachedDialog = dialogManager.peekDialog(chatId);
         const entity = await dialogManager.getEntity(chatId).catch(() => null) ||
             cachedDialog?.peer ||
-            await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_13__.safeGetEntity)(client, chatId).catch(() => null) ||
+            await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_14__.safeGetEntity)(client, chatId).catch(() => null) ||
             chatId;
         const messages = await client.getMessages(entity, query);
         if (!messages || messages.length === 0) {
@@ -37194,7 +37396,7 @@ async function downloadProfilePic(client, index) {
                 });
                 if (photoBuffer) {
                     const outputPath = `profile_picture_${index + 1}.jpg`;
-                    fs__WEBPACK_IMPORTED_MODULE_10__.writeFileSync(outputPath, photoBuffer);
+                    fs__WEBPACK_IMPORTED_MODULE_11__.writeFileSync(outputPath, photoBuffer);
                     logger.log(`Profile picture downloaded as '${outputPath}'`);
                     return outputPath;
                 }
@@ -38612,7 +38814,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _globalState__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./globalState */ "./src/event-handlers/globalState.ts");
 /* harmony import */ var _core_Config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../core/Config */ "./src/core/Config.ts");
 /* harmony import */ var _core_setup_client__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../core/setup-client */ "./src/core/setup-client.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _core_spam_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../core/spam-state */ "./src/core/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 /**
  * System Message Handler
  * Handles system messages from Telegram (SpamBot, system notifications, etc.)
@@ -38649,10 +38852,55 @@ function persistTgautDaysLeft(daysLeft) {
         .updateTgautClientStat(daysLeft)
         .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
 }
+/**
+ * Persist the SpamBot verdict on this account's bufferClients row (CMS reads spamStatus /
+ * limitedUntil) and remember it in-process for the promotion-health swap sizing. Fire-and-forget:
+ * never throws into the handler.
+ */
+function persistSpamStatus(mobile, spamStatus, limitedUntil) {
+    (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.setSpamState)(spamStatus, limitedUntil);
+    if (!mobile) {
+        logger.warn("Cannot persist spam status: account mobile is unknown");
+        return;
+    }
+    try {
+        _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
+            .recordSpamStatus(mobile, {
+            spamStatus,
+            limitedUntil,
+            spamCheckedAt: new Date(),
+            spamCheckSource: "tg-aut",
+        })
+            .then((recorded) => {
+            if (!recorded)
+                logger.warn(`Spam status '${spamStatus}' not recorded for ${mobile}: no bufferClients row or DB unavailable`);
+        })
+            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false));
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false);
+    }
+}
+/** Ask CMS to swap this client's account (archiveOld + formalities). Never throws. */
+async function requestSpamSwap(reason, days) {
+    try {
+        const runtimeBase = (0,_core_Config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
+        if (!runtimeBase) {
+            logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
+            return;
+        }
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${days}&formalities=true&reason=${encodeURIComponent(reason)}`;
+        const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout, process.env.clientId);
+        if (!setupResult.swapped) {
+            logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "SystemMessageHandler.requestSpamSwap", false);
+    }
+}
 const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
 const PASSWORD_RESET_SLEEP_MS = 2000; // 2 seconds
-const MIN_DAYS_FOR_SETUP = 8;
-const MAX_DAYS_FOR_SETUP = 33;
 const HARSH_TRIGGER_DAYS = 5;
 function scheduleSystemMessageTask(callback, delayMs, context) {
     return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_9__.scheduleUnrefTimeout)(() => {
@@ -38707,13 +38955,15 @@ async function handleSpamBotMessage(event) {
     const spamBotText = event.message.text || "SpamBot sent an empty message";
     logger.log("SpamBot:", spamBotText);
     const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.claimSpamBotNotification)(this.mobile ?? process.env.mobile ?? "unknown", typeof event.message.id === "number" ? event.message.id : null);
+    const mobile = this.mobile ?? process.env.mobile;
     switch ((0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.classifySpamBotMessage)(spamBotText)) {
         case "released":
-            if (!(await handleAutomaticallyReleased(event, shouldNotify)) && shouldNotify) {
+            if (!(await handleAutomaticallyReleased(event, shouldNotify, mobile)) && shouldNotify) {
                 await notifyGenericSpamBotMessage(spamBotText);
             }
             return;
         case "healthy":
+            persistSpamStatus(mobile, "free", null);
             await handleGoodNews.call(this);
             if (shouldNotify) {
                 await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"]);
@@ -38722,9 +38972,11 @@ async function handleSpamBotMessage(event) {
         case "harsh-warning":
             (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
             persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
+            persistSpamStatus(mobile, "harsh", null);
             if (shouldNotify) {
                 await notifySystemMessage("harsh-warning", "SpamBot harsh-limit warning", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
             }
+            await requestSpamSwap("SpamBot harsh limit (indefinite)", _core_spam_state__WEBPACK_IMPORTED_MODULE_14__.HARSH_SWAP_DAYS);
             return;
         default:
             if (shouldNotify)
@@ -38737,7 +38989,7 @@ async function notifyGenericSpamBotMessage(text) {
 /**
  * Handle automatically released message
  */
-async function handleAutomaticallyReleased(event, shouldNotify) {
+async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
     try {
         const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
         if (!date) {
@@ -38747,7 +38999,15 @@ async function handleAutomaticallyReleased(event, shouldNotify) {
             persistTgautDaysLeft(sanitized);
             return false;
         }
-        const days = (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.getdaysLeft)(date);
+        const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
+        if (!limitedUntil) {
+            logger.warn(`SpamBot release date "${date}" could not be parsed`);
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
+            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            persistTgautDaysLeft(sanitized);
+            return false;
+        }
+        const days = (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.daysUntil)(limitedUntil);
         // A "limited until <date>" notice ALWAYS means the account is limited. getdaysLeft returns 0 for a
         // today date and -1 for a past date; storing either raw would misclassify — 0 hit the pacing/cap
         // split, and -1 collides with the healthy sentinel (marking a limited account HEALTHY). Sanitize to
@@ -38755,6 +39015,7 @@ async function handleAutomaticallyReleased(event, shouldNotify) {
         const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
         (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
         persistTgautDaysLeft(storedDaysLeft);
+        persistSpamStatus(mobile, "limited", limitedUntil);
         logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
         if (shouldNotify) {
             await notifySystemMessage("automatically-released", "Restriction days left", "", [
@@ -38762,25 +39023,12 @@ async function handleAutomaticallyReleased(event, shouldNotify) {
                 { label: "Days left", value: days },
             ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
         }
-        if (days > MIN_DAYS_FOR_SETUP && days < MAX_DAYS_FOR_SETUP) {
-            logger.debug(`[EDGE CASE] Days in setup range - triggering client setup, days: ${days}`);
-            const runtimeBase = (0,_core_Config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
-            if (!runtimeBase) {
-                logger.error(`[EDGE CASE] Cannot trigger client setup: runtime config base is missing`);
-                return true;
-            }
-            const reason = `Account limited until ${date} (${days} days)`;
-            const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${days}&formalities=true&reason=${encodeURIComponent(reason)}`;
-            const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_14__.fetchWithTimeout, process.env.clientId);
-            if (!setupResult.swapped) {
-                logger.warn(`[EDGE CASE] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
-            }
-        }
-        else if (days >= 0) {
-            logger.debug(`[EDGE CASE] Days outside setup range - days: ${days}, min: ${MIN_DAYS_FOR_SETUP}, max: ${MAX_DAYS_FOR_SETUP}`);
+        if (days >= _core_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP) {
+            logger.debug(`[EDGE CASE] Dated limit of ${days} days - requesting client swap`);
+            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.swapDaysForLimitedUntil)(limitedUntil));
         }
         else {
-            logger.debug(`[EDGE CASE] Invalid days value - days: ${days}`);
+            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP}`);
         }
         return true;
     }
@@ -41455,7 +41703,11 @@ __webpack_require__.r(__webpack_exports__);
 const REACTION_STALE_MS = 10 * 60 * 1000;
 const REACTION_STOPPED_MS = 30 * 60 * 1000;
 const PROMOTION_STALE_MS = 10 * 60 * 1000;
-const PROMOTION_STOPPED_MS = 30 * 60 * 1000;
+// Must stay above the promotion supervisor's 45 min stuck threshold, so health never calls a runner
+// dead (and requests an account swap) before the supervisor itself would restart it.
+const PROMOTION_STOPPED_MS = 47 * 60 * 1000;
+// Same grace the supervisor applies after a declared sleep (timer jitter + channel reload).
+const PROMOTION_SLEEP_GRACE_MS = 2 * 60 * 1000;
 const TG_AUT_READINESS_COMPONENTS = new Set([
     "telegram.connection",
     "database.mongo",
@@ -41717,15 +41969,22 @@ async function collectPromotionHealth() {
         const budgetCapped = stats?.runnerHealth?.runner?.lastCycleBudgetExhausted === true;
         const durabilityFailures = Number(stats?.runnerHealth?.runner?.totalDurabilityFailures ?? 0);
         const lastDurabilityFailureAt = Number(stats?.runnerHealth?.runner?.lastDurabilityFailureAt ?? 0) || null;
+        // A runner inside a declared deliberate sleep is resting, not stalled (mirrors the supervisor).
+        const sleepUntil = stats?.runnerHealth?.runner?.sleepUntil;
+        const sleeping = typeof sleepUntil === "number" && Date.now() < sleepUntil + PROMOTION_SLEEP_GRACE_MS;
+        const quietAllowed = budgetCapped || sleeping;
         const issues = [];
         let status = "healthy";
         let actionOverride = null;
-        if (!budgetCapped && (lastMainAgeMs == null || lastMainAgeMs > PROMOTION_STOPPED_MS)) {
+        let failStreakOnly = true;
+        if (!quietAllowed && (lastMainAgeMs == null || lastMainAgeMs > PROMOTION_STOPPED_MS)) {
             status = "unhealthy";
+            failStreakOnly = false;
             issues.push("Promotion has no recent successful main message");
         }
-        else if (!budgetCapped && lastMainAgeMs > PROMOTION_STALE_MS) {
+        else if (!quietAllowed && lastMainAgeMs > PROMOTION_STALE_MS) {
             status = "degraded";
+            failStreakOnly = false;
             issues.push("Promotion main-message activity is stale");
         }
         if (failStreak > 100) {
@@ -41741,6 +42000,7 @@ async function collectPromotionHealth() {
                 status = "recovering";
             }
             actionOverride = "observe";
+            failStreakOnly = false;
             issues.push("Promotion runner is stopping");
         }
         if (durabilityFailures > 0) {
@@ -41749,15 +42009,23 @@ async function collectPromotionHealth() {
             // resumed manually after Redis is verified healthy.
             status = "unhealthy";
             actionOverride = "manual";
+            failStreakOnly = false;
             issues.push("Promotion is paused after a verification durability failure");
         }
-        if (!budgetCapped && durableStats?.isActive && durableLastUpdatedAgeMs != null && durableLastUpdatedAgeMs > PROMOTION_STOPPED_MS) {
+        if (!quietAllowed && durableStats?.isActive && durableLastUpdatedAgeMs != null && durableLastUpdatedAgeMs > PROMOTION_STOPPED_MS) {
             status = "unhealthy";
+            failStreakOnly = false;
             issues.push("Promotion durable state has not updated recently");
         }
-        else if (!budgetCapped && durableStats?.isActive && durableLastUpdatedAgeMs != null && durableLastUpdatedAgeMs > PROMOTION_STALE_MS && status === "healthy") {
+        else if (!quietAllowed && durableStats?.isActive && durableLastUpdatedAgeMs != null && durableLastUpdatedAgeMs > PROMOTION_STALE_MS && status === "healthy") {
             status = "degraded";
+            failStreakOnly = false;
             issues.push("Promotion durable state is stale");
+        }
+        // A live runner whose only complaint is a high fail streak is retrying on its own; a restart or
+        // account swap would not help, so surface it without making it an actionable recovery.
+        if (status !== "healthy" && failStreakOnly && runnerStatus === "running" && actionOverride === null) {
+            actionOverride = "observe";
         }
         return withDurableStatsFailure(durableRead, (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.createHealthCheck)({
             component: "promotion.engine",
@@ -41773,6 +42041,7 @@ async function collectPromotionHealth() {
                 lastMainAgeMs,
                 runnerStatus,
                 budgetCapped,
+                sleeping,
                 durabilityFailures,
                 lastDurabilityFailureAt,
                 durableActive: durableStats?.isActive ?? null,
