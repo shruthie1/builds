@@ -27259,7 +27259,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedAt;
         delete doc.servedService;
         delete doc.servedUtr;
-        return this.guardWrite(`insert(${chatId})`, () => this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true }));
+        return this.guardWrite(`insert(${chatId})`, async () => {
+            try {
+                await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
+            }
+            catch (error) {
+                // A concurrent insert of the same screenshot won the unique key: the row exists, which is the goal.
+                if (!isDuplicateKey(error))
+                    throw error;
+            }
+        });
     }
     /**
      * A previous proof from a DIFFERENT chat or persona with the same UTR, else a near imageHash.
@@ -27439,6 +27448,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         await this.guardWrite('ensureIndexes(chatId,createdAt)', () => c.createIndex({ chatId: 1, createdAt: -1 }, { name: 'chatId_1_createdAt_-1' }));
         await this.guardWrite('ensureIndexes(imageHash)', () => c.createIndex({ imageHash: 1 }, { name: 'imageHash_1', partialFilterExpression: { imageHash: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
+        // One row per screenshot: insert() upserts on this key, and without a unique index concurrent upserts
+        // race into duplicate rows (6 rows from 10 parallel inserts on Mongo 8.2).
+        await this.guardWrite('ensureIndexes(chatId,profile,telegramMsgId unique)', () => c.createIndex({ chatId: 1, profile: 1, telegramMsgId: 1 }, { name: 'chatId_1_profile_1_telegramMsgId_1_unique', unique: true }));
         // Race guard: at most one SERVED proof per UTR, across chats and personas. Keyed on servedUtr
         // (not utr) so it never shares a key pattern with utr_1 (older Mongo rejects two partial
         // indexes on one key pattern).
@@ -61968,11 +61980,18 @@ class OutboundQueue {
         if (this.running)
             return;
         this.running = true;
+        let crashed = false;
         void this.drain().catch((error) => {
+            crashed = true;
             logger.error('[outbound] drain loop crashed', error);
         }).finally(() => {
             this.running = false;
-            if (this.items.length)
+            if (this.items.length && crashed) {
+                // A drain that keeps throwing must not spin: retry after a second.
+                const t = nativeSetTimeout(() => this.kick(), 1000);
+                t?.unref?.();
+            }
+            else if (this.items.length)
                 this.kick();
             else
                 for (const wake of this.idleWaiters.splice(0))
@@ -62084,6 +62103,17 @@ class OutboundQueue {
         }
     }
     requeue(item) {
+        // Same cap as enqueue(): the in-flight item was not counted while it was out of the queue.
+        if (this.items.length >= OUTBOUND.maxSize) {
+            const worst = this.items.reduce((w, i) => (i.priority > w.priority || (i.priority === w.priority && i.seq > w.seq) ? i : w));
+            const victim = worst.priority > item.priority || (worst.priority === item.priority && worst.seq > item.seq) ? worst : item;
+            this.stats.dropped += 1;
+            logger.warn(`[${victim.label}] ${victim.chatId}: dropped (queue full on re-queue)`);
+            victim.reject(new OutboundDroppedError('evicted', 'outbound queue full: evicted'));
+            if (victim === item)
+                return;
+            this.items = this.items.filter((i) => i !== worst);
+        }
         let at = this.items.findIndex((i) => i.seq > item.seq);
         if (at < 0)
             at = this.items.length;
