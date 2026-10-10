@@ -59644,6 +59644,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
 /* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
 /* harmony import */ var _voice_proof_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./voice-proof-config */ "./src/modules/calls/inhouse/voice-proof-config.ts");
+/* harmony import */ var _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../../telegram-utils/unreachable-report */ "./src/telegram-utils/unreachable-report.ts");
+
 
 
 
@@ -60079,7 +60081,7 @@ class InHouseCallService {
      */
     async leaveInHouseLadder(chatId, result) {
         // Not eligible for a show: the ladder's "calling you" nudges would never be followed by a ring.
-        if (result.status === 'not_eligible') {
+        if (result.status === 'not_eligible' || result.status === 'unreachable') {
             await this.safeClearEvents(chatId);
             return;
         }
@@ -60160,6 +60162,14 @@ class InHouseCallService {
             // An incoming call took the last engine slot while we were planning: retry from the queue.
             if (/busy/i.test(error?.message ?? ''))
                 return { status: 'busy_engine' };
+            // This account cannot address the user at all (entity not resolvable, PEER_ID_INVALID, blocked,
+            // deactivated): a legacy ring fails the same way, and re-arming the legacy ladder looped every
+            // ~31 min forever (sowmya2/sneha2/shruthi1, 2026-10-10). Stop calling this chat.
+            const unreachable = (0,_telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_3__.classifyUnreachable)(error);
+            if (unreachable) {
+                this.logger.warn(`[in-house-calls] ${chatId} unreachable from this account (${unreachable}): clearing its call ladder`);
+                return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
+            }
             this.logger.error(`[in-house-calls] call setup failed for ${chatId}`, error);
             this.safeWarn(`In-house fallback: ${chatId} setup_error ${error?.message ?? ''}`);
             return { status: 'fallback', reason: 'setup_error', videoId: plan.videoId, videoType: plan.videoType };
