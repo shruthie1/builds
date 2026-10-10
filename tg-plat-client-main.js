@@ -979,10 +979,11 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (this.echo) {
             try {
                 await this.ntg.setStreamSources(call.userId, StreamMode.CAPTURE, description);
-                // The caller's audio comes back to us as frames (onFrames), for the echo.
-                await this.ntg.setStreamSources(call.userId, StreamMode.PLAYBACK, {
-                    speaker: { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true },
-                });
+                // The caller's audio comes back to us as frames (onFrames), for the echo. In PLAYBACK
+                // mode ntgcalls files the remote party's audio under `microphone` (py-tgcalls records
+                // the same way); `speaker` alone was accepted but delivered 0 frames live (2026-10-10).
+                const remoteAudio = { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true };
+                await this.ntg.setStreamSources(call.userId, StreamMode.PLAYBACK, { microphone: remoteAudio, speaker: remoteAudio });
                 call.feeder = this.createFeeder(call, audioCommand);
             }
             catch (error) {
