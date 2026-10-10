@@ -25418,6 +25418,35 @@ class DialogManager {
      * @param force If true, bypasses the cooldown period and forces a refresh
      */
     async refresh(force = false) {
+        try {
+            await this.performRefresh(force);
+        }
+        finally {
+            // refresh() flips isInitializing, which makes handleNewMessage() queue events into
+            // pendingUpdates. Drain them on EVERY exit path (success, empty fetch, rollback, throw);
+            // otherwise they sit in the queue until it overflows and the oldest are dropped
+            // ("Pending updates queue full"). Skip while an init/refresh is still in flight: that
+            // one owns the queue and drains it when it finishes.
+            if (!this.isInitializing) {
+                try {
+                    const queuedBefore = this.pendingUpdates.length;
+                    await this.processPendingUpdates();
+                    if (queuedBefore > 0) {
+                        this.log('info', '[dialogs] drained pending updates after refresh', {
+                            drained: queuedBefore,
+                            remaining: this.pendingUpdates.length
+                        });
+                    }
+                }
+                catch (error) {
+                    this.log('warn', 'Failed to drain pending updates after refresh', {
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                }
+            }
+        }
+    }
+    async performRefresh(force) {
         if (this.isInitializing && !force) {
             this.log('debug', 'Initialization in progress, skipping refresh');
             return;
@@ -28365,6 +28394,13 @@ class ReactionRateLimiter {
         }
         return { allowed: true };
     }
+    /**
+     * True when the ACCOUNT is at its own daily/hourly reaction cap. Side-effect free (no logging),
+     * so health probes can poll it. Being capped is an idle state, not a fault.
+     */
+    isAtReactionCap() {
+        return this.hasReachedDailyLimit() || this.hasReachedHourlyLimit();
+    }
     hasReachedDailyLimit() {
         return this.stats.totalReactions >= this.config.DAILY_REACTION_LIMIT;
     }
@@ -28388,6 +28424,13 @@ class ReactionRateLimiter {
             logger.debug(`[LIMIT] Channel ${channelId} on cooldown: ${remainingSec}s remaining`);
         }
         return onCooldown;
+    }
+    /** Milliseconds until the channel's per-channel cooldown ends (0 when not on cooldown). */
+    getChannelCooldownRemainingMs(channelId) {
+        const lastTime = this.channelLastReaction.get(channelId);
+        if (!lastTime)
+            return 0;
+        return Math.max(0, this.config.PER_CHANNEL_COOLDOWN_MS - (Date.now() - lastTime));
     }
     hasReachedChannelLimit(channelId) {
         const count = this.channelDailyCount.get(channelId) ?? 0;
@@ -28827,6 +28870,15 @@ class ReactionService {
         this.lastHealthCheck = 0;
         // Round-robin channel index for even distribution
         this.channelRoundRobinIndex = 0;
+        /** Epoch ms until which every channel is known to be capped (restricted/cooldown/daily limit). */
+        this.channelsCappedUntil = 0;
+        /** Backoff (ms) chosen by the last selectChannel() exhaustion; consumed by the main loop. */
+        this.lastExhaustionBackoffMs = 0;
+        /** True once the all-capped state has been logged; reset when a channel is selected again (state-change logging). */
+        this.allCappedLogged = false;
+        /** Upper bound for the all-channels-capped backoff (daily-limit/permanent caps have no known expiry). */
+        this.ALL_CAPPED_MAX_BACKOFF_MS = 5 * 60 * 1000;
+        this.ALL_CAPPED_MIN_BACKOFF_MS = 1000;
         // Per-instance emoticon preferences for personality
         this.emoticonPreferences = [];
         // MEMORY FIX: Maximum channels to keep in memory
@@ -29032,6 +29084,7 @@ class ReactionService {
             consecutiveSuccesses: stats.consecutiveSuccesses,
             optimalDelayMs: stats.optimalDelayMs,
             isInFloodWait: this.rateLimiter.isInFloodWait(),
+            isCapped: this.rateLimiter.isAtReactionCap() || Date.now() < this.channelsCappedUntil,
             runtimeOutcomes: { ...this.runtimeOutcomes },
         };
     }
@@ -29040,6 +29093,10 @@ class ReactionService {
         this.restrictedChannelIds.clear();
         this.dbRestrictedChannelIds.clear();
         this.runtimeRestrictions.clear();
+        // Channels may be eligible again: drop the all-capped backoff and wake the sleeping loop.
+        this.channelsCappedUntil = 0;
+        this.lastExhaustionBackoffMs = 0;
+        this.interruptSleep?.();
         for (const id of HARDCODED_RESTRICTED_CHANNELS) {
             this.restrictedChannelIds.add(id);
         }
@@ -29094,6 +29151,12 @@ class ReactionService {
                     const delay = this.rateLimiter.getRecommendedDelay();
                     await this.interruptibleSleep(delay);
                 }
+                else if (this.lastExhaustionBackoffMs > 0) {
+                    // Every channel is capped: sleep until the earliest cap expires (bounded) instead of spinning.
+                    const backoff = this.lastExhaustionBackoffMs;
+                    this.lastExhaustionBackoffMs = 0;
+                    await this.interruptibleSleep(backoff + Math.random() * 1000);
+                }
                 else {
                     // Short retry delay when no reaction
                     const retryDelay = 1000 + Math.random() * 1000;
@@ -29113,7 +29176,7 @@ class ReactionService {
         const channel = this.selectChannel();
         if (!channel) {
             logger.warn(`[${this.instanceId}] No channel selected (${this.channels.length} available, ${this.restrictedChannelIds.size} restricted)`);
-            return 'skipped';
+            return 'skipped'; // selectChannel() recorded lastExhaustionBackoffMs when every channel is capped
         }
         // Skip restricted channels
         if (this.isChannelRestricted(channel.id)) {
@@ -29562,6 +29625,7 @@ class ReactionService {
             this.dialogEntities = scannedEntities;
             // Reset round-robin index
             this.channelRoundRobinIndex = 0;
+            this.channelsCappedUntil = 0;
             if (oldChannels && oldChannels !== this.channels) {
                 oldChannels.length = 0;
             }
@@ -29706,9 +29770,11 @@ class ReactionService {
         return shuffled;
     }
     selectChannel() {
+        this.lastExhaustionBackoffMs = 0;
         if (this.channels.length === 0)
             return null;
         let restrictedSkipped = 0;
+        let earliestFreeMs = Infinity;
         let cooldownSkipped = 0;
         let dailyLimitSkipped = 0;
         // Try all channels starting from current index
@@ -29721,24 +29787,48 @@ class ReactionService {
             // Skip restricted
             if (this.isChannelRestricted(channel.id)) {
                 restrictedSkipped++;
+                // Runtime windows expire; permanent restrictions have no remaining time (Infinity).
+                const left = this.runtimeRestrictions.remainingMs(normalizedId);
+                if (left > 0)
+                    earliestFreeMs = Math.min(earliestFreeMs, left);
                 continue;
             }
             // Skip channels on cooldown
             if (this.rateLimiter.isChannelOnCooldown(normalizedId)) {
                 cooldownSkipped++;
+                earliestFreeMs = Math.min(earliestFreeMs, this.rateLimiter.getChannelCooldownRemainingMs(normalizedId));
                 continue;
             }
-            // Skip channels at daily limit
+            // Skip channels at daily limit (frees only at the daily reset; no known expiry)
             if (this.rateLimiter.hasReachedChannelLimit(normalizedId)) {
                 dailyLimitSkipped++;
                 continue;
             }
             // Advance round-robin
             this.channelRoundRobinIndex = (idx + 1) % this.channels.length;
+            if (this.allCappedLogged) {
+                this.allCappedLogged = false;
+                logger.info('[reactions] channels available again after all-capped backoff', { instanceId: this.instanceId, channels: this.channels.length });
+            }
             return channel;
         }
         // If all channels are exhausted, reset index and return null
         this.channelRoundRobinIndex = 0;
+        const backoffMs = Math.min(this.ALL_CAPPED_MAX_BACKOFF_MS, Math.max(this.ALL_CAPPED_MIN_BACKOFF_MS, Number.isFinite(earliestFreeMs) ? earliestFreeMs : this.ALL_CAPPED_MAX_BACKOFF_MS));
+        this.lastExhaustionBackoffMs = backoffMs;
+        this.channelsCappedUntil = Date.now() + backoffMs;
+        if (!this.allCappedLogged) {
+            this.allCappedLogged = true;
+            logger.warn('[reactions] all channels capped; backing off', {
+                instanceId: this.instanceId,
+                channels: this.channels.length,
+                waitMs: backoffMs,
+                nextExpiry: Number.isFinite(earliestFreeMs) ? new Date(Date.now() + earliestFreeMs).toISOString() : null,
+                restricted: restrictedSkipped,
+                cooldown: cooldownSkipped,
+                dailyLimit: dailyLimitSkipped,
+            });
+        }
         logger.warn(`[${this.instanceId}] [LIMIT] All ${this.channels.length} channels exhausted ` +
             `(restricted=${restrictedSkipped}, cooldown=${cooldownSkipped}, dailyLimit=${dailyLimitSkipped})`);
         return null;
@@ -29959,6 +30049,7 @@ class ReactionService {
                 consecutive: stats.consecutiveSuccesses
             };
             this.rateLimiter.resetDailyStats(now);
+            this.channelsCappedUntil = 0;
             logger.info(`[${this.instanceId}] Stats reset after 24h | Reactions: ${previous.reactions}->0, Failed: ${previous.failed}->0, Floods: ${previous.floods}->0, Consecutive: ${previous.consecutive}->0`);
         }
     }
@@ -30288,6 +30379,16 @@ class RuntimeRestrictionStore {
     hasEntry(channelId) {
         const id = channelId?.trim();
         return id ? this.entries.has(id) : false;
+    }
+    /** Milliseconds until the channel's restriction window lapses (0 when not restricted). */
+    remainingMs(channelId) {
+        const id = channelId?.trim();
+        if (!id)
+            return 0;
+        const entry = this.entries.get(id);
+        if (!entry)
+            return 0;
+        return Math.max(0, entry.expiresAt - this.now());
     }
     /** Number of channels currently inside a restriction window. */
     get activeCount() {
@@ -42366,6 +42467,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
 
 
 
@@ -42376,6 +42479,12 @@ __webpack_require__.r(__webpack_exports__);
 
 const REACTION_STALE_MS = 10 * 60 * 1000;
 const REACTION_STOPPED_MS = 30 * 60 * 1000;
+// Error rate is meaningless on a tiny sample (1 failure of 1 attempt = 100%).
+const REACTION_MIN_ATTEMPTS_FOR_ERROR_RATE = 20;
+const reactionHealthLogger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("service-health");
+// Log only on state change: health is polled frequently and these states persist.
+let reactionCappedLogged = false;
+let reactionSmallSampleLogged = false;
 const PROMOTION_STALE_MS = 10 * 60 * 1000;
 // Must stay above the promotion supervisor's 45 min stuck threshold, so health never calls a runner
 // dead (and requests an account swap) before the supervisor itself would restart it.
@@ -42751,11 +42860,17 @@ async function collectReactionHealth() {
         const lastReactionAgeMs = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.millisecondsSince)(lastReactionTime);
         const issues = [];
         let status = "healthy";
+        // At the account's reaction cap (or every channel capped) the loop is deliberately idle:
+        // no successful reactions is expected, so inactivity must not read as a fault.
+        const isCapped = stats.isCapped === true;
         if (!stats.isRunning || stats.isStopped) {
             status = "unhealthy";
             issues.push("Reaction service is stopped or not running");
         }
-        if (lastReactionTime === null) {
+        if (isCapped) {
+            // idle by design; skip activity-age checks
+        }
+        else if (lastReactionTime === null) {
             if (status !== "unhealthy") {
                 status = "degraded";
             }
@@ -42769,11 +42884,28 @@ async function collectReactionHealth() {
             status = "degraded";
             issues.push("Reaction service activity is stale");
         }
-        if (errorRate > 80) {
+        const hasErrorSample = attempts >= REACTION_MIN_ATTEMPTS_FOR_ERROR_RATE;
+        if (isCapped !== reactionCappedLogged) {
+            reactionCappedLogged = isCapped;
+            reactionHealthLogger.info(isCapped ? "[reactions-health] capped, reporting healthy/idle" : "[reactions-health] cap cleared, resuming activity checks", { capped: isCapped, attempts, errors: Number(stats.failed ?? 0), lastReactionAgeMs });
+        }
+        const suppressedErrorRate = !hasErrorSample && errorRate > 50;
+        if (suppressedErrorRate !== reactionSmallSampleLogged) {
+            reactionSmallSampleLogged = suppressedErrorRate;
+            if (suppressedErrorRate) {
+                reactionHealthLogger.info("[reactions-health] error rate ignored: sample below minimum", {
+                    attempts,
+                    minAttempts: REACTION_MIN_ATTEMPTS_FOR_ERROR_RATE,
+                    errors: Number(stats.failed ?? 0),
+                    errorRate,
+                });
+            }
+        }
+        if (hasErrorSample && errorRate > 80) {
             status = "unhealthy";
             issues.push("Reaction error rate is critically high");
         }
-        else if (errorRate > 50 && status !== "unhealthy") {
+        else if (hasErrorSample && errorRate > 50 && status !== "unhealthy") {
             status = "degraded";
             issues.push("Reaction error rate is elevated");
         }
@@ -42799,6 +42931,8 @@ async function collectReactionHealth() {
                 lastReactionTime: stats.lastReactionTime,
                 lastReactionAgeMs,
                 errorRate,
+                attempts,
+                isCapped,
                 isInFloodWait: stats.isInFloodWait,
             },
         });
@@ -60007,13 +60141,18 @@ function formatMessageWithEntities(text) {
     };
 }
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:reply-processor");
+/**
+ * Distinguishes a DB error ({ failed: true }) from a genuinely missing user
+ * ({ failed: false, user: undefined }). Conflating them made a transient Mongo error burn the
+ * reply's retry budget and drop the reply as if the user did not exist.
+ */
 async function readUserDetailForReply(db, chatId) {
     try {
-        return await db.read(chatId);
+        return { failed: false, user: await db.read(chatId) };
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, `Replier.readUserDetail.${chatId}`, false);
-        return undefined;
+        return { failed: true, error };
     }
 }
 /**
@@ -60084,7 +60223,38 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             // onRequeue(replyObj);
             return;
         }
-        const userDetail = await readUserDetailForReply(db, replyObj.chatId);
+        const userRead = await readUserDetailForReply(db, replyObj.chatId);
+        if (userRead.failed) {
+            // Transient DB error: NOT a missing user. Retry without consuming the drop budget
+            // (retryCount is unchanged); the item's age bounds how long it can keep retrying.
+            const ageMs = Date.now() - replyObj.pushedAt;
+            const maxAgeMs = (replyObj.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
+            const errorMessage = userRead.error instanceof Error ? userRead.error.message : String(userRead.error);
+            if (ageMs < maxAgeMs) {
+                logger.warn('[replier] reply deferred: user lookup failed (transient)', {
+                    chatId: replyObj.chatId,
+                    attempt: replyObj.retryCount ?? 0,
+                    ageMs,
+                    retryInMs: 10000,
+                    error: errorMessage,
+                });
+                const retryTimeout = setTimeout(() => {
+                    onRequeue({ ...replyObj });
+                }, 10000);
+                retryTimeout.unref?.();
+            }
+            else {
+                logger.warn('[replier] reply dropped: user lookup kept failing past age bound', {
+                    chatId: replyObj.chatId,
+                    attempt: replyObj.retryCount ?? 0,
+                    ageMs,
+                    maxAgeMs,
+                    error: errorMessage,
+                });
+            }
+            return;
+        }
+        const userDetail = userRead.user;
         let msgs = null;
         try {
             const rawMsgs = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => client.getMessages(entity, { limit: 4 }), { timeout: 10000, errorMessage: "GetMessages Timeout" });
