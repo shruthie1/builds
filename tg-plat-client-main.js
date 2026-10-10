@@ -22438,6 +22438,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   NEAR_HASH_MAX_DISTANCE: () => (/* binding */ NEAR_HASH_MAX_DISTANCE),
 /* harmony export */   NEAR_HASH_SCAN_LIMIT: () => (/* binding */ NEAR_HASH_SCAN_LIMIT),
 /* harmony export */   PAYMENT_PROOF_MAX_REASONS: () => (/* binding */ PAYMENT_PROOF_MAX_REASONS),
+/* harmony export */   PAYMENT_PROOF_TTL_INDEX: () => (/* binding */ PAYMENT_PROOF_TTL_INDEX),
 /* harmony export */   PAYMENT_PROOF_TTL_SECONDS: () => (/* binding */ PAYMENT_PROOF_TTL_SECONDS),
 /* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
 /* harmony export */   hexHamming: () => (/* binding */ hexHamming)
@@ -22449,10 +22450,11 @@ __webpack_require__.r(__webpack_exports__);
  * (cross-chat UTR reuse, near-duplicate images). Design: docs/design/2026-10-10-tg-vision-payment-proof.md section 7.
  *
  * Not stored (PII / size): image bytes, OCR text, payer and payee names. Budget is about 30 MB, so
- * rows stay ~400 B and the TTL index (45 days) is what keeps the collection bounded.
+ * rows stay ~500 B and the TTL index (7 days) is what keeps the collection bounded.
  * Never write rows before ensureIndexes() has created the TTL index (registered in ensureAllIndexes).
  */
-const PAYMENT_PROOF_TTL_SECONDS = 45 * 24 * 60 * 60; // 3_888_000
+const PAYMENT_PROOF_TTL_SECONDS = 7 * 24 * 60 * 60; // 604_800 (was 45 days; see ensureTtlIndex migration)
+const PAYMENT_PROOF_TTL_INDEX = 'createdAt_ttl';
 const PAYMENT_PROOF_MAX_REASONS = 6;
 /** Rows scanned for a near-duplicate hash. Bounded so one lookup never walks the collection. */
 const NEAR_HASH_SCAN_LIMIT = 200;
@@ -22474,6 +22476,15 @@ function hexHamming(a, b) {
     return bits;
 }
 const HEX64 = /^[0-9a-f]{64}$/;
+const INDEX_CONFLICT = /IndexOptionsConflict|IndexKeySpecsConflict|same name|already exists with different options/i;
+function isIndexConflict(error) {
+    const e = error;
+    return e?.code === 85 || e?.code === 86 || INDEX_CONFLICT.test(String(e?.message ?? error));
+}
+function isDuplicateKey(error) {
+    const e = error;
+    return e?.code === 11000 || /E11000|duplicate key/i.test(String(e?.message ?? ''));
+}
 class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -22497,6 +22508,12 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         doc.createdAt = input.createdAt ?? new Date();
         if (typeof doc.imageHash === 'string' && !HEX64.test(doc.imageHash))
             delete doc.imageHash;
+        if (typeof doc.imageSha256 === 'string' && !HEX64.test(doc.imageSha256))
+            delete doc.imageSha256;
+        // Served state is only ever set through markServed (race-guarded), never through insert.
+        delete doc.servedAt;
+        delete doc.servedService;
+        delete doc.servedUtr;
         return this.guardWrite(`insert(${chatId})`, () => this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true }));
     }
     /**
@@ -22561,12 +22578,127 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return res.matchedCount > 0;
         });
     }
+    /**
+     * REJECT_DUPLICATE lookup: a previously SERVED proof (any chat, any persona, including the same
+     * chat re-sending) that matches on, in order:
+     *  (a) the same UTR,
+     *  (b) the same exact image bytes (imageSha256),
+     *  (c) a near dHash (Hamming <= 4) AND the same amount AND the same known time (AND the same
+     *      payee when both are present).
+     * A dHash near-match without (c) is NOT a duplicate (similar app screens collide at 9x8); that
+     * stays an ASK_PROOF signal via findReuse. The row of the message being judged is excluded.
+     */
+    async findServedDuplicate(query) {
+        const chatId = String(query.chatId || '').trim();
+        if (!chatId)
+            return null;
+        const self = { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
+        const served = { servedAt: { $exists: true }, $nor: [self] };
+        const wrap = (by, distance, doc) => ({ by, distance, doc, sameChat: doc.chatId === chatId && doc.profile === query.profile });
+        return this.guard(`findServedDuplicate(${chatId})`, null, async () => {
+            if (query.utr) {
+                const doc = await this.collection.find({ utr: query.utr, ...served }).limit(1).next();
+                if (doc)
+                    return wrap('utr', 0, doc);
+            }
+            if (query.imageSha256 && HEX64.test(query.imageSha256)) {
+                const doc = await this.collection
+                    .find({ imageSha256: query.imageSha256, ...served })
+                    .limit(1)
+                    .next();
+                if (doc)
+                    return wrap('imageSha256', 0, doc);
+            }
+            if (query.imageHash && HEX64.test(query.imageHash)
+                && typeof query.amount === 'number' && typeof query.timeEpochMs === 'number') {
+                const rows = await this.collection
+                    .find({
+                    imageHash: { $exists: true }, amount: query.amount, 'time.epochMs': query.timeEpochMs, ...served,
+                })
+                    .sort({ createdAt: -1 })
+                    .limit(NEAR_HASH_SCAN_LIMIT)
+                    .toArray();
+                const payee = (query.payeeUpiId ?? '').trim().toLowerCase();
+                let best = null;
+                for (const doc of rows) {
+                    if (typeof doc.imageHash !== 'string' || doc.time?.state !== 'known' || doc.time.epochMs !== query.timeEpochMs)
+                        continue;
+                    const theirs = (doc.payeeUpiId ?? '').trim().toLowerCase();
+                    if (payee && theirs && payee !== theirs)
+                        continue;
+                    const distance = hexHamming(query.imageHash, doc.imageHash);
+                    if (distance <= NEAR_HASH_MAX_DISTANCE && (!best || distance < best.distance))
+                        best = wrap('imageHash', distance, doc);
+                }
+                return best;
+            }
+            return null;
+        });
+    }
+    /**
+     * Claim this proof as served. Call BEFORE executing the service and serve only on 'served'.
+     * The partial UNIQUE index on servedUtr (served rows only) makes the claim race-safe across chats:
+     * the loser gets 'duplicate' and must be treated as REJECT_DUPLICATE.
+     * 'already_served' = this very message was already claimed (replay), idempotent.
+     */
+    async markServed(chatId, profile, telegramMsgId, service) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return 'missing';
+        try {
+            const filter = { chatId: id, profile, telegramMsgId };
+            const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
+            // Pipeline update so servedUtr copies this row's own utr (absent when the row has none).
+            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr' } }]);
+            if (res.matchedCount > 0)
+                return 'served';
+            const existing = await this.collection.find(filter).limit(1).next();
+            return existing?.servedAt ? 'already_served' : 'missing';
+        }
+        catch (error) {
+            if (isDuplicateKey(error))
+                return 'duplicate';
+            this.logger.error(`[${this.collectionName}] markServed(${id}) failed: ${String(error?.message ?? error)}`);
+            return 'error';
+        }
+    }
+    /**
+     * Create the TTL index, migrating an existing one whose expireAfterSeconds differs (it was 45 days):
+     * createIndex throws IndexOptionsConflict, so run collMod; if that is unavailable, drop and recreate.
+     * Idempotent: a second run finds the same spec and createIndex is a no-op.
+     */
+    async ensureTtlIndex() {
+        const spec = { name: PAYMENT_PROOF_TTL_INDEX, expireAfterSeconds: PAYMENT_PROOF_TTL_SECONDS };
+        try {
+            await this.collection.createIndex({ createdAt: 1 }, spec);
+            return;
+        }
+        catch (error) {
+            if (!isIndexConflict(error))
+                throw error;
+        }
+        try {
+            await this.connection.rawDb().command({
+                collMod: this.collectionName,
+                index: { name: PAYMENT_PROOF_TTL_INDEX, expireAfterSeconds: PAYMENT_PROOF_TTL_SECONDS },
+            });
+        }
+        catch {
+            await this.collection.dropIndex(PAYMENT_PROOF_TTL_INDEX);
+            await this.collection.createIndex({ createdAt: 1 }, spec);
+        }
+    }
     async ensureIndexes() {
         const c = this.collection;
         await this.guardWrite('ensureIndexes(utr)', () => c.createIndex({ utr: 1 }, { name: 'utr_1', partialFilterExpression: { utr: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(chatId,createdAt)', () => c.createIndex({ chatId: 1, createdAt: -1 }, { name: 'chatId_1_createdAt_-1' }));
         await this.guardWrite('ensureIndexes(imageHash)', () => c.createIndex({ imageHash: 1 }, { name: 'imageHash_1', partialFilterExpression: { imageHash: { $exists: true } } }));
-        await this.guardWrite('ensureIndexes(ttl)', () => c.createIndex({ createdAt: 1 }, { name: 'createdAt_ttl', expireAfterSeconds: PAYMENT_PROOF_TTL_SECONDS }));
+        await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
+        // Race guard: at most one SERVED proof per UTR, across chats and personas. Keyed on servedUtr
+        // (not utr) so it never shares a key pattern with utr_1 (older Mongo rejects two partial
+        // indexes on one key pattern).
+        await this.guardWrite('ensureIndexes(servedUtr unique)', () => c.createIndex({ servedUtr: 1 }, { name: 'servedUtr_unique', unique: true, partialFilterExpression: { servedUtr: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
 }
 
@@ -37369,23 +37501,24 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_11__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/send-message */ "./src/telegram-utils/send-message.ts");
-/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
-/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
-/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
-/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
-/* harmony import */ var _utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
-/* harmony import */ var _telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../telegram-utils/askToPayByEvent */ "./src/telegram-utils/askToPayByEvent.ts");
-/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
-/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram-utils/unreachable-report */ "./src/telegram-utils/unreachable-report.ts");
+/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
+/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
+/* harmony import */ var _messages_upsellMessages__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../messages/upsellMessages */ "./src/messages/upsellMessages.ts");
+/* harmony import */ var _utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../utils/generateInitMsg */ "./src/utils/generateInitMsg.ts");
+/* harmony import */ var _telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../telegram-utils/askToPayByEvent */ "./src/telegram-utils/askToPayByEvent.ts");
+/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./permanent-failure */ "./src/core/permanent-failure/index.ts");
 
 
 
@@ -37416,9 +37549,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__.Logger('tg-aut:core-utils');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger('tg-aut:core-utils');
 function scheduleCoreUtilsTask(callback, delayMs, context, onSettled) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_28__.scheduleUnrefTimeout)(() => {
         void callback()
             .catch((error) => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, context, false);
@@ -37434,7 +37568,7 @@ function scheduleCoreUtilsTask(callback, delayMs, context, onSettled) {
  */
 function scheduleUserMessageTask(chatId, callback, delayMs, context) {
     const run = async () => {
-        if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__.deferWhileOnCall)(chatId, run, context))
+        if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__.deferWhileOnCall)(chatId, run, context))
             return;
         await callback();
     };
@@ -37469,7 +37603,7 @@ async function replyUnread(client, unreadUserDialogs) {
     if (client) {
         try {
             const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-            const dialogsManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager;
+            const dialogsManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getInstance().dialogManager;
             for (const chat of unreadUserDialogs) {
                 try {
                     const userDetails = await db.read(chat.id.toString());
@@ -37480,10 +37614,10 @@ async function replyUnread(client, unreadUserDialogs) {
                                 // if (didPaidToOthers.paid !== "" || didPaidToOthers.paid !== "") {
                                 //     await client.sendMessage(chat.entity,{ message: `Wait...\nI'm verifying your Payment again!!\n${didPaidToOthers.paid !== "" ? (`I think U paid to ${didPaidToOthers.paid} and U also`) : "I think U"}  ${didPaidToOthers.demoGiven !== "" ? (` took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
                                 // } else {
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: "Dont Speak Okay!!\nI'm in **Bathroom**\nMute yourself!! I will show you Okay..!!" });
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: "Dont Speak Okay!!\nI'm in **Bathroom**\nMute yourself!! I will show you Okay..!!" });
                                 // Lazy: call-me imports this module.
                                 const { offerCallOrLink } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts"));
-                                await offerCallOrLink(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` }, { kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: text }, { kind: 'link' }));
+                                await offerCallOrLink(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: `Hey U can Call me here\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` }, { kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: text }, { kind: 'link' }));
                                 // }
                             }
                             else {
@@ -37492,29 +37626,29 @@ async function replyUnread(client, unreadUserDialogs) {
                                         // await client.sendMessage(chat.entity,{ message: "Mute ok.. I Will Call now!!" });
                                     }
                                     else if (userDetails.payAmount < 201) {
-                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: "**Did you like the full Show??**😚" });
+                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: "**Did you like the full Show??**😚" });
                                         scheduleCoreUtilsTask(async () => {
-                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: "**30 Mins VideoCall   :  350₹/-\n1 hour Full   :   600₹/-**" });
+                                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: "**30 Mins VideoCall   :  350₹/-\n1 hour Full   :   600₹/-**" });
                                         }, 3000, `replyUnread.fullShowUpsell.${chat.id.toString()}`);
                                     }
                                 }
                                 else {
-                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: "**Did you like the Demo??😚\n\nPay Again!! if You want More....**" });
+                                    await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: "**Did you like the Demo??😚\n\nPay Again!! if You want More....**" });
                                     scheduleCoreUtilsTask(async () => {
-                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
+                                        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
                                     }, 3000, `replyUnread.demoUpsell.${chat.id.toString()}`);
                                 }
                             }
                         }
                         else {
                             if (userDetails.payAmount > 15) {
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.noFreeDemo + "\n\n" + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo });
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.noFreeDemo + "\n\n" + _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo });
                             }
                             else if (userDetails.payAmount > 10 && userDetails.picsSent) {
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: `I have sent you Pics for your money\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50, _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50two])}` });
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: `I have sent you Pics for your money\n${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50, _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.just50two])}` });
                             }
                             else {
-                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafeSend)(client, chat.entity, { message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_10__.selectRandomElements)(["oyee..", "oye", "haa", "hmm", "??", "hey"], 1)[0] });
+                                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafeSend)(client, chat.entity, { message: (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_10__.selectRandomElements)(["oyee..", "oye", "haa", "hmm", "??", "hey"], 1)[0] });
                             }
                         }
                         await dialogsManager.markAsRead(chat.id.toString());
@@ -37529,7 +37663,7 @@ async function replyUnread(client, unreadUserDialogs) {
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error at replyUnread");
-            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_30__.startNewUserProcess)(error);
+            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_31__.startNewUserProcess)(error);
         }
     }
 }
@@ -37609,7 +37743,7 @@ async function callToPaid() {
                         logger.log(`callToPaid: ${user.chatId} no longer pending, skipping`);
                         return;
                     }
-                    await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_19__.requestCall)(user.chatId.toString(), false, "Auto Call to Paid Users");
+                    await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_20__.requestCall)(user.chatId.toString(), false, "Auto Call to Paid Users");
                 }, AUTO_CALL_SPACING_MS, `callToPaid.${user.chatId}`, resolve);
             });
         }
@@ -37663,13 +37797,15 @@ async function sendVideoToChannel(videoBuffer) {
 }
 /**
  * Automated (timer-driven) send to a user known by chatId: resolved via the canonical
- * cache -> dialogs -> accessHash -> username chain. If nothing resolves it still tries the bare
- * chatId (GramJS may know it) so the caller's own try/catch sees the real Telegram error.
+ * cache -> dialogs -> accessHash -> username chain. If nothing resolves it throws locally
+ * (UnresolvedPeerError) instead of sending to a bare chatId Telegram would reject with PEER_ID_INVALID.
  */
 /** PEER_FLOOD / short FLOOD_WAIT retries live in floodSafe (telegram-utils/flood-safe-send.ts). */
 async function sendToUserAutomated(client, chatId, payload) {
     const peer = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.resolveAutomatedPeer)(client, chatId);
-    return (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => client.sendMessage(peer ?? chatId, payload), { chatId, label: 'sendToUserAutomated', kind: 'post-show' });
+    if (!peer)
+        throw new _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_14__.UnresolvedPeerError(chatId);
+    return (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => client.sendMessage(peer, payload), { chatId, label: 'sendToUserAutomated', kind: 'post-show' });
 }
 let askingtopay = false;
 /** Per-run ceilings so one run can never reach the next cron fire (smallest gap is 2h). */
@@ -37741,6 +37877,7 @@ async function asktoPay(client, time) {
         if (due.length > REMINDER_MAX_SENDS_PER_RUN) {
             logger.warn(`asktoPay: ${due.length} due, capping this run at ${REMINDER_MAX_SENDS_PER_RUN}; the next run starts where this one stopped`);
         }
+        const report = new _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_14__.SendRunReport('asktoPay');
         let sends = 0;
         const truncated = due.length > REMINDER_MAX_SENDS_PER_RUN;
         const startOffset = truncated ? reminderCursor % due.length : 0;
@@ -37760,7 +37897,7 @@ async function asktoPay(client, time) {
                         if (hasPendingPaidService(user)) {
                             if (canProceedWithService(user)) {
                                 logger.log(`Requesting pending paid service for ${user.chatId}`);
-                                const requested = await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_19__.requestCall)(user.chatId.toString(), false, "Scheduled pending paid service");
+                                const requested = await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_20__.requestCall)(user.chatId.toString(), false, "Scheduled pending paid service");
                                 logger.log(`Pending paid service call ${requested ? "queued" : "deferred"} for ${user.chatId}`);
                             }
                             else {
@@ -37769,7 +37906,7 @@ async function asktoPay(client, time) {
                         }
                         else {
                             logger.log(`Restarting paid-user engagement for ${user.chatId}`);
-                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_24__.initMsg)({ tempters: true }) });
+                            const sent = await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_25__.initMsg)({ tempters: true }) }, 'reminder', report);
                             logger.log(`Paid-user engagement init ${sent ? "sent" : "failed"} for ${user.chatId}`);
                         }
                     }, staggerMs, `asktoPay.${chatId}`, resolve);
@@ -37780,6 +37917,16 @@ async function asktoPay(client, time) {
             }
         }
         reminderCursor = truncated ? (startOffset + sends) % due.length : 0;
+        logger.log(report.summary());
+        if (report.unreachableTotal > 0) {
+            await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                title: "Paid-user reminders: unreachable users",
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.INFO,
+                summary: report.summary(),
+                fields: [{ label: "Client", value: process.env.clientId ?? "unknown" }],
+                tags: ["asktopay", "unreachable"],
+            }, "asktoPay.summary");
+        }
     }
     finally {
         askingtopay = false;
@@ -37805,7 +37952,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                     const id = ids[i];
                     const user = await db.read(id.chatId.toString());
                     try {
-                        if (user && user?.canReply !== 0 && (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__.isChatOnCall)(user.chatId.toString())) {
+                        if (user && user?.canReply !== 0 && (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__.isChatOnCall)(user.chatId.toString())) {
                             logger.log(`respToPaidPplfn: skipping ${user.chatId}, on an in-house call (stat kept for the next run)`);
                             continue;
                         }
@@ -37817,7 +37964,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                             let wentOnCall = false;
                             await new Promise((resolve) => {
                                 scheduleCoreUtilsTask(async () => {
-                                    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__.isChatOnCall)(user.chatId.toString())) {
+                                    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__.isChatOnCall)(user.chatId.toString())) {
                                         logger.log(`respToPaidPplfn: ${user.chatId} went on a call before send, skipping (stat kept for the next run)`);
                                         wentOnCall = true;
                                         return;
@@ -37848,7 +37995,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                                         await db.updateSingleKey(user.chatId, 'payAmount', 50);
                                                         await db.updateStatSingleKey(user.chatId, 'payAmount', 50);
                                                     }
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_24__.initMsg)({ tempters: true }) });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_25__.initMsg)({ tempters: true }) });
                                                 }
                                                 catch (error) {
                                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "ErrReplFunc");
@@ -37863,7 +38010,7 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                                     await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: mm + `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo}` });
                                                 }
                                                 else {
-                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_24__.initMsg)({ tempters: true }) });
+                                                    await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_13__.trySendingMsg)(user, client, { message: (0,_utils_generateInitMsg__WEBPACK_IMPORTED_MODULE_25__.initMsg)({ tempters: true }) });
                                                 }
                                             }
                                             catch (error) {
@@ -37912,7 +38059,7 @@ async function sendVclinks(client) {
                     const id = ids[i];
                     const user = await db.read(id.chatId.toString());
                     try {
-                        if (user && user?.canReply !== 0 && (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__.isChatOnCall)(id.chatId.toString())) {
+                        if (user && user?.canReply !== 0 && (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__.isChatOnCall)(id.chatId.toString())) {
                             logger.log(`sendVclinks: skipping ${id.chatId}, on an in-house call (stat kept for the next run)`);
                             continue;
                         }
@@ -37921,7 +38068,7 @@ async function sendVclinks(client) {
                             let wentOnCall = false;
                             await new Promise((resolve) => {
                                 scheduleCoreUtilsTask(async () => {
-                                    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_29__.isChatOnCall)(id.chatId.toString())) {
+                                    if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_30__.isChatOnCall)(id.chatId.toString())) {
                                         wentOnCall = true;
                                         return;
                                     }
@@ -38064,7 +38211,7 @@ async function channelInfo(client, sendInChannel = true, sendIds = false, maxDia
                 const chatEntity = chat.entity.toJSON();
                 const { title, id, broadcast, defaultBannedRights, participantsCount, restricted, username, left } = chatEntity;
                 totalCount++;
-                const canSendMsgs = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_28__.computeLiveCanSendMsgs)({
+                const canSendMsgs = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_29__.computeLiveCanSendMsgs)({
                     channelId: id.toString(),
                     broadcast,
                     restricted,
@@ -38113,18 +38260,18 @@ async function channelInfo(client, sendInChannel = true, sendIds = false, maxDia
 }
 async function getChannelEntity(client, channelId) {
     try {
-        const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance();
+        const entityCache = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_19__.EntityCacheManager.getInstance();
         const plainChannelId = channelId?.toString()?.replace(/^-100/, "");
         // Check EntityCacheManager first
         const cached = await entityCache.getEntity(plainChannelId, client);
         if (cached) {
             return cached;
         }
-        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager;
+        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getInstance().dialogManager;
         logger.log(`Fetching channel entity for ID: ${channelId}`);
-        const dialog = await dialogManager.getDialog(channelId, _tg_dialogs__WEBPACK_IMPORTED_MODULE_17__.DialogType.CHANNEL);
+        const dialog = await dialogManager.getDialog(channelId, _tg_dialogs__WEBPACK_IMPORTED_MODULE_18__.DialogType.CHANNEL);
         // dialog resolves on the -100-prefixed id; safeGetEntity fallback needs the stripped id.
-        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_16__.resolveEntity)(client, dialogManager, channelId, { safeFallbackId: plainChannelId });
+        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_17__.resolveEntity)(client, dialogManager, channelId, { safeFallbackId: plainChannelId });
         if (entity) {
             entityCache.put(plainChannelId, entity);
         }
@@ -38136,7 +38283,7 @@ async function getChannelEntity(client, channelId) {
             const channelInfo = (await (0,_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.findActiveChannel(String(channelId))) ?? null;
             if (channelInfo && channelInfo.username) {
                 try {
-                    const ecm = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_18__.EntityCacheManager.getInstance();
+                    const ecm = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_19__.EntityCacheManager.getInstance();
                     const resolved = await ecm.getEntity(channelInfo.username, client);
                     if (resolved) {
                         ecm.put(channelId?.toString()?.replace(/^-100/, ""), resolved);
@@ -38218,7 +38365,7 @@ async function leaveChannel(client, channel) {
     }
 }
 async function leaveChannels(client) {
-    const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
+    const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
     const dialogs = await dialogManager.getChannelInfo();
     for (let channel of dialogs.channels) {
         if (channel && (channel.restricted || !channel.canSendMsgs)) {
@@ -38229,7 +38376,7 @@ async function leaveChannels(client) {
 }
 async function setTyping(entityLike, sleepTime = 2000) {
     try {
-        await _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
+        await _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
             peer: entityLike,
             action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageTypingAction(),
         }));
@@ -38241,7 +38388,7 @@ async function setTyping(entityLike, sleepTime = 2000) {
 }
 async function setAudioRecord(chatId) {
     try {
-        await _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
+        await _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getClient().invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
             peer: chatId,
             action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageRecordAudioAction(),
         }));
@@ -38345,7 +38492,7 @@ async function removeOtherAuths(client) {
     }
 }
 function isAuthMine(auth) {
-    return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_26__.isAuthFingerprintMatch)(process.env.mobile || '', auth);
+    return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_27__.isAuthFingerprintMatch)(process.env.mobile || '', auth);
 }
 /**
  * Whole days (rounded up) until a SpamBot release date string such as "12 Oct 2026, 15:58 UTC",
@@ -38379,7 +38526,7 @@ async function deleteMessage(event) {
 }
 async function deleteMessagesBeforeId(chatId, messageId) {
     scheduleCoreUtilsTask(async () => {
-        const client = await _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getClient();
+        const client = await _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getClient();
         let limit = 100;
         let offsetId = messageId - 4;
         let totalMessages = 0;
@@ -38498,7 +38645,7 @@ async function executehs(client, chatId, data) {
                 if (await paidForNextShow(chatId))
                     return;
                 try {
-                    await sendToUserAutomated(client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_23__.getUpsellMessage)(50)) });
+                    await sendToUserAutomated(client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_24__.getUpsellMessage)(50)) });
                 }
                 catch (error) {
                     logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.upsell.${chatId}`, false));
@@ -38522,14 +38669,14 @@ async function executehs(client, chatId, data) {
         payAmount: Math.min(50, Number(userDetails.payAmount) || 0)
     };
     userDetails = await db.update(chatId, updatedData); // Reset states after demo given
-    (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnDemoGiven)(chatId, userDetails);
+    (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnDemoGiven)(chatId, userDetails);
     await db.recordDemoGiven(chatId);
     await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
     await db.updateVideos(chatId, data.video);
     const msg = `DEMO-Given : @${userDetails.username}\nChatId : ${chatId}\nClient :${process.env.clientId}\n${parseObjectToString(data)}`;
     await (0,_index__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithButton)(msg, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
     await setTyping(chatId);
-    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_25__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_26__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
     return playback;
 }
 async function executehsl(client, chatId, data) {
@@ -38566,7 +38713,7 @@ async function executehsl(client, chatId, data) {
             if (current.highestPayAmount < 200) {
                 scheduleUserMessageTask(chatId, async () => {
                     try {
-                        await sendToUserAutomated(client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_23__.getUpsellMessage)(current.highestPayAmount)) });
+                        await sendToUserAutomated(client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_24__.getUpsellMessage)(current.highestPayAmount)) });
                     }
                     catch (error) {
                         logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.upsell.${chatId}`, false));
@@ -38594,13 +38741,13 @@ async function executehsl(client, chatId, data) {
     userDetails = await db.update(chatId, updatedData);
     // Reset states based on service level
     if (userDetails.fullShow > 0 || userDetails.highestPayAmount >= 150) {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnFullShow)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnFullShow)(chatId, userDetails);
     }
     else if (isSecondShow) {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnSecondShow)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnSecondShow)(chatId, userDetails);
     }
     else {
-        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_22__.resetStatesOnDemoGiven)(chatId, userDetails);
+        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_23__.resetStatesOnDemoGiven)(chatId, userDetails);
     }
     await db.recordFullShow(chatId);
     await db.updateVideos(chatId, data.video);
@@ -38633,7 +38780,7 @@ async function executehsl(client, chatId, data) {
         }, 60000, `executehsl.reengage.${chatId}`);
     }
     await setTyping(chatId);
-    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_25__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
+    (0,_telegram_utils_askToPayByEvent__WEBPACK_IMPORTED_MODULE_26__.updateAskToPay)(chatId, Date.now(), userDetails.totalCount);
     return playback;
 }
 const defaultMessages = [
@@ -38649,7 +38796,7 @@ function getMsgstats() {
 }
 async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, options = {}) {
     try {
-        const client = _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getClient();
+        const client = _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getClient();
         const query = { limit };
         const includeMedia = options.includeMedia !== false;
         if (offset) {
@@ -38662,11 +38809,11 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
             query['maxId'] = parseInt(maxId.toString(), 10);
         }
         logger.log("getMessagesNew query:", query);
-        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_20__.TelegramManager.getInstance().dialogManager;
+        const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_21__.TelegramManager.getInstance().dialogManager;
         const cachedDialog = dialogManager.peekDialog(chatId);
         const entity = await dialogManager.getEntity(chatId).catch(() => null) ||
             cachedDialog?.peer ||
-            await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_15__.safeGetEntity)(client, chatId).catch(() => null) ||
+            await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_16__.safeGetEntity)(client, chatId).catch(() => null) ||
             chatId;
         const messages = await client.getMessages(entity, query);
         if (!messages || messages.length === 0) {
@@ -49674,18 +49821,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CallManager: () => (/* binding */ CallManager)
 /* harmony export */ });
-/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram-utils/unreachable-report */ "./src/telegram-utils/unreachable-report.ts");
+/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
 
 
 
@@ -49695,7 +49843,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:call-manager");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:call-manager");
 /** When the engine is busy with an incoming in-house call, re-check the queue after this. */
 const IN_HOUSE_BUSY_WAIT_MS = 5000;
 /** Switch-off waits this long at most for playing shows to finish before stopping the service. */
@@ -49840,7 +49989,7 @@ class CallManager {
             await fn();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[CallManager] deferred after-call work failed for ${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] deferred after-call work failed for ${chatId}`, false);
         }
     }
     /** The user started the show another way (VCUI join): drop the queued call and hang up an in-house ring not yet answered. */
@@ -49871,7 +50020,7 @@ class CallManager {
                         if (this.inFlight.size > 0)
                             await this.waitForChange();
                         else
-                            await Promise.race([(0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(IN_HOUSE_BUSY_WAIT_MS), this.waitForChange()]);
+                            await Promise.race([(0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_BUSY_WAIT_MS), this.waitForChange()]);
                         continue;
                     }
                     const chatId = this.callQueue.shift();
@@ -49882,10 +50031,10 @@ class CallManager {
                         continue;
                     }
                     const run = this.dispatchCall(chatId)
-                        .catch((error) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[CallManager] in-house dispatch failed for ${chatId}`, false); })
+                        .catch((error) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] in-house dispatch failed for ${chatId}`, false); })
                         .finally(() => { this.inFlight.delete(chatId); });
                     this.inFlight.set(chatId, run);
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(IN_HOUSE_DISPATCH_GAP_MS);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_DISPATCH_GAP_MS);
                     continue;
                 }
                 if (!this.isCallActive()) {
@@ -49896,7 +50045,7 @@ class CallManager {
                 }
                 // Wait for call to end before processing next
                 while (this.isCallActive()) {
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(500);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(500);
                 }
             }
         }
@@ -49916,19 +50065,19 @@ class CallManager {
                 logger.log(`[CallManager] in-house call ${chatId}: ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
                 if (result.status === 'busy_engine') {
                     this.callQueue.unshift(chatId);
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(IN_HOUSE_BUSY_WAIT_MS);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_BUSY_WAIT_MS);
                     return;
                 }
                 if (result.status !== 'fallback')
                     return;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[CallManager] in-house call failed for ${chatId}; using legacy ring`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] in-house call failed for ${chatId}; using legacy ring`, false);
             }
             // The legacy ring holds a single line: fallback rings from parallel in-house calls queue up.
             const ring = this.legacyLine.then(async () => {
                 while (this.isCallActive())
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(500);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(500);
                 await this.requestCall(chatId, true);
             });
             this.legacyLine = ring.catch(() => undefined);
@@ -49939,7 +50088,7 @@ class CallManager {
     }
     /** The in-house service while the switch is on (loaded lazily, so it costs nothing when off). */
     async getInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_8__.isInHouseCallsEnabled)())
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)())
             return null;
         if (this.inHouse)
             return this.inHouse;
@@ -49959,7 +50108,7 @@ class CallManager {
                 return this.inHouse;
             })
                 .catch((error) => {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "[CallManager] in-house calls could not load; using legacy ring", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "[CallManager] in-house calls could not load; using legacy ring", false);
                 return null;
             })
                 .finally(() => { this.inHouseLoading = null; });
@@ -49976,7 +50125,7 @@ class CallManager {
             return;
         // Swap first, so a service built while the old one stops binds to the live client.
         this.client = client;
-        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "[CallManager] stopping stale in-house service", false));
+        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "[CallManager] stopping stale in-house service", false));
     }
     /** Test seam / explicit wiring. */
     setInHouseCallService(service) {
@@ -49984,7 +50133,7 @@ class CallManager {
     }
     /** Subscribe for incoming in-house calls when the switch is on. */
     async startInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_8__.isInHouseCallsEnabled)()) {
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)()) {
             // Switched off (e.g. config set off + restart): don't leave paid users able to ring us.
             if (!this.client)
                 return;
@@ -50003,9 +50152,9 @@ class CallManager {
     async closeInHouse() {
         try {
             if (this.client) {
-                await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.account.SetPrivacy({
-                    key: new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.InputPrivacyKeyPhoneCall(),
-                    rules: [new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.InputPrivacyValueDisallowAll()],
+                await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.SetPrivacy({
+                    key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall(),
+                    rules: [new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyValueDisallowAll()],
                 }));
             }
         }
@@ -50017,10 +50166,10 @@ class CallManager {
     async drainThenDisposeInHouse() {
         const deadline = Date.now() + IN_HOUSE_DRAIN_MAX_MS;
         while (this.inHouse?.hasActiveCalls?.() && Date.now() < deadline)
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(IN_HOUSE_DRAIN_POLL_MS);
-        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_8__.isInHouseCallsEnabled)())
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_DRAIN_POLL_MS);
+        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)())
             return; // switched back on meanwhile: keep the service
-        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "[CallManager] stopping in-house service", false));
+        await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "[CallManager] stopping in-house service", false));
     }
     /** Hang up any in-house call and unsubscribe. Call before the Telegram client is torn down. */
     async disposeInHouse() {
@@ -50036,7 +50185,7 @@ class CallManager {
         try {
             logger.log(`[CallManager] Requesting call to:`, chatId);
             if (!this.isCallActive() || force) {
-                (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_4__.createPhoneCallState)();
+                (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__.createPhoneCallState)();
                 // Resolve chatId to InputUser
                 const inputUser = await this.resolveInputUser(chatId);
                 if (!inputUser) {
@@ -50044,15 +50193,15 @@ class CallManager {
                     this.endCall();
                     return false;
                 }
-                const dhConfig = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.messages.GetDhConfig({}));
-                const gAHash = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_4__.requestPhoneCall)(dhConfig);
+                const dhConfig = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.messages.GetDhConfig({}));
+                const gAHash = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__.requestPhoneCall)(dhConfig);
                 try {
-                    const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.phone.RequestCall({
+                    const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.phone.RequestCall({
                         video: true,
                         userId: chatId,
                         randomId: this.generateRandomInt(),
                         gAHash: Buffer.from(gAHash),
-                        protocol: new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.PhoneCallProtocol({
+                        protocol: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PhoneCallProtocol({
                             udpP2p: true,
                             udpReflector: true,
                             minLayer: 65,
@@ -50072,6 +50221,14 @@ class CallManager {
                 }
                 catch (error) {
                     const isPrivacyRestricted = error?.errorMessage === "USER_PRIVACY_RESTRICTED";
+                    const unreachable = (0,_telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_0__.classifyUnreachable)(error);
+                    if (unreachable) {
+                        // This account cannot address the user at all: a text would fail the same way, and
+                        // it is not operator-actionable (no channel notification).
+                        logger.warn(`[CallManager] Call request: user unreachable from this account (${unreachable}) chatId=${chatId}`);
+                        this.endCall();
+                        return false;
+                    }
                     if (isPrivacyRestricted) {
                         // Expected: the user's privacy settings forbid calls. Not an operator-actionable error.
                         logger.warn(`[CallManager] Call request blocked by user privacy settings (USER_PRIVACY_RESTRICTED) chatId=${chatId}`);
@@ -50081,12 +50238,12 @@ class CallManager {
                     }
                     try {
                         if (isPrivacyRestricted) {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafeSend)(this.client, chatId, {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, {
                                 message: "Change Your Call Settings\n\nPrivacy Settings... I'm unable to call..!!",
                             }, { kind: 'call-text', label: 'callManager', maxAgeMs: 90000 });
                         }
                         else {
-                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafeSend)(this.client, chatId, {
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, {
                                 message: "some Issue at yourside, I'm unable to call..!!",
                             }, { kind: 'call-text', label: 'callManager', maxAgeMs: 90000 });
                         }
@@ -50096,7 +50253,7 @@ class CallManager {
                     }
                     this.endCall();
                     if (!isPrivacyRestricted) {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'Failed to Request Call', false);
+                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Failed to Request Call', false);
                     }
                     return false;
                 }
@@ -50107,21 +50264,27 @@ class CallManager {
             }
         }
         catch (error) {
+            const unreachable = (0,_telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_0__.classifyUnreachable)(error);
+            if (unreachable) {
+                logger.warn(`[CallManager] Call: user unreachable from this account (${unreachable}) chatId=${chatId}`);
+                this.endCall();
+                return false;
+            }
             try {
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafeSend)(this.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, {
                     message: "some Issue at yourside, I'm unable to call..!!",
                 }, { kind: 'call-text', label: 'callManager', maxAgeMs: 90000 });
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error);
             }
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `[CallManager] Failed to call`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] Failed to call`);
             this.endCall();
             return false;
         }
     }
     async handlePhoneCallEvent(event) {
-        if (!(event instanceof telegram__WEBPACK_IMPORTED_MODULE_1__.Api.UpdatePhoneCall))
+        if (!(event instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.UpdatePhoneCall))
             return;
         const phoneCall = event.phoneCall;
         const callParticipantId = 'participantId' in phoneCall ? phoneCall.participantId : undefined;
@@ -50139,7 +50302,7 @@ class CallManager {
             return;
         }
         try {
-            if (phoneCall instanceof telegram__WEBPACK_IMPORTED_MODULE_1__.Api.PhoneCallAccepted) {
+            if (phoneCall instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PhoneCallAccepted) {
                 logger.log(`[CallManager] Call accepted`);
                 await this.handleCallAccepted(phoneCall);
                 // await this.endCall();
@@ -50150,23 +50313,23 @@ class CallManager {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Phone call event handling error");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Phone call event handling error");
         }
     }
     async handleCallAccepted(phoneCall) {
-        const resultObj = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_4__.confirmPhoneCall)(phoneCall.gB);
+        const resultObj = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__.confirmPhoneCall)(phoneCall.gB);
         if (!resultObj)
             return;
         const { gA, keyFingerprint } = resultObj;
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(TIMEOUTS.SLEEP_MEDIUM);
-        const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.phone.ConfirmCall({
-            peer: new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.InputPhoneCall({
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(TIMEOUTS.SLEEP_MEDIUM);
+        const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.phone.ConfirmCall({
+            peer: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPhoneCall({
                 id: this.currentCall.id,
                 accessHash: this.currentCall.accessHash
             }),
             gA: Buffer.from(gA ?? []),
-            keyFingerprint: big_integer__WEBPACK_IMPORTED_MODULE_3___default()(keyFingerprint ?? "0"),
-            protocol: new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.PhoneCallProtocol({
+            keyFingerprint: big_integer__WEBPACK_IMPORTED_MODULE_4___default()(keyFingerprint ?? "0"),
+            protocol: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PhoneCallProtocol({
                 udpP2p: true,
                 udpReflector: true,
                 minLayer: 65,
@@ -50182,11 +50345,11 @@ class CallManager {
     endCall() {
         this.currentCall = null;
         logger.log(`[CallManager] Ending call`);
-        (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_4__.destroyPhoneCallState)();
+        (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__.destroyPhoneCallState)();
         this.wake?.(); // the legacy line is free: the parallel queue may proceed
     }
     generateRandomInt() {
-        return (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.readBigIntFromBuffer)((0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.generateRandomBytes)(4), true, true).toJSNumber();
+        return (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer)((0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.generateRandomBytes)(4), true, true).toJSNumber();
     }
     getCallQueueStatus() {
         return {
@@ -50198,16 +50361,16 @@ class CallManager {
     // Helper to resolve chatId to InputUser
     async resolveInputUser(chatId) {
         try {
-            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__.EntityCacheManager.getInstance().getEntity(chatId, this.client);
-            if (entity && entity instanceof telegram__WEBPACK_IMPORTED_MODULE_1__.Api.User && entity.accessHash) {
-                return new telegram__WEBPACK_IMPORTED_MODULE_1__.Api.InputUser({
+            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().getEntity(chatId, this.client);
+            if (entity && entity instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.User && entity.accessHash) {
+                return new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputUser({
                     userId: entity.id,
                     accessHash: entity.accessHash
                 });
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "User resolution error");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "User resolution error");
         }
         return null;
     }
@@ -76161,6 +76324,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
 /* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
 /* harmony import */ var _flood_safe_send__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var _unreachable_report__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./unreachable-report */ "./src/telegram-utils/unreachable-report.ts");
+
 
 
 
@@ -76190,7 +76355,7 @@ async function resolveAutomatedPeer(client, chatId, known) {
     }
     return (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_2__.resolveUserPeer)(client, _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().dialogManager, chatId, hints);
 }
-async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, kind = 'reminder') {
+async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, kind = 'reminder', report) {
     if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_6__.isChatOnCall)(chatId)) {
         logger.log(`Skipping message to ${username ?? chatId}: on an in-house call`);
         return false;
@@ -76200,12 +76365,12 @@ async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, 
     try {
         // cache/dialogs -> stored accessHash -> cached username (see resolveUserPeer).
         const peer = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_2__.resolveUserPeer)(client, dialogsManager, chatId, { accessHash, username });
-        if (!peer) {
-            // Last resort: GramJS may still know the bare chatId; a failure is caught below and the next run retries.
-            logger.warn(`Cannot resolve ${username ?? chatId}: no cached entity, accessHash or username match; trying the bare chatId`);
-        }
+        // resolveUserPeer already asked GramJS (cache, dialogs, safeGetEntity). A bare numeric id
+        // would only cost a doomed messages.SendMessage RPC that Telegram answers PEER_ID_INVALID.
+        if (!peer)
+            throw new _unreachable_report__WEBPACK_IMPORTED_MODULE_8__.UnresolvedPeerError(chatId);
         try {
-            await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.floodSafe)(() => client.sendMessage(peer ?? chatId, msgObj), { chatId, label: 'trySendingMsg', kind });
+            await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.floodSafe)(() => client.sendMessage(peer, msgObj), { chatId, label: 'trySendingMsg', kind });
         }
         catch (error) {
             // An accessHash saved by a previous account is rejected: fall back to the username.
@@ -76218,6 +76383,7 @@ async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, 
             await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.floodSafe)(() => client.sendMessage(byName, msgObj), { chatId, label: 'trySendingMsg.byName', kind });
         }
         logger.log(`Sent message successfully to ${username ?? chatId}`);
+        report?.recordSent();
         try {
             await dialogsManager.markAsRead(chatId);
         }
@@ -76227,8 +76393,15 @@ async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, 
         return true;
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error Sending msg: ${msgObj.message} to ${chatId}`);
+        // An unreachable user (deleted, blocked, never in this account's dialogs) is expected: log it
+        // locally and let the caller summarise. Anything else still posts its own notification.
+        const unreachable = (0,_unreachable_report__WEBPACK_IMPORTED_MODULE_8__.classifyUnreachable)(error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error Sending msg: ${msgObj.message} to ${chatId}`, !unreachable);
         logger.error(`Message send failed for ${username ?? chatId}`);
+        if (unreachable)
+            report?.recordUnreachable(unreachable);
+        else
+            report?.recordFailed();
         return false;
     }
 }
@@ -76322,6 +76495,80 @@ async function unblockUser(chatId) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to unblock user");
         await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:unblockUser');
         return false;
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/telegram-utils/unreachable-report.ts"
+/*!**************************************************!*\
+  !*** ./src/telegram-utils/unreachable-report.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SendRunReport: () => (/* binding */ SendRunReport),
+/* harmony export */   UnresolvedPeerError: () => (/* binding */ UnresolvedPeerError),
+/* harmony export */   classifyUnreachable: () => (/* binding */ classifyUnreachable)
+/* harmony export */ });
+/**
+ * Expected "this user cannot be reached from this account" outcomes of an automated send, and a
+ * per-run tally so a batch job (asktoPay) posts ONE summary instead of one channel notification
+ * per unreachable user. Unexpected errors are not classified here and keep their own notification.
+ */
+/** Thrown locally (no RPC) when no strategy can address the user. */
+class UnresolvedPeerError extends Error {
+    constructor(chatId) {
+        super(`Could not find the input entity for ${chatId} (no cached entity, accessHash or username)`);
+        this.name = 'UnresolvedPeerError';
+    }
+}
+const REASONS = [
+    [/PEER_ID_INVALID|USER_ID_INVALID/i, 'PEER_ID_INVALID'],
+    [/input entity/i, 'entity not found'],
+    [/USER_IS_BLOCKED/i, 'blocked'],
+    [/INPUT_USER_DEACTIVATED|USER_DEACTIVATED/i, 'deactivated'],
+];
+/** Reason when `error` is an expected unreachable-user error, else null. */
+function classifyUnreachable(error) {
+    const e = error;
+    const text = `${typeof e?.errorMessage === 'string' ? e.errorMessage : ''} ${error instanceof Error ? error.message : String(e?.message ?? error ?? '')}`;
+    for (const [pattern, reason] of REASONS)
+        if (pattern.test(text))
+            return reason;
+    return null;
+}
+class SendRunReport {
+    constructor(label) {
+        this.sent = 0;
+        this.failed = 0;
+        this.unreachable = new Map();
+        this.label = label;
+    }
+    recordSent() { this.sent++; }
+    recordFailed() { this.failed++; }
+    recordUnreachable(reason) {
+        this.unreachable.set(reason, (this.unreachable.get(reason) ?? 0) + 1);
+    }
+    get unreachableTotal() {
+        let total = 0;
+        for (const n of this.unreachable.values())
+            total += n;
+        return total;
+    }
+    /** e.g. "asktoPay: 120 sent, 40 unreachable (PEER_ID_INVALID 35, blocked 5), 2 failed" */
+    summary() {
+        const parts = [`${this.label}: ${this.sent} sent`];
+        if (this.unreachableTotal) {
+            const detail = [...this.unreachable].map(([reason, n]) => `${reason} ${n}`).join(', ');
+            parts.push(`${this.unreachableTotal} unreachable (${detail})`);
+        }
+        if (this.failed)
+            parts.push(`${this.failed} failed`);
+        return parts.join(', ');
     }
 }
 
