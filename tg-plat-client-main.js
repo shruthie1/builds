@@ -70968,7 +70968,13 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
             }
             return legacy;
         }
-        // outage / error / timeout: fall through to the remote result (its own retry + hold handling applies)
+        // outage / error / timeout. local-only (mySuperSever retired): never call it; report analysis unavailable so
+        // processImage holds the screenshot and re-checks it later (never deleted, never counted invalid).
+        if (source === 'local-only') {
+            recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: 'hold', remoteConfirm: 'none' });
+            return analysisUnavailableDetails();
+        }
+        // local: fall through to the remote result (its own retry + hold handling applies)
     }
     const t0 = deps.now();
     let details;
@@ -70982,7 +70988,7 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
             }
             catch { /* never */ }
         }
-        else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
+        else if (attempt && !attempt.ok && source === 'local') {
             recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(null, deps.now() - t0, error), { source, decidedBy: 'remote-fallback', finalDecision: null, remoteConfirm: 'failed' });
         }
         throw error;
@@ -70993,7 +70999,7 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
         }
         catch { /* never */ }
     }
-    else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
+    else if (attempt && !attempt.ok && source === 'local') {
         const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(details, deps.now() - t0);
         recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-fallback', finalDecision: snap.wouldDecision, remoteConfirm: 'ran' });
     }
@@ -71025,6 +71031,13 @@ function isProofBlocked(vision, ctx) {
         logger.warn(`[vision-shadow] proof check failed, not blocking: ${String(error?.message ?? error)}`);
         return false;
     }
+}
+function analysisUnavailableDetails() {
+    return {
+        amount: 0, isPayment: false, isFailed: false, payeeName: '', payerName: '', text: '',
+        description: 'Analysis unavailable', wordCount: 0, time: '', isFinished: false, isSuccess: false,
+        isInappropriate: false, error: true, confidence: 0, analysisUnavailable: true,
+    };
 }
 function raceRemote(work, ms) {
     let timer;
