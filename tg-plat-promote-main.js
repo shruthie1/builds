@@ -23707,6 +23707,35 @@ class DialogManager {
      * @param force If true, bypasses the cooldown period and forces a refresh
      */
     async refresh(force = false) {
+        try {
+            await this.performRefresh(force);
+        }
+        finally {
+            // refresh() flips isInitializing, which makes handleNewMessage() queue events into
+            // pendingUpdates. Drain them on EVERY exit path (success, empty fetch, rollback, throw);
+            // otherwise they sit in the queue until it overflows and the oldest are dropped
+            // ("Pending updates queue full"). Skip while an init/refresh is still in flight: that
+            // one owns the queue and drains it when it finishes.
+            if (!this.isInitializing) {
+                try {
+                    const queuedBefore = this.pendingUpdates.length;
+                    await this.processPendingUpdates();
+                    if (queuedBefore > 0) {
+                        this.log('info', '[dialogs] drained pending updates after refresh', {
+                            drained: queuedBefore,
+                            remaining: this.pendingUpdates.length
+                        });
+                    }
+                }
+                catch (error) {
+                    this.log('warn', 'Failed to drain pending updates after refresh', {
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                }
+            }
+        }
+    }
+    async performRefresh(force) {
         if (this.isInitializing && !force) {
             this.log('debug', 'Initialization in progress, skipping refresh');
             return;
@@ -26202,6 +26231,13 @@ class ReactionRateLimiter {
         }
         return { allowed: true };
     }
+    /**
+     * True when the ACCOUNT is at its own daily/hourly reaction cap. Side-effect free (no logging),
+     * so health probes can poll it. Being capped is an idle state, not a fault.
+     */
+    isAtReactionCap() {
+        return this.hasReachedDailyLimit() || this.hasReachedHourlyLimit();
+    }
     hasReachedDailyLimit() {
         return this.stats.totalReactions >= this.config.DAILY_REACTION_LIMIT;
     }
@@ -26225,6 +26261,13 @@ class ReactionRateLimiter {
             logger.debug(`[LIMIT] Channel ${channelId} on cooldown: ${remainingSec}s remaining`);
         }
         return onCooldown;
+    }
+    /** Milliseconds until the channel's per-channel cooldown ends (0 when not on cooldown). */
+    getChannelCooldownRemainingMs(channelId) {
+        const lastTime = this.channelLastReaction.get(channelId);
+        if (!lastTime)
+            return 0;
+        return Math.max(0, this.config.PER_CHANNEL_COOLDOWN_MS - (Date.now() - lastTime));
     }
     hasReachedChannelLimit(channelId) {
         const count = this.channelDailyCount.get(channelId) ?? 0;
@@ -26662,6 +26705,15 @@ class ReactionService {
         this.lastHealthCheck = 0;
         // Round-robin channel index for even distribution
         this.channelRoundRobinIndex = 0;
+        /** Epoch ms until which every channel is known to be capped (restricted/cooldown/daily limit). */
+        this.channelsCappedUntil = 0;
+        /** Backoff (ms) chosen by the last selectChannel() exhaustion; consumed by the main loop. */
+        this.lastExhaustionBackoffMs = 0;
+        /** True once the all-capped state has been logged; reset when a channel is selected again (state-change logging). */
+        this.allCappedLogged = false;
+        /** Upper bound for the all-channels-capped backoff (daily-limit/permanent caps have no known expiry). */
+        this.ALL_CAPPED_MAX_BACKOFF_MS = 5 * 60 * 1000;
+        this.ALL_CAPPED_MIN_BACKOFF_MS = 1000;
         // Per-instance emoticon preferences for personality
         this.emoticonPreferences = [];
         // MEMORY FIX: Maximum channels to keep in memory
@@ -26867,6 +26919,7 @@ class ReactionService {
             consecutiveSuccesses: stats.consecutiveSuccesses,
             optimalDelayMs: stats.optimalDelayMs,
             isInFloodWait: this.rateLimiter.isInFloodWait(),
+            isCapped: this.rateLimiter.isAtReactionCap() || Date.now() < this.channelsCappedUntil,
             runtimeOutcomes: { ...this.runtimeOutcomes },
         };
     }
@@ -26875,6 +26928,10 @@ class ReactionService {
         this.restrictedChannelIds.clear();
         this.dbRestrictedChannelIds.clear();
         this.runtimeRestrictions.clear();
+        // Channels may be eligible again: drop the all-capped backoff and wake the sleeping loop.
+        this.channelsCappedUntil = 0;
+        this.lastExhaustionBackoffMs = 0;
+        this.interruptSleep?.();
         for (const id of HARDCODED_RESTRICTED_CHANNELS) {
             this.restrictedChannelIds.add(id);
         }
@@ -26929,6 +26986,12 @@ class ReactionService {
                     const delay = this.rateLimiter.getRecommendedDelay();
                     await this.interruptibleSleep(delay);
                 }
+                else if (this.lastExhaustionBackoffMs > 0) {
+                    // Every channel is capped: sleep until the earliest cap expires (bounded) instead of spinning.
+                    const backoff = this.lastExhaustionBackoffMs;
+                    this.lastExhaustionBackoffMs = 0;
+                    await this.interruptibleSleep(backoff + Math.random() * 1000);
+                }
                 else {
                     // Short retry delay when no reaction
                     const retryDelay = 1000 + Math.random() * 1000;
@@ -26948,7 +27011,7 @@ class ReactionService {
         const channel = this.selectChannel();
         if (!channel) {
             logger.warn(`[${this.instanceId}] No channel selected (${this.channels.length} available, ${this.restrictedChannelIds.size} restricted)`);
-            return 'skipped';
+            return 'skipped'; // selectChannel() recorded lastExhaustionBackoffMs when every channel is capped
         }
         // Skip restricted channels
         if (this.isChannelRestricted(channel.id)) {
@@ -27397,6 +27460,7 @@ class ReactionService {
             this.dialogEntities = scannedEntities;
             // Reset round-robin index
             this.channelRoundRobinIndex = 0;
+            this.channelsCappedUntil = 0;
             if (oldChannels && oldChannels !== this.channels) {
                 oldChannels.length = 0;
             }
@@ -27541,9 +27605,11 @@ class ReactionService {
         return shuffled;
     }
     selectChannel() {
+        this.lastExhaustionBackoffMs = 0;
         if (this.channels.length === 0)
             return null;
         let restrictedSkipped = 0;
+        let earliestFreeMs = Infinity;
         let cooldownSkipped = 0;
         let dailyLimitSkipped = 0;
         // Try all channels starting from current index
@@ -27556,24 +27622,48 @@ class ReactionService {
             // Skip restricted
             if (this.isChannelRestricted(channel.id)) {
                 restrictedSkipped++;
+                // Runtime windows expire; permanent restrictions have no remaining time (Infinity).
+                const left = this.runtimeRestrictions.remainingMs(normalizedId);
+                if (left > 0)
+                    earliestFreeMs = Math.min(earliestFreeMs, left);
                 continue;
             }
             // Skip channels on cooldown
             if (this.rateLimiter.isChannelOnCooldown(normalizedId)) {
                 cooldownSkipped++;
+                earliestFreeMs = Math.min(earliestFreeMs, this.rateLimiter.getChannelCooldownRemainingMs(normalizedId));
                 continue;
             }
-            // Skip channels at daily limit
+            // Skip channels at daily limit (frees only at the daily reset; no known expiry)
             if (this.rateLimiter.hasReachedChannelLimit(normalizedId)) {
                 dailyLimitSkipped++;
                 continue;
             }
             // Advance round-robin
             this.channelRoundRobinIndex = (idx + 1) % this.channels.length;
+            if (this.allCappedLogged) {
+                this.allCappedLogged = false;
+                logger.info('[reactions] channels available again after all-capped backoff', { instanceId: this.instanceId, channels: this.channels.length });
+            }
             return channel;
         }
         // If all channels are exhausted, reset index and return null
         this.channelRoundRobinIndex = 0;
+        const backoffMs = Math.min(this.ALL_CAPPED_MAX_BACKOFF_MS, Math.max(this.ALL_CAPPED_MIN_BACKOFF_MS, Number.isFinite(earliestFreeMs) ? earliestFreeMs : this.ALL_CAPPED_MAX_BACKOFF_MS));
+        this.lastExhaustionBackoffMs = backoffMs;
+        this.channelsCappedUntil = Date.now() + backoffMs;
+        if (!this.allCappedLogged) {
+            this.allCappedLogged = true;
+            logger.warn('[reactions] all channels capped; backing off', {
+                instanceId: this.instanceId,
+                channels: this.channels.length,
+                waitMs: backoffMs,
+                nextExpiry: Number.isFinite(earliestFreeMs) ? new Date(Date.now() + earliestFreeMs).toISOString() : null,
+                restricted: restrictedSkipped,
+                cooldown: cooldownSkipped,
+                dailyLimit: dailyLimitSkipped,
+            });
+        }
         logger.warn(`[${this.instanceId}] [LIMIT] All ${this.channels.length} channels exhausted ` +
             `(restricted=${restrictedSkipped}, cooldown=${cooldownSkipped}, dailyLimit=${dailyLimitSkipped})`);
         return null;
@@ -27794,6 +27884,7 @@ class ReactionService {
                 consecutive: stats.consecutiveSuccesses
             };
             this.rateLimiter.resetDailyStats(now);
+            this.channelsCappedUntil = 0;
             logger.info(`[${this.instanceId}] Stats reset after 24h | Reactions: ${previous.reactions}->0, Failed: ${previous.failed}->0, Floods: ${previous.floods}->0, Consecutive: ${previous.consecutive}->0`);
         }
     }
@@ -28121,6 +28212,16 @@ class RuntimeRestrictionStore {
     hasEntry(channelId) {
         const id = channelId?.trim();
         return id ? this.entries.has(id) : false;
+    }
+    /** Milliseconds until the channel's restriction window lapses (0 when not restricted). */
+    remainingMs(channelId) {
+        const id = channelId?.trim();
+        if (!id)
+            return 0;
+        const entry = this.entries.get(id);
+        if (!entry)
+            return 0;
+        return Math.max(0, entry.expiresAt - this.now());
     }
     /** Number of channels currently inside a restriction window. */
     get activeCount() {
