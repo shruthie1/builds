@@ -37730,7 +37730,7 @@ async function executehs(client, chatId, data) {
                     logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.upsell.${chatId}`, false));
                 }
             }, 180000, `executehs.upsell.${chatId}`);
-        }, 20000, `executehs.fullShowPrompt.${chatId}`);
+        }, 45000, `executehs.fullShowPrompt.${chatId}`);
     }, 8000, `executehs.feedback.${chatId}`);
     const db = _dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     let userDetails = await db.read(chatId);
@@ -37791,7 +37791,7 @@ async function executehsl(client, chatId, data) {
                     }
                 }, 180000, `executehsl.upsell.${chatId}`);
             }
-        }, 20000, `executehsl.offer.${chatId}`);
+        }, 45000, `executehsl.offer.${chatId}`);
     }, 8000, `executehsl.feedback.${chatId}`);
     const isSecondShow = userDetails.highestPayAmount > 50;
     const updatedData = {
@@ -38473,6 +38473,9 @@ async function proceedWithCall(userDetails, chatId, reason) {
         const progress = userDetails.callProgress;
         if (!userDetails.demoGiven && !(progress && Object.keys(progress).length > 0)) {
             if (inHouse) {
+                // Typed like a person, not fired straight after "Wait, I am Calling you".
+                await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.setTyping)(userDetails.chatId);
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(2500 + Math.floor(Math.random() * 1500));
                 await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient().sendMessage(userDetails.chatId, {
                     message: "Don't talk when we connect okk..!! 🙈\n\nI'm in the **Bathroom**\n\nKeep yourself on **Mute**\nI'll show you everything 😉",
                 });
@@ -38498,7 +38501,8 @@ async function proceedWithCall(userDetails, chatId, reason) {
         logger.error(`[ERROR] Error requesting call schedule - chatId: ${chatId}:`, error);
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Cannot request Another call");
     }
-    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(3000);
+    // In-house: the show starts on pick-up, so give them a moment to read the texts before it rings.
+    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(inHouse ? 5000 : 3000);
     logger.debug(`[CALL] Initiating actual call - chatId: ${chatId}, reason: ${reason}`);
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.paidReply, false);
@@ -49470,6 +49474,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FIRST_SYNC_DELAY_MS: () => (/* binding */ FIRST_SYNC_DELAY_MS),
 /* harmony export */   MAX_WRITES_PER_DAY: () => (/* binding */ MAX_WRITES_PER_DAY),
 /* harmony export */   MIN_WRITE_INTERVAL_MS: () => (/* binding */ MIN_WRITE_INTERVAL_MS),
+/* harmony export */   PAYER_MAX_WRITES_PER_DAY: () => (/* binding */ PAYER_MAX_WRITES_PER_DAY),
+/* harmony export */   PAYER_WRITE_INTERVAL_MS: () => (/* binding */ PAYER_WRITE_INTERVAL_MS),
 /* harmony export */   SYNC_INTERVAL_MS: () => (/* binding */ SYNC_INTERVAL_MS)
 /* harmony export */ });
 /**
@@ -49487,6 +49493,12 @@ __webpack_require__.r(__webpack_exports__);
 const ALLOW_LIST_MAX = 500;
 const MIN_WRITE_INTERVAL_MS = 3 * 60 * 60 * 1000;
 const MAX_WRITES_PER_DAY = 4;
+/**
+ * A payer who just paid should be able to call back soon, not hours later: their admission uses a
+ * shorter window, still capped per day (the same persisted counter as routine syncs).
+ */
+const PAYER_WRITE_INTERVAL_MS = 15 * 60 * 1000;
+const PAYER_MAX_WRITES_PER_DAY = 12;
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const FIRST_SYNC_DELAY_MS = 2 * 60 * 1000;
 const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -49495,6 +49507,7 @@ class CallAllowList {
         this.timer = null;
         this.firstTimer = null;
         this.running = null;
+        this.payerRetry = null;
         this.deps = deps;
         this.now = deps.now ?? Date.now;
         this.logger = deps.logger ?? console;
@@ -49510,6 +49523,9 @@ class CallAllowList {
     stop() {
         if (this.firstTimer)
             clearTimeout(this.firstTimer);
+        if (this.payerRetry)
+            clearTimeout(this.payerRetry);
+        this.payerRetry = null;
         if (this.timer)
             clearInterval(this.timer);
         this.firstTimer = null;
@@ -49517,9 +49533,26 @@ class CallAllowList {
     }
     /** One reconcile pass. Concurrent callers share the pass in flight. */
     sync() {
-        if (!this.running) {
-            this.running = this.syncOnce().finally(() => { this.running = null; });
+        return this.pass(false);
+    }
+    /**
+     * A payment was just confirmed: reconcile now with the payer window, so they can call back
+     * within minutes. Throttled → one retry when the window opens.
+     */
+    async admitPayers() {
+        const result = await this.pass(true);
+        if (result.action === 'deferred' && result.reason === 'interval' && !this.payerRetry) {
+            const wait = Math.max(1000, PAYER_WRITE_INTERVAL_MS - (this.now() - this.state().lastWriteAt));
+            this.payerRetry = setTimeout(() => { this.payerRetry = null; void this.pass(true); }, wait);
+            this.payerRetry.unref?.();
         }
+        return result;
+    }
+    pass(payer) {
+        // A routine pass in flight would apply the long window: let a payer pass run after it.
+        if (this.running)
+            return payer ? this.running.then(() => this.pass(true)) : this.running;
+        this.running = this.syncOnce(payer).finally(() => { this.running = null; });
         return this.running;
     }
     /** Operator "calls off": back to Nobody now (one write, not throttled). */
@@ -49528,7 +49561,7 @@ class CallAllowList {
         await this.deps.writeNobody();
         this.recordWrite();
     }
-    async syncOnce() {
+    async syncOnce(payer = false) {
         if (!this.deps.isEnabled())
             return { action: 'disabled' };
         try {
@@ -49540,10 +49573,12 @@ class CallAllowList {
                 return { action: 'noop', allowed: have.size };
             const state = this.state();
             const now = this.now();
-            if (state.lastWriteAt && now - state.lastWriteAt < MIN_WRITE_INTERVAL_MS) {
+            const interval = payer ? PAYER_WRITE_INTERVAL_MS : MIN_WRITE_INTERVAL_MS;
+            const dailyCap = payer ? PAYER_MAX_WRITES_PER_DAY : MAX_WRITES_PER_DAY;
+            if (state.lastWriteAt && now - state.lastWriteAt < interval) {
                 return { action: 'deferred', missing: missing.length, reason: 'interval' };
             }
-            if (state.day === dayKey(now) && state.writesToday >= MAX_WRITES_PER_DAY) {
+            if (state.day === dayKey(now) && state.writesToday >= dailyCap) {
                 return { action: 'deferred', missing: missing.length, reason: 'daily_cap' };
             }
             // Grow only: keep everyone already allowed, newest payers first, capped.
@@ -49910,6 +49945,9 @@ class InHouseCallService {
             return { status: 'fallback', reason: 'plan_error' };
         }
         const { plan } = planned;
+        // A payer with a show due may want to ring us back (e.g. after missing our call): let them, soon.
+        if (plan)
+            void this.deps.allowList?.admitPayers?.()?.catch?.(() => undefined);
         if (!plan) {
             if (planned.reason === 'no_video') {
                 this.safeWarn(`In-house no_video: video unavailable or unreadable for ${chatId}; using the legacy ring`, 'no_video');
@@ -50716,7 +50754,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   setInHouseCallsOverride: () => (/* binding */ setInHouseCallsOverride)
 /* harmony export */ });
 /**
- * The in-house call switch. OFF unless turned on, per client:
+ * The in-house call switch. ON by default (the host must also support it: ntgcalls + ffmpeg;
+ * otherwise calls use the legacy ring + VCUI link). Per client:
  *  - INHOUSE_CALLS=on|off in the client's runtime config (CMS) or env, read at every decision;
  *  - a live override from GET /calls/inhouse/:mode (on|off|default), which wins until the process
  *    restarts or it is set back to 'default'.
@@ -50734,7 +50773,7 @@ function parse(value) {
 function isInHouseCallsEnabled(env = process.env) {
     if (override !== null)
         return override;
-    return parse(env.INHOUSE_CALLS) ?? false;
+    return parse(env.INHOUSE_CALLS) ?? true;
 }
 function setInHouseCallsOverride(mode) {
     override = mode === 'default' ? null : mode === 'on';
@@ -50743,7 +50782,7 @@ function inHouseCallsSwitchState(env = process.env) {
     if (override !== null)
         return { enabled: override, source: 'override' };
     const fromEnv = parse(env.INHOUSE_CALLS);
-    return fromEnv === null ? { enabled: false, source: 'default' } : { enabled: fromEnv, source: 'env' };
+    return fromEnv === null ? { enabled: true, source: 'default' } : { enabled: fromEnv, source: 'env' };
 }
 
 
