@@ -20234,6 +20234,152 @@ function toIncrement(fields) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/payment-proofs.repository.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/payment-proofs.repository.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   NEAR_HASH_MAX_DISTANCE: () => (/* binding */ NEAR_HASH_MAX_DISTANCE),
+/* harmony export */   NEAR_HASH_SCAN_LIMIT: () => (/* binding */ NEAR_HASH_SCAN_LIMIT),
+/* harmony export */   PAYMENT_PROOF_MAX_REASONS: () => (/* binding */ PAYMENT_PROOF_MAX_REASONS),
+/* harmony export */   PAYMENT_PROOF_TTL_SECONDS: () => (/* binding */ PAYMENT_PROOF_TTL_SECONDS),
+/* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
+/* harmony export */   hexHamming: () => (/* binding */ hexHamming)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/**
+ * `paymentProofs`: one small row per analysed payment screenshot, used only for fraud lookups
+ * (cross-chat UTR reuse, near-duplicate images). Design: docs/design/2026-10-10-tg-vision-payment-proof.md section 7.
+ *
+ * Not stored (PII / size): image bytes, OCR text, payer and payee names. Budget is about 30 MB, so
+ * rows stay ~400 B and the TTL index (45 days) is what keeps the collection bounded.
+ * Never write rows before ensureIndexes() has created the TTL index (registered in ensureAllIndexes).
+ */
+const PAYMENT_PROOF_TTL_SECONDS = 45 * 24 * 60 * 60; // 3_888_000
+const PAYMENT_PROOF_MAX_REASONS = 6;
+/** Rows scanned for a near-duplicate hash. Bounded so one lookup never walks the collection. */
+const NEAR_HASH_SCAN_LIMIT = 200;
+/** Default Hamming radius (of 256 bits) for "same image, re-encoded". */
+const NEAR_HASH_MAX_DISTANCE = 4;
+/** Hamming distance between two equal-length hex strings; Infinity when lengths differ or non-hex. */
+function hexHamming(a, b) {
+    if (a.length !== b.length)
+        return Number.POSITIVE_INFINITY;
+    let bits = 0;
+    for (let i = 0; i < a.length; i++) {
+        const p = parseInt(a[i], 16);
+        const q = parseInt(b[i], 16);
+        if (Number.isNaN(p) || Number.isNaN(q))
+            return Number.POSITIVE_INFINITY;
+        const x = p ^ q;
+        bits += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
+    }
+    return bits;
+}
+const HEX64 = /^[0-9a-f]{64}$/;
+class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'paymentProofs';
+    }
+    /**
+     * Idempotent per (chatId, profile, telegramMsgId): a re-delivered message does not add a row.
+     * Absent fields are omitted (the utr/imageHash indexes are partial on $exists).
+     */
+    async insert(input) {
+        const chatId = String(input.chatId || '').trim();
+        if (!chatId || !input.profile)
+            return false;
+        const doc = {};
+        for (const [k, v] of Object.entries(input)) {
+            if (v !== undefined && v !== null && k !== '_id')
+                doc[k] = v;
+        }
+        doc.chatId = chatId;
+        doc.reasons = (input.reasons ?? []).slice(0, PAYMENT_PROOF_MAX_REASONS);
+        doc.createdAt = input.createdAt ?? new Date();
+        if (typeof doc.imageHash === 'string' && !HEX64.test(doc.imageHash))
+            delete doc.imageHash;
+        return this.guardWrite(`insert(${chatId})`, () => this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true }));
+    }
+    /**
+     * A previous proof from a DIFFERENT chat or persona with the same UTR, else a near imageHash.
+     * UTR wins. imageHash is advisory (layout hash; see image-hash.ts), never a standalone reuse key.
+     */
+    async findReuse(query) {
+        const chatId = String(query.chatId || '').trim();
+        const { profile } = query;
+        if (!chatId)
+            return null;
+        const elsewhere = [{ chatId: { $ne: chatId } }, { profile: { $ne: profile } }];
+        return this.guard(`findReuse(${chatId})`, null, async () => {
+            if (query.utr) {
+                const doc = await this.collection
+                    .find({ utr: query.utr, $or: elsewhere })
+                    .limit(1)
+                    .next();
+                if (doc)
+                    return { by: 'utr', distance: 0, doc };
+            }
+            if (query.imageHash && HEX64.test(query.imageHash)) {
+                const max = query.maxHamming ?? NEAR_HASH_MAX_DISTANCE;
+                const rows = await this.collection
+                    .find({ imageHash: { $exists: true }, $or: elsewhere })
+                    .sort({ createdAt: -1 })
+                    .limit(NEAR_HASH_SCAN_LIMIT)
+                    .toArray();
+                let best = null;
+                for (const doc of rows) {
+                    if (typeof doc.imageHash !== 'string')
+                        continue;
+                    const distance = hexHamming(query.imageHash, doc.imageHash);
+                    if (distance <= max && (!best || distance < best.distance)) {
+                        best = { by: 'imageHash', distance, doc };
+                    }
+                }
+                return best;
+            }
+            return null;
+        });
+    }
+    /** Newest first; backs the per-chat near-duplicate scan (default last 20). */
+    async recentForChat(chatId, limit = 20) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit)));
+        return this.guard(`recentForChat(${id})`, [], () => this.collection
+            .find({ chatId: id })
+            .sort({ createdAt: -1 })
+            .limit(n)
+            .toArray());
+    }
+    /** Set the ASK_PROOF state of one row (section 8). Returns true when a row matched. */
+    async markProof(chatId, telegramMsgId, proof) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return false;
+        return this.guard(`markProof(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, telegramMsgId }, { $set: { proof } });
+            return res.matchedCount > 0;
+        });
+    }
+    async ensureIndexes() {
+        const c = this.collection;
+        await this.guardWrite('ensureIndexes(utr)', () => c.createIndex({ utr: 1 }, { name: 'utr_1', partialFilterExpression: { utr: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(chatId,createdAt)', () => c.createIndex({ chatId: 1, createdAt: -1 }, { name: 'chatId_1_createdAt_-1' }));
+        await this.guardWrite('ensureIndexes(imageHash)', () => c.createIndex({ imageHash: 1 }, { name: 'imageHash_1', partialFilterExpression: { imageHash: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(ttl)', () => c.createIndex({ createdAt: 1 }, { name: 'createdAt_ttl', expireAfterSeconds: PAYMENT_PROOF_TTL_SECONDS }));
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/promote-stats.normalize.ts"
 /*!***********************************************************************!*\
   !*** ../../packages/tg-db/src/collections/promote-stats.normalize.ts ***!
@@ -21816,6 +21962,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
+/* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
+
 
 
 
@@ -21847,6 +21995,7 @@ function createRepositories(connection, logger) {
         promote: new _collections_promote_repository__WEBPACK_IMPORTED_MODULE_5__.PromoteRepository(connection, logger),
         clients: new _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__.ClientsRepository(connection, logger),
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
+        paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
     };
 }
 /**
@@ -21874,6 +22023,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['promote', repositories.promote],
         ['clients', repositories.clients],
         ['stats', repositories.stats],
+        ['paymentProofs', repositories.paymentProofs],
     ];
     for (const [name, repository] of all) {
         try {
