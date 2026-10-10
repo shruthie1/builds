@@ -12327,6 +12327,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
+/* harmony export */   parseSpamBotReleaseDate: () => (/* binding */ parseSpamBotReleaseDate),
 /* harmony export */   readLatestSpamBotReply: () => (/* binding */ readLatestSpamBotReply),
 /* harmony export */   reportManualSpamBotProbe: () => (/* binding */ reportManualSpamBotProbe),
 /* harmony export */   runManualSpamBotProbe: () => (/* binding */ runManualSpamBotProbe),
@@ -12373,7 +12374,10 @@ async function readLatestSpamBotReply(client) {
 /** Classifies the stable phrases used by the existing account-state handlers. */
 function classifySpamBotMessage(text) {
     const normalized = text.toLowerCase();
-    if (normalized.includes("automatically released"))
+    // A readable release date wins over the "harsh response" phrase: a dated limit must never be
+    // recorded as an indefinite harsh limit (CMS excludes harsh accounts from swaps). Same order as
+    // the CMS probe classifier.
+    if (normalized.includes("automatically released") || extractSpamBotReleaseDate(text) !== null)
         return "released";
     if (normalized.includes("good news"))
         return "healthy";
@@ -12381,14 +12385,75 @@ function classifySpamBotMessage(text) {
         return "harsh-warning";
     return "other";
 }
+const MONTH_PATTERN = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+const YEAR_PATTERN = "(?:,?\\s+\\d{4}\\b)";
+const TIME_PATTERN = "(?:,?\\s+(?:at\\s+)?\\d{1,2}:\\d{2}(?:\\s*UTC)?)";
+const DATE_PATTERN = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\s+${MONTH_PATTERN}${YEAR_PATTERN}?|${MONTH_PATTERN}\\s+\\d{1,2}${YEAR_PATTERN}?)`;
+const RELEASE_DATE_REGEX = new RegExp(`\\b(?:limited\\s+until|released\\s+on)\\s+(${DATE_PATTERN}${TIME_PATTERN}?)`, "i");
+const MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 /**
- * Extracts the release date without assuming Telegram's exact capitalization.
- * The optional year keeps both legacy "20 Jun" and current "20 Jun, 2026"
- * responses parseable while refusing unrelated prose.
+ * Extracts the release date text without assuming Telegram's exact capitalization. Accepts
+ * "12 Oct", "12 Oct 2026", "12 Oct, 2026", "Oct 12, 2026" and ISO dates, each optionally followed
+ * by ", 15:58 UTC". Matches "limited until ..." and "automatically released on ...". Unrelated
+ * prose is refused.
  */
 function extractSpamBotReleaseDate(text) {
-    const match = text.match(/\blimited\s+until\s+((?:[a-z]+\s+\d{1,2}(?:\s*,\s*\d{4})?)|(?:\d{1,2}\s+[a-z]+(?:\s*,\s*\d{4})?)|(?:\d{4}-\d{2}-\d{2}))/i);
+    const match = text.match(RELEASE_DATE_REGEX);
     return match?.[1]?.trim() || null;
+}
+/**
+ * Parses the string returned by extractSpamBotReleaseDate into a UTC instant. Without a year the
+ * next occurrence is used (dates up to 1 day past stay in the current year); without a time the
+ * instant is 23:59 UTC of that day.
+ * Returns null for anything unparseable or an impossible calendar date.
+ */
+function parseSpamBotReleaseDate(raw, now = new Date()) {
+    const text = raw.trim();
+    const timeMatch = text.match(/(\d{1,2}):(\d{2})(?:\s*UTC)?\s*$/i);
+    // Without a time, assume the END of that UTC day (same as the CMS probe), so a limit is never
+    // treated as lifted early.
+    const hours = timeMatch ? Number(timeMatch[1]) : 23;
+    const minutes = timeMatch ? Number(timeMatch[2]) : 59;
+    if (hours > 23 || minutes > 59)
+        return null;
+    const datePart = timeMatch ? text.slice(0, timeMatch.index).replace(/[,\s]+(?:at)?\s*$/i, "") : text;
+    let day;
+    let month;
+    let year = null;
+    let m;
+    if ((m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/))) {
+        year = Number(m[1]);
+        month = Number(m[2]) - 1;
+        day = Number(m[3]);
+    }
+    else if ((m = datePart.match(new RegExp(`^(\\d{1,2})\\s+(${MONTH_PATTERN})(?:,?\\s+(\\d{4}))?$`, "i")))) {
+        day = Number(m[1]);
+        month = MONTH_NAMES.indexOf(m[2].slice(0, 3).toLowerCase());
+        year = m[3] ? Number(m[3]) : null;
+    }
+    else if ((m = datePart.match(new RegExp(`^(${MONTH_PATTERN})\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?$`, "i")))) {
+        month = MONTH_NAMES.indexOf(m[1].slice(0, 3).toLowerCase());
+        day = Number(m[2]);
+        year = m[3] ? Number(m[3]) : null;
+    }
+    else {
+        return null;
+    }
+    if (month < 0 || day < 1 || day > 31)
+        return null;
+    if (year === null) {
+        const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        year = now.getUTCFullYear();
+        // Roll to next year only when the date is clearly in the past (> 1 day): a just-passed
+        // yearless date ("9 Oct" read on 10 Oct) must not become a ~365-day limit.
+        if (Date.UTC(year, month, day) < todayUtc - 24 * 60 * 60 * 1000)
+            year += 1;
+    }
+    const result = new Date(Date.UTC(year, month, day, hours, minutes));
+    // Reject overflow such as 31 Feb, which Date.UTC silently rolls into March.
+    if (result.getUTCMonth() !== month || result.getUTCDate() !== day)
+        return null;
+    return result;
 }
 /**
  * Claims a concrete SpamBot reply for notification. The manual endpoint and
@@ -19923,6 +19988,20 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
         if (!mobile?.trim())
             return false;
         return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, () => this.bufferClients.updateOne({ mobile }, { $set: update }));
+    }
+    /** Records the SpamBot-derived spam flag on an existing bufferClients row. No upsert: never creates a row. */
+    async recordSpamStatus(mobile, update) {
+        // bufferClients.mobile is stored without a leading "+" (CMS strips it); match that form.
+        const normalizedMobile = mobile?.trim().replace(/^\+/, '');
+        if (!normalizedMobile)
+            return false;
+        let matched = 0;
+        const written = await this.guardWrite(`bufferClients.recordSpamStatus(${normalizedMobile})`, async () => {
+            const result = await this.bufferClients.updateOne({ mobile: normalizedMobile }, { $set: { ...update } }, { upsert: false });
+            matched = result?.matchedCount ?? 0;
+        });
+        // No upsert by design: a missing row is reported (false), not created.
+        return written && matched > 0;
     }
     /**
      * Active buffer accounts of `clientId` that already hold a persona. Strict: callers merge this
@@ -34142,8 +34221,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
 /* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -34155,7 +34235,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("utils");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("utils");
 const __filename = (0,url__WEBPACK_IMPORTED_MODULE_5__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/core/utils.ts");
 const __dirname = path__WEBPACK_IMPORTED_MODULE_4__.dirname(__filename);
 async function sendPermanentFailureNotification(notification, context) {
@@ -34196,7 +34277,7 @@ async function loadTelegramFingerprintSummary(mobile) {
     if (!mobile)
         return null;
     try {
-        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_9__.generateTGConfig)(mobile);
+        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_10__.generateTGConfig)(mobile);
         const params = config.params;
         const proxy = params.proxy;
         return {
@@ -34315,22 +34396,15 @@ async function startNewUserProcess(error, mobile, force = false, context = 'runt
     });
     await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_7__.setupNewMobile)(mobile, false, 90, true, message);
 }
+/**
+ * Whole days until a SpamBot release date, -1 when unparseable. The old split(' ') parser returned
+ * NaN for every real format ("12 Oct 2026, 15:58 UTC", "Oct 12, 2026"), so limits never rotated.
+ */
 function getdaysLeft(inputDate) {
-    const months = [
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-    ];
-    const dateParts = inputDate.split(' ');
-    const day = parseInt(dateParts[0], 10);
-    const monthIndex = months.indexOf(dateParts[1]);
-    const year = parseInt(dateParts[2], 10);
-    const parsedDate = new Date(year, monthIndex, day);
-    const todaysDate = new Date();
-    const parsedDateTimestamp = parsedDate.getTime();
-    const todaysDateTimestamp = todaysDate.getTime();
-    const timeDifference = parsedDateTimestamp - todaysDateTimestamp;
-    const daysDifference = Math.ceil(timeDifference / (1000 * 60 * 60 * 24));
-    return daysDifference;
+    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.parseSpamBotReleaseDate)(inputDate, new Date());
+    if (!parsed)
+        return -1;
+    return Math.ceil((parsed.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 }
 const openChannels = [
     "1503501267",
@@ -34754,7 +34828,9 @@ __webpack_require__.r(__webpack_exports__);
 const MEMORY_DEGRADED_MB = 150;
 const MEMORY_UNHEALTHY_MB = 400;
 const PROMOTION_STALE_MS = 15 * 60 * 1000;
-const PROMOTION_STOPPED_MS = 30 * 60 * 1000;
+// Must stay above the promotion supervisor's 45 min stuck threshold.
+const PROMOTION_STOPPED_MS = 47 * 60 * 1000;
+const PROMOTION_SLEEP_GRACE_MS = 2 * 60 * 1000;
 const REACTION_STALE_MS = 10 * 60 * 1000;
 const REACTION_STOPPED_MS = 30 * 60 * 1000;
 const REACTION_ERROR_RATE_MIN_ATTEMPTS = 10;
@@ -35069,7 +35145,10 @@ function collectManagerPromotionHealth(manager, mobile) {
         // is reached, so "no recent send" is expected and must NOT trigger a restart (which would just
         // churn — the account is still capped). Only flag stale/stopped when it's genuinely not capped.
         const budgetCapped = stats.runnerHealth?.runner?.lastCycleBudgetExhausted === true;
-        if (budgetCapped) {
+        // A runner inside a declared deliberate sleep is resting, not stalled (mirrors the supervisor).
+        const sleepUntil = stats.runnerHealth?.runner?.sleepUntil;
+        const sleeping = typeof sleepUntil === "number" && Date.now() < sleepUntil + PROMOTION_SLEEP_GRACE_MS;
+        if (budgetCapped || sleeping) {
             // leave status healthy; no stale/stopped issue.
         }
         else if (lastMessageAgeMs == null || lastMessageAgeMs > PROMOTION_STOPPED_MS) {
