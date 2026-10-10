@@ -21402,6 +21402,18 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .limit(limit)
             .toArray();
     }
+    /**
+     * chatIds of this persona's real payers (highestPayAmount >= 15, never caught with a fake
+     * screenshot), most recently active first. Feeds the in-house call allow-list. Throws.
+     */
+    async listPaidChatIds(identity, limit) {
+        const rows = await this.collection
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, cheatCount: { $not: { $gt: 0 } } }, { projection: { chatId: 1 } })
+            .sort({ lastMsgTimeStamp: -1 })
+            .limit(limit)
+            .toArray();
+        return rows.map((row) => String(row.chatId)).filter(Boolean);
+    }
     /** Rows of `profile` among chatIds that have messaged at least once (totalCount > 0). Throws. */
     async findReachedRecords(profile, chatIds) {
         return this.collection.find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
