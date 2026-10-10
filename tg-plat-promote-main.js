@@ -21820,6 +21820,47 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/vision-shadow.repository.ts"
+/*!************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/vision-shadow.repository.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   VISION_SHADOW_TTL_INDEX: () => (/* binding */ VISION_SHADOW_TTL_INDEX),
+/* harmony export */   VISION_SHADOW_TTL_SECONDS: () => (/* binding */ VISION_SHADOW_TTL_SECONDS),
+/* harmony export */   VisionShadowRepository: () => (/* binding */ VisionShadowRepository)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/**
+ * `visionShadow`: one small comparison row per analysed payment screenshot (remote mySuperSever vs the
+ * in-process @tg/vision chain), written fire-and-forget by tg-aut in shadow mode. LOG ONLY: no code path
+ * reads it except scripts/vision-parity.cjs. Design: docs/design/2026-10-10-tg-vision-payment-proof.md.
+ *
+ * Never stored: image bytes/base64, OCR text, payer/payee names. Only the TTL index exists (30 days);
+ * the parity script range-scans `createdAt`, which that same index serves, so there is no second index.
+ */
+const VISION_SHADOW_TTL_SECONDS = 30 * 24 * 60 * 60;
+const VISION_SHADOW_TTL_INDEX = 'createdAt_ttl';
+class VisionShadowRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'visionShadow';
+    }
+    /** Never throws; false when the write failed (already logged by guardWrite). */
+    async insert(doc) {
+        return this.guardWrite(`insert(${String(doc.chatId)})`, () => this.collection.insertOne({ ...doc, createdAt: doc.createdAt ?? new Date() }));
+    }
+    async ensureIndexes() {
+        await this.guardWrite('ensureIndexes(createdAt ttl)', () => this.collection.createIndex({ createdAt: 1 }, { name: VISION_SHADOW_TTL_INDEX, expireAfterSeconds: VISION_SHADOW_TTL_SECONDS }));
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/connection.ts"
 /*!**********************************************!*\
   !*** ../../packages/tg-db/src/connection.ts ***!
@@ -22095,6 +22136,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
+/* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
+
 
 
 
@@ -22128,6 +22171,7 @@ function createRepositories(connection, logger) {
         clients: new _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__.ClientsRepository(connection, logger),
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
+        visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
     };
 }
 /**
@@ -22156,6 +22200,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['clients', repositories.clients],
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
+        ['visionShadow', repositories.visionShadow],
     ];
     for (const [name, repository] of all) {
         try {
