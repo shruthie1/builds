@@ -36346,7 +36346,8 @@ async function analyzePaymentProof(image, opts = {}) {
             const outcome = extraction.isPayment === true ? 'extracted' : 'not_payment';
             // 4. optional second opinion on the winner (never throws, never changes the extraction)
             let secondOpinion = null;
-            const runner = opts.secondOpinion ?? (env.VISION_SECOND_OPINION === 'on' ? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)() : undefined);
+            // the default runner decides internally which triggers run (S1-S5 need VISION_SECOND_OPINION=on, S6 authenticity is on by default)
+            const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)();
             if (runner && outcome === 'extracted') {
                 try {
                     secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
@@ -36706,6 +36707,16 @@ FAKE MARKERS
   - disclaimerPhrases: copy VERBATIM any text saying the transaction is not real, such as "not a real transaction", "for entertainment purposes only", "sample", "demo", "prank". Never paraphrase. [] if none.
   - aiWatermarkPresent: true if a small four-pointed sparkle/star or an "AI generated" mark is visible; give aiWatermarkLocation (e.g. bottom-right) and a short factual aiWatermarkEvidence. false if you looked and saw none; null if you cannot tell.
 
+AUTHENTICITY (fakeScore, fakeVerdict, fakeSignals, fakeEvidence) - is this a real payment-app screenshot?
+  - Judge ONLY from what is visible. Never guess from the payee, the amount or the user.
+  - fakeScore 0.0-1.0 (0 certainly genuine, 1 certainly fake). fakeVerdict genuine | suspicious | fake. Genuine: fakeScore < 0.4.
+  - A genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) scores LOW (0.0-0.2). Banners, ads, offers, cashback cards, the "Gemini" button or other app UI in a real app are NOT fake signals.
+  - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator app; visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a UTR that is not 12 digits, a time like 25:70); a photo of another screen.
+  - You do NOT know today's date. Never treat a date or year as future, past or impossible; dates are checked by code.
+  - Unsure or just low quality / cropped: fakeScore 0.3-0.5, verdict suspicious or genuine. Low quality alone is not evidence of fraud.
+  - fakeSignals: only these values: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other. [] if none.
+  - fakeEvidence: at most 5 short strings, each a verbatim on-image phrase or a brief visual fact. [] if genuine.
+
 CONFIDENCE (decimal 0.0-1.0)
   - 0.95 amount, payee, time and status all clear. 0.7 clearly a payment but one field ambiguous. 0.5 unclear image, major fields missing. 0.3 probably not a payment screenshot.
   - NEVER a word such as "high"; always a decimal.
@@ -36717,7 +36728,7 @@ function analysisPromptWithKeys(keysBlock) {
     return `${ANALYSIS_PROMPT}\n\n${keysBlock}`;
 }
 /** Second-opinion prompt (design section 5), single instruction, blind to the first answer. */
-const VERIFICATION_PROMPT = "Look at this payment screenshot. Answer only from what is visible. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. Return null for anything not clearly visible.";
+const VERIFICATION_PROMPT = "Look at this payment screenshot. Answer only from what is visible. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. 7) Is this a genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) or fabricated/edited? Give fakeScore 0.0 (certainly genuine) to 1.0 (certainly fake), fakeVerdict genuine|suspicious|fake, fakeSignals (only: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other) and up to 5 short fakeEvidence strings of visible facts. You do not know today's date: never call a date future or impossible. Banners, ads and app buttons inside a real app are not fake signals; score 0.85 or more only with concrete visible evidence. Return null for anything not clearly visible.";
 
 
 /***/ },
@@ -36731,7 +36742,10 @@ const VERIFICATION_PROMPT = "Look at this payment screenshot. Answer only from w
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AUTHENTICITY_FIELDS: () => (/* binding */ AUTHENTICITY_FIELDS),
 /* harmony export */   CLOCK24_PATTERN: () => (/* binding */ CLOCK24_PATTERN),
+/* harmony export */   FAKE_SIGNALS: () => (/* binding */ FAKE_SIGNALS),
+/* harmony export */   FAKE_VERDICTS: () => (/* binding */ FAKE_VERDICTS),
 /* harmony export */   VERIFY_FIELDS: () => (/* binding */ VERIFY_FIELDS),
 /* harmony export */   WIRE_FIELDS: () => (/* binding */ WIRE_FIELDS),
 /* harmony export */   WIRE_KEYS: () => (/* binding */ WIRE_KEYS),
@@ -36745,6 +36759,18 @@ __webpack_require__.r(__webpack_exports__);
 // "keys block" for json_object providers (nvidia, mistral). One definition, so prompt, schema and parser cannot drift.
 // The legacy MSS converter (getGeminiSchema) dropped items/enum/maxItems/nullable; these emitters keep them.
 
+const FAKE_VERDICTS = ['genuine', 'suspicious', 'fake'];
+const FAKE_SIGNALS = [
+    'disclaimer_text', 'generator_stamp', 'ai_watermark', 'edited_amount', 'font_mismatch',
+    'not_real_app_layout', 'impossible_values', 'photo_of_screen', 'cropped_or_missing_status', 'other',
+];
+/** Authenticity group, flat on the wire (fake* keys) and shared by the main schema and the second-opinion schema. */
+const AUTHENTICITY_FIELDS = [
+    { key: 'fakeScore', type: 'number', nullable: true, minimum: 0, maximum: 1, description: 'Likelihood this screenshot is fabricated/edited/not a real completed payment: 0.0 certainly genuine, 1.0 certainly fake. A genuine bank/UPI app screenshot scores low. 0.85+ only with concrete visible evidence.' },
+    { key: 'fakeVerdict', type: 'string', nullable: true, enum: FAKE_VERDICTS, description: 'genuine | suspicious | fake, judged only from visible evidence. null if you cannot tell.' },
+    { key: 'fakeSignals', type: 'array', nullable: false, maxItems: 5, items: { type: 'string', enum: FAKE_SIGNALS }, description: 'Which visible fake signals apply (enum values only). [] if none.' },
+    { key: 'fakeEvidence', type: 'array', nullable: false, maxItems: 5, items: { type: 'string', maxLength: 120 }, description: 'Short verbatim or visual facts that justify the verdict. [] if genuine.' },
+];
 const CLOCK24_PATTERN = '^\\d{2}:\\d{2}(:\\d{2})?$';
 const WIRE_FIELDS = [
     { key: 'isPayment', type: 'boolean', nullable: true, description: 'true=payment/UPI screen, false=not payment, null=ambiguous' },
@@ -36767,6 +36793,7 @@ const WIRE_FIELDS = [
     { key: 'aiWatermarkPresent', type: 'boolean', nullable: true, description: 'true if a small four-pointed sparkle/star or "AI generated" mark is visible; false if looked and none; null if cannot tell.' },
     { key: 'aiWatermarkLocation', type: 'string', nullable: true, maxLength: 60, description: 'Where the mark is (e.g. bottom-right). null if no mark.' },
     { key: 'aiWatermarkEvidence', type: 'string', nullable: true, maxLength: 120, description: 'One short factual phrase of what was seen. null if no mark.' },
+    ...AUTHENTICITY_FIELDS,
     { key: 'isInappropriate', type: 'boolean', nullable: true, description: 'true=explicit/hate/scam content. null=benign.' },
     { key: 'confidence', type: 'number', nullable: true, minimum: 0, maximum: 1, description: '0-1 decimal: 0.95 all critical fields clear, 0.7 one ambiguous, 0.5 unclear image, 0.3 probably not a payment. Always numeric.' },
 ];
@@ -36783,6 +36810,8 @@ function emitField(f, withConstraints) {
         out.enum = [...f.enum];
     if (f.items) {
         const items = { type: NATIVE_TYPE[f.items.type] };
+        if (f.items.enum)
+            items.enum = [...f.items.enum];
         if (withConstraints && f.items.maxLength !== undefined)
             items.maxLength = f.items.maxLength;
         out.items = items;
@@ -36824,7 +36853,7 @@ function keyType(f) {
     if (f.enum)
         t = f.enum.map((e) => `"${e}"`).join(' | ');
     else if (f.type === 'array')
-        t = `array of strings (max ${f.maxItems ?? 5}; [] when none)`;
+        t = `array of ${f.items?.enum ? f.items.enum.map((e) => `"${e}"`).join(' | ') : 'strings'} (max ${f.maxItems ?? 5}; [] when none)`;
     else if (f.type === 'integer')
         t = `integer${f.minimum !== undefined && f.maximum !== undefined ? ` ${f.minimum}-${f.maximum}` : ''}`;
     else if (f.type === 'number')
@@ -36848,6 +36877,7 @@ const VERIFY_FIELDS = [
     { key: 'utr', type: 'string', nullable: true, description: 'UTR / transaction id; null if not clearly visible' },
     { key: 'payeeUpiId', type: 'string', nullable: true, description: "receiver's UPI id; null if not clearly visible" },
     { key: 'looksEdited', type: 'boolean', nullable: true, description: 'true if the image looks digitally edited; null if unclear' },
+    ...AUTHENTICITY_FIELDS,
 ];
 function toVerifySchema() {
     const properties = {};
@@ -36869,13 +36899,16 @@ function toVerifySchema() {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   coerceConfidence: () => (/* binding */ coerceConfidence),
+/* harmony export */   normalizeAuthenticity: () => (/* binding */ normalizeAuthenticity),
 /* harmony export */   normalizeWire: () => (/* binding */ normalizeWire),
 /* harmony export */   validateWire: () => (/* binding */ validateWire)
 /* harmony export */ });
 /* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
-/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
-/* harmony import */ var _rules_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../rules/time */ "../../packages/tg-vision/src/rules/time.ts");
-/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./schema */ "../../packages/tg-vision/src/contract/schema.ts");
+/* harmony import */ var _rules_sanitize__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../rules/sanitize */ "../../packages/tg-vision/src/rules/sanitize.ts");
+/* harmony import */ var _rules_time__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../rules/time */ "../../packages/tg-vision/src/rules/time.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+
 
 
 
@@ -36947,9 +36980,34 @@ function fakeMarkers(w) {
     };
     return { disclaimerPhrases: phrases, aiWatermark };
 }
+/** Verdict -> score used only when the model gave a verdict but no usable score (kept below the 0.85 block line). */
+const VERDICT_DEFAULT_SCORE = { genuine: 0.1, suspicious: 0.5, fake: 0.7 };
+const verdictFromScore = (score) => (score >= 0.7 ? 'fake' : score >= 0.4 ? 'suspicious' : 'genuine');
+/**
+ * Authenticity group from the flat wire keys. Total: a missing / unusable group is null (older output, OCR-only
+ * providers), never an error. The score is clamped to [0,1], an unknown verdict is re-derived from the score,
+ * signals are enum-filtered and de-duplicated, evidence is trimmed (max 5 x 120).
+ */
+function normalizeAuthenticity(w) {
+    if (!w || typeof w !== 'object')
+        return null;
+    const score = typeof w.fakeScore === 'number' && Number.isFinite(w.fakeScore) ? Math.max(0, Math.min(1, w.fakeScore)) : null;
+    const verdict = typeof w.fakeVerdict === 'string' && _schema__WEBPACK_IMPORTED_MODULE_1__.FAKE_VERDICTS.includes(w.fakeVerdict.trim().toLowerCase())
+        ? w.fakeVerdict.trim().toLowerCase() : null;
+    if (score === null && verdict === null)
+        return null;
+    const signals = Array.isArray(w.fakeSignals)
+        ? [...new Set(w.fakeSignals.filter((s) => typeof s === 'string' && _schema__WEBPACK_IMPORTED_MODULE_1__.FAKE_SIGNALS.includes(s)))]
+        : [];
+    const evidence = Array.isArray(w.fakeEvidence)
+        ? w.fakeEvidence.filter((s) => typeof s === 'string').map((s) => s.trim().slice(0, 120)).filter(Boolean).slice(0, 5)
+        : [];
+    const fakeScore = score ?? VERDICT_DEFAULT_SCORE[verdict];
+    return { fakeScore, verdict: verdict ?? verdictFromScore(fakeScore), signals, evidence };
+}
 /** Build the typed extraction. Call validateWire first; this function is total and never throws on a bad shape. */
 function normalizeWire(raw, ctx) {
-    const v2 = ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES;
+    const v2 = ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_4__.NO_RULES;
     const w = raw && typeof raw === 'object' ? raw : {};
     const rulesApplied = [];
     const fullText = typeof w.text === 'string' ? w.text : '';
@@ -36974,7 +37032,7 @@ function normalizeWire(raw, ctx) {
             rulesApplied.push('R33');
         }
     }
-    const time = (0,_rules_time__WEBPACK_IMPORTED_MODULE_2__.resolveVisionTime)({ timeRaw: w.timeRaw, dateDay: w.dateDay, dateMonth: w.dateMonth, dateYear: w.dateYear, clock24: w.clock24 }, fullText, ctx.nowMs, v2);
+    const time = (0,_rules_time__WEBPACK_IMPORTED_MODULE_3__.resolveVisionTime)({ timeRaw: w.timeRaw, dateDay: w.dateDay, dateMonth: w.dateMonth, dateYear: w.dateYear, clock24: w.clock24 }, fullText, ctx.nowMs, v2);
     if (time.source === 'ocr_text')
         rulesApplied.push('R50');
     const app = str(w.app);
@@ -36999,6 +37057,7 @@ function normalizeWire(raw, ctx) {
         fullText,
         ocrText: ctx.ocrText ?? '',
         fakeMarkers: fakeMarkers(w),
+        authenticity: normalizeAuthenticity(w),
         isInappropriate: bool(w.isInappropriate),
         provider: ctx.provider,
         model: ctx.model,
@@ -37006,7 +37065,7 @@ function normalizeWire(raw, ctx) {
         latencyMs: ctx.latencyMs ?? 0,
         rulesApplied,
     };
-    return { extraction: (0,_rules_sanitize__WEBPACK_IMPORTED_MODULE_1__.sanitizeExtraction)(extraction), amountOutOfRange };
+    return { extraction: (0,_rules_sanitize__WEBPACK_IMPORTED_MODULE_2__.sanitizeExtraction)(extraction), amountOutOfRange };
 }
 
 
@@ -37146,11 +37205,15 @@ function hamming(a, b) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ANALYSIS_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.ANALYSIS_PROMPT),
+/* harmony export */   AUTHENTICITY_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.AUTHENTICITY_FIELDS),
+/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_25__.AUTHENTICITY_SECOND_OPINION_SCORE),
 /* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
 /* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_23__.CURRENCY_REGEX),
 /* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.DEFAULT_BUDGETS_MS),
 /* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_20__.DEFAULT_PROVIDER_ORDER),
 /* harmony export */   EnvKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.EnvKeyPool),
+/* harmony export */   FAKE_SIGNALS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_SIGNALS),
+/* harmony export */   FAKE_VERDICTS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_VERDICTS),
 /* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_DEFAULT_MODEL),
 /* harmony export */   GEMMA_MODELS: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.GEMMA_MODELS),
 /* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_22__.GEMMA_R07B_BUDGET_MS),
@@ -37206,6 +37269,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   istEpochMs: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istEpochMs),
 /* harmony export */   istParts: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istParts),
 /* harmony export */   keyFingerprint: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.keyFingerprint),
+/* harmony export */   normalizeAuthenticity: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeAuthenticity),
 /* harmony export */   normalizeWire: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeWire),
 /* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_21__.ocrTextToWire),
 /* harmony export */   parseModelOutput: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.parseModelOutput),
@@ -39470,6 +39534,7 @@ function rulesV2FromEnv(env = process.env) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* binding */ AUTHENTICITY_SECOND_OPINION_SCORE),
 /* harmony export */   SECOND_OPINION_MODEL: () => (/* binding */ SECOND_OPINION_MODEL),
 /* harmony export */   SECOND_OPINION_TIMEOUT_MS: () => (/* binding */ SECOND_OPINION_TIMEOUT_MS),
 /* harmony export */   combineAll: () => (/* binding */ combineAll),
@@ -39481,14 +39546,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   secondOpinionTriggers: () => (/* binding */ secondOpinionTriggers)
 /* harmony export */ });
 /* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
-/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
-/* harmony import */ var _providers_gemma__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./providers/gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
-/* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
-/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
-/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
-/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
-/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
-/* harmony import */ var _transport_token_budget__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./transport/token-budget */ "../../packages/tg-vision/src/transport/token-budget.ts");
+/* harmony import */ var _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./contract/wire-normalize */ "../../packages/tg-vision/src/contract/wire-normalize.ts");
+/* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
+/* harmony import */ var _providers_gemma__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./providers/gemma */ "../../packages/tg-vision/src/providers/gemma.ts");
+/* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
+/* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _transport_key_pool__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./transport/key-pool */ "../../packages/tg-vision/src/transport/key-pool.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _transport_token_budget__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./transport/token-budget */ "../../packages/tg-vision/src/transport/token-budget.ts");
 // Second opinion on Gemma 4 31B (design section 5). Confirms a flag the cheap first pass raised; it adds NO rejection
 // path: any skip / timeout / error is fail-open and requestSecondOpinion NEVER throws.
 
@@ -39500,8 +39566,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_2__.GEMMA_MODELS[1];
+
+const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS[1];
 const SECOND_OPINION_TIMEOUT_MS = 12000;
+const AUTHENTICITY_SECOND_OPINION_SCORE = 0.4;
 const isMasked = (vpa) => /\*|x{2,}/i.test(vpa);
 const normVpa = (vpa) => (vpa ?? '').trim().toLowerCase();
 /** Which flags of the first pass call for a second opinion (design table S1-S5). */
@@ -39516,28 +39584,32 @@ function secondOpinionTriggers(e, ctx = {}) {
     const vpa = e.payeeUpiId;
     if (vpa && !isMasked(vpa) && ctx.isOwnUpi && !ctx.isOwnUpi(vpa))
         out.push('S3');
-    const ocrAmount = e.ocrText ? (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.extractAmount)(e.ocrText, ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_5__.NO_RULES) : 0;
-    if (e.amount !== null && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(e.amount) && ocrAmount > 0 && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(ocrAmount) && ocrAmount !== e.amount)
+    const ocrAmount = e.ocrText ? (0,_rules_amount__WEBPACK_IMPORTED_MODULE_5__.extractAmount)(e.ocrText, ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_6__.NO_RULES) : 0;
+    if (e.amount !== null && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_5__.isValidAmount)(e.amount) && ocrAmount > 0 && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_5__.isValidAmount)(ocrAmount) && ocrAmount !== e.amount)
         out.push('S4');
     if (e.status === 'success' && e.confidence < 0.6)
         out.push('S5');
+    // S6: only when no deterministic LONG disclaimer already decides (nothing left to confirm then)
+    const a = e.authenticity;
+    if (a && (a.verdict !== 'genuine' || a.fakeScore >= AUTHENTICITY_SECOND_OPINION_SCORE) && !(ctx.hasHardSignal?.(e) ?? false))
+        out.push('S6');
     return out;
 }
 const STATUSES = ['success', 'failed', 'pending', 'unknown'];
 function skipped(reason, model) {
     return {
         skipped: reason, model, watermarkPresent: null, watermarkLocation: null, disclaimerPhrases: [],
-        amount: null, status: null, utr: null, payeeUpiId: null, looksEdited: null,
+        amount: null, status: null, utr: null, payeeUpiId: null, looksEdited: null, authenticity: null,
     };
 }
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 const bool = (v) => (typeof v === 'boolean' ? v : null);
 function fromJson(text, model, v2) {
-    const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.parseModelOutput)(text, v2);
+    const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.parseModelOutput)(text, v2);
     if (parsed.source !== 'json' || !parsed.wire || Array.isArray(parsed.wire))
         return skipped('error', model);
     const w = parsed.wire;
-    const amount = typeof w.amount === 'number' && Number.isFinite(w.amount) && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_4__.isValidAmount)(w.amount) ? w.amount : null;
+    const amount = typeof w.amount === 'number' && Number.isFinite(w.amount) && (0,_rules_amount__WEBPACK_IMPORTED_MODULE_5__.isValidAmount)(w.amount) ? w.amount : null;
     return {
         skipped: null,
         model,
@@ -39551,35 +39623,36 @@ function fromJson(text, model, v2) {
         utr: str(w.utr),
         payeeUpiId: str(w.payeeUpiId),
         looksEdited: bool(w.looksEdited),
+        authenticity: (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_1__.normalizeAuthenticity)(w),
     };
 }
 /** The verifier call. Blind to the first answer. Never throws; every failure is a `skipped` marker. */
 async function requestSecondOpinion(image, deps) {
     const model = deps.model ?? SECOND_OPINION_MODEL;
     try {
-        const env = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.envOf)(deps);
-        const v2 = deps.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_5__.NO_RULES;
+        const env = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(deps);
+        const v2 = deps.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_6__.NO_RULES;
         const pool = deps.pool.get(env, v2);
         pool.restoreExpired();
         const byId = new Map();
         for (const key of pool.active())
-            byId.set((0,_transport_key_pool__WEBPACK_IMPORTED_MODULE_6__.keyFingerprint)(key), key);
+            byId.set((0,_transport_key_pool__WEBPACK_IMPORTED_MODULE_7__.keyFingerprint)(key), key);
         const reservation = deps.budget.reserveOn([...byId.keys()], 'second_opinion');
         if (!reservation)
             return skipped('budget', model);
         const apiKey = byId.get(reservation.keyId);
         try {
-            const res = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_7__.withTimeout)((signal) => deps.factory(apiKey).generateContent({
+            const res = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_8__.withTimeout)((signal) => deps.factory(apiKey).generateContent({
                 model,
-                contents: [{ parts: [{ inlineData: { mimeType: _providers_provider__WEBPACK_IMPORTED_MODULE_3__.IMAGE_MIME, data: (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.toBase64)(image) } }, { text: _contract_prompt__WEBPACK_IMPORTED_MODULE_1__.VERIFICATION_PROMPT }] }],
-                config: { ..._contract_prompt__WEBPACK_IMPORTED_MODULE_1__.GENERATION_CONFIG, responseMimeType: 'application/json', responseSchema: (0,_contract_schema__WEBPACK_IMPORTED_MODULE_0__.toVerifySchema)() },
+                contents: [{ parts: [{ inlineData: { mimeType: _providers_provider__WEBPACK_IMPORTED_MODULE_4__.IMAGE_MIME, data: (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image) } }, { text: _contract_prompt__WEBPACK_IMPORTED_MODULE_2__.VERIFICATION_PROMPT }] }],
+                config: { ..._contract_prompt__WEBPACK_IMPORTED_MODULE_2__.GENERATION_CONFIG, responseMimeType: 'application/json', responseSchema: (0,_contract_schema__WEBPACK_IMPORTED_MODULE_0__.toVerifySchema)() },
                 signal,
             }), deps.timeoutMs ?? SECOND_OPINION_TIMEOUT_MS, 'second opinion');
             deps.budget.settle(reservation, res.totalTokens);
             return fromJson(res.text, model, v2);
         }
         catch (error) {
-            if ((0,_transport_retry__WEBPACK_IMPORTED_MODULE_7__.isRateLimit)(error, v2)) {
+            if ((0,_transport_retry__WEBPACK_IMPORTED_MODULE_8__.isRateLimit)(error, v2)) {
                 deps.budget.release(reservation);
                 pool.remove(apiKey);
             }
@@ -39593,17 +39666,23 @@ async function requestSecondOpinion(image, deps) {
 }
 /** Runner for tg-aut / the chain: null when no flag fired, a SecondOpinion (maybe `skipped`) otherwise. */
 function createSecondOpinionRunner(deps = {}) {
-    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_6__.EnvKeyPool({ name: 'gemma-second-opinion', envNames: _providers_gemma__WEBPACK_IMPORTED_MODULE_2__.GEMMA_KEY_ENV, strategy: 'round-robin', logger: deps.logger, now: deps.now, random: deps.random });
-    const budget = deps.budget ?? new _transport_token_budget__WEBPACK_IMPORTED_MODULE_8__.TokenBudget({ now: deps.now });
-    const factory = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.cachedFactory)((0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.clientFactoryFrom)(deps, deps.clientFactory));
+    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_7__.EnvKeyPool({ name: 'gemma-second-opinion', envNames: _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_KEY_ENV, strategy: 'round-robin', logger: deps.logger, now: deps.now, random: deps.random });
+    const budget = deps.budget ?? new _transport_token_budget__WEBPACK_IMPORTED_MODULE_9__.TokenBudget({ now: deps.now });
+    const factory = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.cachedFactory)((0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.clientFactoryFrom)(deps, deps.clientFactory));
     return async (image, extraction, ctx = {}) => {
         try {
-            const env = ctx.env ?? (0,_providers_provider__WEBPACK_IMPORTED_MODULE_3__.envOf)(deps);
-            if (secondOpinionTriggers(extraction, ctx).length === 0)
+            const env = ctx.env ?? (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(deps);
+            const triggers = secondOpinionTriggers(extraction, ctx);
+            if (triggers.length === 0)
                 return null;
-            if (env.VISION_SECOND_OPINION !== 'on')
+            // S1-S5 stay behind VISION_SECOND_OPINION=on. S6 (authenticity) runs by default; VISION_AUTHENTICITY=off is its rollback.
+            const legacyOn = env.VISION_SECOND_OPINION === 'on' && triggers.some((t) => t !== 'S6');
+            const authOn = triggers.includes('S6') && String(env.VISION_AUTHENTICITY ?? '').trim().toLowerCase() !== 'off';
+            if (!legacyOn && !authOn)
                 return skipped('disabled', deps.model ?? SECOND_OPINION_MODEL);
-            return await requestSecondOpinion(image, { ...deps, env, v2: ctx.v2 ?? deps.v2, pool, budget, factory });
+            // VISION_SECOND_OPINION_MODEL lets ops move to the faster 26B model without a redeploy (31B measured 2-38 s, 26B ~5 s)
+            const model = deps.model ?? _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS.find((m) => m === String(env.VISION_SECOND_OPINION_MODEL ?? '').trim());
+            return await requestSecondOpinion(image, { ...deps, ...(model ? { model } : {}), env, v2: ctx.v2 ?? deps.v2, pool, budget, factory });
         }
         catch {
             return skipped('error', deps.model ?? SECOND_OPINION_MODEL);
@@ -39655,6 +39734,9 @@ function combineSecondOpinion(trigger, first, second, ctx = {}) {
         }
         case 'S4':
             return { trigger, confirmation: 'not_applicable', decision: 'log_only', reason: 'AMOUNT_DISAGREE', alert: false };
+        case 'S6':
+            // Decided in proof-check (apps/tg-aut/.../decision.ts): the second opinion only corroborates, it never decides here.
+            return { trigger, confirmation: ok ? 'not_applicable' : 'unavailable', decision: 'log_only', reason: 'AUTHENTICITY_SECOND_OPINION', alert: false };
         case 'S5': {
             if (!ok)
                 return { trigger, confirmation: 'unavailable', decision: 'unchanged', reason: 'LOW_CONFIDENCE_SUCCESS', alert: false };
@@ -69828,6 +69910,37 @@ function isBlockedFakeScreenshot(text, dbcoll) {
 
 /***/ },
 
+/***/ "./src/payments/proof-check/code-checks.ts"
+/*!*************************************************!*\
+  !*** ./src/payments/proof-check/code-checks.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isFutureDated: () => (/* binding */ isFutureDated),
+/* harmony export */   isUtrMalformed: () => (/* binding */ isUtrMalformed)
+/* harmony export */ });
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+
+/** Digits-only UTR whose length is clearly not a 12-digit UPI reference. Letters, long order ids and missing UTRs are never flagged. */
+function isUtrMalformed(utr) {
+    const t = String(utr ?? '').replace(/[\s-]/g, '');
+    if (!/^\d+$/.test(t))
+        return false;
+    return t.length !== _thresholds__WEBPACK_IMPORTED_MODULE_0__.UTR_DIGITS && t.length >= _thresholds__WEBPACK_IMPORTED_MODULE_0__.UTR_MALFORMED_MIN_DIGITS && t.length <= _thresholds__WEBPACK_IMPORTED_MODULE_0__.UTR_MALFORMED_MAX_DIGITS;
+}
+/** Transaction time (known epoch) later than the extraction time plus the skew. Unknown time never flags. */
+function isFutureDated(time, nowMs, skewMs = _thresholds__WEBPACK_IMPORTED_MODULE_0__.FUTURE_DATE_SKEW_MS) {
+    if (!time || time.state !== 'known' || typeof time.epochMs !== 'number' || !Number.isFinite(time.epochMs))
+        return false;
+    return Number.isFinite(nowMs) && nowMs > 0 && time.epochMs > nowMs + skewMs;
+}
+
+
+/***/ },
+
 /***/ "./src/payments/proof-check/decision.ts"
 /*!**********************************************!*\
   !*** ./src/payments/proof-check/decision.ts ***!
@@ -69838,11 +69951,16 @@ function isBlockedFakeScreenshot(text, dbcoll) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   buildOcrAndText: () => (/* binding */ buildOcrAndText),
-/* harmony export */   decide: () => (/* binding */ decide)
+/* harmony export */   decide: () => (/* binding */ decide),
+/* harmony export */   hasHardTextSignal: () => (/* binding */ hasHardTextSignal)
 /* harmony export */ });
 /* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
 /* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
 /* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+
+
 
 
 
@@ -69853,9 +69971,23 @@ function buildOcrAndText(vision) {
         return '';
     return `${e.ocrText ?? ''} ${e.fullText ?? ''}`.toLowerCase().replace(/\s+/g, ' ').trim();
 }
+/** True when a deterministic text signal alone decides BLOCK (LONG disclaimer in the image text, tier-A blocklist). */
+function hasHardTextSignal(vision, dbcoll) {
+    try {
+        const text = buildOcrAndText(vision);
+        if (!text)
+            return false;
+        return (0,_disclaimers__WEBPACK_IMPORTED_MODULE_1__.scanDisclaimers)(text, []).longInText.length > 0 || (0,_blocklist__WEBPACK_IMPORTED_MODULE_0__.matchBlocklist)(text, { dbcoll }).tierA.length > 0;
+    }
+    catch {
+        return false;
+    }
+}
 /**
- * Pure rule engine (design 6). BLOCK only on LONG disclaimer text found in the image text, or tier-A
- * blocklist. Everything else that looks wrong is ASK_PROOF. A model judgement alone never BLOCKs.
+ * Pure rule engine (design 6 + LLM authenticity). BLOCK on: LONG disclaimer text in the image text, tier-A blocklist,
+ * or an LLM fakeScore >= FAKE_BLOCK_SCORE that is CORROBORATED (second opinion fake, or a code-verified signal: payee
+ * not ours / malformed UTR / future date). One model's judgement alone never BLOCKs; it asks for proof. A missing
+ * authenticity (OCR-only provider, skipped second opinion) is "no opinion" and can never cause BLOCK.
  */
 function decide(input) {
     const { vision, reuse } = input;
@@ -69886,8 +70018,41 @@ function decide(input) {
         ask.push(reuse.by === 'imageHash' ? 'IMAGE_NEAR_DUPLICATE_OTHER_CHAT' : 'UTR_REUSED');
     else if (reuse?.sameChatRepeat)
         info.push('UTR_REPEAT_SAME_CHAT');
-    if ((0,_upi_ownership__WEBPACK_IMPORTED_MODULE_2__.checkPayeeUpi)(e.payeeUpiId, input.ownUpiIds) === 'not_ours')
+    const payeeNotOurs = (0,_upi_ownership__WEBPACK_IMPORTED_MODULE_2__.checkPayeeUpi)(e.payeeUpiId, input.ownUpiIds) === 'not_ours';
+    if (payeeNotOurs)
         ask.push('UPI_NOT_OURS');
+    const utrMalformed = (0,_code_checks__WEBPACK_IMPORTED_MODULE_3__.isUtrMalformed)(e.utr);
+    const futureDated = (0,_code_checks__WEBPACK_IMPORTED_MODULE_3__.isFutureDated)(e.time, input.ctx?.now ?? 0);
+    if (utrMalformed)
+        info.push('UTR_MALFORMED');
+    if (futureDated)
+        info.push('DATE_IN_FUTURE');
+    if (input.llmAuthenticity !== false) {
+        const a = e.authenticity ?? null;
+        const s = so?.authenticity ?? null;
+        const score = a?.fakeScore ?? 0;
+        const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.SECOND_OPINION_FAKE_SCORE);
+        const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.SECOND_OPINION_ASK_SCORE);
+        if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.FAKE_BLOCK_SCORE) {
+            // corroboration by an independent check; the first matching rule names the BLOCK
+            if (secondFake)
+                block.push('LLM_FAKE_CONFIRMED_SECOND_OPINION');
+            if (payeeNotOurs)
+                block.push('LLM_FAKE_PAYEE_NOT_OURS');
+            if (utrMalformed)
+                block.push('LLM_FAKE_UTR_MALFORMED');
+            if (futureDated)
+                block.push('LLM_FAKE_FUTURE_DATE');
+        }
+        if (a && !block.some(r => r.startsWith('LLM_FAKE_'))) {
+            if (score >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.FAKE_ASK_SCORE)
+                ask.push('LLM_FAKE_SUSPECTED');
+            else if (a.verdict === 'fake')
+                ask.push('LLM_FAKE_UNCORROBORATED');
+        }
+        if (secondSuspicious && !block.some(r => r.startsWith('LLM_FAKE_')))
+            ask.push('LLM_SECOND_OPINION_SUSPICIOUS');
+    }
     const dup = input.duplicate;
     const dupReasons = dup ? ['DUPLICATE_PROOF', `DUPLICATE_BY_${dup.by === 'imageSha256' ? 'IMAGE_SHA256' : dup.by === 'imageHash' ? 'IMAGE_DHASH' : 'UTR'}`] : [];
     const reasons = [...block, ...dupReasons, ...ask, ...info];
@@ -69991,32 +70156,39 @@ function scanDisclaimers(ocrAndText, modelPhrases) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.LONG_DISCLAIMERS),
-/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_5__.OLD_PAYMENT_MESSAGES),
-/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.SHORT_DISCLAIMERS),
-/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.buildDuplicateQuery),
+/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_4__.LONG_DISCLAIMERS),
+/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_7__.OLD_PAYMENT_MESSAGES),
+/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_4__.SHORT_DISCLAIMERS),
+/* harmony export */   authenticityEnabled: () => (/* reexport safe */ _thresholds__WEBPACK_IMPORTED_MODULE_2__.authenticityEnabled),
+/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_6__.buildDuplicateQuery),
 /* harmony export */   buildOcrAndText: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.buildOcrAndText),
-/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.checkPayeeUpi),
+/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_5__.checkPayeeUpi),
 /* harmony export */   decide: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.decide),
-/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.imageSha256),
-/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_1__.isBlockedFakeScreenshot),
-/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.isMaskedVpa),
-/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.lookupReuse),
-/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_4__.lookupServedDuplicate),
-/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_1__.matchBlocklist),
-/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.matchesPhrase),
-/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.normalizeVpa),
-/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.ownIdsFrom),
+/* harmony export */   hasHardTextSignal: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.hasHardTextSignal),
+/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_6__.imageSha256),
+/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_3__.isBlockedFakeScreenshot),
+/* harmony export */   isFutureDated: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_1__.isFutureDated),
+/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_5__.isMaskedVpa),
+/* harmony export */   isUtrMalformed: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_1__.isUtrMalformed),
+/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_6__.lookupReuse),
+/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_6__.lookupServedDuplicate),
+/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_3__.matchBlocklist),
+/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_4__.matchesPhrase),
+/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_5__.normalizeVpa),
+/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_5__.ownIdsFrom),
 /* harmony export */   proofCheck: () => (/* binding */ proofCheck),
-/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_2__.scanDisclaimers),
-/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_3__.withinOneEdit)
+/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_4__.scanDisclaimers),
+/* harmony export */   thresholds: () => (/* reexport module object */ _thresholds__WEBPACK_IMPORTED_MODULE_2__),
+/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_5__.withinOneEdit)
 /* harmony export */ });
 /* harmony import */ var _decision__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decision */ "./src/payments/proof-check/decision.ts");
-/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
-/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
-/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
-/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
 
 /** Entry point: pure, synchronous, never throws (a failure degrades to ACCEPT so genuine payers are not hurt). */
 function proofCheck(input) {
@@ -70027,6 +70199,9 @@ function proofCheck(input) {
         return { decision: 'ACCEPT', reasons: ['PROOF_CHECK_ERROR'], alert: false };
     }
 }
+
+
+
 
 
 
@@ -70160,6 +70335,51 @@ async function lookupReuse(repo, q) {
 
 /***/ },
 
+/***/ "./src/payments/proof-check/thresholds.ts"
+/*!************************************************!*\
+  !*** ./src/payments/proof-check/thresholds.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AUTHENTICITY_FLAG: () => (/* binding */ AUTHENTICITY_FLAG),
+/* harmony export */   FAKE_ASK_SCORE: () => (/* binding */ FAKE_ASK_SCORE),
+/* harmony export */   FAKE_BLOCK_SCORE: () => (/* binding */ FAKE_BLOCK_SCORE),
+/* harmony export */   FUTURE_DATE_SKEW_MS: () => (/* binding */ FUTURE_DATE_SKEW_MS),
+/* harmony export */   SECOND_OPINION_ASK_SCORE: () => (/* binding */ SECOND_OPINION_ASK_SCORE),
+/* harmony export */   SECOND_OPINION_FAKE_SCORE: () => (/* binding */ SECOND_OPINION_FAKE_SCORE),
+/* harmony export */   UTR_DIGITS: () => (/* binding */ UTR_DIGITS),
+/* harmony export */   UTR_MALFORMED_MAX_DIGITS: () => (/* binding */ UTR_MALFORMED_MAX_DIGITS),
+/* harmony export */   UTR_MALFORMED_MIN_DIGITS: () => (/* binding */ UTR_MALFORMED_MIN_DIGITS),
+/* harmony export */   authenticityEnabled: () => (/* binding */ authenticityEnabled)
+/* harmony export */ });
+/** Every threshold of the LLM authenticity rules, in one place. Change here only; tests import these. */
+/** Main-pass score at or above which the model alone is NEVER enough to block: it only asks for proof. */
+const FAKE_ASK_SCORE = 0.5;
+/** Main-pass score at which a BLOCK becomes possible, and only together with corroboration (second opinion or a code-verified signal). */
+const FAKE_BLOCK_SCORE = 0.85;
+/** Second opinion counts as confirming "fake" at this score (or verdict 'fake'). */
+const SECOND_OPINION_FAKE_SCORE = 0.7;
+/** Second opinion counts as "suspicious" at this score (or verdict suspicious/fake): ASK_PROOF only. */
+const SECOND_OPINION_ASK_SCORE = 0.5;
+/** A payment dated further than this after the extraction time cannot be real (IST/UTC mix-ups are 5.5 h). */
+const FUTURE_DATE_SKEW_MS = 6 * 60 * 60 * 1000;
+/** UPI UTR / reference = 12 digits. Digits-only values of this length range that are NOT 12 digits are "clearly malformed";
+ *  anything longer (Paytm order ids), or with letters (PhonePe T-ids, bank refs) is never flagged. */
+const UTR_DIGITS = 12;
+const UTR_MALFORMED_MIN_DIGITS = 6;
+const UTR_MALFORMED_MAX_DIGITS = 15;
+/** Env rollback: VISION_AUTHENTICITY=off disables the LLM authenticity rules and the S6 second opinion. */
+const AUTHENTICITY_FLAG = 'VISION_AUTHENTICITY';
+function authenticityEnabled(env = process.env) {
+    return String(env[AUTHENTICITY_FLAG] ?? '').trim().toLowerCase() !== 'off';
+}
+
+
+/***/ },
+
 /***/ "./src/payments/proof-check/upi-ownership.ts"
 /*!***************************************************!*\
   !*** ./src/payments/proof-check/upi-ownership.ts ***!
@@ -70216,7 +70436,11 @@ function checkPayeeUpi(payee, ownIds) {
 /** Adapter over `UpiIds` from services/payment/UpiClass (only `.allIds` is read). */
 function ownIdsFrom(source) {
     const ids = source?.allIds;
-    return Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x.length > 0) : [];
+    if (!Array.isArray(ids))
+        return [];
+    // allIds can carry QR suffixes ("vpa@bank&bpsign=..."): the payee VPA a receipt shows is the part before '&'.
+    const out = ids.filter((x) => typeof x === 'string' && x.length > 0).map(x => (x.includes('@') ? x.split('&')[0] : x));
+    return [...new Set(out)];
 }
 
 
@@ -70236,6 +70460,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   failedLocal: () => (/* binding */ failedLocal),
 /* harmony export */   isLegacyAccept: () => (/* binding */ isLegacyAccept),
 /* harmony export */   legacyWouldDecision: () => (/* binding */ legacyWouldDecision),
+/* harmony export */   scrubEvidence: () => (/* binding */ scrubEvidence),
 /* harmony export */   snapshotLocal: () => (/* binding */ snapshotLocal),
 /* harmony export */   snapshotRemote: () => (/* binding */ snapshotRemote)
 /* harmony export */ });
@@ -70306,6 +70531,16 @@ function snapshotRemote(d, durationMs, thrown) {
         wouldDecision: legacyWouldDecision(d),
     };
 }
+const nameTokens = (...names) => names.flatMap((n) => String(n ?? '').toLowerCase().split(/[^\p{L}\p{N}]+/u)).filter((t) => t.length >= 4);
+/** Drop evidence strings that quote a payee/payer name (any token of >= 4 chars) or carry a 6+ digit run (UTR, phone). */
+function scrubEvidence(evidence, ...names) {
+    const tokens = nameTokens(...names);
+    return (evidence ?? [])
+        .map((x) => String(x))
+        .filter((x) => { const l = x.toLowerCase(); return !/\d{6,}/.test(x) && !tokens.some((t) => l.includes(t)); })
+        .slice(0, 5)
+        .map((x) => clip(x, 120));
+}
 /**
  * Build the local snapshot from a VisionResult, its legacy-adapted details and the proof-check outcome.
  * Stores no text: only the short verbatim disclaimer phrases the model flagged (max 5 x 120 chars), UTR and payee VPA.
@@ -70329,7 +70564,16 @@ function snapshotLocal(vision, legacy, proof, durationMs) {
         watermarkPresent: e?.fakeMarkers?.aiWatermark?.present ?? null,
         disclaimerPhrases: (e?.fakeMarkers?.disclaimerPhrases ?? []).slice(0, 5).map((p) => clip(String(p), 120)),
         utr: e?.utr ?? null, payeeUpiId: e?.payeeUpiId ?? null, rulesApplied: (e?.rulesApplied ?? []).slice(0, 10),
-        proofDecision: proof?.decision ?? null, proofReasons: (proof?.reasons ?? []).slice(0, 6),
+        proofDecision: proof?.decision ?? null, proofReasons: (proof?.reasons ?? []).slice(0, 10),
+        fakeScore: e?.authenticity?.fakeScore ?? null, fakeVerdict: e?.authenticity?.verdict ?? null,
+        fakeSignals: (e?.authenticity?.signals ?? []).slice(0, 10),
+        fakeEvidence: scrubEvidence(e?.authenticity?.evidence, e?.payeeName, e?.payerName),
+        secondOpinion: vision.secondOpinion
+            ? {
+                skipped: vision.secondOpinion.skipped ?? null, verdict: vision.secondOpinion.authenticity?.verdict ?? null,
+                fakeScore: vision.secondOpinion.authenticity?.fakeScore ?? null, signals: (vision.secondOpinion.authenticity?.signals ?? []).slice(0, 10),
+            }
+            : null,
         durationMs, error: null, wouldDecision: would,
     };
 }
@@ -70338,6 +70582,7 @@ function failedLocal(error, durationMs) {
         outcome: null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
         isFinished: false, noVerifiableAmount: false, confidence: 0, attempts: [], watermarkPresent: null,
         disclaimerPhrases: [], utr: null, payeeUpiId: null, rulesApplied: [], proofDecision: null, proofReasons: [],
+        fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null,
         durationMs, error: clip(String(error?.message ?? error ?? 'unknown'), 200), wouldDecision: null,
     };
 }
@@ -70384,9 +70629,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _proof_check__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./proof-check */ "./src/payments/proof-check/index.ts");
-/* harmony import */ var _proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./proof-check/reuse */ "./src/payments/proof-check/reuse.ts");
-/* harmony import */ var _vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./vision-shadow-core */ "./src/payments/vision-shadow-core.ts");
+/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _proof_check__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./proof-check */ "./src/payments/proof-check/index.ts");
+/* harmony import */ var _proof_check_reuse__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./proof-check/reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./vision-shadow-core */ "./src/payments/vision-shadow-core.ts");
 // Vision shadow + source switch (design U11). IMAGE_ANALYSIS_SOURCE is read at call time:
 //   remote (default)          today's remote result is the decision; tg-vision runs on the same bytes in the background
 //   off-shadow | remote-only  remote only, no shadow
@@ -70405,6 +70651,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:vision-shadow');
 const MAX_IN_FLIGHT = 2;
 const SHADOW_TIMEOUT_MS = 60000;
@@ -70414,9 +70661,13 @@ function imageAnalysisSource(env = process.env) {
     return v === 'local' || v === 'local-only' || v === 'off-shadow' || v === 'remote-only' ? v : 'remote';
 }
 const defaultDeps = () => ({
-    analyze: (image) => (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.analyzePaymentProof)(image),
+    analyze: (image) => (0,_tg_vision__WEBPACK_IMPORTED_MODULE_1__.analyzePaymentProof)(image, {
+        // S6 (authenticity second opinion) is pointless when a deterministic text signal already blocks
+        secondOpinionContext: { hasHardSignal: (e) => (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.hasHardTextSignal)({ extraction: e }, process.env.dbcoll ?? null) },
+    }),
     getRepositories: () => null,
     now: Date.now,
+    getOwnUpiIds: () => (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.ownIdsFrom)(_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__.UpiIds),
     maxInFlight: MAX_IN_FLIGHT,
     timeoutMs: SHADOW_TIMEOUT_MS,
 });
@@ -70474,15 +70725,17 @@ async function composeRow(image, ctx, inp) {
         if (!vision || !inp.legacy)
             throw inp.localError ?? new Error('no local result');
         const profile = (process.env.dbcoll || '').toLowerCase();
-        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_3__.proofCheck)({
+        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.proofCheck)({
             vision,
             ctx: { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: deps.now() },
             dbcoll: process.env.dbcoll ?? null,
+            ownUpiIds: safeOwnUpiIds(),
+            llmAuthenticity: (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.authenticityEnabled)(),
         });
-        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotLocal)(vision, inp.legacy, proof, inp.localMs);
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotLocal)(vision, inp.legacy, proof, inp.localMs);
     }
     catch (error) {
-        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.failedLocal)(error, inp.localMs);
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.failedLocal)(error, inp.localMs);
     }
     // Log-only duplicate lookup (read methods only; never markServed).
     let duplicate = null;
@@ -70492,20 +70745,20 @@ async function composeRow(image, ctx, inp) {
         if (repo) {
             const profile = (process.env.dbcoll || '').toLowerCase();
             const pctx = { chatId: ctx.chatId, profile, clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: hash, imageSha256: sha256, now: deps.now() };
-            const q = (vision ? (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.buildDuplicateQuery)(vision, pctx) : null) ?? {
+            const q = (vision ? (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_5__.buildDuplicateQuery)(vision, pctx) : null) ?? {
                 chatId: ctx.chatId, profile, telegramMsgId: ctx.msgId,
                 imageSha256: sha256, ...(hash ? { imageHash: hash } : {}),
             };
-            const dup = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.lookupServedDuplicate)(repo, q);
+            const dup = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_5__.lookupServedDuplicate)(repo, q);
             if (dup)
                 duplicate = { by: dup.by, sameChat: dup.sameChat, ...(dup.matchedProofId ? { matchedProofId: dup.matchedProofId } : {}) };
-            const r = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_4__.lookupReuse)(repo, { chatId: ctx.chatId, profile, telegramMsgId: ctx.msgId, utr: local.utr, imageHash: hash });
+            const r = await (0,_proof_check_reuse__WEBPACK_IMPORTED_MODULE_5__.lookupReuse)(repo, { chatId: ctx.chatId, profile, telegramMsgId: ctx.msgId, utr: local.utr, imageHash: hash });
             if (r)
                 reuse = { otherChatOrPersona: r.otherChatOrPersona, ...(r.by ? { by: r.by } : {}), ...(r.sameChatRepeat ? { sameChatRepeat: true } : {}) };
         }
     }
     catch { /* log-only */ }
-    return (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.buildShadowDoc)({
+    return (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.buildShadowDoc)({
         ctx, now: new Date(deps.now()), sha256, dHash: hash, imageBytes: image.length, remote: inp.remote, local, duplicate, reuse,
         localMode: inp.localMode,
     });
@@ -70579,24 +70832,24 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
                 recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: 'block', remoteConfirm: 'none' });
                 return { ...legacy, proofBlocked: true };
             }
-            if (source === 'local-only' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.isLegacyAccept)(attempt.legacy)) {
-                recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'none' });
+            if (source === 'local-only' || (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.isLegacyAccept)(attempt.legacy)) {
+                recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'none' });
                 return legacy;
             }
             // Reject confirmation: the local result is not a credit-accept. A genuine payer must never be false-rejected.
             const tr = deps.now();
             try {
                 const remote = await raceRemote(remoteFn(photoBuffer), deps.timeoutMs);
-                const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(remote, deps.now() - tr);
-                if ((0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.isLegacyAccept)(remote)) {
+                const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(remote, deps.now() - tr);
+                if ((0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.isLegacyAccept)(remote)) {
                     recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-confirm', finalDecision: 'accept', remoteConfirm: 'ran' });
                     return remote;
                 }
-                recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'ran' });
+                recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'ran' });
             }
             catch (error) {
                 logger.warn(`[vision-shadow] reject confirmation failed, keeping local result: ${String(error?.message ?? error)}`);
-                recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - tr, error), { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'failed' });
+                recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(null, deps.now() - tr, error), { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'failed' });
             }
             return legacy;
         }
@@ -70610,33 +70863,43 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
     catch (error) {
         if (source === 'remote') {
             try {
-                scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - t0, error));
+                scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(null, deps.now() - t0, error));
             }
             catch { /* never */ }
         }
         else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
-            recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(null, deps.now() - t0, error), { source, decidedBy: 'remote-fallback', finalDecision: null, remoteConfirm: 'failed' });
+            recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(null, deps.now() - t0, error), { source, decidedBy: 'remote-fallback', finalDecision: null, remoteConfirm: 'failed' });
         }
         throw error;
     }
     if (source === 'remote') {
         try {
-            scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(details, deps.now() - t0));
+            scheduleShadow(photoBuffer, ctx, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(details, deps.now() - t0));
         }
         catch { /* never */ }
     }
     else if (attempt && !attempt.ok && (source === 'local' || source === 'local-only')) {
-        const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_5__.snapshotRemote)(details, deps.now() - t0);
+        const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(details, deps.now() - t0);
         recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-fallback', finalDecision: snap.wouldDecision, remoteConfirm: 'ran' });
     }
     return details;
 }
+function safeOwnUpiIds() {
+    try {
+        return deps.getOwnUpiIds();
+    }
+    catch {
+        return [];
+    }
+}
 function isProofBlocked(vision, ctx) {
     try {
-        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_3__.proofCheck)({
+        const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.proofCheck)({
             vision,
             ctx: { chatId: ctx.chatId, profile: (process.env.dbcoll || '').toLowerCase(), clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: null, now: deps.now() },
             dbcoll: process.env.dbcoll ?? null,
+            ownUpiIds: safeOwnUpiIds(),
+            llmAuthenticity: (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.authenticityEnabled)(),
         });
         if (proof.decision !== 'BLOCK')
             return false;
