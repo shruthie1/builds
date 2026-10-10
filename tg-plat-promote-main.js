@@ -20321,7 +20321,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedAt;
         delete doc.servedService;
         delete doc.servedUtr;
-        return this.guardWrite(`insert(${chatId})`, () => this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true }));
+        return this.guardWrite(`insert(${chatId})`, async () => {
+            try {
+                await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
+            }
+            catch (error) {
+                // A concurrent insert of the same screenshot won the unique key: the row exists, which is the goal.
+                if (!isDuplicateKey(error))
+                    throw error;
+            }
+        });
     }
     /**
      * A previous proof from a DIFFERENT chat or persona with the same UTR, else a near imageHash.
@@ -20501,6 +20510,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         await this.guardWrite('ensureIndexes(chatId,createdAt)', () => c.createIndex({ chatId: 1, createdAt: -1 }, { name: 'chatId_1_createdAt_-1' }));
         await this.guardWrite('ensureIndexes(imageHash)', () => c.createIndex({ imageHash: 1 }, { name: 'imageHash_1', partialFilterExpression: { imageHash: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
+        // One row per screenshot: insert() upserts on this key, and without a unique index concurrent upserts
+        // race into duplicate rows (6 rows from 10 parallel inserts on Mongo 8.2).
+        await this.guardWrite('ensureIndexes(chatId,profile,telegramMsgId unique)', () => c.createIndex({ chatId: 1, profile: 1, telegramMsgId: 1 }, { name: 'chatId_1_profile_1_telegramMsgId_1_unique', unique: true }));
         // Race guard: at most one SERVED proof per UTR, across chats and personas. Keyed on servedUtr
         // (not utr) so it never shares a key pattern with utr_1 (older Mongo rejects two partial
         // indexes on one key pattern).
