@@ -5589,7 +5589,10 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         catch (error) {
             await this.failCall(call, error);
         }
-        return done;
+        // A media failure can end the call while RequestCall is still in flight (nidhi1 2026-10-11: the
+        // audio source died, then RequestCall threw PEER_FLOOD): the record resolved before failCall set
+        // the error, so the caller saw a plain media_failed and rang the refused user again. Carry it over.
+        return done.then((rec) => (rec.error || !call.record.error ? rec : { ...rec, error: call.record.error }));
     }
     /** Hang up the call with `userId`, or every active call when omitted. */
     async hangup(userId) {
@@ -57159,19 +57162,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   cleanupGlobalResources: () => (/* binding */ cleanupGlobalResources),
 /* harmony export */   configureDotenv: () => (/* binding */ configureDotenv),
-/* harmony export */   daysLeftForRelease: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_7__.daysLeftForRelease),
-/* harmony export */   generateRandomInt: () => (/* reexport safe */ _event_handlers_utils__WEBPACK_IMPORTED_MODULE_14__.generateRandomInt),
-/* harmony export */   getDemoStats: () => (/* reexport safe */ _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_10__.getDemoStats),
+/* harmony export */   daysLeftForRelease: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_8__.daysLeftForRelease),
+/* harmony export */   generateRandomInt: () => (/* reexport safe */ _event_handlers_utils__WEBPACK_IMPORTED_MODULE_15__.generateRandomInt),
+/* harmony export */   getDemoStats: () => (/* reexport safe */ _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_11__.getDemoStats),
 /* harmony export */   getMemoryStats: () => (/* binding */ getMemoryStats),
-/* harmony export */   getUserStats: () => (/* reexport safe */ _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_10__.getUserStats),
-/* harmony export */   globalCanReply: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_7__.globalCanReply),
+/* harmony export */   getUserStats: () => (/* reexport safe */ _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_11__.getUserStats),
+/* harmony export */   globalCanReply: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_8__.globalCanReply),
 /* harmony export */   handleEvents: () => (/* binding */ handleEvents),
 /* harmony export */   initSetup: () => (/* binding */ initSetup),
 /* harmony export */   initializeIndexServices: () => (/* binding */ initializeIndexServices),
-/* harmony export */   initiateCall: () => (/* reexport safe */ _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_11__.initiateCall),
-/* harmony export */   respToFailedMSg: () => (/* reexport safe */ _event_handlers_MessageResponseService__WEBPACK_IMPORTED_MODULE_12__.respToFailedMSg),
-/* harmony export */   sendMessageWithButton: () => (/* reexport safe */ _event_handlers_MessageUtils__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithButton),
-/* harmony export */   setReply: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_7__.setReply)
+/* harmony export */   initiateCall: () => (/* reexport safe */ _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_12__.initiateCall),
+/* harmony export */   respToFailedMSg: () => (/* reexport safe */ _event_handlers_MessageResponseService__WEBPACK_IMPORTED_MODULE_13__.respToFailedMSg),
+/* harmony export */   sendMessageWithButton: () => (/* reexport safe */ _event_handlers_MessageUtils__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithButton),
+/* harmony export */   setReply: () => (/* reexport safe */ _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_8__.setReply)
 /* harmony export */ });
 /* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
 /* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./core/utils */ "./src/core/utils.ts");
@@ -57180,17 +57183,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _handlers_respondToMsgs__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./handlers/respondToMsgs */ "./src/handlers/respondToMsgs.ts");
 /* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
 /* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inbound/inbound-decision */ "./src/inbound/inbound-decision.ts");
-/* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./event-handlers/globalState */ "./src/event-handlers/globalState.ts");
-/* harmony import */ var _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./event-handlers/PrivateMessageHandler */ "./src/event-handlers/PrivateMessageHandler.ts");
-/* harmony import */ var _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./event-handlers/SystemMessageHandler */ "./src/event-handlers/SystemMessageHandler.ts");
-/* harmony import */ var _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./event-handlers/StatsService */ "./src/event-handlers/StatsService.ts");
-/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
-/* harmony import */ var _event_handlers_MessageResponseService__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./event-handlers/MessageResponseService */ "./src/event-handlers/MessageResponseService.ts");
-/* harmony import */ var _event_handlers_MessageUtils__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./event-handlers/MessageUtils */ "./src/event-handlers/MessageUtils.ts");
-/* harmony import */ var _event_handlers_utils__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./event-handlers/utils */ "./src/event-handlers/utils.ts");
-/* harmony import */ var _event_handlers_cleanup__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./event-handlers/cleanup */ "./src/event-handlers/cleanup.ts");
-/* harmony import */ var _event_handlers_memoryStats__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./event-handlers/memoryStats */ "./src/event-handlers/memoryStats.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _modules_calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./modules/calls/call-flood-cooldown */ "./src/modules/calls/call-flood-cooldown.ts");
+/* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./event-handlers/globalState */ "./src/event-handlers/globalState.ts");
+/* harmony import */ var _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./event-handlers/PrivateMessageHandler */ "./src/event-handlers/PrivateMessageHandler.ts");
+/* harmony import */ var _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./event-handlers/SystemMessageHandler */ "./src/event-handlers/SystemMessageHandler.ts");
+/* harmony import */ var _event_handlers_StatsService__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./event-handlers/StatsService */ "./src/event-handlers/StatsService.ts");
+/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
+/* harmony import */ var _event_handlers_MessageResponseService__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./event-handlers/MessageResponseService */ "./src/event-handlers/MessageResponseService.ts");
+/* harmony import */ var _event_handlers_MessageUtils__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./event-handlers/MessageUtils */ "./src/event-handlers/MessageUtils.ts");
+/* harmony import */ var _event_handlers_utils__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./event-handlers/utils */ "./src/event-handlers/utils.ts");
+/* harmony import */ var _event_handlers_cleanup__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./event-handlers/cleanup */ "./src/event-handlers/cleanup.ts");
+/* harmony import */ var _event_handlers_memoryStats__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./event-handlers/memoryStats */ "./src/event-handlers/memoryStats.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Main Event Handler
  * Refactored modular version - maintains complete backward compatibility
@@ -57202,6 +57206,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // Import modular services
+
 
 
 
@@ -57267,50 +57272,53 @@ async function handleEvents(event) {
             throw new Error("Incoming Telegram event is missing message.chatId");
         _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__.connectionRetryService.markInboundActivity();
         // The user wrote: if Telegram refused this chat (PEER_FLOOD), allow one fresh attempt again.
-        if (event.isPrivate && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__.floodGate.clearRefused(chatId)) {
+        if (event.isPrivate && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__.floodGate.clearRefused(chatId)) {
             logger.log(`[flood-gate] ${chatId} wrote again: refused chat re-opened for sending`);
+        }
+        if (event.isPrivate && _modules_calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_7__.callFloodCooldown.clearRefused(chatId)) {
+            logger.log(`[call-flood] ${chatId} wrote again: calls to this chat re-opened`);
         }
         // PRIORITY 1: Handle private messages with media FIRST (before any text-based commands)
         // This ensures images are never skipped due to text content or globalCanReply status
         if (event.isPrivate && event.message.media) {
             logger.debug(`-------------------Images received:: ${chatId}`);
             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__.markInbound)(event, "handled", "media", "media");
-            logger.debug(`[MEDIA PRIORITY] Processing private message with media - chatId: ${chatId}, globalCanReply: ${_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_7__.globalCanReply}`);
-            await _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handlePrivateMessage.call(this, event);
+            logger.debug(`[MEDIA PRIORITY] Processing private message with media - chatId: ${chatId}, globalCanReply: ${_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_8__.globalCanReply}`);
+            await _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handlePrivateMessage.call(this, event);
             return;
         }
         // PRIORITY 2: Handle system commands (only for text-only messages)
         // Handle exit command
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.isExitCommand)(event)) {
+        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.isExitCommand)(event)) {
             logger.log(`[EDGE CASE] Exit command received from chatId: ${chatId}`);
             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__.markInbound)(event, "handled", "exit-command", "command");
-            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handleExitCommand.call(this, event);
+            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.handleExitCommand.call(this, event);
             return;
         }
         // Handle SpamBot messages
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.isSpamBotMessage)(chatId)) {
+        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.isSpamBotMessage)(chatId)) {
             logger.debug(`[SPECIAL CASE] SpamBot message received: ${event.message.text?.substring(0, 100)}`);
             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__.markInbound)(event, "handled", "spambot-message", "system");
-            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handleSpamBotMessage.call(this, event);
+            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.handleSpamBotMessage.call(this, event);
             return;
         }
         // Handle Telegram system messages
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.isTelegramSystemMessage)(chatId)) {
+        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.isTelegramSystemMessage)(chatId)) {
             logger.debug(`[SPECIAL CASE] Telegram system message received: ${event.message.text?.substring(0, 100)}`);
             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__.markInbound)(event, "handled", "telegram-system-message", "system");
-            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handleTelegramSystemMessage)(event);
+            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.handleTelegramSystemMessage)(event);
             return;
         }
         // Handle reset command
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.isResetCommand)(event)) {
+        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.isResetCommand)(event)) {
             logger.log(`[EDGE CASE] Reset command received from chatId: ${chatId}`);
             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_6__.markInbound)(event, "handled", "reset-command", "command");
-            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handleResetCommand)(event);
+            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_10__.handleResetCommand)(event);
             return;
         }
         // PRIORITY 3: Handle remaining private messages (text-only)
-        if ((0,_event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_8__.shouldHandlePrivateMessage)(event)) {
-            await _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handlePrivateMessage.call(this, event);
+        if ((0,_event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_9__.shouldHandlePrivateMessage)(event)) {
+            await _event_handlers_PrivateMessageHandler__WEBPACK_IMPORTED_MODULE_9__.handlePrivateMessage.call(this, event);
             return;
         }
         if (event.isPrivate)
@@ -57359,13 +57367,13 @@ function getEventChatId(event) {
  * Cleanup global resources
  */
 function cleanupGlobalResources() {
-    (0,_event_handlers_cleanup__WEBPACK_IMPORTED_MODULE_15__.cleanupGlobalResources)();
+    (0,_event_handlers_cleanup__WEBPACK_IMPORTED_MODULE_16__.cleanupGlobalResources)();
 }
 /**
  * Get memory statistics
  */
 function getMemoryStats() {
-    return (0,_event_handlers_memoryStats__WEBPACK_IMPORTED_MODULE_16__.getMemoryStats)();
+    return (0,_event_handlers_memoryStats__WEBPACK_IMPORTED_MODULE_17__.getMemoryStats)();
 }
 
 
@@ -59339,7 +59347,7 @@ class CallManager {
         this.MAX_QUEUE_SIZE = 1000; // Maximum queue size to prevent unbounded growth
         this.inHouse = null;
         /** Account-wide pause after PEER_FLOOD / FLOOD_WAIT on a call; shared with the in-house service. */
-        this.callCooldown = new _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.CallFloodCooldown();
+        this.callCooldown = _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.callFloodCooldown;
         this.callTexts = new Map();
         this.inHouseLoading = null;
         /** In-house calls running in parallel, by chat. */
@@ -59655,9 +59663,12 @@ class CallManager {
             logger.log(`[CallManager] No client available for call request`);
             return false;
         }
-        // Telegram call-limited this account: a legacy ring would flood again and deepen the limit.
-        if (this.callCooldown.isActive()) {
-            logger.warn(`[CallManager] Call to ${chatId} skipped: account call-limited for ${Math.ceil(this.callCooldown.remainingMs() / 60000)} more min`);
+        // Telegram call-limited this account (FLOOD_WAIT) or refused calls to this user (PEER_FLOOD): a
+        // ring would flood again and deepen the limit.
+        if (this.callCooldown.isActive() || this.callCooldown.isRefused(chatId)) {
+            logger.warn(this.callCooldown.isActive()
+                ? `[CallManager] Call to ${chatId} skipped: account call-limited for ${Math.ceil(this.callCooldown.remainingMs() / 60000)} more min`
+                : `[CallManager] Call to ${chatId} skipped: Telegram refused calls to this chat (PEER_FLOOD) until they write again`);
             await this.inHouse?.leaveFloodLimited?.(chatId);
             return false;
         }
@@ -59765,12 +59776,15 @@ class CallManager {
     /** A call request was flood-limited: pause all calls, and stop this chat's ladder with the link instead of a ring. */
     async onCallFlood(chatId, flood) {
         if (this.inHouse) {
-            this.inHouse.noteCallFlood(flood);
+            this.inHouse.noteCallFlood(flood, chatId);
             await this.inHouse.leaveFloodLimited(chatId);
             return;
         }
-        const { pauseMs } = this.callCooldown.note(flood);
-        logger.warn(`[CallManager] account call-limited (${flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
+        const { pauseMs, scope } = this.callCooldown.note(flood, chatId);
+        const label = flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`;
+        logger.warn(scope === 'chat'
+            ? `[CallManager] ${chatId}: Telegram refused calls to this chat (${label}); other calls continue`
+            : `[CallManager] account call-limited (${label}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
     }
     /** Fire-and-forget call-status text through the outbound queue; never blocks call state. */
     /** A ring that can never succeed (privacy, unreachable): delete the chat's remaining ladder rings. */
@@ -59903,7 +59917,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CALL_FLOOD_COOLDOWN_MAX_MS: () => (/* binding */ CALL_FLOOD_COOLDOWN_MAX_MS),
 /* harmony export */   CALL_FLOOD_COOLDOWN_MS: () => (/* binding */ CALL_FLOOD_COOLDOWN_MS),
+/* harmony export */   CALL_REFUSED_MAX_CHATS: () => (/* binding */ CALL_REFUSED_MAX_CHATS),
 /* harmony export */   CallFloodCooldown: () => (/* binding */ CallFloodCooldown),
+/* harmony export */   callFloodCooldown: () => (/* binding */ callFloodCooldown),
+/* harmony export */   callPeerFloodPausesAccount: () => (/* binding */ callPeerFloodPausesAccount),
 /* harmony export */   classifyCallFlood: () => (/* binding */ classifyCallFlood)
 /* harmony export */ });
 /* harmony import */ var _outbound_flood_error__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../outbound/flood-error */ "./src/outbound/flood-error.ts");
@@ -59912,9 +59929,21 @@ __webpack_require__.r(__webpack_exports__);
 const CALL_FLOOD_COOLDOWN_MS = 30 * 60000;
 /** The pause never runs longer than this from now. */
 const CALL_FLOOD_COOLDOWN_MAX_MS = 2 * 60 * 60000;
+/** Most chats remembered as call-refused (oldest forgotten first). */
+const CALL_REFUSED_MAX_CHATS = 5000;
 /**
- * PEER_FLOOD / FLOOD_WAIT_n / "Too many requests" on a call request. All of them mean Telegram has
- * limited the ACCOUNT, so ringing again (in-house or legacy) only deepens the limit.
+ * Rollback switch: `CALL_PEER_FLOOD_ACCOUNT_PAUSE=true` restores the old behaviour (a PEER_FLOOD on one
+ * call pauses every call on the account for 30 min). Read when a flood is noted (remote config is
+ * applied to process.env at startup).
+ */
+function callPeerFloodPausesAccount() {
+    return process.env.CALL_PEER_FLOOD_ACCOUNT_PAUSE === 'true';
+}
+/**
+ * PEER_FLOOD / FLOOD_WAIT_n / "Too many requests" on a call request. FLOOD_WAIT is a timed limit on the
+ * ACCOUNT. PEER_FLOOD is Telegram refusing THIS user (spam limit), not a timer: other users' calls
+ * keep connecting (nidhi1/keerthi2 2026-10-11 rang others fine after a call PEER_FLOOD), so it refuses
+ * only that chat until the user writes again.
  */
 function classifyCallFlood(error) {
     const flood = (0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_0__.classifyFlood)(error);
@@ -59924,29 +59953,63 @@ function classifyCallFlood(error) {
         return { kind: 'peer' };
     return null;
 }
-/** Account-wide pause on placing calls. In-memory, per process (like FloodGate). */
+/**
+ * Call flood state, in memory per process (like FloodGate): an account-wide pause for FLOOD_WAIT, and
+ * the set of chats Telegram refused calls to (PEER_FLOOD).
+ */
 class CallFloodCooldown {
     constructor(now = () => Date.now()) {
         this.until = 0;
         this.started = 0;
+        this.refused = new Map();
         this.now = now;
     }
     isActive() { return this.until > this.now(); }
     remainingMs() { return Math.max(0, this.until - this.now()); }
     /** When the current cooldown episode began (0 = none yet). A chat is offered the link once per episode. */
     episodeStart() { return this.started; }
-    /** Records a flood; starts (or extends) the pause. `started` is true when this opened a new episode. */
-    note(flood) {
+    /** True when Telegram refused a call to this chat (PEER_FLOOD) and the user has not written since. */
+    isRefused(chatId) {
+        return chatId != null && this.refused.has(String(chatId));
+    }
+    /** When this chat was refused (0 = not refused). */
+    refusedAt(chatId) { return this.refused.get(String(chatId)) ?? 0; }
+    /** The user wrote again: calls to them may be tried again. */
+    clearRefused(chatId) {
+        return chatId != null && this.refused.delete(String(chatId));
+    }
+    refusedCount() { return this.refused.size; }
+    reset() { this.until = 0; this.started = 0; this.refused.clear(); }
+    /**
+     * Records a flood. A PEER_FLOOD with a chat refuses just that chat (scope 'chat', no pause; `started`
+     * = newly refused). FLOOD_WAIT (or the rollback switch) starts or extends the account pause (scope
+     * 'account'; `started` = a new episode).
+     */
+    note(flood, chatId) {
         const now = this.now();
+        if (flood.kind === 'peer' && chatId && !callPeerFloodPausesAccount()) {
+            const key = String(chatId);
+            const started = !this.refused.has(key);
+            this.refused.delete(key);
+            this.refused.set(key, now);
+            if (this.refused.size > CALL_REFUSED_MAX_CHATS) {
+                const oldest = this.refused.keys().next().value;
+                if (oldest !== undefined)
+                    this.refused.delete(oldest);
+            }
+            return { started, pauseMs: 0, scope: 'chat' };
+        }
         const wasActive = this.until > now;
         const wanted = flood.kind === 'wait' ? Math.max(CALL_FLOOD_COOLDOWN_MS, flood.seconds * 1000 + 60000) : CALL_FLOOD_COOLDOWN_MS;
         const next = wasActive ? Math.max(this.until + CALL_FLOOD_COOLDOWN_MS, now + wanted) : now + wanted;
         this.until = Math.min(next, now + CALL_FLOOD_COOLDOWN_MAX_MS);
         if (!wasActive)
             this.started = now;
-        return { started: !wasActive, pauseMs: this.until - now };
+        return { started: !wasActive, pauseMs: this.until - now, scope: 'account' };
     }
 }
+/** The process-wide call flood state (CallManager and the in-house service share it). */
+const callFloodCooldown = new CallFloodCooldown();
 
 
 /***/ },
@@ -60645,9 +60708,10 @@ class InHouseCallService {
         // Reserve the slot before any await, so a queue dispatching calls in parallel never overshoots.
         if (this.isInCall(chatId))
             return { status: 'already_in_call' };
-        // The account is call-limited by Telegram: do not touch Telegram, just stop this chat's ladder.
-        if (this.cooldown.isActive()) {
-            const limited = { status: 'flood_limited', reason: 'account_cooldown' };
+        // The account is call-limited (FLOOD_WAIT), or Telegram refused calls to this user (PEER_FLOOD):
+        // do not touch Telegram, just stop this chat's ladder.
+        if (this.cooldown.isActive() || this.cooldown.isRefused(chatId)) {
+            const limited = { status: 'flood_limited', reason: this.cooldown.isActive() ? 'account_cooldown' : 'chat_refused' };
             await this.leaveInHouseLadder(chatId, limited);
             return limited;
         }
@@ -60859,26 +60923,35 @@ class InHouseCallService {
             this.logger.warn(`[in-house-calls] legacy ladder for ${chatId} failed`, error?.message ?? error);
         }
     }
-    /** True while calls are paused because Telegram call-limited this account. */
+    /** True while ALL calls are paused because Telegram call-limited this account (FLOOD_WAIT). */
     isCallLimited() {
         return this.cooldown.isActive();
     }
     /**
-     * A call request hit PEER_FLOOD / FLOOD_WAIT: the ACCOUNT is limited. Pause every call (in-house and
-     * legacy) for a while, tell the shared outbound flood gate, and warn once (an ops notice only when
-     * a new cooldown starts, not on every extension).
+     * A call request to `chatId` hit PEER_FLOOD / FLOOD_WAIT. PEER_FLOOD refuses just that chat (other
+     * calls continue); FLOOD_WAIT pauses every call (in-house and legacy) for a while. Tells the shared
+     * flood gate (counts only), and sends one ops notice per refused chat / new account pause.
      */
-    noteCallFlood(flood) {
-        const { started, pauseMs } = this.cooldown.note(flood);
+    noteCallFlood(flood, chatId) {
+        const { started, pauseMs, scope } = this.cooldown.note(flood, chatId);
         const label = flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`;
-        this.logger.warn(`[in-house-calls] account call-limited (${label}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
+        if (scope === 'chat') {
+            this.logger.warn(`[in-house-calls] ${chatId}: Telegram refused calls to this chat (${label}); not ringing them until they write again, other calls continue`);
+        }
+        else {
+            this.logger.warn(`[in-house-calls] account call-limited (${label}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
+        }
         try {
             this.deps.reportFlood?.(flood);
         }
         catch (error) {
             this.logger.warn('[in-house-calls] reporting the call flood to the flood gate failed', error?.message ?? error);
         }
-        if (started)
+        if (!started)
+            return;
+        if (scope === 'chat')
+            void this.safeNotify(`Call to ${chatId} refused by Telegram (${label}); sent them the Zoom link. Other calls continue.`);
+        else
             void this.safeNotify(`Calls paused ${Math.ceil(pauseMs / 60000)} min: account call-limited (${label}); users get the Zoom link instead.`);
     }
     /**
@@ -60891,7 +60964,9 @@ class InHouseCallService {
         if (!link)
             return;
         const last = this.floodLinks.get(chatId);
-        if (last !== undefined && last >= this.cooldown.episodeStart())
+        // Once per account pause, or once per refusal of this chat.
+        const since = this.cooldown.isActive() ? this.cooldown.episodeStart() : this.cooldown.refusedAt(chatId);
+        if (last !== undefined && last >= since)
             return;
         this.floodLinks.set(chatId, this.now());
         if (this.floodLinks.size > 5000)
@@ -60989,7 +61064,7 @@ class InHouseCallService {
             }
             const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error);
             if (flood) {
-                this.noteCallFlood(flood);
+                this.noteCallFlood(flood, chatId);
                 return { status: 'flood_limited', reason: 'setup_flood', videoId: plan.videoId, videoType: plan.videoType };
             }
             this.logger.error(`[in-house-calls] call setup failed for ${chatId}`, error);
@@ -61244,7 +61319,7 @@ class InHouseCallService {
             // PEER_FLOOD & co on the call itself: the account is limited, a legacy ring would flood too.
             const flood = record.error ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)({ message: record.error }) : null;
             if (flood) {
-                this.noteCallFlood(flood);
+                this.noteCallFlood(flood, chatId);
                 return { status: 'flood_limited', reason: 'never_connected_flood', videoId: plan.videoId, videoType: plan.videoType };
             }
             // media_failed / error / disconnect before any answer: the in-house path could not deliver.
@@ -61744,7 +61819,8 @@ function createInHouseCallService(client, hooks) {
         callEnded: (chatId) => hooks.callEnded?.(chatId),
         hasQueuedCalls: () => hooks.hasQueuedCalls?.() ?? false,
         callCooldown: hooks.callCooldown,
-        // Texts share the account's flood state: a call flood pauses sends too.
+        // Counted in the shared flood gate (health/analytics); a call PEER_FLOOD does not block texts:
+        // the Zoom link to that user gets its own attempt (and marks the chat if Telegram refuses it).
         reportFlood: (flood) => {
             if (flood.kind === 'peer')
                 _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.notePeerFlood();
@@ -88478,16 +88554,16 @@ const tempters = {
         "I am going 𝗖𝗿𝗮𝘇𝘆 because of you"
     ],
     "vc_invitations": [
-        "𝗪𝗜𝗟𝗟 𝗬𝗢𝗨 𝗗𝗢\n       🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n𝗡𝗢𝗪?",
-        "𝗦𝗛𝗔𝗟𝗟 𝗪𝗘 𝗧𝗔𝗟𝗞 𝗢𝗡\n       🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱?",
-        "𝗗𝗢 🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n𝗣𝗟𝗘𝗔𝗦𝗘, 𝗜'𝗺 𝗪𝗮𝗶𝘁𝗶𝗻𝗴",
+        "       𝗪𝗜𝗟𝗟 𝗬𝗢𝗨 𝗗𝗢\n       🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n       𝗡𝗢𝗪?",
+        "    𝗦𝗛𝗔𝗟𝗟 𝗪𝗘 𝗧𝗔𝗟𝗞 𝗢𝗡\n       🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱?",
+        "        𝗗𝗢\n🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n. 𝗣𝗟𝗘𝗔𝗦𝗘, 𝗜'𝗺 𝗪𝗮𝗶𝘁𝗶𝗻𝗴",
         "𝗚𝗜𝗩𝗘 𝗠𝗘 𝗣𝗟𝗘𝗔𝗦𝗨𝗥𝗘 𝗢𝗡\n       🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱",
         "𝗦𝗛𝗔𝗟𝗟 𝗜 𝗧𝗔𝗞𝗘 𝗢𝗙𝗙 𝗠𝗬 𝗖𝗟𝗢𝗧𝗛𝗘𝗦 𝗢𝗡\n\n       🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱?",
         "𝗪𝗜𝗟𝗟 𝗬𝗢𝗨 𝗦𝗛𝗢𝗪 𝗬𝗢𝗨𝗥𝗦 𝗢𝗡\n      🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱?",
-        "𝗬𝗢𝗨 𝗠𝗨𝗦𝗧 𝗗𝗢 𝗔\n       🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n𝗡𝗢𝗪",
+        "    𝗬𝗢𝗨 𝗠𝗨𝗦𝗧 𝗗𝗢\n       🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n         𝗡𝗢𝗪",
         "𝗜'𝗟𝗟 𝗦𝗛𝗢𝗪 𝗬𝗢𝗨 𝗪𝗛𝗜𝗟𝗘 𝗙𝗜𝗡𝗚𝗘𝗥𝗜𝗡𝗚 𝗠𝗬𝗦𝗘𝗟𝗙 𝗢𝗡\n       🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱",
         "𝗜'𝗟𝗟 𝗧𝗘𝗠𝗣𝗧 𝗬𝗢𝗨 𝗢𝗡\n        🇻 🇮 🇩 🇪 🇴  🇨 🇦 🇱 🇱",
-        "𝗪𝗜𝗟𝗟 𝗬𝗢𝗨 𝗖𝗢𝗠𝗘 𝗢𝗡\n        🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n𝗣𝗟𝗘𝗔𝗦𝗘?"
+        "    𝗪𝗜𝗟𝗟 𝗬𝗢𝗨 𝗖𝗢𝗠𝗘 𝗢𝗡\n        🇻 🇮 🇩 🇪 🇴   🇨 🇦 🇱 🇱 \n        𝗣𝗟𝗘𝗔𝗦𝗘?"
     ],
     "direct_requests_commands": [
         "I want to 𝗦𝘂𝗰𝗸 ur 𝗗𝗶𝗰𝗸!!",
@@ -88537,12 +88613,14 @@ function getRandomTempterMessages() {
 // Only accepts { tempters: true | false }
 function initMsg(options = {}) {
     const greeting = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(greetings);
-    const coreMessage = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(coreInitMsgs);
-    let msg = `${greeting}\n${coreMessage}`;
     if (options.tempters) {
-        msg += `\n\n\n${getRandomTempterMessages()}`;
+        const tempterMessages = getRandomTempterMessages();
+        return `${greeting}\n\n${tempterMessages}`;
     }
-    return msg;
+    else {
+        const coreMessage = (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(coreInitMsgs);
+        return `${greeting}\n\n${coreMessage}`;
+    }
 }
 function getCoreInitMsg() {
     return (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(coreInitMsgs);
