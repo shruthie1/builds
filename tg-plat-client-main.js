@@ -72716,10 +72716,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../index */ "./src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../event-handlers/globalState */ "./src/event-handlers/globalState.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Replier Health Checker
  * Monitors replier health and detects stuck states
  */
+
 
 
 
@@ -72746,6 +72748,9 @@ class ReplierHealthChecker {
         this.checkIntervalMs = 2 * 60 * 1000; // 2 minutes
         this.maxQueueSizeForAlert = 10;
         this.maxQueueSizeForWarning = 20;
+        /** A halted (not stuck) replier is reported at most once per this window: it waits by design. */
+        this.haltedAlertIntervalMs = 30 * 60 * 1000;
+        this.lastHaltedAlert = 0;
     }
     /**
      * Check replier health
@@ -72756,18 +72761,28 @@ class ReplierHealthChecker {
         const localSleepBlocked = sleepTime >= now;
         const floodGateBlocked = !(0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__.isFloodGateOpen)();
         const floodGateRemainingMs = (0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__.getFloodGateRemainingMs)();
+        // Account-wide Telegram send limit (PEER_FLOOD pause / breaker shared with the outbound queue): replies wait
+        // behind it, so a queue that is not draining is halted, not stuck (kavya2, 2026-10-11).
+        const sendPausedMs = _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__.floodGate.remainingMs(now);
+        const peerFloodHits = _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__.floodGate.recentHits(now);
+        const sendLimited = sendPausedMs > 0 || peerFloodHits > 0;
         // Check if queue is stuck
-        if (queueLength > this.maxQueueSizeForAlert && now > this.lastChecked + this.checkIntervalMs) {
+        const halted = globalSleepBlocked || localSleepBlocked || floodGateBlocked || sendLimited;
+        const haltedRecentlyReported = halted && now - this.lastHaltedAlert < this.haltedAlertIntervalMs;
+        if (queueLength > this.maxQueueSizeForAlert && now > this.lastChecked + this.checkIntervalMs && !haltedRecentlyReported) {
             this.lastChecked = now;
-            const haltReason = globalSleepBlocked || localSleepBlocked || floodGateBlocked
+            if (halted)
+                this.lastHaltedAlert = now;
+            const haltReason = halted
                 ? `halted (${[
                     globalSleepBlocked ? `globalSleep ${Math.ceil((globalSleepTime - now) / 1000)}s` : null,
                     localSleepBlocked ? `sleep ${Math.ceil((sleepTime - now) / 1000)}s` : null,
                     floodGateBlocked ? `floodGate ${Math.ceil(floodGateRemainingMs / 1000)}s` : null,
+                    sendLimited ? `Telegram send limit${sendPausedMs > 0 ? ` ${Math.ceil(sendPausedMs / 1000)}s` : ''}` : null,
                 ].filter(Boolean).join(", ")})`
                 : "stuck";
             await sendReplierHealthNotification({
-                severity: globalSleepBlocked || localSleepBlocked || floodGateBlocked
+                severity: halted
                     ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING
                     : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR,
                 title: `Replier ${haltReason}`,
@@ -72777,14 +72792,15 @@ class ReplierHealthChecker {
                     { label: 'Global sleep', value: globalSleepBlocked ? `${Math.ceil((globalSleepTime - now) / 1000)}s` : 'clear' },
                     { label: 'Local sleep', value: localSleepBlocked ? `${Math.ceil((sleepTime - now) / 1000)}s` : 'clear' },
                     { label: 'Flood gate', value: floodGateBlocked ? `${Math.ceil(floodGateRemainingMs / 1000)}s` : 'clear' },
+                    { label: 'Telegram send limit', value: sendLimited ? `${sendPausedMs > 0 ? `paused ${Math.ceil(sendPausedMs / 1000)}s, ` : ''}${peerFloodHits} PEER_FLOOD in 15 min` : 'clear' },
                     { label: '1 Min', value: `${minuteQueueLength}/${rateLimitConfig.messagesPerMinute}` },
                     { label: '10 Mins', value: `${tenMinutesQueueLength}/${rateLimitConfig.messagesPer10Minutes}` },
                     { label: '1 hour', value: `${hourQueueLength}/${rateLimitConfig.messagesPerHour}` },
                 ],
-                tags: ['replier-health', globalSleepBlocked || localSleepBlocked || floodGateBlocked ? 'halted' : 'stuck'],
+                tags: ['replier-health', halted ? 'halted' : 'stuck'],
             });
             // Try to force replier only if no explicit halt is active
-            if (canSendMessage() && !globalSleepBlocked && !localSleepBlocked && !floodGateBlocked) {
+            if (canSendMessage() && !halted) {
                 forceReplier();
             }
         }
