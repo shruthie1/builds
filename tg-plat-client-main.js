@@ -36380,20 +36380,30 @@ async function analyzePaymentProof(image, opts = {}) {
         let judged = 0;
         let done = false;
         let timer;
+        const running = new Map(); // provider index -> start time
         const finish = (win) => {
             if (done)
                 return;
             done = true;
             if (timer)
                 clearTimeout(timer);
-            if (win)
+            if (win) {
+                // the peers still running lost the race: record them (aborted below) so stored attempts show what ran
+                for (const [idx, t0] of running) {
+                    if (idx === win.index)
+                        continue;
+                    attempts.push({ provider: providers[idx].name, model: '', ok: false, errorClass: 'superseded', message: `aborted: ${win.provider.name} answered first`, latencyMs: clock() - t0 });
+                }
                 controller.abort();
+            }
             resolve({ win, judged });
         };
         const start = (k) => {
             started++;
             pending++;
+            running.set(group[k], clock());
             void attempt(group[k], controller.signal).then((step) => {
+                running.delete(group[k]);
                 pending--;
                 if (done)
                     return;
