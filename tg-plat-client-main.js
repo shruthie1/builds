@@ -59968,6 +59968,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PAY_PROMPT_COOLDOWN_MS: () => (/* binding */ PAY_PROMPT_COOLDOWN_MS),
 /* harmony export */   PITCH_LIMITS: () => (/* binding */ PITCH_LIMITS),
 /* harmony export */   POST_SHOW_QUIET_MS: () => (/* binding */ POST_SHOW_QUIET_MS),
+/* harmony export */   PRIVACY_EPISODE_MS: () => (/* binding */ PRIVACY_EPISODE_MS),
 /* harmony export */   PRIVACY_MESSAGE: () => (/* binding */ PRIVACY_MESSAGE),
 /* harmony export */   PRIVACY_NOTICE_COOLDOWN_MS: () => (/* binding */ PRIVACY_NOTICE_COOLDOWN_MS),
 /* harmony export */   PRIVACY_RETRY_MIN_MS: () => (/* binding */ PRIVACY_RETRY_MIN_MS),
@@ -60019,6 +60020,12 @@ const POST_SHOW_QUIET_MS = 5 * 60 * 1000;
 const PRIVACY_NOTICE_COOLDOWN_MS = 30 * 60 * 1000;
 /** A user message this soon after the privacy notice is not taken as "I fixed my settings". */
 const PRIVACY_RETRY_MIN_MS = 20 * 1000;
+/**
+ * One privacy episode per chat: the probe ladder (5/15/45 min) and the ops warning happen once per this
+ * window. Re-arming them on every blocked ring looped forever: a failed probe ring scheduled the next
+ * probe (every ~5 min while the notice could not be sent, every 45 min when it could).
+ */
+const PRIVACY_EPISODE_MS = 6 * 60 * 60 * 1000;
 /** "On another call, give me N mins": at most once per chat in this window. */
 const WAIT_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
 /** After the video failed on an answered call, ring through the legacy path for this long. */
@@ -60089,6 +60096,7 @@ class InHouseCallService {
         this.stopped = false;
         this.warnNotices = new Map();
         this.privacyNotices = new Map();
+        this.privacyEpisodes = new Map();
         this.waitNotices = new Map();
         this.mediaFailures = new Map();
         this.legacyLadders = new Map();
@@ -60793,6 +60801,8 @@ class InHouseCallService {
                     // a failed send must not silence the notice for 30 min.
                     void this.safeSend(chatId, text, true).then((sent) => { if (sent)
                         this.claimWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS); });
+                }
+                if (this.claimWindow(this.privacyEpisodes, chatId, PRIVACY_EPISODE_MS)) {
                     this.safeWarn(`In-house privacy_restricted: ${chatId} (calls blocked by the user's settings)`);
                     try {
                         await this.deps.privacyBlocked?.(chatId);
