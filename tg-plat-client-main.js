@@ -45571,7 +45571,6 @@ class JobManager {
                 // MEMORY OPTIMIZATION: Build alert message efficiently
                 const lastUpdatedTimeStamp = Number(promotionHealth?.metadata?.durableLastUpdatedAt ?? promotedStats.lastUpdatedTimeStamp ?? 0);
                 const alertMsg = `Promotions failing! Rotating user... 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_15__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`;
-                await this.notifyError(alertMsg);
                 const runtimeBase = (0,_Config__WEBPACK_IMPORTED_MODULE_16__.getRuntimeConfigBaseOrNull)();
                 if (!runtimeBase) {
                     this.log('error', 'Cannot trigger setupClient rotation: runtime config base is missing');
@@ -45580,6 +45579,9 @@ class JobManager {
                 const reason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}`;
                 const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_spam_state__WEBPACK_IMPORTED_MODULE_23__.swapDaysForCurrentSpamState)()}&formalities=true&reason=${encodeURIComponent(reason)}`;
                 const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_22__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_24__.fetchWithTimeout, process.env.clientId);
+                // Alert only when a rotation request actually went out: while backed off this ran every 10 min.
+                if (!setupResult.suppressedLocally)
+                    await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
                 if (setupResult.swapped) {
                     this.log('info', `Promotion rotation completed 🔄 ${setupResult.existingMobile} → ${setupResult.newMobile}`);
                 }
@@ -46037,9 +46039,11 @@ async function loadTelegramFingerprintSummary(mobile) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* binding */ HANDOFF_MAX_FAILURES),
 /* harmony export */   getPermanentFailureHandoffContext: () => (/* binding */ getPermanentFailureHandoffContext),
 /* harmony export */   handlePermanentTelegramFailure: () => (/* binding */ handlePermanentTelegramFailure),
 /* harmony export */   isPermanentFailureHandoffActive: () => (/* binding */ isPermanentFailureHandoffActive),
+/* harmony export */   resetPermanentFailureHandoff: () => (/* binding */ resetPermanentFailureHandoff),
 /* harmony export */   startNewUserProcess: () => (/* binding */ startNewUserProcess)
 /* harmony export */ });
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
@@ -46076,6 +46080,27 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:permanent-failure:handoff');
 const POST_SETUPCLIENT_SHUTDOWN_DELAY_MS = 60000;
 let isNewUserProcessRunning = 0;
+/**
+ * Owner rule (2026-10-11): a handoff that fails (CMS down, no swap) is retried with doubling gaps
+ * (1, 2, 4, 8, 16 min) and abandoned after HANDOFF_MAX_FAILURES, instead of a CRITICAL alert plus a
+ * setupClient call every 60 s for as long as the dead account keeps erroring. A restart re-arms it.
+ */
+const HANDOFF_RETRY_BASE_MS = 60000;
+const HANDOFF_MAX_FAILURES = 5;
+let failedHandoffs = 0;
+function noteHandoffFailure(context) {
+    failedHandoffs++;
+    if (failedHandoffs === HANDOFF_MAX_FAILURES) {
+        logger.error(`[PermanentFailure] ${context}: setupClient handoff failed ${failedHandoffs} times; giving up until the process restarts`);
+    }
+}
+/** Test hook: forget handoff attempts in this process. */
+function resetPermanentFailureHandoff() {
+    isNewUserProcessRunning = 0;
+    failedHandoffs = 0;
+    permanentFailureHandoffInProgress = false;
+    permanentFailureHandoffContext = null;
+}
 let permanentFailureHandoffInProgress = false;
 let permanentFailureHandoffContext = null;
 function isPermanentFailureHandoffActive() {
@@ -46147,7 +46172,11 @@ async function startNewUserProcess(error, context = 'runtime') {
         logger.debug(`[PermanentFailure] ${context} | skip-new-user | non-permanent | ${errorMessage} | ${String(errorDetails.message).slice(0, 160)}`);
         return;
     }
-    if (isNewUserProcessRunning >= Date.now() - 60000) {
+    if (failedHandoffs >= HANDOFF_MAX_FAILURES) {
+        logger.debug(`[PermanentFailure] ${context}: handoff abandoned after ${failedHandoffs} failures, skipping`);
+        return;
+    }
+    if (isNewUserProcessRunning >= Date.now() - HANDOFF_RETRY_BASE_MS * 2 ** failedHandoffs) {
         logger.warn(`[PermanentFailure] ${context}: setup flow already triggered recently, skipping duplicate handoff`, {
             errorMessage,
             mobile: process.env.mobile,
@@ -46194,6 +46223,7 @@ async function startNewUserProcess(error, context = 'runtime') {
         const runtimeBase = (0,_Config__WEBPACK_IMPORTED_MODULE_6__.getRuntimeConfigBaseOrNull)();
         if (!runtimeBase) {
             logger.error(`[PermanentFailure] ${context}: cannot trigger setupClient because runtime config base is missing`);
+            noteHandoffFailure(context);
             permanentFailureHandoffInProgress = false;
             permanentFailureHandoffContext = null;
             return;
@@ -46222,6 +46252,7 @@ async function startNewUserProcess(error, context = 'runtime') {
         process.kill(process.pid, 'SIGTERM');
     }
     catch (err) {
+        noteHandoffFailure(context);
         permanentFailureHandoffInProgress = false;
         permanentFailureHandoffContext = null;
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(err, 'Error during new user process');
@@ -46241,9 +46272,11 @@ async function startNewUserProcess(error, context = 'runtime') {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_MAX_FAILURES),
 /* harmony export */   getPermanentFailureHandoffContext: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.getPermanentFailureHandoffContext),
 /* harmony export */   handlePermanentTelegramFailure: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.handlePermanentTelegramFailure),
 /* harmony export */   isPermanentFailureHandoffActive: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.isPermanentFailureHandoffActive),
+/* harmony export */   resetPermanentFailureHandoff: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.resetPermanentFailureHandoff),
 /* harmony export */   startNewUserProcess: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.startNewUserProcess)
 /* harmony export */ });
 /* harmony import */ var _handoff__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./handoff */ "./src/core/permanent-failure/handoff.ts");
@@ -46266,6 +46299,8 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
 /* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
 /* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
@@ -46288,11 +46323,26 @@ const SETUP_CLIENT_BACKOFF_MS = 2 * 60 * 60 * 1000;
 const SETUP_CLIENT_PENDING_BACKOFF_MS = 15 * 60 * 1000;
 /** After a successful swap the process is about to be restarted by CMS; don't ask again meanwhile. */
 const SETUP_CLIENT_POST_SWAP_MS = 5 * 60 * 1000;
+/**
+ * Owner rule (2026-10-11): a request that fails (CMS 'failed', disabled, client_not_found, a throw)
+ * backs off 15, 30, 60, 120 min and stops after SETUP_CLIENT_MAX_FAILURES in a row, until the process
+ * restarts. It used to be re-asked every health cycle (10 min) forever.
+ */
+const SETUP_CLIENT_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
+const SETUP_CLIENT_MAX_FAILURES = 5;
 let swapSuppressedUntil = 0;
 let inFlight = null;
+let consecutiveFailures = 0;
 function resetSetupClientBackoff() {
     swapSuppressedUntil = 0;
     inFlight = null;
+    consecutiveFailures = 0;
+}
+function noteSetupFailure() {
+    consecutiveFailures++;
+    swapSuppressedUntil = consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES
+        ? Number.POSITIVE_INFINITY
+        : Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
 }
 /**
  * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
@@ -46308,7 +46358,9 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
             status: 'cooldown',
             swapped: false,
             clientId: expectedClientId ?? '',
-            message: `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate or swapped result`,
+            message: Number.isFinite(remainingMs)
+                ? `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
+                : `setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`,
             cooldownRemainingMs: remainingMs,
             suppressedLocally: true,
         };
@@ -46323,13 +46375,26 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
         // Only "nothing swappable" backs off for long. CMS's own short cooldown or a transient
         // 'failed' must not block a genuine rotation for hours.
         if (result.swapped) {
+            consecutiveFailures = 0;
             swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
         }
         else if (result.status === 'no_candidate') {
+            consecutiveFailures = 0;
             swapSuppressedUntil = Date.now()
                 + (result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS);
         }
+        else if (result.status === 'cooldown') {
+            // CMS's own cooldown: wait exactly that long, not a failure.
+            if (result.cooldownRemainingMs && result.cooldownRemainingMs > 0)
+                swapSuppressedUntil = Date.now() + result.cooldownRemainingMs;
+        }
+        else {
+            noteSetupFailure();
+        }
         return result;
+    }, (error) => {
+        noteSetupFailure();
+        throw error;
     })
         .finally(() => {
         if (inFlight === pending)
