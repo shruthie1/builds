@@ -36479,6 +36479,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CURRENCY_REGEX: () => (/* binding */ CURRENCY_REGEX),
 /* harmony export */   OPERATIONAL_CLASSES: () => (/* binding */ OPERATIONAL_CLASSES),
 /* harmony export */   allProvidersFailedMessage: () => (/* binding */ allProvidersFailedMessage),
+/* harmony export */   anyModelJudged: () => (/* binding */ anyModelJudged),
 /* harmony export */   classifyExhausted: () => (/* binding */ classifyExhausted),
 /* harmony export */   failedAttempts: () => (/* binding */ failedAttempts),
 /* harmony export */   isNoVerifiableAmount: () => (/* binding */ isNoVerifiableAmount),
@@ -36506,8 +36507,24 @@ function isNoVerifiableAmount(attempts, ocrText) {
         return false;
     return !CURRENCY_REGEX.test(ocrText || '');
 }
+/** Text-only providers: an OCR "no amount" is not a model having looked at the screenshot. */
+const TEXT_ONLY_PROVIDERS = new Set(['rapidapi', 'ocr-space']);
+/** An image model answered and judged the screenshot (could not confirm a payment amount): a content result. */
+const JUDGEMENT_CLASSES = new Set(['no_amount', 'amount_range', 'low_confidence', 'escalated']);
+/** True when at least one image model (not an OCR-only provider) looked at the screenshot and judged it. */
+function anyModelJudged(attempts) {
+    return failedAttempts(attempts).some((a) => !TEXT_ONLY_PROVIDERS.has(a.provider) && a.errorClass !== null && JUDGEMENT_CLASSES.has(a.errorClass));
+}
+/**
+ * Exhausted chain: an OUTAGE (hold + re-check) only when no image model actually judged the screenshot. If Gemini/Groq/
+ * NVIDIA/Gemma looked and could not confirm a payment, a busy or broken sibling (e.g. NVIDIA 503 "workers full") must not
+ * turn that into an outage: those images were held, re-checked and silently given up (sowmya2/keerthi2, 2026-10-11).
+ * They now take the no_verifiable_amount path, which asks the user for a clear screenshot. R15 still applies first.
+ */
 function classifyExhausted(attempts, ocrText) {
-    return isNoVerifiableAmount(attempts, ocrText) ? 'no_verifiable_amount' : 'all_providers_failed';
+    if (isNoVerifiableAmount(attempts, ocrText) || anyModelJudged(attempts))
+        return 'no_verifiable_amount';
+    return 'all_providers_failed';
 }
 /**
  * R60: alert only on OPERATIONAL failures. Never for an OCR pre-check reject (no_text), never for the benign
