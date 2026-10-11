@@ -31913,6 +31913,7 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_LADDER_CALLS: () => (/* binding */ MAX_LADDER_CALLS),
 /* harmony export */   buildInHouseEventLadder: () => (/* binding */ buildInHouseEventLadder),
 /* harmony export */   buildInHouseFollowUp: () => (/* binding */ buildInHouseFollowUp),
 /* harmony export */   buildInHousePrivacyProbes: () => (/* binding */ buildInHousePrivacyProbes),
@@ -31923,6 +31924,8 @@ const MIN = 60 * 1000;
 // Uniform tightening factor: scales every ladder step's delay so the whole sequence is
 // more compressed (steps fire closer together). 1 = original spacing; 0.7 = 30% tighter.
 const SCALE = 0.7;
+/** Owner rule (2026-10-11): at most this many automatic rings per ladder, with growing gaps, then stop. */
+const MAX_LADDER_CALLS = 6;
 function buildPaidEventLadder(chatId, clientId, type, now) {
     const at = (mins) => now + Math.round(mins * SCALE * MIN);
     const call = (mins) => ({ type: 'call', chatId, clientId, time: at(mins), payload: {}, attempts: 0 });
@@ -31960,9 +31963,8 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
             msg(11, `Babe you there?? 🥹\nJust open this and <b>call me</b>\n\n👉 ${zoom}`),
             msg(13, "Same problem 😭\nNormal call still <b>won't connect</b>\n\nplease believe me na, i'm <b>not going anywhere</b>\nI'll give you the <b>full show</b> today pakka 💕\nJust come to the link okay?"),
             call(15), msg(15.5, callMe()),
-            call(20), msg(20.5, callMe()),
             call(30), msg(30.5, callMe()),
-            call(45), msg(45.5, callMe()),
+            call(60), msg(60.5, callMe()),
         ];
     }
     if (type === '2') {
@@ -31971,25 +31973,19 @@ function buildPaidEventLadder(chatId, clientId, type, now) {
             call(1.5),
             msg(2, `Okay this normal call really <b>isn't working</b> 😩\nJust call me here instead babe 😚\n\n${zoom}\n\n<b>Call me Now na</b>`),
             call(4), msg(4.5, callMe()),
-            call(6.5), msg(7, callMe()),
             call(9), msg(9.5, callMe()),
-            call(12), msg(12.5, callMe()),
             call(15), msg(15.5, callMe()),
-            call(20), msg(20.5, callMe()),
             call(30), msg(30.5, callMe()),
-            call(45), msg(45.5, callMe()),
+            call(60), msg(60.5, callMe()),
         ];
     }
     return [
         msg(1, callMe()),
         call(4), msg(4.5, callMe()),
-        call(6.5), msg(7, callMe()),
         call(9), msg(9.5, callMe()),
-        call(12), msg(12.5, callMe()),
         call(15), msg(15.5, callMe()),
-        call(20), msg(20.5, callMe()),
         call(30), msg(30.5, callMe()),
-        call(45), msg(45.5, callMe()),
+        call(60), msg(60.5, callMe()),
     ];
 }
 /** Lines that make no sense after an in-house call already rang / was answered: network blame and the mute briefing. */
@@ -32422,6 +32418,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   EventScheduler: () => (/* reexport safe */ _event_scheduler__WEBPACK_IMPORTED_MODULE_4__.EventScheduler),
 /* harmony export */   EventStore: () => (/* reexport safe */ _event_store__WEBPACK_IMPORTED_MODULE_2__.EventStore),
 /* harmony export */   MAX_EVENT_ATTEMPTS: () => (/* reexport safe */ _event_schema__WEBPACK_IMPORTED_MODULE_0__.MAX_EVENT_ATTEMPTS),
+/* harmony export */   MAX_LADDER_CALLS: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.MAX_LADDER_CALLS),
 /* harmony export */   buildInHouseEventLadder: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHouseEventLadder),
 /* harmony export */   buildInHouseFollowUp: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHouseFollowUp),
 /* harmony export */   buildInHousePrivacyProbes: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildInHousePrivacyProbes),
@@ -58945,6 +58942,8 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:call-manager");
 /** When the engine is busy with an incoming in-house call, re-check the queue after this. */
 const IN_HOUSE_BUSY_WAIT_MS = 5000;
+/** Legacy ring-failure texts: at most one per chat per this window (a ladder spans ~42 min). */
+const CALL_TEXT_DEDUPE_MS = 60 * 60000;
 /** Switch-off waits this long at most for playing shows to finish before stopping the service. */
 const IN_HOUSE_DRAIN_MAX_MS = 35 * 60000;
 const IN_HOUSE_DRAIN_POLL_MS = 2000;
@@ -58969,6 +58968,7 @@ class CallManager {
         this.inHouse = null;
         /** Account-wide pause after PEER_FLOOD / FLOOD_WAIT on a call; shared with the in-house service. */
         this.callCooldown = new _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.CallFloodCooldown();
+        this.callTexts = new Map();
         this.inHouseLoading = null;
         /** In-house calls running in parallel, by chat. */
         this.inFlight = new Map();
@@ -59340,6 +59340,7 @@ class CallManager {
                         // it is not operator-actionable (no channel notification).
                         logger.warn(`[CallManager] Call request: user unreachable from this account (${unreachable}) chatId=${chatId}`);
                         this.endCall();
+                        await this.stopLadder(chatId);
                         return false;
                     }
                     if (isPrivacyRestricted) {
@@ -59355,6 +59356,9 @@ class CallManager {
                         ? "Change Your Call Settings\n\nPrivacy Settings... I'm unable to call..!!"
                         : "some Issue at yourside, I'm unable to call..!!");
                     this.endCall();
+                    // Ringing a user whose settings forbid calls only repeats the text: stop the ladder.
+                    if (isPrivacyRestricted)
+                        await this.stopLadder(chatId);
                     if (!isPrivacyRestricted) {
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, 'Failed to Request Call', false);
                     }
@@ -59371,6 +59375,7 @@ class CallManager {
             if (unreachable) {
                 logger.warn(`[CallManager] Call: user unreachable from this account (${unreachable}) chatId=${chatId}`);
                 this.endCall();
+                await this.stopLadder(chatId);
                 return false;
             }
             const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.classifyCallFlood)(error);
@@ -59396,7 +59401,24 @@ class CallManager {
         logger.warn(`[CallManager] account call-limited (${flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
     }
     /** Fire-and-forget call-status text through the outbound queue; never blocks call state. */
+    /** A ring that can never succeed (privacy, unreachable): delete the chat's remaining ladder rings. */
+    async stopLadder(chatId) {
+        try {
+            const { deleteEventsForChat } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../events/event-executor */ "./src/modules/events/event-executor.ts"));
+            await deleteEventsForChat(chatId);
+        }
+        catch (error) {
+            logger.warn(`[CallManager] clearing the ladder for ${chatId} failed`, error?.message ?? error);
+        }
+    }
+    /** One failure text per chat per CALL_TEXT_DEDUPE_MS (a ladder is ~42 min): not one per failed ring. */
     sendCallText(chatId, message) {
+        const last = this.callTexts.get(chatId);
+        if (last !== undefined && Date.now() - last < CALL_TEXT_DEDUPE_MS)
+            return;
+        this.callTexts.set(chatId, Date.now());
+        if (this.callTexts.size > 5000)
+            this.callTexts.delete(this.callTexts.keys().next().value);
         (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, { message }, { kind: 'call-text', label: 'callManager', maxAgeMs: 90000 })
             .catch((error) => { logger.error(`[CallManager] Error sending message:`, error); });
     }
@@ -60434,7 +60456,8 @@ class InHouseCallService {
      * The in-house path could not carry this show (video missing/unreadable, setup error, answered
      * but no media, never connected): the in-house ladder's "pick up, I'm calling you" nudges would
      * now sit on top of bare legacy rings. Swap the chat to the legacy ladder (rings + VCUI link)
-     * once per MEDIA_FAILED_WINDOW_MS.
+     * once per episode: no time re-arm (its last ring at ~31.5 min fell past a 30-min window and rebuilt
+     * the ladder forever). A new episode starts only on a user action (resetRetryEpisodes).
      */
     async leaveInHouseLadder(chatId, result) {
         // Not eligible for a show: the ladder's "calling you" nudges would never be followed by a ring.
@@ -60450,7 +60473,7 @@ class InHouseCallService {
             return;
         if (result.status !== 'fallback' && result.status !== 'media_failed')
             return;
-        if (!this.claimWindow(this.legacyLadders, chatId, MEDIA_FAILED_WINDOW_MS))
+        if (!this.claimWindow(this.legacyLadders, chatId, Number.POSITIVE_INFINITY))
             return;
         try {
             await this.deps.legacyLadder(chatId, result.videoType, { linkSent: result.status === 'media_failed' && !!this.deps.vcuiLink });
@@ -60506,6 +60529,7 @@ class InHouseCallService {
      * the notice, so a message typed right away does not re-ring a still-blocked user.
      */
     clearPrivacyBlock(chatId) {
+        this.resetRetryEpisodes(chatId, { keepPrivacy: true });
         const at = this.privacyNotices.get(chatId);
         // Asking for a call re-arms the probe episode, even when the notice never went out (flooded account).
         if (at === undefined || this.now() - at >= PRIVACY_RETRY_MIN_MS)
@@ -60514,6 +60538,17 @@ class InHouseCallService {
             return false;
         this.privacyNotices.delete(chatId);
         return true;
+    }
+    /**
+     * A user action (asked for a call, paid, a fresh ladder was scheduled) starts a new retry episode:
+     * the legacy-ladder swap, the unanswered bonus ring and the privacy probes may each run once more.
+     * Nothing re-arms them on time (owner, 2026-10-11: back off, stop, wait for the user).
+     */
+    resetRetryEpisodes(chatId, opts = {}) {
+        this.legacyLadders.delete(chatId);
+        this.autoRetries.delete(chatId);
+        if (!opts.keepPrivacy)
+            this.privacyEpisodes.delete(chatId);
     }
     /** Our last ring to chatId was blocked by their call privacy (within the notice window): ringing again is pointless. */
     isPrivacyBlocked(chatId) {
@@ -60994,7 +61029,8 @@ class InHouseCallService {
     claimAutoRetry(chatId) {
         const last = this.autoRetries.get(chatId);
         const now = this.now();
-        if (last !== undefined && now - last < AUTO_RETRY_WINDOW_MS)
+        // One bonus ring per episode, not per 30 min: a cron or ladder ring hours later must not earn another.
+        if (last !== undefined)
             return false;
         this.autoRetries.set(chatId, now);
         if (this.autoRetries.size > 5000)
@@ -62097,6 +62133,11 @@ async function scheduleLadder(chatId, type = '1') {
     const events = (inHouse ? _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildInHouseEventLadder : _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildPaidEventLadder)(chatId, clientId, type, Date.now());
     await s.createMultiple(events);
     logger.log(`Scheduled ${events.length} ${inHouse ? 'in-house ' : ''}events for ${clientId} | ${chatId}`);
+    // A fresh ladder is a new user action (payment / request): the in-house retry episodes may run once more.
+    try {
+        (await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager?.getInHouse?.())?.resetRetryEpisodes?.(chatId);
+    }
+    catch { /* in-house unavailable: nothing to reset */ }
 }
 /** An in-house show was cut short: replace the chat's pending events with a backing-off re-call follow-up. */
 async function scheduleInHouseFollowUp(chatId, delayMs) {
