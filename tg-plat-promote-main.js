@@ -629,6 +629,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
  * Conversion Attribution Service — common-chat based ROI.
  *
@@ -639,6 +640,8 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-channel-state:conversion-attribution");
 class ConversionAttributionService {
     constructor(intelligenceService, tracker) {
         if (!isIntelligenceServiceLike(intelligenceService)) {
@@ -734,7 +737,8 @@ class ConversionAttributionService {
                     }
                     catch { /* analytics is optional */ }
                 }
-                catch {
+                catch (error) {
+                    logger.warn(`conversion attribution failed for channel ${channelId}`, error);
                     failedChannelIds.push(channelId);
                     try {
                         await this.tracker.releaseConversion(channelClaimId);
@@ -747,7 +751,8 @@ class ConversionAttributionService {
             }
             return { discoveredChannelIds: uniqueChatIds, attributedChannels: attributions, failedChannelIds };
         }
-        catch {
+        catch (error) {
+            logger.warn(`conversion attribution failed for ${uniqueChatIds.length} channel(s)`, error);
             return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
         }
     }
@@ -1246,7 +1251,8 @@ class ChannelIntelligenceService {
         try {
             engine = _percentile_engine__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine.getInstance();
         }
-        catch {
+        catch (error) {
+            poolLog.warn('percentile-engine-unavailable', { chan: safeChannelId, err: error instanceof Error ? error.message : String(error) });
             return;
         }
         let percentiles = engine.getCachedPercentiles();
@@ -1254,7 +1260,8 @@ class ChannelIntelligenceService {
             try {
                 percentiles = await engine.getPercentiles();
             }
-            catch {
+            catch (error) {
+                poolLog.warn('percentiles-unavailable', { chan: safeChannelId, err: error instanceof Error ? error.message : String(error) });
                 return;
             }
         }
@@ -1573,6 +1580,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PercentileEngine: () => (/* binding */ PercentileEngine)
 /* harmony export */ });
 /* harmony import */ var _pool_constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/constants */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/constants.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
  * Bounded pool percentile engine.
  *
@@ -1580,6 +1588,8 @@ __webpack_require__.r(__webpack_exports__);
  * It is used solely to bench weak entries; channel selection relies on outcomes directly.
  */
 
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:percentile-engine");
 const REDIS_KEY = 'percentiles:message-pool';
 const REDIS_TTL_SECONDS = 3600;
 const REFRESH_MS = 30 * 60 * 1000;
@@ -1653,7 +1663,8 @@ class PercentileEngine {
             const [result] = await source.aggregate(messageRawScorePipeline(nowMs)).toArray();
             messageRawScore = extractBuckets(isRecord(result) ? result['messageRawScoreValues'] : null);
         }
-        catch {
+        catch (error) {
+            logger.warn('messageRawScore aggregation failed; using neutral fallback', error);
             // An unavailable aggregation leaves pool benching at its neutral median fallback.
         }
         this.cache = { messageRawScore };
@@ -6249,7 +6260,8 @@ class BasePromotionEngine {
             intelligenceLog.info("warm-cache", { requested: ids.length, found: docs.length, ms });
             return { requested: ids.length, found: docs.length, ms };
         }
-        catch {
+        catch (error) {
+            intelligenceLog.warn("warm-cache-failed", { requested: ids.length, err: error instanceof Error ? error.message : String(error) });
             this.intelligenceDocCache = null; // fall back to per-channel live reads
             return { requested: ids.length, found: 0, ms: Date.now() - t0 };
         }
@@ -6278,7 +6290,8 @@ class BasePromotionEngine {
         try {
             account = this.promotionContext ?? this.refreshPromotionContext();
         }
-        catch {
+        catch (error) {
+            intelligenceLog.warn("promotion-context-unavailable", { chan: channelInfo.channelId, err: error instanceof Error ? error.message : String(error) });
             return null;
         }
         const { doc: existingDoc, cached } = await this.getIntelligenceDocCached(account, channelInfo.channelId);
@@ -7774,6 +7787,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isExtendedBanLadderEnabled: () => (/* binding */ isExtendedBanLadderEnabled)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
  * Per-mobile channel block store.
  *
@@ -7793,6 +7807,8 @@ __webpack_require__.r(__webpack_exports__);
  *   value "perm" (30-day TTL) or "temp" (3h TTL). exists() is enough for the pre-flight check.
  */
 
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:account-channel-block");
 const TEMP_BLOCK_TTL_SECONDS = 3 * 60 * 60; // 3 hours — first USER_BANNED_IN_CHANNEL
 const PERM_BLOCK_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days — structural channel block self-heal
 /**
@@ -7911,7 +7927,8 @@ class RedisAccountChannelBlock {
                     await this.redis.expire(strikeKey, extended ? EXTENDED_STRIKE_TTL_SECONDS : STRIKE_TTL_SECONDS);
                 }
             }
-            catch {
+            catch (error) {
+                logger.warn(`strike counter failed (${strikeKey}); defaulting to 1`, error);
                 strikes = 1;
             }
         }
@@ -7994,6 +8011,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isExplorationBudgetEnabled: () => (/* binding */ isExplorationBudgetEnabled)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
  * Per-mobile exploration budget: how many UNPROVEN channels an account may try right now.
  *
@@ -8020,6 +8038,8 @@ __webpack_require__.r(__webpack_exports__);
  * Emergency rollback only: env PROMOTION_EXPLORATION_BUDGET=off.
  */
 
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:account-exploration");
 const RESTRICT_AFTER_UNPROVEN_BANS = 10;
 const UNPROVEN_PER_HOUR_WHEN_RESTRICTED = 5;
 const PROVEN_PAIR_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -8109,7 +8129,8 @@ class RedisAccountExploration {
                 await this.redis.set(usedKey, String(used + charged), 'EX', USED_BUCKET_TTL_SECONDS);
             return denied;
         }
-        catch {
+        catch (error) {
+            logger.warn(`deniedChannels failed for ${safeMobile}; failing open`, error);
             return new Set();
         }
     }
@@ -8808,6 +8829,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMOTION_VERIFICATION_TTL_SECONDS: () => (/* binding */ PROMOTION_VERIFICATION_TTL_SECONDS),
 /* harmony export */   RedisPromotionVerificationQueue: () => (/* binding */ RedisPromotionVerificationQueue)
 /* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:verification-queue");
 const PROMOTION_VERIFICATION_TTL_SECONDS = 48 * 60 * 60;
 class RedisPromotionVerificationQueue {
     constructor(redis, mobile, maxSize = 500) {
@@ -8896,7 +8920,8 @@ function parseQueuedMessage(raw) {
             ...(value.workType === 'followUp' ? { workType: 'followUp' } : {}),
         };
     }
-    catch {
+    catch (error) {
+        logger.warn(`failed to parse queued message ${raw.slice(0, 200)}`, error);
         return null;
     }
 }
@@ -8972,6 +8997,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
 /* harmony import */ var _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../redis/redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -8983,6 +9009,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-channel-state:promotion-runtime");
 class PromotionAccountContext {
     constructor(runtime, mobile, clientId) {
         this.runtime = runtime;
@@ -9010,7 +9038,7 @@ class PromotionAccountContext {
             await this.runtime.channelBlock.blockTemporary(this.mobile, channelId);
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordBan(this.mobile, channelId).catch(() => undefined);
+            await this.runtime.exploration.recordBan(this.mobile, channelId).catch((error) => { logger.warn(`exploration.recordBan failed for ${this.mobile}/${channelId}`, error); });
         }
     }
     /** Which of these channelIds are currently blocked for THIS mobile (pre-flight filter). */
@@ -9026,7 +9054,7 @@ class PromotionAccountContext {
     async explorationDeniedForMobile(channelIds, options = {}) {
         if (!this.runtime.exploration)
             return new Set();
-        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch(() => new Set());
+        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${this.mobile}; failing open`, error); return new Set(); });
     }
     async recordSuccess(channelId, isFollowup) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
@@ -9036,10 +9064,10 @@ class PromotionAccountContext {
         // leave a delivered pair unproven or its ban strikes in place.
         if (this.runtime.channelBlock) {
             // A delivery ends this pair's ban history (no-op under the PROMOTION_BAN_LADDER=legacy rollback).
-            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch(() => undefined);
+            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch((error) => { logger.warn(`channelBlock.clearStrikes failed for ${this.mobile}/${safeChannelId}`, error); });
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch(() => undefined);
+            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${this.mobile}/${safeChannelId}`, error); });
         }
         await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
         if (this.runtime.accountHealth) {
@@ -9145,7 +9173,8 @@ class PromotionAccountContext {
         try {
             return await this.runtime.accountHealth.getAccountHealth(this.mobile);
         }
-        catch {
+        catch (error) {
+            logger.warn(`getAccountHealth failed for ${this.mobile}`, error);
             return null;
         }
     }
@@ -15330,8 +15359,10 @@ function resolveProxyFromEnv() {
             timeout: envInt("PROXY_TIMEOUT", 10),
         };
     }
-    catch {
-        logger.error("Failed to parse proxy URL from env", { proxyUrl });
+    catch (error) {
+        // Never log the raw URL: it can carry credentials. Redact userinfo.
+        const redacted = proxyUrl.replace(/\/\/.*@/, "//***@");
+        logger.error(`Failed to parse proxy URL from env (${redacted}): ${error instanceof Error ? error.message : String(error)}`);
         return null;
     }
 }
@@ -16058,6 +16089,9 @@ class Logger {
         if (seen.has(obj))
             return chalk__WEBPACK_IMPORTED_MODULE_0___default().red("[Circular]");
         seen.add(obj);
+        // An Error's message/stack are not enumerable: Object.entries() would print it as "{}".
+        if (obj instanceof Error)
+            return this.formatError(obj, indent, seen);
         if (Array.isArray(obj)) {
             return ("[\n" +
                 obj.map((el) => " ".repeat(indent) + this.formatObjectMessage(el, indent + 2, seen)).join(",\n") +
@@ -16071,6 +16105,17 @@ class Logger {
             return " ".repeat(indent) + coloredKey + formattedValue;
         });
         return "{\n" + entries.join(",\n") + "\n" + " ".repeat(indent - 2) + "}";
+    }
+    /** "Name: message", any extra own fields (Telegram code/errorMessage/seconds...), and the first stack frames. */
+    formatError(err, indent, seen) {
+        const head = chalk__WEBPACK_IMPORTED_MODULE_0___default().red.bold(`${err.name || "Error"}: ${err.message}`);
+        const extra = Object.entries(err).filter(([key]) => key !== "stack" && key !== "message");
+        const fields = extra.length
+            ? " " + this.formatObjectMessage(Object.fromEntries(extra), indent + 2, seen)
+            : "";
+        const frames = (err.stack ?? "").split("\n").slice(1, 4).map((line) => line.trim()).filter(Boolean);
+        const stack = frames.length ? "\n" + frames.map((f) => " ".repeat(indent) + chalk__WEBPACK_IMPORTED_MODULE_0___default().gray(f)).join("\n") : "";
+        return head + fields + stack;
     }
     parseColoredContext(context) {
         if (/^\d+$/.test(context))
@@ -19198,7 +19243,12 @@ async function withTimeout(promiseFactory, options = {}) {
             logger.error("onTimeout callback failed:", cbErr);
         }
     }
-    return throwErr ? Promise.reject(lastError) : undefined;
+    if (!throwErr) {
+        // The caller asked for undefined instead of a rejection: still record why, or the failure is lost.
+        logger.warn(`${errorMessage}: gave up, returning undefined`, lastError);
+        return undefined;
+    }
+    return Promise.reject(lastError);
 }
 async function runWithTimeout(promise, timeoutMs, cancelSignal, errorMessage) {
     let timeoutId = null;
@@ -19737,7 +19787,7 @@ class ChannelsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.B
             // Nothing to write is not a failure, but the caller still wants the current row: several
             // call sites use the returned document as the refreshed channel state.
             this.logger.debug?.(`[activeChannels] ${normalizedId} update skipped: nothing left after normalization`);
-            return this.findActiveChannel(normalizedId).catch(() => null);
+            return this.findActiveChannel(normalizedId).catch((error) => { this.logger.warn(`[activeChannels] findActiveChannel(${normalizedId}) failed after skipped update: ${error instanceof Error ? error.message : String(error)}`); return null; });
         }
         // STRICT WRITE BOUNDARY: whitelist to the canonical persisted keys. A naked spread here is
         // the exact vector that leaked ~40 raw GramJS entity fields (flags/defaultBannedRights/
@@ -27578,11 +27628,11 @@ class ReactionService {
             return;
         try {
             void Promise.resolve(this.onReactionOutcome(outcome)).catch((error) => {
-                logger.debug(`[${this.instanceId}] onReactionOutcome(${outcome}) handler error: ${error}`);
+                logger.warn(`[${this.instanceId}] onReactionOutcome(${outcome}) handler error`, error);
             });
         }
         catch (error) {
-            logger.debug(`[${this.instanceId}] onReactionOutcome(${outcome}) threw: ${error}`);
+            logger.warn(`[${this.instanceId}] onReactionOutcome(${outcome}) threw`, error);
         }
     }
     /**
@@ -27781,7 +27831,7 @@ class ReactionService {
                     }
                 }
                 catch (error) {
-                    logger.debug("Reaction disabled-cache read failed; treating channel as usable for this refresh", {
+                    logger.warn("Reaction disabled-cache read failed; treating channel as usable for this refresh", {
                         channelId: this.normalizeChannelId(ch.id),
                         error: error instanceof Error ? error.message : String(error),
                     });
