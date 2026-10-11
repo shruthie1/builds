@@ -58912,7 +58912,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./call-flood-cooldown */ "./src/modules/calls/call-flood-cooldown.ts");
+/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
+
 
 
 
@@ -58948,6 +58950,8 @@ class CallManager {
         this.processing = false;
         this.MAX_QUEUE_SIZE = 1000; // Maximum queue size to prevent unbounded growth
         this.inHouse = null;
+        /** Account-wide pause after PEER_FLOOD / FLOOD_WAIT on a call; shared with the in-house service. */
+        this.callCooldown = new _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.CallFloodCooldown();
         this.inHouseLoading = null;
         /** In-house calls running in parallel, by chat. */
         this.inFlight = new Map();
@@ -59167,7 +59171,7 @@ class CallManager {
     }
     /** The in-house service while the switch is on (loaded lazily, so it costs nothing when off). */
     async getInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)())
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_10__.isInHouseCallsEnabled)())
             return null;
         if (this.inHouse)
             return this.inHouse;
@@ -59183,6 +59187,7 @@ class CallManager {
                     callEnded: (chatId) => this.onInHouseCallEnded(chatId),
                     dequeue: (chatId) => { this.removeFromQueue(chatId); },
                     hasQueuedCalls: () => this.callQueue.length > 0,
+                    callCooldown: this.callCooldown,
                 });
                 return this.inHouse;
             })
@@ -59212,7 +59217,7 @@ class CallManager {
     }
     /** Subscribe for incoming in-house calls when the switch is on. */
     async startInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)()) {
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_10__.isInHouseCallsEnabled)()) {
             // Switched off (e.g. config set off + restart): don't leave paid users able to ring us.
             if (!this.client)
                 return;
@@ -59246,7 +59251,7 @@ class CallManager {
         const deadline = Date.now() + IN_HOUSE_DRAIN_MAX_MS;
         while (this.inHouse?.hasActiveCalls?.() && Date.now() < deadline)
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_DRAIN_POLL_MS);
-        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_9__.isInHouseCallsEnabled)())
+        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_10__.isInHouseCallsEnabled)())
             return; // switched back on meanwhile: keep the service
         await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "[CallManager] stopping in-house service", false));
     }
@@ -59259,6 +59264,12 @@ class CallManager {
     async requestCall(chatId, force = false) {
         if (!this.client) {
             logger.log(`[CallManager] No client available for call request`);
+            return false;
+        }
+        // Telegram call-limited this account: a legacy ring would flood again and deepen the limit.
+        if (this.callCooldown.isActive()) {
+            logger.warn(`[CallManager] Call to ${chatId} skipped: account call-limited for ${Math.ceil(this.callCooldown.remainingMs() / 60000)} more min`);
+            await this.inHouse?.leaveFloodLimited?.(chatId);
             return false;
         }
         try {
@@ -59299,6 +59310,12 @@ class CallManager {
                     return true;
                 }
                 catch (error) {
+                    const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.classifyCallFlood)(error);
+                    if (flood) {
+                        await this.onCallFlood(chatId, flood);
+                        this.endCall();
+                        return false;
+                    }
                     const isPrivacyRestricted = error?.errorMessage === "USER_PRIVACY_RESTRICTED";
                     const unreachable = (0,_telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_0__.classifyUnreachable)(error);
                     if (unreachable) {
@@ -59339,11 +59356,27 @@ class CallManager {
                 this.endCall();
                 return false;
             }
+            const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.classifyCallFlood)(error);
+            if (flood) {
+                await this.onCallFlood(chatId, flood);
+                this.endCall();
+                return false;
+            }
             this.sendCallText(chatId, "some Issue at yourside, I'm unable to call..!!");
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] Failed to call`);
             this.endCall();
             return false;
         }
+    }
+    /** A call request was flood-limited: pause all calls, and stop this chat's ladder with the link instead of a ring. */
+    async onCallFlood(chatId, flood) {
+        if (this.inHouse) {
+            this.inHouse.noteCallFlood(flood);
+            await this.inHouse.leaveFloodLimited(chatId);
+            return;
+        }
+        const { pauseMs } = this.callCooldown.note(flood);
+        logger.warn(`[CallManager] account call-limited (${flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
     }
     /** Fire-and-forget call-status text through the outbound queue; never blocks call state. */
     sendCallText(chatId, message) {
@@ -59444,6 +59477,65 @@ class CallManager {
 }
 CallManager.instanceCounter = 0;
 CallManager.activeInstances = new Map();
+
+
+/***/ },
+
+/***/ "./src/modules/calls/call-flood-cooldown.ts"
+/*!**************************************************!*\
+  !*** ./src/modules/calls/call-flood-cooldown.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CALL_FLOOD_COOLDOWN_MAX_MS: () => (/* binding */ CALL_FLOOD_COOLDOWN_MAX_MS),
+/* harmony export */   CALL_FLOOD_COOLDOWN_MS: () => (/* binding */ CALL_FLOOD_COOLDOWN_MS),
+/* harmony export */   CallFloodCooldown: () => (/* binding */ CallFloodCooldown),
+/* harmony export */   classifyCallFlood: () => (/* binding */ classifyCallFlood)
+/* harmony export */ });
+/* harmony import */ var _outbound_flood_error__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../outbound/flood-error */ "./src/outbound/flood-error.ts");
+
+/** First pause after a call-side flood, and the step added when floods recur while cooling. */
+const CALL_FLOOD_COOLDOWN_MS = 30 * 60000;
+/** The pause never runs longer than this from now. */
+const CALL_FLOOD_COOLDOWN_MAX_MS = 2 * 60 * 60000;
+/**
+ * PEER_FLOOD / FLOOD_WAIT_n / "Too many requests" on a call request. All of them mean Telegram has
+ * limited the ACCOUNT, so ringing again (in-house or legacy) only deepens the limit.
+ */
+function classifyCallFlood(error) {
+    const flood = (0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_0__.classifyFlood)(error);
+    if (flood)
+        return flood;
+    if (/too many requests/i.test((0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_0__.floodErrorText)(error)))
+        return { kind: 'peer' };
+    return null;
+}
+/** Account-wide pause on placing calls. In-memory, per process (like FloodGate). */
+class CallFloodCooldown {
+    constructor(now = () => Date.now()) {
+        this.until = 0;
+        this.started = 0;
+        this.now = now;
+    }
+    isActive() { return this.until > this.now(); }
+    remainingMs() { return Math.max(0, this.until - this.now()); }
+    /** When the current cooldown episode began (0 = none yet). A chat is offered the link once per episode. */
+    episodeStart() { return this.started; }
+    /** Records a flood; starts (or extends) the pause. `started` is true when this opened a new episode. */
+    note(flood) {
+        const now = this.now();
+        const wasActive = this.until > now;
+        const wanted = flood.kind === 'wait' ? Math.max(CALL_FLOOD_COOLDOWN_MS, flood.seconds * 1000 + 60000) : CALL_FLOOD_COOLDOWN_MS;
+        const next = wasActive ? Math.max(this.until + CALL_FLOOD_COOLDOWN_MS, now + wanted) : now + wanted;
+        this.until = Math.min(next, now + CALL_FLOOD_COOLDOWN_MAX_MS);
+        if (!wasActive)
+            this.started = now;
+        return { started: !wasActive, pauseMs: this.until - now };
+    }
+}
 
 
 /***/ },
@@ -59869,12 +59961,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   UNANSWERED_RETRY_MS: () => (/* binding */ UNANSWERED_RETRY_MS),
 /* harmony export */   USER_ENDED_RECALL_MS: () => (/* binding */ USER_ENDED_RECALL_MS),
 /* harmony export */   WAIT_NOTICE_COOLDOWN_MS: () => (/* binding */ WAIT_NOTICE_COOLDOWN_MS),
-/* harmony export */   WARN_DEDUPE_MS: () => (/* binding */ WARN_DEDUPE_MS)
+/* harmony export */   WARN_DEDUPE_MS: () => (/* binding */ WARN_DEDUPE_MS),
+/* harmony export */   callFloodLimitedMessages: () => (/* binding */ callFloodLimitedMessages)
 /* harmony export */ });
 /* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
 /* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
 /* harmony import */ var _voice_proof_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./voice-proof-config */ "./src/modules/calls/inhouse/voice-proof-config.ts");
 /* harmony import */ var _telegram_utils_unreachable_report__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../../telegram-utils/unreachable-report */ "./src/telegram-utils/unreachable-report.ts");
+/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../call-flood-cooldown */ "./src/modules/calls/call-flood-cooldown.ts");
+
 
 
 
@@ -59884,6 +59979,11 @@ function defaultTimer(fn, ms) {
     timer.unref?.();
     return () => clearInterval(timer);
 }
+/** Calls are paused (Telegram call-limited the account): offer the web call. {link} = the chat's VCUI link. */
+const callFloodLimitedMessages = [
+    `Baby I can't call you\non Telegram right now 🙈\n\n**Or call me on Zoom here**👇👇\n{link}`,
+    `Telegram is not letting me\ncall right now 🥺\n\n**Call me on Zoom here**👇👇\n{link}`,
+];
 const PRIVACY_MESSAGE = "Change Your Call Settings\n\nPrivacy Settings... I'm unable to call..!!";
 const UNANSWERED_RETRY_MS = 3 * 60 * 1000;
 /** Re-call after a show was cut: soon after a network drop, a little later after the user hung up. */
@@ -59975,6 +60075,8 @@ class InHouseCallService {
         this.waitNotices = new Map();
         this.mediaFailures = new Map();
         this.legacyLadders = new Map();
+        /** Last time each chat was sent the Zoom link because calls are paused (once per cooldown episode). */
+        this.floodLinks = new Map();
         /** Running progress checkpoints per chat. */
         this.checkpoints = new Map();
         /**
@@ -60033,6 +60135,7 @@ class InHouseCallService {
         };
         this.deps = deps;
         this.now = deps.now ?? Date.now;
+        this.cooldown = deps.callCooldown ?? new _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.CallFloodCooldown(this.now);
         this.logger = deps.logger ?? console;
         this.maxCalls = Math.max(1, Math.floor(deps.maxConcurrentCalls ?? 1));
     }
@@ -60125,6 +60228,12 @@ class InHouseCallService {
         // Reserve the slot before any await, so a queue dispatching calls in parallel never overshoots.
         if (this.isInCall(chatId))
             return { status: 'already_in_call' };
+        // The account is call-limited by Telegram: do not touch Telegram, just stop this chat's ladder.
+        if (this.cooldown.isActive()) {
+            const limited = { status: 'flood_limited', reason: 'account_cooldown' };
+            await this.leaveInHouseLadder(chatId, limited);
+            return limited;
+        }
         if (this.isBusy()) {
             this.noticeQueued(chatId);
             return { status: 'busy_engine' };
@@ -60315,6 +60424,10 @@ class InHouseCallService {
             await this.safeClearEvents(chatId);
             return;
         }
+        if (result.status === 'flood_limited') {
+            await this.leaveFloodLimited(chatId);
+            return;
+        }
         if (!this.deps.legacyLadder || !result.videoType)
             return;
         if (result.status !== 'fallback' && result.status !== 'media_failed')
@@ -60327,6 +60440,47 @@ class InHouseCallService {
         catch (error) {
             this.logger.warn(`[in-house-calls] legacy ladder for ${chatId} failed`, error?.message ?? error);
         }
+    }
+    /** True while calls are paused because Telegram call-limited this account. */
+    isCallLimited() {
+        return this.cooldown.isActive();
+    }
+    /**
+     * A call request hit PEER_FLOOD / FLOOD_WAIT: the ACCOUNT is limited. Pause every call (in-house and
+     * legacy) for a while, tell the shared outbound flood gate, and warn once (an ops notice only when
+     * a new cooldown starts, not on every extension).
+     */
+    noteCallFlood(flood) {
+        const { started, pauseMs } = this.cooldown.note(flood);
+        const label = flood.kind === 'peer' ? 'PEER_FLOOD' : `FLOOD_WAIT_${flood.seconds}`;
+        this.logger.warn(`[in-house-calls] account call-limited (${label}): pausing calls for ${Math.ceil(pauseMs / 60000)} min`);
+        try {
+            this.deps.reportFlood?.(flood);
+        }
+        catch (error) {
+            this.logger.warn('[in-house-calls] reporting the call flood to the flood gate failed', error?.message ?? error);
+        }
+        if (started)
+            void this.safeNotify(`Calls paused ${Math.ceil(pauseMs / 60000)} min: account call-limited (${label}); users get the Zoom link instead.`);
+    }
+    /**
+     * This chat's call cannot be placed while the account is call-limited: drop its ladder (nothing
+     * re-arms) and send the VCUI link once per cooldown, so a payer is not left waiting for a ring.
+     */
+    async leaveFloodLimited(chatId) {
+        await this.safeClearEvents(chatId);
+        const link = this.deps.vcuiLink?.(chatId);
+        if (!link)
+            return;
+        const last = this.floodLinks.get(chatId);
+        if (last !== undefined && last >= this.cooldown.episodeStart())
+            return;
+        this.floodLinks.set(chatId, this.now());
+        if (this.floodLinks.size > 5000)
+            this.floodLinks.delete(this.floodLinks.keys().next().value);
+        const text = (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(callFloodLimitedMessages, chatId, 'flood', { link });
+        void this.safeSend(chatId, text, true).then((sent) => { if (!sent)
+            this.floodLinks.delete(chatId); });
     }
     /**
      * The user wrote again after our privacy notice: they may have fixed their settings, so let one
@@ -60399,6 +60553,11 @@ class InHouseCallService {
             if (unreachable) {
                 this.logger.warn(`[in-house-calls] ${chatId} unreachable from this account (${unreachable}): clearing its call ladder`);
                 return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
+            }
+            const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error);
+            if (flood) {
+                this.noteCallFlood(flood);
+                return { status: 'flood_limited', reason: 'setup_flood', videoId: plan.videoId, videoType: plan.videoType };
             }
             this.logger.error(`[in-house-calls] call setup failed for ${chatId}`, error);
             this.safeWarn(`In-house fallback: ${chatId} setup_error ${error?.message ?? ''}`);
@@ -60643,6 +60802,12 @@ class InHouseCallService {
                     void this.safeSend(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callStatusMessage)(_messages_callMessages__WEBPACK_IMPORTED_MODULE_0__.callMediaFailedMessages, chatId, 'media', { link }), true);
                 this.safeWarn(`In-house media_failed: ${chatId} answered but no media (${record.endReason}: ${record.error ?? ''})`);
                 return { status: 'media_failed', reason: record.endReason ?? undefined, videoId: plan.videoId, videoType: plan.videoType };
+            }
+            // PEER_FLOOD & co on the call itself: the account is limited, a legacy ring would flood too.
+            const flood = record.error ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)({ message: record.error }) : null;
+            if (flood) {
+                this.noteCallFlood(flood);
+                return { status: 'flood_limited', reason: 'never_connected_flood', videoId: plan.videoId, videoType: plan.videoType };
             }
             // media_failed / error / disconnect before any answer: the in-house path could not deliver.
             this.logger.warn(`[in-house-calls] ${chatId} never connected (${record.endReason}: ${record.error ?? ''}); falling back`);
@@ -60899,13 +61064,13 @@ function createHumanSender(deps) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CallAllowList: () => (/* reexport safe */ _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList),
-/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__.InHouseCallService),
+/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__.InHouseCallService),
 /* harmony export */   createInHouseCallService: () => (/* binding */ createInHouseCallService),
-/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.inHouseCallsSwitchState),
-/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled),
+/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.inHouseCallsSwitchState),
+/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_17__.restoreCallPrivacyIfLeftOpen),
-/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_15__.setInHouseCallsOverride)
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_18__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.setInHouseCallsOverride)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
@@ -60925,10 +61090,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
-/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
-/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
+/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+
 
 
 
@@ -60988,7 +61155,7 @@ function probeVideoSize(url) {
     return new Promise((resolve) => {
         (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url], { timeout: FFPROBE_TIMEOUT_MS }, (error, stdout) => {
             const m = /^(\d+)x(\d+)/.exec(String(stdout ?? '').trim());
-            resolve(!error && m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_16__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null);
+            resolve(!error && m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null);
         });
     });
 }
@@ -61028,10 +61195,10 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_17__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_18__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList({
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled)(),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled)(),
         listPaidChatIds: (limit) => db.listPaidChatIds(limit),
         resolvable: (chatIds) => chatIds.filter((id) => cachedInputUser(client, id) !== null),
         readPrivacy: () => readCallPrivacy(client),
@@ -61059,7 +61226,7 @@ function createCallAllowList(client) {
 function createInHouseCallService(client, hooks) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_17__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_18__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_6__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -61085,7 +61252,7 @@ function createInHouseCallService(client, hooks) {
         },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     });
-    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_14__.InHouseCallService({
+    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__.InHouseCallService({
         allowList: createCallAllowList(client),
         // The same pay-prompt voice notes the chat flow sends, from the client's working directory.
         pitchClips: () => PITCH_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_2___default().resolve(process.cwd(), file)).filter((file) => fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(file)),
@@ -61093,13 +61260,13 @@ function createInHouseCallService(client, hooks) {
             await sendLikeHuman(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
         },
         privacyText: (chatId) => (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPrivacyMessage)(chatId),
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_15__.isInHouseCallsEnabled)(),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled)(),
         isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
         maxConcurrentCalls: maxCalls,
         createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine(client, {
             logger: engineLogger,
-            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_16__.callVideoParams)(),
-            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_16__.callEchoParams)(),
+            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.callVideoParams)(),
+            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.callEchoParams)(),
             maxConcurrentCalls: maxCalls,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
@@ -61132,6 +61299,14 @@ function createInHouseCallService(client, hooks) {
         },
         callEnded: (chatId) => hooks.callEnded?.(chatId),
         hasQueuedCalls: () => hooks.hasQueuedCalls?.() ?? false,
+        callCooldown: hooks.callCooldown,
+        // Texts share the account's flood state: a call flood pauses sends too.
+        reportFlood: (flood) => {
+            if (flood.kind === 'peer')
+                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.notePeerFlood();
+            else
+                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.noteFloodWait(flood.seconds * 1000);
+        },
         loadVoiceProofState: () => {
             try {
                 return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_1___default().readFileSync(proofStateFile, 'utf8'));
