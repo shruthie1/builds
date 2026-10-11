@@ -70715,12 +70715,23 @@ function snapshotLocal(vision, legacy, proof, durationMs) {
         durationMs, error: null, wouldDecision: would,
     };
 }
-function failedLocal(error, durationMs) {
+/**
+ * Row for a local run that produced no decision. When tg-vision returned a result (e.g. all_providers_failed), keep its
+ * per-provider attempts WITH a short error message and the OCR pre-check: without them a held screenshot is
+ * undiagnosable (2026-10-11: 5 held images on sowmya2 with attempts []). Messages are provider error texts, clipped.
+ */
+function failedLocal(error, durationMs, vision) {
+    const attempts = (vision?.attempts ?? []).slice(0, 8).map((a) => ({
+        provider: a.provider, errorClass: a.errorClass, ms: a.latencyMs, message: a.message ? clip(String(a.message), 160) : null,
+    }));
+    const precheck = vision?.precheck
+        ? { status: vision.precheck.status, wordCount: vision.precheck.wordCount, ms: typeof vision.precheck.ms === 'number' ? vision.precheck.ms : null }
+        : null;
     return {
-        outcome: null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
-        isFinished: false, noVerifiableAmount: false, confidence: 0, attempts: [], watermarkPresent: null,
+        outcome: vision?.outcome ?? null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
+        isFinished: false, noVerifiableAmount: false, confidence: 0, attempts, watermarkPresent: null,
         disclaimerPhrases: [], utr: null, payeeUpiId: null, rulesApplied: [], proofDecision: null, proofReasons: [],
-        fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null, precheck: null,
+        fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null, precheck,
         durationMs, error: clip(String(error?.message ?? error ?? 'unknown'), 200), wouldDecision: null,
     };
 }
@@ -70873,7 +70884,7 @@ async function composeRow(image, ctx, inp) {
         local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotLocal)(vision, inp.legacy, proof, inp.localMs);
     }
     catch (error) {
-        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.failedLocal)(error, inp.localMs);
+        local = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.failedLocal)(error, inp.localMs, vision);
     }
     // Log-only duplicate lookup (read methods only; never markServed).
     let duplicate = null;
