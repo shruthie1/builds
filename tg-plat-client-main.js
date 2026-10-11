@@ -36159,6 +36159,9 @@ class RuntimeRestrictionStore {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_HEDGE_MS: () => (/* binding */ DEFAULT_HEDGE_MS),
+/* harmony export */   HEDGE_GROUP_SIZE: () => (/* binding */ HEDGE_GROUP_SIZE),
+/* harmony export */   SKIP_AFTER_JUDGED: () => (/* binding */ SKIP_AFTER_JUDGED),
 /* harmony export */   analyzePaymentProof: () => (/* binding */ analyzePaymentProof),
 /* harmony export */   shouldFallbackForPaymentExtraction: () => (/* binding */ shouldFallbackForPaymentExtraction)
 /* harmony export */ });
@@ -36184,6 +36187,14 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const MIN_CONFIDENCE_THRESHOLD = 0.35;
+/** Smart chain: hedge delay before the next image models start in parallel (VISION_HEDGE_MS; 0 = sequential). */
+const DEFAULT_HEDGE_MS = 6000;
+/** The primary plus this many image models form one hedged group. */
+const HEDGE_GROUP_SIZE = 3;
+/** Skip the remaining image models once this many found no amount (text-only providers still run). */
+const SKIP_AFTER_JUDGED = 2;
+const TEXT_ONLY = new Set(['rapidapi', 'ocr-space']);
+const JUDGED_CLASSES = new Set(['no_amount', 'low_confidence', 'amount_range']);
 const R12_CONFIDENCE_THRESHOLD = 0.4;
 const PROBE_TIMEOUT_MS = 8000;
 const KEYWORDS = [
@@ -36276,26 +36287,37 @@ async function analyzePaymentProof(image, opts = {}) {
             totalLatencyMs: clock() - started, fallbackUsed: false,
         };
     }
-    // 2. providers in order
-    for (let i = 0; i < providers.length; i++) {
+    // 2. providers, hedged (smart chain, 2026-10-11, measured on 196 visionShadow rows):
+    //  - the primary runs alone; when it fails, or has not answered within VISION_HEDGE_MS (6 s ~ Gemini p92), the next
+    //    image models start in parallel and the first valid answer wins (losers are aborted). NVIDIA rescued real payments
+    //    (500, 350) that Gemini and Groq both missed, so the rescuers still run, just not one after another.
+    //  - once >= SKIP_AFTER_JUDGED image models looked at the image and found no amount, the remaining image models are
+    //    skipped (Gemma: 0 wins in 196 rows, often a 20 s timeout).
+    //  - text readers (RapidAPI, OCR-Space) form their own last stage: their amounts are OCR-grade, never the first word.
+    //  VISION_HEDGE_MS=0 restores the plain sequential chain.
+    const hedgeRaw = env.VISION_HEDGE_MS;
+    const hedgeMs = hedgeRaw === undefined || hedgeRaw === '' ? DEFAULT_HEDGE_MS : Number(hedgeRaw);
+    const hedging = Number.isFinite(hedgeMs) && hedgeMs > 0;
+    let settled = false;
+    const attempt = async (i, parent) => {
         const provider = providers[i];
         const remaining = providers.length - i - 1;
         const t0 = clock();
-        const fail = (errorClass, message, model = '') => {
-            attempts.push({ provider: provider.name, model, ok: false, errorClass, message: clip(message), latencyMs: clock() - t0 });
-        };
         let model = '';
+        const fail = (errorClass, message, m = model) => {
+            if (!settled)
+                attempts.push({ provider: provider.name, model: m, ok: false, errorClass, message: clip(message), latencyMs: clock() - t0 });
+            return { kind: 'fail', judged: errorClass !== null && JUDGED_CLASSES.has(errorClass) && !TEXT_ONLY.has(provider.name) };
+        };
         try {
             const budget = (0,_config__WEBPACK_IMPORTED_MODULE_1__.providerBudgetMs)(provider.name, env, v2);
-            const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`);
+            const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`, parent);
             model = raw.model;
             const latencyMs = clock() - t0;
             const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.parseModelOutput)(raw.text, v2);
             const errors = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.validateWire)(parsed.wire);
-            if (errors.length > 0) {
-                fail('validation', `Response validation failed: ${errors.join(', ')}`, model);
-                continue;
-            }
+            if (errors.length > 0)
+                return fail('validation', `Response validation failed: ${errors.join(', ')}`);
             let wire = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.applyProviderTweaks)(provider, parsed.wire);
             // R25(1): low-confidence / non-payment answers are enriched from the model's own text
             const modelText = typeof wire.text === 'string' ? wire.text : '';
@@ -36311,8 +36333,7 @@ async function analyzePaymentProof(image, opts = {}) {
             extraction.rulesApplied.push(...rulesExtra);
             // R09
             if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0) {
-                fail('low_confidence', `Confidence ${extraction.confidence.toFixed(2)} below minimum threshold ${MIN_CONFIDENCE_THRESHOLD}`, model);
-                continue;
+                return fail('low_confidence', `Confidence ${extraction.confidence.toFixed(2)} below minimum threshold ${MIN_CONFIDENCE_THRESHOLD}`);
             }
             // R11: secondary extraction from the pre-check OCR text
             if (extraction.isPayment === true && extraction.amount === null && ocrText.length > 10) {
@@ -36332,44 +36353,124 @@ async function analyzePaymentProof(image, opts = {}) {
             const r12 = shouldFallbackForPaymentExtraction(extraction, !v2.has('R10b'));
             if (r12.fallback) {
                 if (normalized.amountOutOfRange !== null && extraction.amount === null) {
-                    fail('amount_range', `payment amount ${normalized.amountOutOfRange} is outside valid range (${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT}-${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT})`, model);
+                    return fail('amount_range', `payment amount ${normalized.amountOutOfRange} is outside valid range (${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT}-${_rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT})`);
                 }
-                else {
-                    fail('no_amount', `could not extract a payment amount: ${r12.reasons.join('; ')}`, model);
-                }
-                continue;
+                return fail('no_amount', `could not extract a payment amount: ${r12.reasons.join('; ')}`);
             }
             // R13 (defensive: typed amounts are range-checked in normalizeWire, R11 amounts come from R34)
             if (extraction.isPayment === true && extraction.amount !== null
                 && (extraction.amount < _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT || extraction.amount > _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT)) {
-                fail('amount_range', `payment amount ${extraction.amount} is outside valid range`, model);
-                continue;
+                return fail('amount_range', `payment amount ${extraction.amount} is outside valid range`);
             }
-            attempts.push({ provider: provider.name, model, ok: true, errorClass: null, message: null, latencyMs });
-            const outcome = extraction.isPayment === true ? 'extracted' : 'not_payment';
-            // 4. optional second opinion on the winner (never throws, never changes the extraction)
-            let secondOpinion = null;
-            // the default runner decides internally which triggers run (S1-S5 need VISION_SECOND_OPINION=on, S6 authenticity is on by default)
-            const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)();
-            if (runner && outcome === 'extracted') {
-                try {
-                    secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
-                }
-                catch (error) {
-                    logger.warn(`[vision] second opinion failed: ${error instanceof Error ? error.message : String(error)}`);
-                    secondOpinion = null;
-                }
-            }
-            return {
-                outcome, extraction, attempts, precheck, secondOpinion,
-                totalLatencyMs: clock() - started, fallbackUsed: i > 0,
-            };
+            return { kind: 'win', index: i, provider, model, latencyMs, extraction };
         }
         catch (error) {
+            if (settled)
+                return { kind: 'fail', judged: false };
             const message = error instanceof Error ? error.message : String(error);
             logger.warn(`[vision] ${provider.name} failed: ${message}`);
-            fail((0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.classifyError)(error), message, model);
+            return fail((0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.classifyError)(error), message);
         }
+    };
+    /** Run providers[group[0]] now and the rest of the group after the hedge delay or the primary's failure. */
+    const runGroup = (group) => new Promise((resolve) => {
+        const controller = new AbortController();
+        let pending = 0;
+        let started = 0;
+        let judged = 0;
+        let done = false;
+        let timer;
+        const finish = (win) => {
+            if (done)
+                return;
+            done = true;
+            if (timer)
+                clearTimeout(timer);
+            if (win)
+                controller.abort();
+            resolve({ win, judged });
+        };
+        const start = (k) => {
+            started++;
+            pending++;
+            void attempt(group[k], controller.signal).then((step) => {
+                pending--;
+                if (done)
+                    return;
+                if (step.kind === 'win')
+                    return finish(step);
+                if (step.judged)
+                    judged++;
+                if (k === 0)
+                    startRest();
+                if (pending === 0 && started === group.length)
+                    finish(null);
+            });
+        };
+        const startRest = () => {
+            if (timer) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+            while (started < group.length)
+                start(started);
+        };
+        start(0);
+        if (group.length > 1)
+            timer = setTimeout(startRest, hedgeMs);
+    });
+    const succeed = async (win) => {
+        settled = true;
+        attempts.push({ provider: win.provider.name, model: win.model, ok: true, errorClass: null, message: null, latencyMs: win.latencyMs });
+        const extraction = win.extraction;
+        const outcome = extraction.isPayment === true ? 'extracted' : 'not_payment';
+        // 4. optional second opinion on the winner (never throws, never changes the extraction)
+        let secondOpinion = null;
+        // the default runner decides internally which triggers run (S1-S5 need VISION_SECOND_OPINION=on, S6 authenticity is on by default)
+        const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)();
+        if (runner && outcome === 'extracted') {
+            try {
+                secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
+            }
+            catch (error) {
+                logger.warn(`[vision] second opinion failed: ${error instanceof Error ? error.message : String(error)}`);
+                secondOpinion = null;
+            }
+        }
+        return {
+            outcome, extraction, attempts, precheck, secondOpinion,
+            totalLatencyMs: clock() - started, fallbackUsed: win.index > 0,
+        };
+    };
+    const imageModels = providers.map((_, k) => k).filter((k) => !TEXT_ONLY.has(providers[k].name));
+    const textReaders = providers.map((_, k) => k).filter((k) => TEXT_ONLY.has(providers[k].name));
+    // Stage 1: image-model panel. The primary plus its hedged peers, then any further image model one at a time while
+    // fewer than SKIP_AFTER_JUDGED models have found no amount.
+    let judgedImage = 0;
+    let next = 0;
+    if (imageModels.length > 0) {
+        const panel = imageModels.slice(0, hedging ? HEDGE_GROUP_SIZE : 1);
+        const { win, judged } = await runGroup(panel);
+        if (win)
+            return succeed(win);
+        judgedImage += judged;
+        next = panel.length;
+    }
+    for (; next < imageModels.length; next++) {
+        if (judgedImage >= SKIP_AFTER_JUDGED) {
+            logger.log(`[vision] ${providers[imageModels[next]].name} skipped: ${judgedImage} image models already found no amount`);
+            continue;
+        }
+        const { win, judged } = await runGroup([imageModels[next]]);
+        if (win)
+            return succeed(win);
+        judgedImage += judged;
+    }
+    // Stage 2: text readers (OCR-grade amounts, last resort), in order.
+    for (const k of textReaders) {
+        const { win } = await runGroup([k]);
+        if (win)
+            return succeed(win);
     }
     // 5. chain exhausted (R15 / R16)
     const exhausted = (0,_outcome__WEBPACK_IMPORTED_MODULE_2__.classifyExhausted)(attempts, ocrText);
@@ -36426,7 +36527,8 @@ __webpack_require__.r(__webpack_exports__);
 
 /** R07 outer per-provider budgets (ms), from service-config.json. */
 const DEFAULT_BUDGETS_MS = {
-    gemini: 30000,
+    // 30 s -> 15 s (2026-10-11): successes p95 8.7 s; with hedging a slow Gemini no longer blocks the chain.
+    gemini: 15000,
     groq: 15000,
     nvidia: 20000,
     mistral: 30000,
