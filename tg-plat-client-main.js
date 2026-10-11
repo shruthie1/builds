@@ -45046,7 +45046,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
 /* harmony import */ var _Config__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./Config */ "./src/core/Config.ts");
-/* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../event-handlers/globalState */ "./src/event-handlers/globalState.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
@@ -45402,8 +45402,10 @@ class JobManager {
                 mobile: telegramManager.mobile || 'unknown',
                 uptimeSec: Math.floor((now - this.startTime) / 1000),
                 floodGate: {
-                    open: (0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.isFloodGateOpen)(),
-                    remainingSec: Math.ceil((0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.getFloodGateRemainingMs)() / 1000),
+                    open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__.floodGate.isPaused(now),
+                    remainingSec: Math.ceil(_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__.floodGate.remainingMs(now) / 1000),
+                    refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__.floodGate.refusedCount(),
+                    peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_17__.floodGate.recentHits(now),
                 },
                 promotions: promotionStats ? {
                     active: promotor?.isPromotionActive?.() ?? false,
@@ -45609,10 +45611,6 @@ class JobManager {
         if (!reactionRecoveryHandled) {
             await this.recoverReactionIfNeeded(telegramManager, reactionRecoveryRequested, reactionHealth);
         }
-        if (!(0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.isFloodGateOpen)()) {
-            this.log('warn', `Global flood gate active, skipping promotion restart for ${Math.ceil((0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.getFloodGateRemainingMs)() / 1000)}s`);
-            return;
-        }
         if (promotionHaltedByPaidUserLimit) {
             this.log('warn', 'Promotion restart skipped because paid-user limits are reached');
             return;
@@ -45667,10 +45665,6 @@ class JobManager {
                 return;
             if (!promotedStats) {
                 this.log('debug', 'Promotion health skipped: promote stats not initialized yet');
-                return;
-            }
-            if (!(0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.isFloodGateOpen)()) {
-                this.log('warn', `Promotion health skipped: global flood gate active for ${Math.ceil((0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_17__.getFloodGateRemainingMs)() / 1000)}s`);
                 return;
             }
             const messageStats = promotor.getStats();
@@ -50284,11 +50278,8 @@ var __webpack_filename__ = "src/event-handlers/globalState.ts";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   daysLeftForRelease: () => (/* binding */ daysLeftForRelease),
-/* harmony export */   getFloodGateRemainingMs: () => (/* binding */ getFloodGateRemainingMs),
 /* harmony export */   globalCanReply: () => (/* binding */ globalCanReply),
-/* harmony export */   isFloodGateOpen: () => (/* binding */ isFloodGateOpen),
 /* harmony export */   setDaysLeft: () => (/* binding */ setDaysLeft),
-/* harmony export */   setFloodGate: () => (/* binding */ setFloodGate),
 /* harmony export */   setReply: () => (/* binding */ setReply)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -50318,34 +50309,6 @@ function daysLeftForRelease() {
 function setDaysLeft(value) {
     logger.debug(`Setting days left to:`, value);
     days = value;
-}
-// --- Centralized Flood Gate ---
-// Shared account-level flood gate. High-volume senders such as promotions should check this
-// before sending. Low-priority background tasks can keep their own local backoff when their
-// failures should not pause promotion delivery.
-let floodGateUntil = 0;
-/**
- * Set a global flood gate that ALL sending subsystems must respect.
- * Only extends the gate — never shortens it.
- */
-function setFloodGate(durationMs) {
-    const until = Date.now() + durationMs;
-    if (until > floodGateUntil) {
-        floodGateUntil = until;
-        logger.warn(`Global flood gate set for ${(durationMs / 1000 / 60).toFixed(1)} minutes (until ${new Date(until).toLocaleTimeString()})`);
-    }
-}
-/**
- * Check if it's safe to send messages (no active flood gate).
- */
-function isFloodGateOpen() {
-    return Date.now() > floodGateUntil;
-}
-/**
- * Get time remaining on flood gate in ms (for logging/monitoring).
- */
-function getFloodGateRemainingMs() {
-    return Math.max(0, floodGateUntil - Date.now());
 }
 
 
@@ -50615,9 +50578,9 @@ async function handleCheatResponse(event, userDetails, chatId) {
 async function sendCheatResponseMessage(event, userDetails) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(2000);
     const msgElement = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["No Dear", "Not at All", "No Baby, Please Wait!!", "Network issue baby", "I Love you Babyyy😚", "I Want to kiss you😚", "Its me only baby😚😚", "No Dear, Please understand"], 1)[0];
-    await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => event.message.respond({
+    await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.respond({
         message: `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-    }), (text) => event.message.respond({ message: `**${msgElement}**\n\n${text}` }));
+    }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.respond({ message: `**${msgElement}**\n\n${text}` }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callText', kind: 'call-text' }));
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(2000);
 }
 /**
@@ -50700,9 +50663,9 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
     if (userDetails.payAmount >= 15) {
         if (userDetails.payAmount >= 30) {
             logger.debug(`[EDGE CASE] Cheat without demo - sending call message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => event.message.respond({
+            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_23__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.respond({
                 message: `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-            }), (text) => event.message.respond({ message: text }));
+            }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.respond({ message: text }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallText', kind: 'call-text' }));
         }
         else if ((userDetails.payAmount < 30 && userDetails.cheatCount > 2) || userDetails.cheatCount > 3) {
             logger.debug(`[EDGE CASE] Cheat without demo - initiating call - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, cheatCount: ${userDetails.cheatCount}`);
@@ -50938,10 +50901,10 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
         else {
             logger.debug(`[PAYMENT] First GPay request - sending explanation - chatId: ${chatId}`);
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(5000);
-            await event.message.reply({
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.reply({
                 message: `<b>I Dont have GPay!!\n\nOnly "PhonePe / PayTm"/</b>Others!!\n\nTry these👇\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_11__.payLinks.gpay1}1 - Doubt (Try Once)\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_11__.payLinks.gpay2}2 - Doubt (Try Once)\n\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_11__.payLinks.paytm3} - Working\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_11__.payLinks.phonepe3} - Working`,
                 parseMode: "html",
-            });
+            }), { chatId, label: 'existingUser.gpayInfo' });
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_5__.sleep)(3000);
             await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.sendMessageWithTimeout)(event.client, chatId, {
                 message: `Pay with **PhonePe** or **PayTm**, I will give you **10Rs Discount!!**`,
@@ -52329,8 +52292,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   cleanup: () => (/* binding */ cleanup),
 /* harmony export */   getRateLimiterStats: () => (/* binding */ getRateLimiterStats),
-/* harmony export */   sendGreetings: () => (/* binding */ sendGreetings),
-/* harmony export */   setPeerFloodSleep: () => (/* binding */ setPeerFloodSleep)
+/* harmony export */   sendGreetings: () => (/* binding */ sendGreetings)
 /* harmony export */ });
 /* harmony import */ var _messages_standardMessages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../messages/standardMessages */ "./src/messages/standardMessages.ts");
 /* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
@@ -52458,7 +52420,6 @@ class NewUserRateLimiter {
         this.queue = new Map();
         this.processedChatIds = new Map(); // Track processed chatIds with timestamp
         this.state = {
-            peerFloodSleep: Date.now(),
             tenMinuteWindow: [],
             hourWindow: []
         };
@@ -52516,7 +52477,7 @@ class NewUserRateLimiter {
         }
     }
     async processQueue() {
-        if (this.queue.size === 0 || Date.now() <= this.state.peerFloodSleep) {
+        if (this.queue.size === 0) {
             return;
         }
         this.cleanupTimestamps();
@@ -52622,16 +52583,11 @@ class NewUserRateLimiter {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error enqueuing greetings");
         }
     }
-    setPeerFloodSleep(time) {
-        this.state.peerFloodSleep = Date.now() + time;
-        logger.warn(`[LIMIT] Peer flood protection active for ${(time / 1000).toFixed(0)}s - greetings paused`);
-    }
     getStats() {
         return {
             queueSize: this.queue.size,
             tenMinuteCount: this.state.tenMinuteWindow.length,
             hourCount: this.state.hourWindow.length,
-            isFlooding: Date.now() <= this.state.peerFloodSleep,
             processedChatCount: this.processedChatIds.size
         };
     }
@@ -52650,9 +52606,6 @@ const rateLimiter = new NewUserRateLimiter();
 async function sendGreetings(event, msgs, doesUserExists) {
     logger.log("Processing Greeting Request");
     await rateLimiter.enqueueEvent(event, msgs, doesUserExists);
-}
-function setPeerFloodSleep(time) {
-    rateLimiter.setPeerFloodSleep(time);
 }
 function getRateLimiterStats() {
     return rateLimiter.getStats();
@@ -57016,6 +56969,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _event_handlers_utils__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./event-handlers/utils */ "./src/event-handlers/utils.ts");
 /* harmony import */ var _event_handlers_cleanup__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./event-handlers/cleanup */ "./src/event-handlers/cleanup.ts");
 /* harmony import */ var _event_handlers_memoryStats__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./event-handlers/memoryStats */ "./src/event-handlers/memoryStats.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Main Event Handler
  * Refactored modular version - maintains complete backward compatibility
@@ -57027,6 +56981,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // Import modular services
+
 
 
 
@@ -57087,6 +57042,10 @@ async function handleEvents(event) {
         if (!chatId)
             throw new Error("Incoming Telegram event is missing message.chatId");
         _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__.connectionRetryService.markInboundActivity();
+        // The user wrote: if Telegram refused this chat (PEER_FLOOD), allow one fresh attempt again.
+        if (event.isPrivate && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_16__.floodGate.clearRefused(chatId)) {
+            logger.log(`[flood-gate] ${chatId} wrote again: refused chat re-opened for sending`);
+        }
         // PRIORITY 1: Handle private messages with media FIRST (before any text-based commands)
         // This ensures images are never skipped due to text content or globalCanReply status
         if (event.isPrivate && event.message.media) {
@@ -62407,53 +62366,74 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /**
  * Account-wide Telegram flood state, shared by the replier (replier/**) and the OutboundQueue.
- * PEER_FLOOD / FLOOD_WAIT are throttles on the ACCOUNT, so whichever sender hits one tells the other
- * to hold off. In-memory, per process (a restart forgets it, as it forgets the replier's own state).
+ * In-memory, per process (a restart forgets it, as it forgets the replier's own state).
  *
- * PEER_FLOOD: pause 60-120 s; 3 hits inside 15 min trip the breaker and pause 5-10 min (same numbers
- * as the replier's own breaker). FLOOD_WAIT: pause for the stated seconds.
+ * FLOOD_WAIT is a timed throttle on the ACCOUNT: whichever sender hits one pauses every sender for the
+ * stated seconds.
+ *
+ * PEER_FLOOD is NOT paused on. Telegram's spam limit refuses messages to SOME users while the account
+ * keeps reaching the rest, and waiting does not lift it (Telethon FAQ; fleet 2026-10-11: 1,041
+ * PEER_FLOODs hit only 221 chats, a refused chat later went through 6 times = 0.6%, and other chats kept
+ * being sent to within minutes of 268 hits). An account-wide pause only froze replies to every user
+ * behind a few refused ones. So a PEER_FLOOD marks just that chat as refused: senders stop trying it
+ * (no retries) until the user writes again (clearRefused on their next incoming message).
  */
 const FLOOD_GATE = {
-    peerPauseMs: { min: 60000, max: 120000 },
-    breakerHits: 3,
-    breakerWindowMs: 15 * 60000,
-    breakerPauseMs: { min: 5 * 60000, max: 10 * 60000 },
+    /** Window for the informational PEER_FLOOD hit count (health / analytics only). */
+    hitWindowMs: 15 * 60000,
     /** A single FLOOD_WAIT never pauses the account longer than this. */
     maxFloodWaitPauseMs: 15 * 60000,
+    /** Most refused chats remembered (oldest forgotten first). */
+    maxRefusedChats: 5000,
 };
 class FloodGate {
     constructor(deps = {}) {
         this.until = 0;
         this.hitLog = [];
+        this.refused = new Map();
         this.deps = deps;
     }
     now() { return (this.deps.now ?? Date.now)(); }
-    rand() { return (this.deps.random ?? Math.random)(); }
-    /** Epoch ms until which the account should not send (0 / past = open). */
+    /** Epoch ms until which the account should not send (0 / past = open). Only FLOOD_WAIT sets it. */
     pausedUntil() { return this.until; }
     isPaused(now = this.now()) { return this.until > now; }
     remainingMs(now = this.now()) { return Math.max(0, this.until - now); }
-    /** PEER_FLOOD hits inside the breaker window. */
+    /** PEER_FLOOD hits inside the last hitWindowMs (informational). */
     recentHits(now = this.now()) {
-        return this.hitLog.filter((t) => now - t < FLOOD_GATE.breakerWindowMs).length;
+        return this.hitLog.filter((t) => now - t < FLOOD_GATE.hitWindowMs).length;
     }
-    /** Records a PEER_FLOOD and extends the pause. Returns the pause applied and whether the breaker tripped. */
-    notePeerFlood(now = this.now()) {
-        this.hitLog = this.hitLog.filter((t) => now - t < FLOOD_GATE.breakerWindowMs);
+    /** Records a PEER_FLOOD for `chatId`: that chat is refused until the user writes again. No account pause. */
+    notePeerFlood(now = this.now(), chatId) {
+        this.hitLog = this.hitLog.filter((t) => now - t < FLOOD_GATE.hitWindowMs);
         this.hitLog.push(now);
-        const tripped = this.hitLog.length >= FLOOD_GATE.breakerHits;
-        const range = tripped ? FLOOD_GATE.breakerPauseMs : FLOOD_GATE.peerPauseMs;
-        const pauseMs = range.min + Math.floor(this.rand() * (range.max - range.min));
-        this.until = Math.max(this.until, now + pauseMs);
-        return { pauseMs, tripped, hits: this.hitLog.length };
+        const key = chatId == null ? '' : String(chatId);
+        if (key) {
+            this.refused.delete(key);
+            this.refused.set(key, now);
+            if (this.refused.size > FLOOD_GATE.maxRefusedChats) {
+                const oldest = this.refused.keys().next().value;
+                if (oldest !== undefined)
+                    this.refused.delete(oldest);
+            }
+        }
+        return { hits: this.hitLog.length };
     }
+    /** True when Telegram refused this chat with PEER_FLOOD and the user has not written since. */
+    isRefused(chatId) {
+        return chatId != null && this.refused.has(String(chatId));
+    }
+    /** The user wrote again: allow sending to them again (one fresh attempt per new message). */
+    clearRefused(chatId) {
+        return chatId != null && this.refused.delete(String(chatId));
+    }
+    refusedCount() { return this.refused.size; }
     /** Records a FLOOD_WAIT of `ms` (already buffered by the caller if it wants a margin). */
     noteFloodWait(ms, now = this.now()) {
         const pauseMs = Math.min(Math.max(0, ms), FLOOD_GATE.maxFloodWaitPauseMs);
         this.until = Math.max(this.until, now + pauseMs);
         return { pauseMs };
     }
-    reset() { this.until = 0; this.hitLog = []; }
+    reset() { this.until = 0; this.hitLog = []; this.refused.clear(); }
     configure(deps) { this.deps = deps; }
 }
 /** The process-wide gate. */
@@ -62505,7 +62485,6 @@ const OUTBOUND = {
     onCallRecheckMs: 30000,
     /** A send that neither resolves nor rejects in this long is abandoned so it cannot block the account. */
     sendTimeoutMs: 180000,
-    peerFloodBackoffMs: [{ min: 90000, max: 150000 }, { min: 270000, max: 330000 }],
     floodWaitMaxRetrySeconds: 300,
     floodWaitFactor: 1.2,
     /** Longest single wait inside the drain loop, so a new high-priority item is noticed promptly. */
@@ -62591,6 +62570,11 @@ class OutboundQueue {
             if (existing)
                 return existing.promise;
         }
+        if (spec.chatId != null && this.gate.isRefused(spec.chatId)) {
+            this.stats.dropped += 1;
+            logger.warn(`[${spec.label ?? kind}] ${spec.chatId}: not sent, Telegram refused this chat (PEER_FLOOD); waiting for the user to write again`);
+            return Promise.reject(new OutboundDroppedError('refused', 'chat refused by Telegram (PEER_FLOOD) until the user writes again'));
+        }
         const priority = spec.priority ?? cfg.priority;
         if (this.items.length >= OUTBOUND.maxSize) {
             const worst = this.items.reduce((w, i) => (i.priority > w.priority || (i.priority === w.priority && i.seq > w.seq) ? i : w));
@@ -62629,7 +62613,6 @@ class OutboundQueue {
             resolve,
             reject,
             promise,
-            peerFloodRetries: 0,
             floodWaitRetries: 0,
         });
         this.kick();
@@ -62788,18 +62771,19 @@ class OutboundQueue {
             item.reject(error);
         };
         if (flood?.kind === 'peer') {
-            const { pauseMs, tripped, hits } = this.gate.notePeerFlood(now);
-            if (item.peerFloodRetries >= OUTBOUND.peerFloodBackoffMs.length)
-                return fail('PEER_FLOOD, out of retries');
-            const { min, max } = OUTBOUND.peerFloodBackoffMs[item.peerFloodRetries];
-            const backoff = min + Math.floor(this.rand() * (max - min));
-            if (now + backoff >= item.expiresAt)
-                return fail('PEER_FLOOD, retry would outlive the message');
-            item.peerFloodRetries += 1;
-            item.notBefore = now + backoff;
-            this.stats.floodRequeues += 1;
-            logger.warn(`${where}: PEER_FLOOD (${item.peerFloodRetries}/${OUTBOUND.peerFloodBackoffMs.length}); account paused ${Math.round(pauseMs / 1000)}s${tripped ? ` (breaker: ${hits} hits)` : ''}, retry in ${Math.round(backoff / 1000)}s`);
-            this.requeue(item);
+            // This chat only: no retry (a refused chat almost never goes through later) and no account pause.
+            this.gate.notePeerFlood(now, item.chatId || null);
+            fail('PEER_FLOOD, Telegram refused this chat; not retried until the user writes again');
+            if (item.chatId) {
+                const rest = this.items.filter((i) => i.chatKey === item.chatKey);
+                if (rest.length) {
+                    this.items = this.items.filter((i) => i.chatKey !== item.chatKey);
+                    this.stats.dropped += rest.length;
+                    logger.warn(`${where}: dropped ${rest.length} more queued message(s) for this refused chat`);
+                    for (const i of rest)
+                        i.reject(new OutboundDroppedError('refused', 'chat refused by Telegram (PEER_FLOOD) until the user writes again'));
+                }
+            }
             return;
         }
         if (flood?.kind === 'wait') {
@@ -70308,7 +70292,7 @@ const unpaidPatterns = [
                             await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${toldAmount}₹** Only Pics ok!!`, true);
                         }
                         (0,_timeoutHelper__WEBPACK_IMPORTED_MODULE_14__.trackedSetTimeout)(context, async () => {
-                            await event.message.respond({ message: userDetails.payAmount < 50 ? _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo : _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.pricelist });
+                            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.floodSafe)(() => event.message.respond({ message: userDetails.payAmount < 50 ? _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.demo : _messages_standardMessages__WEBPACK_IMPORTED_MODULE_5__.pricelist }), { chatId: event.chatId?.toString(), label: 'unpaid.priceList' });
                         }, 10000);
                     }
                 }
@@ -72725,13 +72709,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../index */ "./src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../event-handlers/globalState */ "./src/event-handlers/globalState.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Replier Health Checker
  * Monitors replier health and detects stuck states
  */
-
 
 
 
@@ -72769,15 +72751,12 @@ class ReplierHealthChecker {
         const now = Date.now();
         const globalSleepBlocked = now <= globalSleepTime;
         const localSleepBlocked = sleepTime >= now;
-        const floodGateBlocked = !(0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__.isFloodGateOpen)();
-        const floodGateRemainingMs = (0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_4__.getFloodGateRemainingMs)();
-        // Account-wide Telegram send limit (PEER_FLOOD pause / breaker shared with the outbound queue): replies wait
-        // behind it, so a queue that is not draining is halted, not stuck (kavya2, 2026-10-11).
-        const sendPausedMs = _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__.floodGate.remainingMs(now);
-        const peerFloodHits = _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_5__.floodGate.recentHits(now);
-        const sendLimited = sendPausedMs > 0 || peerFloodHits > 0;
+        // Account-wide FLOOD_WAIT pause (shared with the outbound queue): replies wait behind it, so a queue that
+        // is not draining is halted, not stuck. PEER_FLOOD never pauses the account (outbound/flood-gate.ts).
+        const sendPausedMs = _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_4__.floodGate.remainingMs(now);
+        const sendLimited = sendPausedMs > 0;
         // Check if queue is stuck
-        const halted = globalSleepBlocked || localSleepBlocked || floodGateBlocked || sendLimited;
+        const halted = globalSleepBlocked || localSleepBlocked || sendLimited;
         const haltedRecentlyReported = halted && now - this.lastHaltedAlert < this.haltedAlertIntervalMs;
         if (queueLength > this.maxQueueSizeForAlert && now > this.lastChecked + this.checkIntervalMs && !haltedRecentlyReported) {
             this.lastChecked = now;
@@ -72787,8 +72766,7 @@ class ReplierHealthChecker {
                 ? `halted (${[
                     globalSleepBlocked ? `globalSleep ${Math.ceil((globalSleepTime - now) / 1000)}s` : null,
                     localSleepBlocked ? `sleep ${Math.ceil((sleepTime - now) / 1000)}s` : null,
-                    floodGateBlocked ? `floodGate ${Math.ceil(floodGateRemainingMs / 1000)}s` : null,
-                    sendLimited ? `Telegram send limit${sendPausedMs > 0 ? ` ${Math.ceil(sendPausedMs / 1000)}s` : ''}` : null,
+                    sendLimited ? `Telegram FLOOD_WAIT ${Math.ceil(sendPausedMs / 1000)}s` : null,
                 ].filter(Boolean).join(", ")})`
                 : "stuck";
             await sendReplierHealthNotification({
@@ -72801,8 +72779,8 @@ class ReplierHealthChecker {
                     { label: 'Global replies', value: _index__WEBPACK_IMPORTED_MODULE_2__.globalCanReply ? 'on' : 'off' },
                     { label: 'Global sleep', value: globalSleepBlocked ? `${Math.ceil((globalSleepTime - now) / 1000)}s` : 'clear' },
                     { label: 'Local sleep', value: localSleepBlocked ? `${Math.ceil((sleepTime - now) / 1000)}s` : 'clear' },
-                    { label: 'Flood gate', value: floodGateBlocked ? `${Math.ceil(floodGateRemainingMs / 1000)}s` : 'clear' },
-                    { label: 'Telegram send limit', value: sendLimited ? `${sendPausedMs > 0 ? `paused ${Math.ceil(sendPausedMs / 1000)}s, ` : ''}${peerFloodHits} PEER_FLOOD in 15 min` : 'clear' },
+                    { label: 'Telegram FLOOD_WAIT', value: sendLimited ? `paused ${Math.ceil(sendPausedMs / 1000)}s` : 'clear' },
+                    { label: 'Refused chats (PEER_FLOOD)', value: `${_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_4__.floodGate.refusedCount()} (${_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_4__.floodGate.recentHits(now)} in 15 min)` },
                     { label: '1 Min', value: `${minuteQueueLength}/${rateLimitConfig.messagesPerMinute}` },
                     { label: '10 Mins', value: `${tenMinutesQueueLength}/${rateLimitConfig.messagesPer10Minutes}` },
                     { label: '1 hour', value: `${hourQueueLength}/${rateLimitConfig.messagesPerHour}` },
@@ -73256,8 +73234,6 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("replier.queue-manager");
-/** A parked (PEER_FLOOD) item due for longer than this is served before fresh items. */
-const PARKED_STARVE_MS = 2 * 60 * 1000;
 /**
  * Queue manager for reply items
  */
@@ -73283,19 +73259,6 @@ class ReplierQueueManager {
                 waitTime,
                 pushedAt: Date.now()
             };
-            // One pending reply per chat while a PEER_FLOOD deferral is active: the newest context
-            // replaces the parked content but INHERITS the parked backoff (notBefore/floodRetries), so a
-            // new inbound message never causes an earlier retry to a peer Telegram is throttling.
-            const parked = this.queue.find(item => item.chatId === chatId && (item.floodRetries ?? 0) > 0);
-            if (parked) {
-                parked.msg = msg;
-                // Keep a pending attachment when the newest message has none; pushedAt stays the original
-                // park time so the 3h PEER_FLOOD age drop still applies to a chatty user.
-                parked.file = file ?? parked.file;
-                parked.msgId = replyMessageId;
-                parked.waitTime = waitTime;
-                return;
-            }
             // Deduplication: If no file, merge with existing text-only item
             if (!file) {
                 const existingIndex = this.queue.findIndex(item => item.chatId === chatId && !item.file);
@@ -73331,26 +73294,8 @@ class ReplierQueueManager {
      * Remove and return first item from queue
      */
     shift(now = Date.now()) {
-        // Skip items parked by a PEER_FLOOD backoff. Prefer never-flooded items (users actively
-        // talking) over due retries, so retries never delay a live conversation.
-        let idx = -1;
-        for (let i = 0; i < this.queue.length; i++) {
-            const item = this.queue[i];
-            if (item.notBefore !== undefined && item.notBefore > now)
-                continue;
-            // A parked retry that has been due for a while goes first, so steady fresh traffic cannot starve it.
-            if (item.floodRetries && item.notBefore !== undefined && now - item.notBefore > PARKED_STARVE_MS) {
-                idx = i;
-                break;
-            }
-            if (!item.floodRetries) {
-                if (idx === -1 || this.queue[idx].floodRetries)
-                    idx = i;
-                continue;
-            }
-            if (idx === -1)
-                idx = i;
-        }
+        // Skip items deferred while their chat is on a call.
+        const idx = this.queue.findIndex(item => item.notBefore === undefined || item.notBefore <= now);
         if (idx === -1)
             return undefined;
         return this.queue.splice(idx, 1)[0];
@@ -73359,13 +73304,9 @@ class ReplierQueueManager {
     hasDue(now = Date.now()) {
         return this.queue.some(item => item.notBefore === undefined || item.notBefore <= now);
     }
-    /** Count of items eligible now (parked PEER_FLOOD retries excluded). */
+    /** Count of items eligible now (items deferred for an ongoing call excluded). */
     getDueLength(now = Date.now()) {
         return this.queue.filter(item => item.notBefore === undefined || item.notBefore <= now).length;
-    }
-    /** Items eligible now, in queue order. */
-    getDueItems(now = Date.now()) {
-        return this.queue.filter(item => item.notBefore === undefined || item.notBefore <= now);
     }
     /**
      * Add item to front of queue
@@ -73377,18 +73318,6 @@ class ReplierQueueManager {
      * Add item to end of queue
      */
     pushItem(item) {
-        // A deferred retry must not duplicate a chat that already has a pending item (a newer
-        // inbound reply may have been queued while this one was in flight): newest content wins,
-        // the deferral (backoff) is kept.
-        if (item.floodRetries) {
-            const existing = this.queue.find(q => q.chatId === item.chatId);
-            if (existing) {
-                existing.floodRetries = Math.max(existing.floodRetries ?? 0, item.floodRetries);
-                existing.notBefore = Math.max(existing.notBefore ?? 0, item.notBefore ?? 0);
-                existing.retryCount = Math.max(existing.retryCount ?? 0, item.retryCount ?? 0) || existing.retryCount;
-                return;
-            }
-        }
         this.queue.push(item);
     }
     /**
@@ -73427,7 +73356,6 @@ class ReplierQueueManager {
             waitTime: item.waitTime,
             pushedAt: item.pushedAt,
             retryCount: item.retryCount,
-            ...(item.floodRetries ? { floodRetries: item.floodRetries } : {}),
             ...(item.notBefore !== undefined ? { notBefore: item.notBefore } : {}),
         }));
     }
@@ -73635,9 +73563,6 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:replier");
-// Circuit breaker: this many PEER_FLOOD hits within the window = account-level throttle.
-const PEER_FLOOD_BREAKER_HITS = 3;
-const PEER_FLOOD_BREAKER_WINDOW_MS = 15 * 60 * 1000;
 /** A deactivated recipient cannot recover; retrying only burns account send attempts. */
 function isRecipientDeactivatedError(error) {
     const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_1__.parseTelegramError)(error);
@@ -73695,7 +73620,6 @@ class Replier {
         this.pendingStateSaveTimeout = null;
         this.lastQueueUpdateSave = 0;
         this.processInterval = null;
-        this.peerFloodHits = [];
         this.updateCount = 0; // Track updates for periodic cleanup
         this.config = config;
         this.rateLimitConfig = rateLimitConfig;
@@ -73859,7 +73783,7 @@ class Replier {
     async processReplies(client) {
         while (this.queueManager.hasDue()) {
             // Also honour the per-instance flood/slowmode backoff (`this.sleepTime`).
-            // Without this, a FLOOD_WAIT/PEER_FLOOD backoff (sleepTime set minutes
+            // Without this, a FLOOD_WAIT backoff (sleepTime set minutes
             // ahead) would not pause the loop: it would shift each queued reply,
             // hit the `sleepTime < now` guard in handleReply, log "SKIPPED REPLY!!"
             // and drop the item (no requeue) — losing the whole queue and hot-spinning.
@@ -73877,7 +73801,6 @@ class Replier {
                         await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_16__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
                     }
                     else {
-                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_16__.handleTyping)(client, replyObj.chatId), { timeout: 5000, errorMessage: "SetTyping Timeout" });
                         this.queueManager.unshift(replyObj);
                         this.scheduleStateSave("rate-limit requeue", 500);
                         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(20000);
@@ -73942,13 +73865,8 @@ class Replier {
                 }
             }
             else {
-                // Send typing indicators while waiting (limit to first 10 to avoid blocking)
-                const items = this.queueManager.getDueItems();
-                const typingLimit = Math.min(items.length, 10);
-                for (let i = 0; i < typingLimit; i++) {
-                    await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_16__.handleTyping)(client, items[i].chatId), { timeout: 5000, errorMessage: "SetTyping Timeout" });
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(1000);
-                }
+                // Paused (FLOOD_WAIT / global stop): wait quietly. No typing to queued chats: a "typing…" that
+                // lasts minutes with no reply looks broken and keeps hitting Telegram while it is throttling us.
                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(20000);
             }
         }
@@ -74009,32 +73927,10 @@ class Replier {
                 _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_11__.floodGate.noteFloodWait(seconds * 1000 * buffer); // shared with the OutboundQueue
                 break;
             }
-            case 'PEER_FLOOD': {
-                // PEER_FLOOD is a user-level throttle that can persist for minutes.
-                // 30-60s gets hit again immediately — use 5-10 minutes instead.
-                // PEER_FLOOD is per-peer: the failing reply is parked on its own chat by reply-processor
-                // (5/15/30/60 min backoff), so one hit only paces the loop briefly. Several hits in a
-                // short window mean the account itself is being throttled -> full 5-10 min stop.
-                const now = Date.now();
-                this.peerFloodHits = this.peerFloodHits.filter((t) => now - t < PEER_FLOOD_BREAKER_WINDOW_MS);
-                this.peerFloodHits.push(now);
-                const tripped = this.peerFloodHits.length >= PEER_FLOOD_BREAKER_HITS;
-                const gapMs = tripped
-                    ? 5 * 60 * 1000 + Math.random() * 5 * 60 * 1000
-                    : 60 * 1000 + Math.random() * 60 * 1000;
-                void sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                    title: "Replier peer flood",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
-                    summary: "Telegram returned PEER_FLOOD while replier was sending messages.",
-                    fields: [
-                        { label: "Backoff Seconds", value: Math.ceil(gapMs / 1000) },
-                    ],
-                    tags: ["tg-aut", "replier", "peer-flood"],
-                }, `Replier.notification.peerFlood.${clientId}`);
-                this.sleepTime = Math.max(this.sleepTime, Date.now() + gapMs);
-                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_11__.floodGate.notePeerFlood(); // shared with the OutboundQueue
+            case 'PEER_FLOOD':
+                // Per chat, never account-wide: reply-processor marks the refused chat and drops the reply
+                // (outbound/flood-gate.ts). The rest of the queue keeps flowing.
                 break;
-            }
             default:
                 // For FloodWaitError instances that might not parse via string
                 if (error instanceof telegram_errors__WEBPACK_IMPORTED_MODULE_0__.FloodWaitError) {
@@ -74153,10 +74049,6 @@ class Replier {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PEER_FLOOD_BACKOFF_MS: () => (/* binding */ PEER_FLOOD_BACKOFF_MS),
-/* harmony export */   PEER_FLOOD_MAX_AGE_MS: () => (/* binding */ PEER_FLOOD_MAX_AGE_MS),
-/* harmony export */   handleTyping: () => (/* binding */ handleTyping),
-/* harmony export */   peerFloodDelayMs: () => (/* binding */ peerFloodDelayMs),
 /* harmony export */   processSingleReply: () => (/* binding */ processSingleReply)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -74177,10 +74069,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
 
 
 
@@ -74287,47 +74181,14 @@ async function getEntity(chatId, client) {
         return null;
     }
 }
-/**
- * Handle typing indicator
- */
-async function handleTyping(client, chatId) {
-    try {
-        const entity = await getEntity(chatId, client);
-        if (!entity) {
-            logger.warn(`Could not get entity for typing, chatId: ${chatId}`);
-            return;
-        }
-        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.SetTyping({
-            peer: entity,
-            action: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.SendMessageRecordVideoAction(),
-        })), { timeout: 5000, errorMessage: "Typing timeout" });
-    }
-    catch (error) {
-        logger.error(`Error setting typing:`, error);
-    }
-}
-// Fresh items wait behind the whole queue, and a PEER_FLOOD/FLOOD_WAIT pause holds that queue for
-// 5–10 min. At 5 min, replies that arrived during a pause were dropped unsent (prod 2026-10-09:
+// Fresh items wait behind the whole queue, and a FLOOD_WAIT pause can hold that queue for
+// minutes. At 5 min, replies that arrived during a pause were dropped unsent (prod 2026-10-09:
 // 94 drops by midday, all first attempts aged 5.5–17 min). 20 min covers a pause plus the backlog.
 const RECENT_MAX_AGE_MS = 20 * 60 * 1000;
 // In-memory retried items are not covered by state-persistence's STALE_CUTOFF_MS (load-time only).
 const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
-// PEER_FLOOD is per-peer and intermittent (fleet 2026-10-10: 1,662 PEER_FLOOD sends vs 9,223 successes
-// in 24h, other chats kept succeeding). A reply that hits it is parked on its own chat and retried
-// with a growing, jittered backoff (never faster than 5 min) until delivered or this age. 3h: each
-// step is slower than the previous one (5,15,30,60,60... min) so a reply gets ~6 attempts, and a
-// reply to the user's last message is still relevant to a user who is waiting for hours.
-const PEER_FLOOD_BACKOFF_MS = [5, 15, 30, 60].map((m) => m * 60 * 1000);
-const PEER_FLOOD_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 const ON_CALL_RECHECK_MS = 30000;
-/** Backoff before the next attempt after the Nth PEER_FLOOD (1-based), +-20% jitter, capped at 60 min base. */
-function peerFloodDelayMs(floodRetries, random = Math.random()) {
-    const base = PEER_FLOOD_BACKOFF_MS[Math.min(Math.max(floodRetries, 1), PEER_FLOOD_BACKOFF_MS.length) - 1];
-    return Math.round(base * (0.8 + 0.4 * random));
-}
 function maxAgeFor(item) {
-    if ((item.floodRetries ?? 0) > 0)
-        return PEER_FLOOD_MAX_AGE_MS;
     return (item.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
 }
 /**
@@ -74337,6 +74198,11 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
     try {
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
         onProcessed(); // Update lastProcessed timestamp
+        // Telegram refused this chat (PEER_FLOOD) and the user has not written since: never retry it.
+        if (_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate.isRefused(replyObj.chatId)) {
+            logger.warn(`[replier] reply dropped: Telegram refused chatId=${replyObj.chatId} (PEER_FLOOD) until the user writes again kind=${classifyReply(replyObj)}`);
+            return;
+        }
         // Never message a user mid-call: park the item (not a flood retry, not dropped) and look again shortly.
         if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_14__.isChatOnCall)(replyObj.chatId)) {
             logger.log(`[replier] ${replyObj.chatId} is on a call; reply deferred 30s`);
@@ -74387,10 +74253,9 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             msgs = rawMsgs ? rawMsgs : null;
             const hasOthersMsg = !msgs || (Array.isArray(msgs) && msgs.some((msg) => msg?.fromId == null));
             const ageMs = Date.now() - replyObj.pushedAt;
-            const isRetry = (replyObj.retryCount ?? 0) > 0 || (replyObj.floodRetries ?? 0) > 0;
-            // Fresh items must be < 20 min old. Items already retried (e.g. after PEER_FLOOD, whose
-            // backoff can outlast the fresh window) keep their original pushedAt, so they are bounded by the
-            // 1h cap instead; otherwise every retried reply would be silently dropped as stale.
+            const isRetry = (replyObj.retryCount ?? 0) > 0;
+            // Fresh items must be < 20 min old. Retried items keep their original pushedAt, so they are
+            // bounded by the 1h cap instead; otherwise every retried reply would be dropped as stale.
             const isRecent = ageMs < maxAgeFor(replyObj);
             if (!isRecent && isRetry) {
                 logger.warn(`Dropping stale retried reply: chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} ageMs=${ageMs} retryCount=${replyObj.retryCount}`);
@@ -74432,18 +74297,10 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
     }
     catch (error) {
         if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error).type === 'PEER_FLOOD') {
-            // Keep the reply: park it on its own chat (see PEER_FLOOD_BACKOFF_MS). Not counted against
-            // the 5-try budget, which would drop it within ~45 min.
-            const floodRetries = (replyObj.floodRetries ?? 0) + 1;
-            const ageMs = Date.now() - replyObj.pushedAt;
-            const delayMs = peerFloodDelayMs(floodRetries);
-            if (ageMs + delayMs <= PEER_FLOOD_MAX_AGE_MS) {
-                logger.warn(`[replier] PEER_FLOOD: reply deferred chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} floodRetries=${floodRetries} retryInMs=${delayMs} ageMs=${ageMs}`);
-                onRequeue({ ...replyObj, floodRetries, notBefore: Date.now() + delayMs });
-            }
-            else {
-                logger.warn(`[replier] PEER_FLOOD: reply dropped, would exceed max age chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} floodRetries=${floodRetries} ageMs=${ageMs} maxAgeMs=${PEER_FLOOD_MAX_AGE_MS}`);
-            }
+            // Telegram refuses this chat, not the account: mark it, drop the reply, never retry it.
+            // The user's next message clears the mark (one fresh attempt per message they send).
+            _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
+            logger.warn(`[replier] PEER_FLOOD: Telegram refused chatId=${replyObj.chatId}; reply dropped, not retried until the user writes again kind=${classifyReply(replyObj)}`);
             return;
         }
         logger.warn(`Error processing single reply (requeue handled):`, error);
@@ -74706,8 +74563,8 @@ const moduleDirname =  true
     : 0;
 // Constants
 const STATE_TTL_SECONDS = 1 * 24 * 60 * 60; // 1 day
-// Must cover reply-processor's PEER_FLOOD_MAX_AGE_MS (3h) so deferred replies survive a restart.
-const STALE_CUTOFF_MS = 3 * 60 * 60 * 1000; // 3 hours
+// Must cover reply-processor's RETRY_MAX_AGE_MS (1h): older replies would be dropped on load anyway.
+const STALE_CUTOFF_MS = 60 * 60 * 1000; // 1 hour
 /**
  * Get persistence key using mobile and clientId
  */
@@ -77864,7 +77721,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_jobs__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../core/jobs */ "./src/core/jobs.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _telegram_utils_markAsRead__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram-utils/markAsRead */ "./src/telegram-utils/markAsRead.ts");
-/* harmony import */ var _event_handlers_globalState__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../event-handlers/globalState */ "./src/event-handlers/globalState.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_16___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_16__);
@@ -78956,8 +78813,10 @@ router.get("/diagnostics/runtime/overview", _middlewares_leader_middleware__WEBP
             mobile: telegramManager?.mobile || process.env.mobile || "unknown",
             telegramReady,
             floodGate: {
-                open: (0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_14__.isFloodGateOpen)(),
-                remainingMs: (0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_14__.getFloodGateRemainingMs)(),
+                open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.isPaused(),
+                remainingMs: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.remainingMs(),
+                refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.refusedCount(),
+                peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.recentHits(),
             },
             jobs,
             promotions: promotionStats ? {
@@ -82009,33 +81868,35 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
 /* harmony export */ });
 /* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! express */ "express");
-/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(express__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
-/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
-/* harmony import */ var _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../modules/events/event-executor */ "./src/modules/events/event-executor.ts");
-/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
-/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
-/* harmony import */ var _telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram-utils/send-message */ "./src/telegram-utils/send-message.ts");
-/* harmony import */ var _telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram-utils/telegramUtils */ "./src/telegram-utils/telegramUtils.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
-/* harmony import */ var _modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../modules/calls/inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_24___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_24__);
-/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! express */ "express");
+/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(express__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _modules_calls__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../modules/calls */ "./src/modules/calls/index.ts");
+/* harmony import */ var _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../modules/events/event-executor */ "./src/modules/events/event-executor.ts");
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
+/* harmony import */ var _telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram-utils/send-message */ "./src/telegram-utils/send-message.ts");
+/* harmony import */ var _telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram-utils/telegramUtils */ "./src/telegram-utils/telegramUtils.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
+/* harmony import */ var _modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../modules/calls/inhouse/switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_25___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_25__);
+/* harmony import */ var _utils_apiResponse__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../utils/apiResponse */ "./src/utils/apiResponse.ts");
+
 
 
 
@@ -82065,11 +81926,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__.Logger("tg-aut:telegram-routes");
-const router = (0,express__WEBPACK_IMPORTED_MODULE_1__.Router)();
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("tg-aut:telegram-routes");
+const router = (0,express__WEBPACK_IMPORTED_MODULE_2__.Router)();
 function scheduleTelegramRouteTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_14__.scheduleUnrefTimeout)(() => {
-        void callback().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, context));
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_15__.scheduleUnrefTimeout)(() => {
+        void callback().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, context));
     }, delayMs);
 }
 /** How long an HTTP request waits for its queued send before answering `queued` (never hold a request for minutes). */
@@ -82088,7 +81949,7 @@ async function sendOrQueued(send, context) {
     try {
         const outcome = await Promise.race([send.then((value) => ({ queued: false, value })), pending]);
         if (outcome.queued)
-            void send.catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `${context}.queued`));
+            void send.catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `${context}.queued`));
         return outcome;
     }
     finally {
@@ -82112,8 +81973,8 @@ function peerIdText(peer) {
     if (!peer) {
         return null;
     }
-    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.PeerChannel) {
-        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_20__.getPeerDialogId)(peer) ?? null;
+    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.PeerChannel) {
+        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_21__.getPeerDialogId)(peer) ?? null;
     }
     if (typeof peer === "object" && "id" in peer) {
         const id = peer.id;
@@ -82135,7 +81996,7 @@ function getCachedSenderInfo(messageFromId) {
     if (!senderId) {
         return null;
     }
-    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_21__.EntityCacheManager.getInstance().get(senderId);
+    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_22__.EntityCacheManager.getInstance().get(senderId);
     if (senderEntity?.className === "User") {
         return {
             id: senderEntity.id?.toString() ?? senderId,
@@ -82154,8 +82015,8 @@ function getCachedSenderInfo(messageFromId) {
     };
 }
 async function sendTelegramUnavailable(req, res, operation, readOnly = true, errorText = "TelegramManager instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
@@ -82175,20 +82036,20 @@ async function sendTelegramUnavailable(req, res, operation, readOnly = true, err
  * The only 503s left are the genuine "dependency down" pre-flight checks (instance/DB unavailable).
  */
 function sendTelegramOperationFailure(req, res, operation, error, errorText, _summary, _readOnly = true) {
-    const status = (0,_tg_events__WEBPACK_IMPORTED_MODULE_6__.isBadTargetError)(error) ? 404 : 500;
+    const status = (0,_tg_events__WEBPACK_IMPORTED_MODULE_7__.isBadTargetError)(error) ? 404 : 500;
     res.status(status).json({
         operation,
         readOnly: false,
         success: false,
         sent: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
         requestId: req.requestId,
     });
 }
 async function sendDatabaseUnavailable(req, res, operation, readOnly = true, errorText = "MongoDB instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
@@ -82197,7 +82058,7 @@ async function sendDatabaseUnavailable(req, res, operation, readOnly = true, err
     });
 }
 function sendDatabaseOperationFailure(req, res, operation, error, errorText, summary, readOnly = true) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -82205,11 +82066,11 @@ function sendDatabaseOperationFailure(req, res, operation, error, errorText, sum
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
@@ -82225,11 +82086,11 @@ function sendTelegramOperationSuccess(req, res, operation, message, payload = {}
     });
 }
 async function getTelegramClientForOperation(req, res, operation, readOnly = false) {
-    if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist())) {
+    if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
         await sendTelegramUnavailable(req, res, operation, readOnly);
         return null;
     }
-    const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
+    const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
     if (!client) {
         await sendTelegramUnavailable(req, res, operation, readOnly, "Telegram client instance not available");
         return null;
@@ -82237,11 +82098,11 @@ async function getTelegramClientForOperation(req, res, operation, readOnly = fal
     return client;
 }
 async function getTelegramManagerForOperation(req, res, operation, readOnly = false) {
-    if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist())) {
+    if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
         await sendTelegramUnavailable(req, res, operation, readOnly);
         return null;
     }
-    return _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance();
+    return _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
 }
 function buildTelegramRouteData(req) {
     const data = {};
@@ -82258,13 +82119,13 @@ function buildTelegramRouteData(req) {
 }
 async function resetRecentUserAfterService(chatId) {
     try {
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout)(`https://ums.paidgirls.site/resetRecentUser?chatId=${encodeURIComponent(chatId)}`, { timeout: 5000 }, 1);
+        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_16__.fetchWithTimeout)(`https://ums.paidgirls.site/resetRecentUser?chatId=${encodeURIComponent(chatId)}`, { timeout: 5000 }, 1);
         if (!response) {
             logger.warn(`Completed service for ${chatId}, but resetRecentUser did not return a response`);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `resetRecentUserAfterService.${chatId}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `resetRecentUserAfterService.${chatId}`, false);
     }
 }
 async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
@@ -82276,8 +82137,8 @@ async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
             return;
         const data = buildTelegramRouteData(req);
         const playback = longShow
-            ? await (0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.executehsl)(tg, chatId, data)
-            : await (0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.executehs)(tg, chatId, data);
+            ? await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.executehsl)(tg, chatId, data)
+            : await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.executehs)(tg, chatId, data);
         if (resetRecentUser && playback.recorded) {
             await resetRecentUserAfterService(chatId);
         }
@@ -82289,7 +82150,7 @@ async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, longShow ? "Error in /executehsl endpoint" : "Error in /executehs endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, longShow ? "Error in /executehsl endpoint" : "Error in /executehs endpoint");
         sendTelegramOperationFailure(req, res, operation, error, longShow ? "Failed to execute long handshake" : "Failed to execute handshake", longShow ? "Telegram long handshake execution failed" : "Telegram handshake execution failed", false);
     }
 }
@@ -82322,7 +82183,7 @@ async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
  *             schema:
  *               type: boolean
  */
-router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "request-call";
     const chatId = req.params.chatId?.trim();
     const force = req.query.force === "true";
@@ -82341,7 +82202,7 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
     try {
         if (!(await getTelegramManagerForOperation(req, res, operation)))
             return;
-        const requested = Boolean(await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_4__.requestCall)(chatId, force, "API"));
+        const requested = Boolean(await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_5__.requestCall)(chatId, force, "API"));
         res.status(200).json({
             operation,
             readOnly: false,
@@ -82353,7 +82214,7 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to request call", "Telegram call request failed", false);
     }
 });
@@ -82401,13 +82262,13 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               items:
  *                 type: object
  */
-router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "chat-history";
     try {
         const chatId = req.params.chatId;
         const requestId = req.requestId || "unknown";
         if (!chatId || chatId.trim() === "") {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_25__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_26__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
             return;
         }
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
@@ -82417,13 +82278,13 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
         // Validate parameters
         if (offset === null || minId === null || limit === null || maxId === null || limit < 1) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_25__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_26__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
             return;
         }
         // Validate limit to prevent abuse
         const maxLimit = 100;
         const safeLimit = Math.min(Math.max(limit, 1), maxLimit);
-        if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist())) {
+        if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
             logger.error("Telegram manager unavailable for chat history");
             await sendTelegramUnavailable(req, res, operation, true, "Telegram client instance not available");
             return;
@@ -82432,7 +82293,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         let messages = [];
         let hasMore = false;
         try {
-            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
+            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_11__.withTimeout)(() => (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
                 timeout: 30000,
                 errorMessage: `GetMessages timeout for chatId: ${chatId}`,
                 throwErr: true,
@@ -82471,7 +82332,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /chat/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /chat/:chatId endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
     }
 });
@@ -82499,7 +82360,7 @@ router.get("/chat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *             schema:
  *               type: boolean
  */
-router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-call-request";
     const chatId = req.params.chatId?.trim();
     if (!chatId) {
@@ -82534,7 +82395,7 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to delete call request", "Telegram call request cleanup failed", false);
     }
 });
@@ -82543,7 +82404,7 @@ router.get("/deletecallrequest/:chatId", _middlewares_leader_middleware__WEBPACK
  * mode on|off|default sets a live override (default = follow INHOUSE_CALLS from config/env).
  * Takes effect for the next queued call; a call in progress finishes.
  */
-router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "in-house-calls-switch";
     const mode = req.params.mode?.trim().toLowerCase();
     if (mode !== undefined && !["on", "off", "default"].includes(mode)) {
@@ -82552,8 +82413,8 @@ router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _middlewares_leader_middl
     }
     try {
         if (mode)
-            (0,_modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)(mode);
-        const manager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance();
+            (0,_modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_20__.setInHouseCallsOverride)(mode);
+        const manager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
         const callManager = manager?.callManager;
         let supported = null;
         if (callManager) {
@@ -82567,13 +82428,13 @@ router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _middlewares_leader_middl
         res.status(200).json({
             operation,
             success: true,
-            ...(0,_modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState)(),
+            ...(0,_modules_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_20__.inHouseCallsSwitchState)(),
             supported,
             requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /calls/inhouse endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /calls/inhouse endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to update in-house calls switch", "In-house calls switch failed", false);
     }
 });
@@ -82652,10 +82513,10 @@ router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _middlewares_leader_middl
  *               type: object
  *               example: { operation: "execute-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, false));
+router.get("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, false));
 // The VCUI uses POST + keepalive so this completion can finish after its
 // five-second call-ended screen redirects. GET remains unchanged for callers.
-router.post("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, true));
+router.post("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, true));
 /**
  * @swagger
  * /executehsl/{chatId}:
@@ -82731,8 +82592,8 @@ router.post("/executehs/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "execute-long-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, false));
-router.post("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, true));
+router.get("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, false));
+router.post("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, true));
 /**
  * @swagger
  * /senddmp/{chatId}:
@@ -82758,15 +82619,15 @@ router.post("/executehsl/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               type: object
  *               example: { operation: "send-demo-media-package", success: true, chatId: "12345" }
  */
-router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-demo-media-package";
     try {
         const chatId = req.params.chatId;
         const tg = await getTelegramClientForOperation(req, res, operation);
         if (!tg)
             return;
-        const files = await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_7__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
-        const peer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_8__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        const files = await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_8__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
+        const peer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_9__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
         const sentDmp = await sendOrQueued((0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, {
             file: files,
             message: "Take Demo Video Call, I Will show you Directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
@@ -82778,7 +82639,7 @@ router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_
         sendTelegramOperationSuccess(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error sending demo video call");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error sending demo video call");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
     }
 });
@@ -82807,20 +82668,20 @@ router.get("/senddmp/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_
  *               type: object
  *               example: { operation: "delete-chat", success: true, chatId: "12345" }
  */
-router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "delete-chat";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const deleted = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_9__.deleteChat)(chatId);
+        const deleted = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_10__.deleteChat)(chatId);
         if (deleted === false) {
             throw new Error("deleteChat returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "Chat deleted", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /deletechat endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /deletechat endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
     }
 });
@@ -82849,20 +82710,20 @@ router.get("/deletechat/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *               type: object
  *               example: { operation: "block-user", success: true, chatId: "12345" }
  */
-router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "block-user";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const blocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_9__.blockUser)(chatId);
+        const blocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_10__.blockUser)(chatId);
         if (blocked === false) {
             throw new Error("blockUser returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "User blocked", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /blockuser endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /blockuser endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
     }
 });
@@ -82891,20 +82752,20 @@ router.get("/blockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTE
  *               type: object
  *               example: { operation: "unblock-user", success: true, chatId: "12345" }
  */
-router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "unblock-user";
     try {
         const chatId = req.params.chatId;
         if (!(await getTelegramClientForOperation(req, res, operation)))
             return;
-        const unblocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_9__.unblockUser)(chatId);
+        const unblocked = await (0,_telegram_utils_telegramUtils__WEBPACK_IMPORTED_MODULE_10__.unblockUser)(chatId);
         if (unblocked === false) {
             throw new Error("unblockUser returned false");
         }
         sendTelegramOperationSuccess(req, res, operation, "User unblock completed", { chatId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /unblockuser endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /unblockuser endpoint");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
     }
 });
@@ -82943,7 +82804,7 @@ router.get("/unblockuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *             schema:
  *               type: object
  */
-router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-external-message";
     const chatId = req.params.chatId?.trim();
     const rawMessage = typeof req.query.msg === "string" ? req.query.msg : "";
@@ -82979,15 +82840,15 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         let db;
         let userDetail;
         try {
-            if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_11__.UserDataDtoCrud.isInstanceExist()) {
+            if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.isInstanceExist()) {
                 await sendDatabaseUnavailable(req, res, operation, false);
                 return;
             }
-            db = _core_dbservice__WEBPACK_IMPORTED_MODULE_11__.UserDataDtoCrud.getInstance();
+            db = _core_dbservice__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance();
             userDetail = await db.read(chatId);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
             sendDatabaseOperationFailure(req, res, operation, error, "Failed to load user before sending message", "External message user lookup failed", false);
             return;
         }
@@ -83017,7 +82878,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
             });
             return;
         }
-        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
+        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_11__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
             timeout: 5000,
             errorMessage: "GetMessages Timeout",
             throwErr: false,
@@ -83038,16 +82899,16 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
             });
             return;
         }
-        if (req.query.force !== "true" && !(0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetail)) {
+        if (req.query.force !== "true" && !(0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetail)) {
             logger.log("Skipping Paid User Service Reply");
-            await (0,_index__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithButton)(`Failed to send External Message: ${msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
-            await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_5__.deleteEventsForChat)(chatId).catch((e) => logger.error("event delete failed", e instanceof Error ? e.message : String(e)));
+            await (0,_index__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithButton)(`Failed to send External Message: ${msg}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+            await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_6__.deleteEventsForChat)(chatId).catch((e) => logger.error("event delete failed", e instanceof Error ? e.message : String(e)));
             try {
                 const updatedUserDetail = await db.update(chatId, { paidReply: true, limitTime: Date.now() });
                 Object.assign(userDetail, updatedUserDetail);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
                 sendDatabaseOperationFailure(req, res, operation, error, "Failed to update user before sending message", "External message user state update failed", false);
                 return;
             }
@@ -83065,7 +82926,10 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
             return;
         }
         logger.log("Sending External Message to: ", chatId);
-        const extPeer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_8__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        // A deliberate operator send counts like the user writing: one real attempt even if the chat was
+        // refused by PEER_FLOOD (a failure marks it refused again).
+        _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__.floodGate.clearRefused(chatId);
+        const extPeer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_9__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
         const outcome = await sendOrQueued((0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(extPeer, {
             message: msg,
             linkPreview: false,
@@ -83081,7 +82945,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send external message", "External message send failed", false);
     }
 });
@@ -83110,7 +82974,7 @@ router.get("/sendmessage/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
  *               type: object
  *               example: { operation: "send-video-call-link", success: true, chatId: "12345" }
  */
-router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "send-video-call-link";
     try {
         const chatId = req.params.chatId;
@@ -83119,12 +82983,12 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
             return;
         const message = `https://zomCall.netlify.app/${process.env.clientId}/${chatId}`;
         const payload = { message, linkPreview: false };
-        const firstPeer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_8__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        const firstPeer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_9__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
         const firstSend = await sendOrQueued((0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(firstPeer, payload), { chatId, label: "sendvclink", kind: "link" }), "sendvclink");
         // The first send answers the HTTP request immediately (no minutes-long hold). The follow-up is a
         // background timer, so it can wait out a flood limit.
         scheduleTelegramRouteTask(async () => {
-            const peer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_8__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+            const peer = (await (0,_telegram_utils_send_message__WEBPACK_IMPORTED_MODULE_9__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
             await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, payload), { chatId, label: "sendvclink.followUp", kind: "link" });
         }, 10000, "Error sending delayed video call link");
         sendTelegramOperationSuccess(req, res, operation, "Video call link sent and follow-up scheduled", {
@@ -83134,7 +82998,7 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error sending video call link");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error sending video call link");
         sendTelegramOperationFailure(req, res, operation, error, "Failed to send video call link", "Telegram video call link send failed", false);
     }
 });
@@ -83161,12 +83025,12 @@ router.get("/sendvclink/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
  *                 username:
  *                   type: string
  */
-router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(snapshot, "telegram.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_23__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(snapshot, "telegram.connection");
         if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "telegram.connection",
                 owner: "telegram",
@@ -83187,26 +83051,26 @@ router.get("/checkhealth", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
             });
             return;
         }
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.healthCheckHttpStatus)(check)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.healthCheckHttpStatus)(check)).json({
             status: toLegacyTelegramHealthStatus(check),
             username: process.env.username,
             readOnly: true,
             health: snapshot,
             healthStatus: check.status,
             check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(snapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.createHealthRecoveryPlan)(snapshot),
             requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /checkHealth endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /checkHealth endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
             summary: "Error checking Telegram connection",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_24__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -83251,18 +83115,18 @@ function toLegacyTelegramHealthStatus(check) {
  *             schema:
  *               type: object
  */
-router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.instanceExist())) {
+        if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "telegram-get-me");
             return;
         }
-        const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient();
+        const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
         const me = await client.getMe();
         res.json(me);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /getMe endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /getMe endpoint");
         sendTelegramOperationFailure(req, res, "telegram-get-me", error, "Failed to get Telegram user", "Telegram getMe failed");
     }
 });
@@ -83379,7 +83243,7 @@ router.get("/getme", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18_
  *                   description:
  *                     type: string
  */
-router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "list-dialogs";
     try {
         const requestId = req.requestId || "unknown";
@@ -83410,7 +83274,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
         const requestedLimit = parseOptionalNonNegativeInteger(req.query.limit, 100);
         const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
         if (requestedLimit === null || offset === null) {
-            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_25__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
+            (0,_utils_apiResponse__WEBPACK_IMPORTED_MODULE_26__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
             return;
         }
         // MEMORY FIX: Enforce maximum limit to prevent excessive memory usage
@@ -83464,30 +83328,30 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             try {
                                 // Keep this list endpoint cache-only. Live entity lookups can outlive
                                 // request timeouts and keep logging after the response has been sent.
-                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_21__.EntityCacheManager.getInstance().get(dialog.id);
+                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_22__.EntityCacheManager.getInstance().get(dialog.id);
                                 if (entity) {
                                     // Extract comprehensive entity information
-                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.User) {
+                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.User) {
                                         const user = entity;
                                         const userStatus = user.status;
                                         let wasOnline = null;
                                         // Extract wasOnline from different status types
-                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.UserStatusOffline) {
+                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.UserStatusOffline) {
                                             wasOnline = userStatus.wasOnline || null;
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.UserStatusRecently) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.UserStatusRecently) {
                                             wasOnline = null; // Recently doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.UserStatusLastWeek) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.UserStatusLastWeek) {
                                             wasOnline = null; // LastWeek doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.UserStatusLastMonth) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.UserStatusLastMonth) {
                                             wasOnline = null; // LastMonth doesn't have wasOnline
                                         }
                                         enhancedInfo = {
                                             username: user.username || null,
                                             phone: user.phone || null,
-                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.UserStatusOnline,
+                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.UserStatusOnline,
                                             lastSeen: wasOnline,
                                             isBot: user.bot || false,
                                             isVerified: user.verified || false,
@@ -83501,7 +83365,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             isFake: user.fake || false
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.Chat) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.Chat) {
                                         const chat = entity;
                                         enhancedInfo = {
                                             participantsCount: chat.participantsCount || null,
@@ -83510,7 +83374,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                                             migratedTo: chat.migratedTo ? String(chat.migratedTo) : null
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.Channel) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.Channel) {
                                         const channel = entity;
                                         enhancedInfo = {
                                             username: channel.username || null,
@@ -83559,7 +83423,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                             // MEMORY FIX: Limit entity fetches to prevent memory leaks
                             let senderInfo = null;
                             // Check if message is Api.Message (has fromId property)
-                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.Message;
+                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.Message;
                             const messageFromId = isApiMessage ? message.fromId : null;
                             if (messageFromId && totalProcessed < MAX_ENTITY_FETCHES) {
                                 senderInfo = getCachedSenderInfo(messageFromId);
@@ -83623,7 +83487,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
                         logger.warn(`Error enhancing dialog:`, error instanceof Error ? error.message : String(error));
                         // Return basic dialog info on error
                         const errorMessage = dialog.message;
-                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_24__.Api.Message;
+                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_25__.Api.Message;
                         const errorMessageText = isApiMessage ? errorMessage.message || "" : "";
                         const errorMessageOut = isApiMessage ? errorMessage.out || false : false;
                         return {
@@ -83683,7 +83547,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /dialogs endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /dialogs endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
         }
@@ -83713,7 +83577,7 @@ router.get("/dialogs", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1
  *             schema:
  *               type: object
  */
-router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "dialog-info";
     try {
         const chatId = req.params.chatId;
@@ -83732,14 +83596,14 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
             return;
         try {
             // Get entity info — check cache first, then network
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_21__.EntityCacheManager.getInstance().get(chatId);
-            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => client.getEntity(chatId), {
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_22__.EntityCacheManager.getInstance().get(chatId);
+            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_11__.withTimeout)(() => client.getEntity(chatId), {
                 timeout: 10000,
                 errorMessage: `GetEntity timeout for chatId: ${chatId}`,
                 throwErr: true,
             });
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_21__.EntityCacheManager.getInstance().put(chatId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_22__.EntityCacheManager.getInstance().put(chatId, entity);
             }
             // Type guards and safe property access
             const isUser = entity.className === "User";
@@ -83782,7 +83646,7 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialog info", "Telegram dialog info failed", true);
         }
@@ -83815,7 +83679,7 @@ router.get("/dialog/:chatId/info", _middlewares_leader_middleware__WEBPACK_IMPOR
  *                 success:
  *                   type: boolean
  */
-router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_18__.leaderOnlyMiddleware, async (req, res) => {
+router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, async (req, res) => {
     const operation = "mark-dialog-read";
     try {
         const chatId = req.params.chatId;
@@ -83833,7 +83697,7 @@ router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         if (!client)
             return;
         try {
-            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => client.markAsRead(chatId), {
+            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_11__.withTimeout)(() => client.markAsRead(chatId), {
                 timeout: 10000,
                 errorMessage: `MarkAsRead timeout for chatId: ${chatId}`,
                 throwErr: true,
@@ -83850,7 +83714,7 @@ router.post("/markasread/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
         if (!res.headersSent) {
             sendTelegramOperationFailure(req, res, operation, error, "Failed to mark dialog as read", "Telegram mark dialog read failed", false);
         }
@@ -86644,13 +86508,13 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-async function directSendOp(op) {
+async function directSendOp(op, chatId) {
     try {
         return await op();
     }
     catch (error) {
         if ((0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_3__.classifyFlood)(error)?.kind === 'peer')
-            _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_2__.floodGate.notePeerFlood();
+            _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_2__.floodGate.notePeerFlood(undefined, chatId || null);
         throw error;
     }
 }
@@ -86677,7 +86541,7 @@ function floodSafeSend(client, entity, params, ctx = {}) {
     if (isOwnChannel(entity))
         return client.sendMessage(entity, params);
     if (ctx.direct)
-        return directSendOp(() => client.sendMessage(entity, params));
+        return directSendOp(() => client.sendMessage(entity, params), String(ctx.chatId ?? chatIdOf(entity)));
     return floodSafe(() => client.sendMessage(entity, params), { ...ctx, chatId: ctx.chatId ?? chatIdOf(entity) });
 }
 /** Throwing file send: client.sendFile through the queue (kind 'media'). */
@@ -86685,7 +86549,7 @@ function floodSafeSendFile(client, entity, params, ctx = {}) {
     if (isOwnChannel(entity))
         return client.sendFile(entity, params);
     if (ctx.direct)
-        return directSendOp(() => client.sendFile(entity, params));
+        return directSendOp(() => client.sendFile(entity, params), String(ctx.chatId ?? chatIdOf(entity)));
     return floodSafe(() => client.sendFile(entity, params), { kind: 'media', ...ctx, chatId: ctx.chatId ?? chatIdOf(entity) });
 }
 /**
@@ -86901,10 +86765,6 @@ async function MarkAsRead(client, markAll) {
     }
     if (!_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_12__.globalCanReply) {
         logger.log("Skipping markAsRead - globalCanReply disabled.");
-        return;
-    }
-    if (!(0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_12__.isFloodGateOpen)()) {
-        logger.log(`Skipping markAsRead - shared flood gate closed for ${Math.ceil((0,_event_handlers_globalState__WEBPACK_IMPORTED_MODULE_12__.getFloodGateRemainingMs)() / 1000)}s.`);
         return;
     }
     lastMarkedAt = now;
