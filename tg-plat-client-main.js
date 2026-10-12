@@ -5989,7 +5989,8 @@ function stripUndefined(obj) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   AudioFeeder: () => (/* binding */ AudioFeeder),
-/* harmony export */   AudioSourceError: () => (/* binding */ AudioSourceError)
+/* harmony export */   AudioSourceError: () => (/* binding */ AudioSourceError),
+/* harmony export */   SOURCE_EXIT_WAIT_MS: () => (/* binding */ SOURCE_EXIT_WAIT_MS)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
@@ -6003,6 +6004,15 @@ const RESUME_BUFFER_MS = 1000;
 const MAX_CATCH_UP_MS = 200;
 /** Remote audio beyond delay + this is dropped, so the echo never drifts later. */
 const MAX_REMOTE_SLACK_MS = 1000;
+/** After ffmpeg's stdout closes, how long to wait for its exit status before deciding without it. */
+const SOURCE_EXIT_WAIT_MS = 1000;
+/**
+ * Rollback switch: `CALL_CHILD_WAIT_FOR_EXIT=true` restores the old behaviour (the source counts as done
+ * only once Node reports ffmpeg's exit).
+ */
+function sourceWaitsForExit() {
+    return process.env.CALL_CHILD_WAIT_FOR_EXIT === 'true';
+}
 /**
  * Feeds a call's microphone track itself (ntgcalls MediaSource.EXTERNAL) instead of letting
  * ntgcalls read ffmpeg: the show's PCM is paced out in 10 ms frames, and the caller's own voice
@@ -6035,6 +6045,7 @@ class AudioFeeder {
         this.sending = false;
         this.totalBytes = 0;
         this.failed = false;
+        this.exitWait = null;
         this.o = options;
         this.bytesPerMs = (options.sampleRate * options.channels * 2) / 1000;
         this.frameBytes = this.bytesPerMs * FRAME_MS;
@@ -6070,6 +6081,7 @@ class AudioFeeder {
         if (this.timer)
             (this.o.clearInterval ?? ((h) => clearInterval(h)))(this.timer);
         this.timer = null;
+        this.clearExitWait();
         try {
             this.proc?.kill('SIGKILL');
         }
@@ -6093,7 +6105,30 @@ class AudioFeeder {
                 proc.stdout?.pause();
             }
         });
+        // ntgcalls replaces libuv's SIGCHLD handler during in-house calls; after that Node never reports a
+        // child's exit, so 'close' never comes, the show never ends (underruns until the duration cap).
+        // stdout closing means ffmpeg wrote everything: wait briefly for the exit status, then decide
+        // without it (some audio = the show ended; none = a media failure, never a fake "delivered").
+        proc.stdout?.on('end', () => {
+            if (this.sourceDone || this.stopped || sourceWaitsForExit())
+                return;
+            const set = this.o.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+            this.exitWait = set(() => {
+                this.exitWait = null;
+                if (this.sourceDone || this.stopped)
+                    return;
+                this.sourceDone = true;
+                if (this.totalBytes > 0)
+                    return;
+                this.failed = true;
+                this.o.onError?.(new AudioSourceError('audio source closed its output with no audio and its exit was never reported'));
+            }, SOURCE_EXIT_WAIT_MS);
+            this.exitWait?.unref?.();
+        });
         proc.on('close', (code, signal) => {
+            this.clearExitWait();
+            if (this.sourceDone)
+                return;
             this.sourceDone = true;
             if (this.stopped)
                 return;
@@ -6106,6 +6141,7 @@ class AudioFeeder {
             this.o.onError?.(new AudioSourceError(`audio source exited${code != null ? ` with code ${code}` : ''}${signal ? ` (signal ${signal})` : ''} after ${this.totalBytes} bytes`));
         });
         proc.on('error', (error) => {
+            this.clearExitWait();
             this.sourceDone = true;
             this.failed = true;
             this.o.onError?.(new AudioSourceError(`audio source failed: ${error?.message ?? error}`));
@@ -6225,6 +6261,12 @@ class AudioFeeder {
         const ms = Math.max(0, this.o.echo?.delayMs ?? 0);
         const bytes = Math.round(ms * this.bytesPerMs);
         return bytes - (bytes % 2);
+    }
+    clearExitWait() {
+        if (this.exitWait == null)
+            return;
+        (this.o.clearTimeout ?? ((h) => clearTimeout(h)))(this.exitWait);
+        this.exitWait = null;
     }
     finishOnce() {
         if (this.ended)
@@ -61565,8 +61607,10 @@ class InHouseCallService {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FFPROBE_EXIT_WAIT_MS: () => (/* binding */ FFPROBE_EXIT_WAIT_MS),
 /* harmony export */   FFPROBE_GRACE_MS: () => (/* binding */ FFPROBE_GRACE_MS),
 /* harmony export */   FFPROBE_TIMEOUT_MS: () => (/* binding */ FFPROBE_TIMEOUT_MS),
+/* harmony export */   childWaitsForExit: () => (/* binding */ childWaitsForExit),
 /* harmony export */   runFfprobe: () => (/* binding */ runFfprobe)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
@@ -61578,13 +61622,81 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg
 const FFPROBE_TIMEOUT_MS = 20000;
 /** Extra wait for execFile's own timeout to report before the hard deadline gives up on the child. */
 const FFPROBE_GRACE_MS = 5000;
+/** After ffprobe's stdout closes, how long to wait for its exit status before trusting the output. */
+const FFPROBE_EXIT_WAIT_MS = 1000;
 /**
- * Runs ffprobe and resolves with its stdout, or null on error/timeout. Never waits on the child's exit
- * alone: on the fleet an ffprobe that had exited stayed a zombie (its exit was never reported to Node),
- * execFile's callback never fired and the in-house call awaiting it hung for hours (arpitha2
- * 2026-10-11). A hard deadline just past execFile's own timeout resolves null and kills the child.
+ * Rollback switch: `CALL_CHILD_WAIT_FOR_EXIT=true` restores the old behaviour (result only once Node
+ * reports the child's exit). Default: the result is taken when stdout closes.
+ */
+function childWaitsForExit() {
+    return process.env.CALL_CHILD_WAIT_FOR_EXIT === 'true';
+}
+/**
+ * Runs ffprobe and resolves with its stdout, or null on error/timeout.
+ *
+ * Does not depend on Node seeing the child's exit. ntgcalls (boost::process / asio signal_set) replaces
+ * libuv's SIGCHLD handler during in-house calls; from then on no child exit is ever reported in that
+ * process (the child stays a zombie). Waiting for the exit made every later probe fail, so every
+ * in-house call fell back with no_video (kavya1 / shruthi1 / nidhi1, 2026-10-12). ffprobe's stdout
+ * closing means it has written everything: if its exit status does not follow within
+ * FFPROBE_EXIT_WAIT_MS, the output is used as is (empty output = null).
  */
 function runFfprobe(args, opts = {}) {
+    if (childWaitsForExit())
+        return runFfprobeOnExit(args, opts);
+    const timeoutMs = opts.timeoutMs ?? FFPROBE_TIMEOUT_MS;
+    const exitWaitMs = opts.exitWaitMs ?? FFPROBE_EXIT_WAIT_MS;
+    return new Promise((resolve) => {
+        let settled = false;
+        let deadline;
+        let exitWait;
+        const chunks = [];
+        const finish = (value) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(deadline);
+            clearTimeout(exitWait);
+            resolve(value);
+        };
+        let child;
+        try {
+            child = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(opts.bin ?? 'ffprobe', args, { stdio: ['ignore', 'pipe', 'ignore'] });
+        }
+        catch {
+            finish(null);
+            return;
+        }
+        child.on('error', () => finish(null));
+        child.on('close', (code, signal) => finish(code === 0 && !signal ? Buffer.concat(chunks).toString() : null));
+        child.stdout?.on('data', (chunk) => { chunks.push(chunk); });
+        child.stdout?.on('end', () => {
+            if (settled)
+                return;
+            exitWait = setTimeout(() => {
+                if (settled)
+                    return;
+                const out = Buffer.concat(chunks).toString();
+                logger.warn(`[in-house-calls] ffprobe pid=${child.pid ?? '?'} finished its output but Node never saw it exit (child-exit tracking lost in this process); using the output`);
+                finish(out.trim() ? out : null);
+            }, exitWaitMs);
+            exitWait.unref?.();
+        });
+        deadline = setTimeout(() => {
+            if (settled)
+                return;
+            logger.warn(`[in-house-calls] ffprobe pid=${child.pid ?? '?'} produced no result within ${Math.round(timeoutMs / 1000)}s; continuing without it`);
+            try {
+                child.kill('SIGKILL');
+            }
+            catch { /* already gone */ }
+            finish(null);
+        }, timeoutMs);
+        deadline.unref?.();
+    });
+}
+/** Pre-2026-10-12 behaviour (rollback): execFile, result only on the reported exit, hard deadline. */
+function runFfprobeOnExit(args, opts) {
     const timeoutMs = opts.timeoutMs ?? FFPROBE_TIMEOUT_MS;
     const graceMs = opts.graceMs ?? FFPROBE_GRACE_MS;
     return new Promise((resolve) => {
