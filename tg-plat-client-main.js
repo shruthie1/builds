@@ -6007,13 +6007,6 @@ const MAX_REMOTE_SLACK_MS = 1000;
 /** After ffmpeg's stdout closes, how long to wait for its exit status before deciding without it. */
 const SOURCE_EXIT_WAIT_MS = 1000;
 /**
- * Rollback switch: `CALL_CHILD_WAIT_FOR_EXIT=true` restores the old behaviour (the source counts as done
- * only once Node reports ffmpeg's exit).
- */
-function sourceWaitsForExit() {
-    return process.env.CALL_CHILD_WAIT_FOR_EXIT === 'true';
-}
-/**
  * Feeds a call's microphone track itself (ntgcalls MediaSource.EXTERNAL) instead of letting
  * ntgcalls read ffmpeg: the show's PCM is paced out in 10 ms frames, and the caller's own voice
  * (ntgcalls onFrames, PLAYBACK) is mixed back in at `echo.gain`, `echo.delayMs` late.
@@ -6110,7 +6103,7 @@ class AudioFeeder {
         // stdout closing means ffmpeg wrote everything: wait briefly for the exit status, then decide
         // without it (some audio = the show ended; none = a media failure, never a fake "delivered").
         proc.stdout?.on('end', () => {
-            if (this.sourceDone || this.stopped || sourceWaitsForExit())
+            if (this.sourceDone || this.stopped)
                 return;
             const set = this.o.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
             this.exitWait = set(() => {
@@ -39280,6 +39273,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MONTH_PATTERN: () => (/* binding */ MONTH_PATTERN),
 /* harmony export */   STATUS_BAR: () => (/* binding */ STATUS_BAR),
 /* harmony export */   TRANSACTION_CONTEXT: () => (/* binding */ TRANSACTION_CONTEXT),
+/* harmony export */   contextWindow: () => (/* binding */ contextWindow),
 /* harmony export */   hasTransactionContext: () => (/* binding */ hasTransactionContext),
 /* harmony export */   monthNumber: () => (/* binding */ monthNumber),
 /* harmony export */   monthToNumLegacy: () => (/* binding */ monthToNumLegacy),
@@ -39314,10 +39308,12 @@ function monthNumber(monthStr) {
     const v = MONTH_TO_NUM[cap] || MONTH_TO_NUM[cap.slice(0, 3)];
     return v ? parseInt(v, 10) : null;
 }
+/** The 50 chars either side of a match (lower-cased), where transaction / status-bar words are looked for. */
+function contextWindow(text, start, matchLen) {
+    return (text.slice(Math.max(0, start - 50), start) + text.slice(start + matchLen, start + matchLen + 50)).toLowerCase();
+}
 function hasTransactionContext(text, start, matchLen) {
-    const before = text.slice(Math.max(0, start - 50), start).toLowerCase();
-    const after = text.slice(start + matchLen, start + matchLen + 50).toLowerCase();
-    const context = before + after;
+    const context = contextWindow(text, start, matchLen);
     if (STATUS_BAR.test(context))
         return false;
     return TRANSACTION_CONTEXT.test(context);
@@ -39536,6 +39532,10 @@ __webpack_require__.r(__webpack_exports__);
 //  - R50 precedence kept: a transaction-context date found in the text overrides the model's date.
 //  - V2 ids: R51 (O->0 cleanup only next to digits, so "Oct"/"Nov" survive), R54 (year-boundary roll-back
 //    for an inferred year). Without them the legacy text cleanup and year handling are kept.
+//  - Always on (not V2-gated): R57 a printed "12 October 2026 at 11:55 PM" next to transaction words is not vetoed by a status bar
+//    ("5G", "45%") within 50 chars: on short receipts the phone's status bar always sits that close, so
+//    the model's misread time stood (meghana1 2026-10-12: text 11:55 PM, model 13:55 -> "Old payment").
+//  - R58: a history screen's "2 minutes ago" / "just now" is a context time (most recent entry wins).
 
 
 const IST_OFFSET_MS = 330 * 60 * 1000;
@@ -39615,23 +39615,25 @@ function extractFromContext(contextText, v2) {
 }
 function extractFromText(text) {
     const ok = (m) => (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.hasTransactionContext)(text, m.index, m[0].length);
+    // R57: a named-month date with a clock needs transaction words around it; a status bar does not veto it.
+    const okNamed = (m) => _time_compat__WEBPACK_IMPORTED_MODULE_0__.TRANSACTION_CONTEXT.test((0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.contextWindow)(text, m.index, m[0].length));
     const build = (date, clock) => isValidYmd(date.y, date.mo, date.d) && (!clock || isValidHms(clock.h, clock.mi, clock.s)) ? { date, clock } : null;
     let m;
     let f;
     m = text.match(new RegExp(`(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})[,]?\\s*(?:at\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, 'i'));
-    if (m && ok(m)) {
+    if (m && okNamed(m)) {
         const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[2]);
         if (mon && (f = build(ymd(m[3], mon, m[1]), { h: to24h(parseInt(m[4], 10), m[6]), mi: parseInt(m[5], 10), s: 0 })))
             return f;
     }
     m = text.match(new RegExp(`(\\d{1,2}):(\\d{2})\\s*(am|pm)\\s+(?:on\\s+)?(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})`, 'i'));
-    if (m && ok(m)) {
+    if (m && okNamed(m)) {
         const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[5]);
         if (mon && (f = build(ymd(m[6], mon, m[4]), { h: to24h(parseInt(m[1], 10), m[3]), mi: parseInt(m[2], 10), s: 0 })))
             return f;
     }
     m = text.match(new RegExp(`(\\d{1,2})\\s+${_time_compat__WEBPACK_IMPORTED_MODULE_0__.MONTH_PATTERN}\\s+(\\d{4})\\s+(\\d{1,2}):(\\d{2})\\b`, 'i'));
-    if (m && ok(m)) {
+    if (m && okNamed(m)) {
         const mon = (0,_time_compat__WEBPACK_IMPORTED_MODULE_0__.monthNumber)(m[2]);
         if (mon && (f = build(ymd(m[3], mon, m[1]), { h: parseInt(m[4], 10), mi: parseInt(m[5], 10), s: 0 })))
             return f;
@@ -39658,6 +39660,20 @@ function extractFromText(text) {
             return f;
     }
     return null;
+}
+/** R58: the most recent "N minutes/hours ago" (or "just now") on a history screen, as an IST moment. */
+function relativeFromText(text, nowMs) {
+    const t = text.toLowerCase();
+    let agoMs = /\bjust now\b/.test(t) ? 0 : null;
+    for (const m of t.matchAll(/\b(\d{1,3})\s*(min|mins|minute|minutes|hr|hrs|hour|hours)\s+ago\b/g)) {
+        const ms = parseInt(m[1], 10) * (m[2].startsWith('h') ? 3600000 : 60000);
+        if (agoMs === null || ms < agoMs)
+            agoMs = ms;
+    }
+    if (agoMs === null)
+        return null;
+    const p = istParts(nowMs - agoMs);
+    return { date: { y: p.y, mo: p.mo, d: p.d }, clock: { h: p.h, mi: p.mi, s: 0 } };
 }
 /** Manual (host-TZ independent) parse of a model-supplied time string. Zone-carrying ISO strings are converted to IST. */
 function parseTimeString(raw, nowMs) {
@@ -39777,7 +39793,9 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
         }
     }
     // 2. R50: context date overrides the model's date; its clock wins when printed with the date
-    const ctx = contextText.trim() ? extractFromContext(contextText, v2) : null;
+    const ctx = contextText.trim()
+        ? extractFromContext(contextText, v2) ?? relativeFromText(contextText, nowMs)
+        : null;
     let date;
     let clock;
     let source;
@@ -55489,7 +55507,6 @@ function checkTimeBasedResets(chatId, userDetails) {
 var __webpack_filename__ = "src/helpers/timeUtils.ts";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   extractTimestamps: () => (/* binding */ extractTimestamps),
 /* harmony export */   getCurrentDate: () => (/* binding */ getCurrentDate),
 /* harmony export */   getCurrentTime: () => (/* binding */ getCurrentTime),
 /* harmony export */   validateAndFormatTime: () => (/* binding */ validateAndFormatTime),
@@ -55624,86 +55641,6 @@ const getCurrentTime = () => {
         return `${fallback.getHours().toString().padStart(2, "0")}:${fallback.getMinutes().toString().padStart(2, "0")}:${fallback.getSeconds().toString().padStart(2, "0")}`;
     }
 };
-/**
- * Extracts robust and validated timestamps from text in IST format.
- * - Skips first 3 lines if multiline
- * - Skips first 10 characters if single-line
- * - Filters status bar times
- * - Prioritizes transaction/date context
- */
-function extractTimestamps(text) {
-    const results = [];
-    /* ---------- OCR CLEANUP ---------- */
-    const cleaned = text
-        .replace(/[Oo]/g, "0")
-        .replace(/\bl\b/g, "1");
-    const lines = cleaned.split(/\r?\n/).filter(Boolean);
-    const isMultiLine = lines.length > 1;
-    /* ---------- DEFINE SEARCHABLE TEXT ---------- */
-    let searchableText = "";
-    if (isMultiLine) {
-        // Skip first 3 lines (status bar + header noise)
-        searchableText = lines.slice(3).join("\n");
-    }
-    else {
-        // Single line → skip first 10 characters
-        searchableText = cleaned.slice(10);
-    }
-    /* ---------- TIME REGEX ---------- */
-    const timeRegex = /\b(0?[0-9]|1[0-9]|2[0-3])(?:[.:\-]([0-5]\d))?\s*(AM|PM)?\b/gi;
-    let match;
-    while ((match = timeRegex.exec(searchableText)) !== null) {
-        let hour = Number(match[1]);
-        let minute = match[2] ? Number(match[2]) : 0;
-        const ampm = match[3]?.toUpperCase() ?? null;
-        /* ---------- BASIC VALIDATION ---------- */
-        // Reject lone hour like "5" without AM/PM or minutes
-        // But allow hour 0 (midnight) in 24-hour format if it has minutes
-        if (!ampm && !match[2] && hour !== 0)
-            continue;
-        /* ---------- CONTEXT ---------- */
-        const start = match.index;
-        const end = start + match[0].length;
-        const before = searchableText.slice(Math.max(0, start - 40), start).toLowerCase();
-        const after = searchableText.slice(end, end + 40).toLowerCase();
-        const context = before + after;
-        /* ---------- STATUS BAR FILTER ---------- */
-        const statusBarIndicators = /\b(4g|5g|lte|wifi|battery|signal|\d{1,3}%)\b/i;
-        if (!ampm && statusBarIndicators.test(context)) {
-            continue;
-        }
-        /* ---------- DATE / TRANSACTION CONTEXT ---------- */
-        const hasDateContext = /\b(on|at|date|time|transaction|payment|paid|sent|received|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(context);
-        /* ---------- AM/PM CONVERSION ---------- */
-        // Validate 12-hour format: hours should be 1-12 before conversion
-        if (ampm && (hour < 1 || hour > 12)) {
-            continue;
-        }
-        if (ampm) {
-            if (hour === 12 && ampm === "AM") {
-                hour = 0;
-            }
-            else if (hour !== 12 && ampm === "PM") {
-                hour += 12;
-            }
-        }
-        // Validate final hour and minute ranges
-        if (hour > 23 || minute > 59)
-            continue;
-        /* ---------- FINAL FILTER ---------- */
-        if (!ampm && !hasDateContext) {
-            // 24-hour times must have date/transaction context
-            continue;
-        }
-        const timestamp = `${getCurrentDate()}T${hour
-            .toString()
-            .padStart(2, "0")}:${minute.toString().padStart(2, "0")}:00`;
-        if (!ampm || validateTimeConversion(match[0], timestamp)) {
-            results.push(timestamp);
-        }
-    }
-    return results;
-}
 function validateTimeConversion(extractedText, convertedTime) {
     // Normalize OCR mistakes
     let cleanText = extractedText.replace(/[Oo]/g, "0").replace(/\bl\b/g, "1");
@@ -55881,6 +55818,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _messages_standardMessages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../messages/standardMessages */ "./src/messages/standardMessages.ts");
 /* harmony import */ var _messages_paymentMsgs__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../messages/paymentMsgs */ "./src/messages/paymentMsgs.ts");
+/* harmony import */ var _utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/isWithinPastTenMinutes */ "./src/utils/isWithinPastTenMinutes.ts");
+
 
 
 
@@ -55931,144 +55870,135 @@ function isAutomatedUpiNotification(text) {
         'download the app', 'on every payment',
     ]);
 }
+const MINUTE_MS = 60 * 1000;
+const ACCEPT_WITHIN_MS = 12 * 60 * MINUTE_MS;
+/** A user who paid to someone else must not have been on a call in the last 3 minutes. */
+const PAID_OTHERS_CALL_GAP_MS = 3 * MINUTE_MS;
+const CALL_GAP_MS = 5 * MINUTE_MS;
+const FRESH_PAYMENT_MS = 2.5 * MINUTE_MS;
+const NEAR_NOW_MS = 15 * MINUTE_MS;
+/** Users with fewer videos than this get the benefit of the doubt on a bad time. */
+const LENIENT_VIDEO_COUNT = 4;
+/** At or above this amount an unreadable time is accepted. */
+const NO_TIME_CHECK_AMOUNT = 200;
+const OTHER_CLIENT_LIMIT_MS = 30 * MINUTE_MS;
+const PAYMENT_MSG = {
+    oldPayment: "Seems Its **Old payment!!**\n\nPay now Again Baby!!😚😚",
+    confirmTime: "I couldn't confirm **Payment Time**!!\n\nSend Full Screenshot with **Payment Time** visible Baby!!😚",
+    timeUnclear: "I couldn't see **Payment Time** clearly!!\n\nSend me Full Screenshot with **Payment Time** visible Baby!!😚",
+    callOver: "**Your Call is Over Baby!!**\nPay again if u want more**",
+    suspiciousOld: `It is Old Payment!!\n\n**Pay me Now Again!!**\nSend me Latest Screenshot Babyy!!`,
+    suspiciousNotMine: `Seems its Not my Payment!!\n\nSend me Full Screenshot of **My Payment** with **Payment Time** also, I will verify!!`,
+    otherClient: "**This is not my Payment!!\nBye!!**",
+};
+const accept = () => ({ isvalid: true, msg: "" });
+const reject = (msg) => ({ isvalid: false, msg });
+const chatLink = (chatId) => `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`;
+/**
+ * Is this payment screenshot a valid payment to us? Called only for payments to our UPI/merchant.
+ *  - our persona name on it: accept, no time check
+ *  - another client's name on it (and not ours): reject, limit the user 30 min
+ *  - no known name: judged by the payment time (see judgeRecentTime / judgeUnreadableTime / judgePaidToOthers)
+ */
 async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutesImage, didPaidToOthers) {
     const text = `${imageDetails.payeeName} ${imageDetails.payerName} ${imageDetails.text}`.toLowerCase();
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     const otherclients = db.getClientFirstNames();
-    // Own-client match now uses the CURRENT persona names (firstNames + `name` given-name +
-    // dbcoll/product/username) from the live clients DB — not just the internal dbcoll/product
-    // env strings. A genuine payment shows the account's real persona name (e.g. "Shruthie"),
-    // which the old check missed → false-reject. This recognizes it as mine and accepts.
+    // Own-client match uses the CURRENT persona names (firstNames + `name` given-name + dbcoll/product/username)
+    // from the live clients DB: a genuine payment shows the account's real persona name (e.g. "Shruthie").
     const ownClientNames = db.getOwnClientNames();
     const myNameExists = ownClientNames.some((name) => text.includes(name));
     const othersNameExists = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, otherclients);
     const videoCount = Array.isArray(userDetails.videos) ? userDetails.videos.length : 0;
-    logger.log(`ENTRY | chatId=${userDetails.chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} isWithin10minValid=${isWithinPastTenMinutesImage.isValid} isWithin10minResult=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
+    const chatId = userDetails.chatId;
+    logger.log(`ENTRY | chatId=${chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} isWithin10minValid=${isWithinPastTenMinutesImage.isValid} isWithin10minResult=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
     if (myNameExists) {
-        logger.log(`SCENARIO: My name in payment | ACCEPT (no time check) | chatId=${userDetails.chatId}`);
-        return { isvalid: true, msg: "" };
+        logger.log(`SCENARIO: My name in payment | ACCEPT (no time check) | chatId=${chatId}`);
+        return accept();
     }
-    else if (!myNameExists && !othersNameExists) {
-        logger.log(`SCENARIO: No known names in payment | validating time & didPaidToOthers | chatId=${userDetails.chatId}`);
-        if (!didPaidToOthers) {
-            if (isWithinPastTenMinutesImage.result) {
-                const trimmedInput = (imageDetails.time || "").trim();
-                const now = new Date();
-                let paymentTime = new Date(trimmedInput);
-                const currentYear = now.getFullYear();
-                paymentTime.setFullYear(currentYear);
-                // Year-boundary guard (matches isWithinPastTenMinutes): forcing the
-                // current year onto a late-December payment just after New Year shoves
-                // a genuine recent payment ~1 year into the future. Roll it back so a
-                // real payment is not rejected as "Old payment".
-                if (paymentTime.getTime() - now.getTime() > 24 * 60 * 60 * 1000) {
-                    paymentTime.setFullYear(currentYear - 1);
-                }
-                const nowUTC = now.getTime();
-                const paymentTimeUTC = paymentTime.getTime();
-                const timeDifference = nowUTC - paymentTimeUTC;
-                const timeDiffMins = (timeDifference / 1000 / 60).toFixed(2);
-                const callTimeAgoMins = userDetails.callTime ? ((nowUTC - userDetails.callTime) / 1000 / 60).toFixed(2) : "N/A";
-                logger.log(`Sub-scenario: isWithin10min=true | timeDiff=${timeDifference}ms (${timeDiffMins} mins ago) callTimeAgo=${callTimeAgoMins} mins paymentUTC<=now=${paymentTimeUTC <= nowUTC} callTime<paymentTime=${userDetails.callTime < paymentTimeUTC}`);
-                if (timeDifference <= 12 * 60 * 60 * 1000 && paymentTimeUTC <= nowUTC && userDetails.callTime < paymentTimeUTC) {
-                    logger.log(`SCENARIO: No known names + time valid (12h, callTime<payment) | ACCEPT | chatId=${userDetails.chatId}`);
-                    return { isvalid: true, msg: "" };
-                }
-                else {
-                    const fiveMinutesMs = 5 * 60 * 1000;
-                    const twoAndHalfMinutesMs = 2.5 * 60 * 1000;
-                    const leniencyVideos = videoCount < 4;
-                    const callOver5MinsAgo = userDetails.callTime < Date.now() - fiveMinutesMs;
-                    const callWithin5Mins = userDetails.callTime >= Date.now() - fiveMinutesMs;
-                    const paymentWithin2_5Mins = timeDifference <= twoAndHalfMinutesMs;
-                    if (leniencyVideos && callOver5MinsAgo) {
-                        logger.log(`SCENARIO: No known names + time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${userDetails.chatId}`);
-                        return { isvalid: true, msg: "" };
-                    }
-                    if (callWithin5Mins && paymentWithin2_5Mins && paymentTimeUTC <= nowUTC) {
-                        logger.log(`SCENARIO: No known names + call within 5mins + payment within 2.5mins | ACCEPT | chatId=${userDetails.chatId}`);
-                        return { isvalid: true, msg: "" };
-                    }
-                    const fifteenMinutesMs = 15 * 60 * 1000;
-                    if (timeDifference <= fifteenMinutesMs && paymentTimeUTC <= nowUTC) {
-                        logger.log(`SCENARIO: No known names + time close to now but callTime check failed (possible wrong timestamp) | REJECT ask screenshot | chatId=${userDetails.chatId} timeDiffMins=${timeDiffMins}`);
-                        return {
-                            isvalid: false,
-                            msg: "I couldn't confirm **Payment Time**!!\n\nSend Full Screenshot with **Payment Time** visible Baby!!😚",
-                        };
-                    }
-                    logger.log(`SCENARIO: No known names + time invalid (old payment) | REJECT Old payment | chatId=${userDetails.chatId} timeDiffMins=${timeDiffMins}`);
-                    return {
-                        isvalid: false,
-                        msg: "Seems Its **Old payment!!**\n\nPay now Again Baby!!😚😚",
-                    };
-                }
-            }
-            else {
-                const callOver5MinsAgo = userDetails.callTime < Date.now() - 5 * 60 * 1000;
-                logger.log(`Sub-scenario: isWithin10min=false | videos=${videoCount} amount=${imageDetails.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${isWithinPastTenMinutesImage.isValid}`);
-                if (videoCount > 0 && imageDetails.amount < 200) {
-                    if (callOver5MinsAgo) {
-                        if (isWithinPastTenMinutesImage.isValid) {
-                            logger.log(`SCENARIO: No known names + time not recent (parsed time exists but not in window) | REJECT Old payment | chatId=${userDetails.chatId}`);
-                            return {
-                                isvalid: false,
-                                msg: "Seems Its **Old payment!!**\n\nPay now Again Baby!!😚😚",
-                            };
-                        }
-                        logger.log(`SCENARIO: No known names + time unparseable/unclear (could be new payment) | REJECT ask screenshot with time | chatId=${userDetails.chatId}`);
-                        return {
-                            isvalid: false,
-                            msg: "I couldn't see **Payment Time** clearly!!\n\nSend me Full Screenshot with **Payment Time** visible Baby!!😚",
-                        };
-                    }
-                    else {
-                        logger.log(`SCENARIO: No known names + call still active (within 5mins) | REJECT call over msg | chatId=${userDetails.chatId}`);
-                        return {
-                            isvalid: false,
-                            msg: "**Your Call is Over Baby!!**\nPay again if u want more**",
-                        };
-                    }
-                }
-                else {
-                    logger.log(`SCENARIO: No known names + time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${userDetails.chatId}`);
-                    return { isvalid: true, msg: "" };
-                }
-            }
-        }
-        else {
-            const callOver3MinsAgo = userDetails.callTime < Date.now() - 3 * 60 * 1000;
-            logger.log(`Sub-scenario: didPaidToOthers=true | isWithin10min=${isWithinPastTenMinutesImage.result} callOver3MinsAgo=${callOver3MinsAgo}`);
-            if (isWithinPastTenMinutesImage.result && callOver3MinsAgo) {
-                logger.log(`SCENARIO: No known names + paid to others + time recent + call over 3mins | ACCEPT | chatId=${userDetails.chatId}`);
-                return { isvalid: true, msg: "" };
-            }
-            else {
-                const reason = !isWithinPastTenMinutesImage.result ? "time not recent" : "call within 3mins";
-                logger.log(`SCENARIO: No known names + paid to others + suspicious (${reason}) | REJECT ask screenshot | chatId=${userDetails.chatId} isValid=${isWithinPastTenMinutesImage.isValid}`);
-                let message = "";
-                if (isWithinPastTenMinutesImage.isValid) {
-                    message = `It is Old Payment!!\n\n**Pay me Now Again!!**\nSend me Latest Screenshot Babyy!!`;
-                }
-                else {
-                    message = `Seems its Not my Payment!!\n\nSend me Full Screenshot of **My Payment** with **Payment Time** also, I will verify!!`;
-                }
-                await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Told its Suspicious!!\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
-                return { isvalid: false, msg: message };
-            }
-        }
+    if (othersNameExists) {
+        logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${chatId}`);
+        const updated = await db.update(chatId, { limitTime: Date.now() + OTHER_CLIENT_LIMIT_MS });
+        await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Told Not my payment!!\n${isWithinPastTenMinutesImage.time}`, "Chat", chatLink(updated.chatId));
+        return reject(PAYMENT_MSG.otherClient);
     }
-    else if (othersNameExists && !myNameExists) {
-        logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${userDetails.chatId}`);
-        const updatedUserDetails = {
-            limitTime: Date.now() + 30 * 60 * 1000,
-        };
-        userDetails = await db.update(userDetails.chatId, updatedUserDetails);
-        await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Told Not my payment!!\n${isWithinPastTenMinutesImage.time}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${userDetails.chatId}`);
-        return { isvalid: false, msg: "**This is not my Payment!!\nBye!!**" };
+    logger.log(`SCENARIO: No known names in payment | validating time & didPaidToOthers | chatId=${chatId}`);
+    const ctx = { image: imageDetails, user: userDetails, check: isWithinPastTenMinutesImage, videoCount };
+    if (didPaidToOthers)
+        return judgePaidToOthers(ctx);
+    return isWithinPastTenMinutesImage.result ? judgeRecentTime(ctx) : judgeUnreadableTime(ctx);
+}
+/** No known name, the time is inside the window: accept unless the time contradicts the user's last call. */
+function judgeRecentTime({ image, user, check, videoCount }) {
+    const chatId = user.chatId;
+    const now = new Date();
+    const nowMs = now.getTime();
+    // Judge the moment the time-window check accepted (incl. its AM/PM correction); re-parsing the raw time
+    // dropped that correction and could reject the payment it had just accepted.
+    const paymentMs = check.paymentMs ?? (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_9__.parsePaymentTime)(image.time || "", now)?.getTime() ?? NaN;
+    const age = nowMs - paymentMs;
+    const ageMins = (age / MINUTE_MS).toFixed(2);
+    const notFuture = paymentMs <= nowMs;
+    // callTime may be unset: every comparison with it is then false, on purpose (kept as written).
+    const callTime = user.callTime;
+    const callTimeAgoMins = callTime ? ((nowMs - callTime) / MINUTE_MS).toFixed(2) : "N/A";
+    logger.log(`Sub-scenario: isWithin10min=true | timeDiff=${age}ms (${ageMins} mins ago) callTimeAgo=${callTimeAgoMins} mins paymentUTC<=now=${notFuture} callTime<paymentTime=${callTime < paymentMs}`);
+    if (age <= ACCEPT_WITHIN_MS && notFuture && callTime < paymentMs) {
+        logger.log(`SCENARIO: No known names + time valid (12h, callTime<payment) | ACCEPT | chatId=${chatId}`);
+        return accept();
     }
-    logger.log(`SCENARIO: Fallthrough - no branch matched | REJECT unknown | chatId=${userDetails.chatId}`);
-    return { isvalid: false, msg: "Unknown payment status." };
+    const leniencyVideos = videoCount < LENIENT_VIDEO_COUNT;
+    const callOver5MinsAgo = callTime < Date.now() - CALL_GAP_MS;
+    const callWithin5Mins = callTime >= Date.now() - CALL_GAP_MS;
+    if (leniencyVideos && callOver5MinsAgo) {
+        logger.log(`SCENARIO: No known names + time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
+        return accept();
+    }
+    if (callWithin5Mins && age <= FRESH_PAYMENT_MS && notFuture) {
+        logger.log(`SCENARIO: No known names + call within 5mins + payment within 2.5mins | ACCEPT | chatId=${chatId}`);
+        return accept();
+    }
+    if (age <= NEAR_NOW_MS && notFuture) {
+        logger.log(`SCENARIO: No known names + time close to now but callTime check failed (possible wrong timestamp) | REJECT ask screenshot | chatId=${chatId} timeDiffMins=${ageMins}`);
+        return reject(PAYMENT_MSG.confirmTime);
+    }
+    logger.log(`SCENARIO: No known names + time invalid (old payment) | REJECT Old payment | chatId=${chatId} timeDiffMins=${ageMins}`);
+    return reject(PAYMENT_MSG.oldPayment);
+}
+/** No known name, the time is outside the window or unreadable. */
+function judgeUnreadableTime({ image, user, check, videoCount }) {
+    const chatId = user.chatId;
+    const callOver5MinsAgo = user.callTime < Date.now() - CALL_GAP_MS;
+    logger.log(`Sub-scenario: isWithin10min=false | videos=${videoCount} amount=${image.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${check.isValid}`);
+    // Written as the negation on purpose: a missing/NaN amount must take this accept branch.
+    if (!(videoCount > 0 && image.amount < NO_TIME_CHECK_AMOUNT)) {
+        logger.log(`SCENARIO: No known names + time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
+        return accept();
+    }
+    if (!callOver5MinsAgo) {
+        logger.log(`SCENARIO: No known names + call still active (within 5mins) | REJECT call over msg | chatId=${chatId}`);
+        return reject(PAYMENT_MSG.callOver);
+    }
+    if (check.isValid) {
+        logger.log(`SCENARIO: No known names + time not recent (parsed time exists but not in window) | REJECT Old payment | chatId=${chatId}`);
+        return reject(PAYMENT_MSG.oldPayment);
+    }
+    logger.log(`SCENARIO: No known names + time unparseable/unclear (could be new payment) | REJECT ask screenshot with time | chatId=${chatId}`);
+    return reject(PAYMENT_MSG.timeUnclear);
+}
+/** No known name and the screenshot shows a payment to someone else too: needs a recent time and no call in the last 3 min. */
+async function judgePaidToOthers({ user, check }) {
+    const chatId = user.chatId;
+    const callOver3MinsAgo = user.callTime < Date.now() - PAID_OTHERS_CALL_GAP_MS;
+    logger.log(`Sub-scenario: didPaidToOthers=true | isWithin10min=${check.result} callOver3MinsAgo=${callOver3MinsAgo}`);
+    if (check.result && callOver3MinsAgo) {
+        logger.log(`SCENARIO: No known names + paid to others + time recent + call over 3mins | ACCEPT | chatId=${chatId}`);
+        return accept();
+    }
+    const reason = !check.result ? "time not recent" : "call within 3mins";
+    logger.log(`SCENARIO: No known names + paid to others + suspicious (${reason}) | REJECT ask screenshot | chatId=${chatId} isValid=${check.isValid}`);
+    await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Told its Suspicious!!\n${check.time}`, "Chat", chatLink(chatId));
+    return reject(check.isValid ? PAYMENT_MSG.suspiciousOld : PAYMENT_MSG.suspiciousNotMine);
 }
 async function askToFinishPayment(event) {
     try {
@@ -56080,7 +56010,7 @@ async function askToFinishPayment(event) {
         logger.error("Failed to ask user to finish payment", error);
     }
     await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
-    await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Asked to finish Payment`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}`);
+    await (0,_index__WEBPACK_IMPORTED_MODULE_0__.sendMessageWithButton)(`Asked to finish Payment`, "Chat", chatLink(event.chatId.toString()));
 }
 
 
@@ -56328,9 +56258,8 @@ allowAmountMismatch = false) {
             logger.debug(`[ProcessImage] Time format validation failed. Expected ISO format (YYYY-MM-DDTHH:mm:ss), got: "${timeString}"`);
             // Try parsing anyway in case it's a valid date string in another format
         }
-        const paymentTime = new Date(timeString);
-        // Check if date parsing was successful
-        if (isNaN(paymentTime.getTime())) {
+        const paymentTime = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__.parseRawPaymentTime)(timeString);
+        if (!paymentTime) {
             logger.debug(`[ProcessImage] Invalid date parsed from time string: "${timeString}"`);
             return false;
         }
@@ -56652,24 +56581,7 @@ async function processImage(event) {
                                         ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING, reply);
                                         didPayOthers = true;
                                     }
-                                    let isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__["default"])(imageDetails.time, userDetails);
-                                    // if (!isWithinPastTenMinutesImage.result) {
-                                    //   logger.log("Extracting timestamps from image text for validation...");
-                                    //   const possibleTimeStamps = extractTimestamps(
-                                    //     imageDetails.text
-                                    //   );
-                                    //   for (const timestamp of possibleTimeStamps) {
-                                    //     const isWithinPastTenMinutes = isRecentValidPayment(
-                                    //       timestamp,
-                                    //       userDetails
-                                    //     );
-                                    //     if (isWithinPastTenMinutes.result) {
-                                    //       logger.log(`Found valid timestamp in image text: ${timestamp}`);
-                                    //       isWithinPastTenMinutesImage = isWithinPastTenMinutes;
-                                    //       break;
-                                    //     }
-                                    //   }
-                                    // }
+                                    const isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__["default"])(imageDetails.time, userDetails);
                                     const isPaymentProperlyMine = await (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers);
                                     if (isPaymentProperlyMine.isvalid) {
                                         logger.log("Valid payment confirmed and processed.");
@@ -61608,9 +61520,7 @@ class InHouseCallService {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   FFPROBE_EXIT_WAIT_MS: () => (/* binding */ FFPROBE_EXIT_WAIT_MS),
-/* harmony export */   FFPROBE_GRACE_MS: () => (/* binding */ FFPROBE_GRACE_MS),
 /* harmony export */   FFPROBE_TIMEOUT_MS: () => (/* binding */ FFPROBE_TIMEOUT_MS),
-/* harmony export */   childWaitsForExit: () => (/* binding */ childWaitsForExit),
 /* harmony export */   runFfprobe: () => (/* binding */ runFfprobe)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
@@ -61620,17 +61530,8 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:in-house-calls');
 const FFPROBE_TIMEOUT_MS = 20000;
-/** Extra wait for execFile's own timeout to report before the hard deadline gives up on the child. */
-const FFPROBE_GRACE_MS = 5000;
 /** After ffprobe's stdout closes, how long to wait for its exit status before trusting the output. */
 const FFPROBE_EXIT_WAIT_MS = 1000;
-/**
- * Rollback switch: `CALL_CHILD_WAIT_FOR_EXIT=true` restores the old behaviour (result only once Node
- * reports the child's exit). Default: the result is taken when stdout closes.
- */
-function childWaitsForExit() {
-    return process.env.CALL_CHILD_WAIT_FOR_EXIT === 'true';
-}
 /**
  * Runs ffprobe and resolves with its stdout, or null on error/timeout.
  *
@@ -61642,8 +61543,6 @@ function childWaitsForExit() {
  * FFPROBE_EXIT_WAIT_MS, the output is used as is (empty output = null).
  */
 function runFfprobe(args, opts = {}) {
-    if (childWaitsForExit())
-        return runFfprobeOnExit(args, opts);
     const timeoutMs = opts.timeoutMs ?? FFPROBE_TIMEOUT_MS;
     const exitWaitMs = opts.exitWaitMs ?? FFPROBE_EXIT_WAIT_MS;
     return new Promise((resolve) => {
@@ -61692,36 +61591,6 @@ function runFfprobe(args, opts = {}) {
             catch { /* already gone */ }
             finish(null);
         }, timeoutMs);
-        deadline.unref?.();
-    });
-}
-/** Pre-2026-10-12 behaviour (rollback): execFile, result only on the reported exit, hard deadline. */
-function runFfprobeOnExit(args, opts) {
-    const timeoutMs = opts.timeoutMs ?? FFPROBE_TIMEOUT_MS;
-    const graceMs = opts.graceMs ?? FFPROBE_GRACE_MS;
-    return new Promise((resolve) => {
-        let settled = false;
-        let deadline;
-        const finish = (value) => {
-            if (settled)
-                return;
-            settled = true;
-            clearTimeout(deadline);
-            resolve(value);
-        };
-        const child = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)(opts.bin ?? 'ffprobe', args, { timeout: timeoutMs }, (error, stdout) => {
-            finish(error ? null : String(stdout ?? ''));
-        });
-        deadline = setTimeout(() => {
-            if (settled)
-                return;
-            logger.warn(`[in-house-calls] ffprobe pid=${child.pid ?? '?'} never reported its exit within ${Math.round((timeoutMs + graceMs) / 1000)}s; continuing without it`);
-            try {
-                child.kill('SIGKILL');
-            }
-            catch { /* already gone */ }
-            finish(null);
-        }, timeoutMs + graceMs);
         deadline.unref?.();
     });
 }
@@ -88843,7 +88712,9 @@ function getCoreInitMsg() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   "default": () => (/* binding */ isRecentValidPayment)
+/* harmony export */   "default": () => (/* binding */ isRecentValidPayment),
+/* harmony export */   parsePaymentTime: () => (/* binding */ parsePaymentTime),
+/* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -88852,18 +88723,60 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("utils.isWithinPastTenMinutes");
-const british = 'en-GB';
-const timeConfig = { hour: '2-digit', minute: '2-digit', hour12: false };
-const dateConfig = { day: '2-digit', month: '2-digit' };
-const timeZone = 'Asia/Kolkata';
+const MINUTE_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+const TWELVE_HOURS_MS = 12 * 60 * MINUTE_MS;
+/** How far from exactly 12 h a time may be and still count as an AM/PM misread. */
+const AM_PM_TOLERANCE_MS = 15 * MINUTE_MS;
+/** The payment must be this recent... */
+const WINDOW_MS = 10 * MINUTE_MS;
+/** ...or this recent when the user's last call was within WINDOW_MS (they are paying again right after a call). */
+const WINDOW_AFTER_CALL_MS = 5 * MINUTE_MS;
+const IST_TIME = { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" };
+const IST_DATE = { day: "2-digit", month: "2-digit", timeZone: "Asia/Kolkata" };
+const INVALID = Object.freeze({ isValid: false, result: false });
+/** A provider payment time string as a Date, or null when unparseable. No year handling. */
+function parseRawPaymentTime(input) {
+    const date = new Date(input.trim());
+    return isNaN(date.getTime()) ? null : date;
+}
+/**
+ * A provider payment time ("YYYY-MM-DDTHH:MM:SS", IST wall clock; the fleet runs with TZ=Asia/Kolkata) with
+ * the current year forced on, rolled back one year when that lands more than a day in the future (a
+ * late-December payment checked just after New Year). Null when unparseable. Shared by the time-window
+ * check and handleMyPayment so both judge the same moment.
+ */
+function parsePaymentTime(input, now = new Date()) {
+    const date = parseRawPaymentTime(input);
+    if (!date)
+        return null;
+    const currentYear = now.getFullYear();
+    date.setFullYear(currentYear);
+    if (date.getTime() - now.getTime() > DAY_MS)
+        date.setFullYear(currentYear - 1);
+    return date;
+}
+/** A time ~12 h ahead (PM read as AM) or ~12 h behind (AM read as PM), moved back by 12 h. */
+function correctAmPmMisread(paymentMs, nowMs) {
+    if (paymentMs > nowMs) {
+        return Math.abs(paymentMs - nowMs - TWELVE_HOURS_MS) <= AM_PM_TOLERANCE_MS
+            ? { paymentMs: paymentMs - TWELVE_HOURS_MS, description: "input time ahead by ~12hrs, subtracting 12hrs" }
+            : null;
+    }
+    const age = nowMs - paymentMs;
+    return age > TWELVE_HOURS_MS - AM_PM_TOLERANCE_MS && age < TWELVE_HOURS_MS + AM_PM_TOLERANCE_MS
+        ? { paymentMs: paymentMs + TWELVE_HOURS_MS, description: "input time behind by ~12hrs, adding 12hrs" }
+        : null;
+}
+function istLabel(date) {
+    return `${date.toLocaleTimeString("en-GB", IST_TIME)} ${date.toLocaleDateString("en-GB", IST_DATE)}`;
+}
 function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING, details) {
     void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.CLIENT_UPDATES, {
         severity,
         title,
         summary,
-        fields: [
-            ...fields,
-        ],
+        fields,
         details,
         tags: ["payment-time", "payment-image"],
     }).then((sent) => {
@@ -88874,112 +88787,47 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `PaymentTime.notification.${context}`, false);
     });
 }
+/**
+ * Is the screenshot's payment time recent? Within 10 minutes, or 5 when the user's last call was in the
+ * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and corrected first (ops are told).
+ */
 function isRecentValidPayment(input, userDetails) {
     try {
-        // Enhanced input validation
-        if (!input || typeof input !== 'string' || input.trim() === '') {
+        if (!input || typeof input !== "string" || input.trim() === "") {
             notifyPaymentTime("invalidInput", "Payment timestamp empty", undefined, [{ label: "Input", value: String(input) }]);
-            return { isValid: false, result: false };
+            return { ...INVALID };
         }
         const trimmedInput = input.trim();
         const now = new Date();
-        let inputDate = new Date(trimmedInput);
-        if (isNaN(inputDate.getTime())) {
+        const parsed = parsePaymentTime(trimmedInput, now);
+        if (!parsed) {
             notifyPaymentTime("invalidIso", "Payment timestamp unparseable", undefined, [{ label: "Input", value: trimmedInput }]);
-            return { isValid: false, result: false };
+            return { ...INVALID };
         }
-        const currentYear = now.getFullYear();
-        inputDate.setFullYear(currentYear);
-        // Year-boundary guard: forcing the current year onto a late-December
-        // timestamp just after New Year (e.g. now=Jan 1, payment=Dec 31) shoves
-        // a genuine recent payment ~1 year into the future. If the forced date
-        // lands more than a day ahead of now, the original timestamp belonged to
-        // the previous year — roll it back so the recent payment still validates.
-        const oneDayMs = 24 * 60 * 60 * 1000;
-        if (inputDate.getTime() - now.getTime() > oneDayMs) {
-            inputDate.setFullYear(currentYear - 1);
-        }
-        // Work with UTC timestamps directly
-        const nowUTC = now.getTime();
-        const inputDateUTC = inputDate.getTime();
-        const tenMinutesMs = 10 * 60 * 1000;
-        const fiveMinutesMs = 5 * 60 * 1000;
+        const nowMs = now.getTime();
         const lastCallTime = userDetails.callTime || 0;
-        // Determine time window based on lastCallTime (both are UTC timestamps)
-        const timeSinceLastCall = nowUTC - lastCallTime;
-        const isLastCallWithin10Minutes = lastCallTime > 0 && timeSinceLastCall <= tenMinutesMs;
-        // Debug logging for time window selection
-        logger.log(`🔍 Debug - Time window selection:`);
-        logger.log(`  - nowUTC: ${nowUTC} (${new Date(nowUTC).toISOString()})`);
-        logger.log(`  - lastCallTime: ${lastCallTime} (${lastCallTime > 0 ? new Date(lastCallTime).toISOString() : 'N/A'})`);
-        logger.log(`  - timeSinceLastCall: ${timeSinceLastCall}ms (${(timeSinceLastCall / 1000 / 60).toFixed(2)} minutes)`);
-        logger.log(`  - isLastCallWithin10Minutes: ${isLastCallWithin10Minutes}`);
-        // Choose time window: 5 minutes if last call was within 10 minutes, otherwise 10 minutes
-        const timeWindowMs = isLastCallWithin10Minutes ? fiveMinutesMs : tenMinutesMs;
-        const timeWindowAgoMs = nowUTC - timeWindowMs;
-        const timeWindowDescription = isLastCallWithin10Minutes ? "5 minutes" : "10 minutes";
-        logger.log(`  - Selected time window: ${timeWindowDescription} (${timeWindowMs}ms)`);
-        // Check if input is within the determined time window
-        const isWithinTimeWindow = inputDateUTC >= timeWindowAgoMs && inputDateUTC <= nowUTC;
-        // Debug logging for input validation
-        logger.log(`🔍 Debug - Input validation:`);
-        logger.log(`  - inputDateUTC: ${inputDateUTC} (${inputDate.toISOString()})`);
-        logger.log(`  - timeWindowAgoMs: ${timeWindowAgoMs} (${new Date(timeWindowAgoMs).toISOString()})`);
-        logger.log(`  - timeDifference: ${nowUTC - inputDateUTC}ms (${((nowUTC - inputDateUTC) / 1000 / 60).toFixed(2)} minutes ago)`);
-        logger.log(`  - isWithinTimeWindow: ${isWithinTimeWindow}`);
-        // Create display strings in IST
-        const nowIST = `${now.toLocaleTimeString(british, { ...timeConfig, timeZone })} ${now.toLocaleDateString(british, { ...dateConfig, timeZone })}`;
-        const inputIST = `${inputDate.toLocaleTimeString(british, { ...timeConfig, timeZone })} ${inputDate.toLocaleDateString(british, { ...dateConfig, timeZone })}`;
-        const timeReport = `${nowIST} vs ${inputIST} (checking within ${timeWindowDescription})`;
-        // Handle AM/PM confusion with 12-hour time adjustments
-        if (!isWithinTimeWindow) {
-            const twelveHoursMs = 12 * 60 * 60 * 1000;
-            const fifteenMinutesMs = 15 * 60 * 1000;
-            const timeDifference = nowUTC - inputDateUTC;
-            let adjustedInputDateUTC = inputDateUTC;
-            let timeAdjustmentMade = false;
-            let adjustmentDescription = '';
-            // Case 1: Input time is ahead by ~12 hours (PM interpreted as AM)
-            if (inputDateUTC > nowUTC) {
-                const futureTimeDiff = inputDateUTC - nowUTC;
-                if (Math.abs(futureTimeDiff - twelveHoursMs) <= fifteenMinutesMs) {
-                    adjustedInputDateUTC = inputDateUTC - twelveHoursMs;
-                    timeAdjustmentMade = true;
-                    adjustmentDescription = 'input time ahead by ~12hrs, subtracting 12hrs';
-                }
-            }
-            // Case 2: Input time is behind by ~12 hours (AM interpreted as PM)
-            else if (timeDifference > (twelveHoursMs - fifteenMinutesMs) &&
-                timeDifference < (twelveHoursMs + fifteenMinutesMs)) {
-                adjustedInputDateUTC = inputDateUTC + twelveHoursMs;
-                timeAdjustmentMade = true;
-                adjustmentDescription = 'input time behind by ~12hrs, adding 12hrs';
-            }
-            if (timeAdjustmentMade) {
-                const adjustedInputDate = new Date(adjustedInputDateUTC);
-                const adjustedInputIST = `${adjustedInputDate.toLocaleTimeString(british, { ...timeConfig, timeZone })} ${adjustedInputDate.toLocaleDateString(british, { ...dateConfig, timeZone })}`;
-                const adjustedTimeReport = `${nowIST} vs ${adjustedInputIST} (checking within ${timeWindowDescription})`;
-                notifyPaymentTime("timeAdjustment", "Payment timestamp adjusted", adjustmentDescription, [
-                    { label: "Input", value: trimmedInput },
-                    { label: "Window", value: timeWindowDescription },
-                ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, adjustedTimeReport);
-                // Recheck with adjusted time using the same time window
-                const finalResult = adjustedInputDateUTC >= timeWindowAgoMs && adjustedInputDateUTC <= nowUTC;
-                logger.log(`🔍 Debug - After adjustment:`);
-                logger.log(`  - adjustedInputDateUTC: ${adjustedInputDateUTC} (${new Date(adjustedInputDateUTC).toISOString()})`);
-                logger.log(`  - adjustedTimeDifference: ${nowUTC - adjustedInputDateUTC}ms (${((nowUTC - adjustedInputDateUTC) / 1000 / 60).toFixed(2)} minutes ago)`);
-                logger.log(`🎯 Final result: ${finalResult} - ${adjustedTimeReport}`);
-                return { isValid: true, result: finalResult, time: adjustedTimeReport };
+        const afterCall = lastCallTime > 0 && nowMs - lastCallTime <= WINDOW_MS;
+        const windowMs = afterCall ? WINDOW_AFTER_CALL_MS : WINDOW_MS;
+        const windowLabel = afterCall ? "5 minutes" : "10 minutes";
+        const inWindow = (ms) => ms >= nowMs - windowMs && ms <= nowMs;
+        const report = (ms) => `${istLabel(now)} vs ${istLabel(new Date(ms))} (checking within ${windowLabel})`;
+        let paymentMs = parsed.getTime();
+        let time = report(paymentMs);
+        if (!inWindow(paymentMs)) {
+            const corrected = correctAmPmMisread(paymentMs, nowMs);
+            if (corrected) {
+                paymentMs = corrected.paymentMs;
+                time = report(paymentMs);
+                notifyPaymentTime("timeAdjustment", "Payment timestamp adjusted", corrected.description, [{ label: "Input", value: trimmedInput }, { label: "Window", value: windowLabel }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, time);
             }
         }
-        const finalResult = isWithinTimeWindow;
-        logger.log(`🎯 Final result: ${finalResult} - ${timeReport}`);
-        return { isValid: true, result: finalResult, time: timeReport };
+        const result = inWindow(paymentMs);
+        logger.log(`[payment-time] input="${trimmedInput}" paymentAgeMin=${((nowMs - paymentMs) / MINUTE_MS).toFixed(2)} window=${windowLabel} lastCallAgoMin=${lastCallTime > 0 ? ((nowMs - lastCallTime) / MINUTE_MS).toFixed(2) : "N/A"} result=${result} | ${time}`);
+        return { isValid: true, result, time, paymentMs };
     }
     catch (error) {
-        const parsedError = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error);
-        notifyPaymentTime("validationError", "Payment timestamp validation failed", undefined, [{ label: "Input", value: String(input) }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR, parsedError.message);
-        return { isValid: false, result: false };
+        notifyPaymentTime("validationError", "Payment timestamp validation failed", undefined, [{ label: "Input", value: String(input) }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error).message);
+        return { ...INVALID };
     }
 }
 
