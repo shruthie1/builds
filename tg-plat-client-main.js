@@ -60425,6 +60425,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MEDIA_FAILED_WINDOW_MS: () => (/* binding */ MEDIA_FAILED_WINDOW_MS),
 /* harmony export */   PAY_PROMPT_COOLDOWN_MS: () => (/* binding */ PAY_PROMPT_COOLDOWN_MS),
 /* harmony export */   PITCH_LIMITS: () => (/* binding */ PITCH_LIMITS),
+/* harmony export */   PLAN_TIMEOUT_MS: () => (/* binding */ PLAN_TIMEOUT_MS),
 /* harmony export */   POST_SHOW_QUIET_MS: () => (/* binding */ POST_SHOW_QUIET_MS),
 /* harmony export */   PRIVACY_MESSAGE: () => (/* binding */ PRIVACY_MESSAGE),
 /* harmony export */   PRIVACY_NOTICE_COOLDOWN_MS: () => (/* binding */ PRIVACY_NOTICE_COOLDOWN_MS),
@@ -60495,6 +60496,23 @@ const SAFETY_FOLLOW_UP_SLACK_MS = 2 * 60 * 1000;
 const WARN_DEDUPE_MS = 10 * 60 * 1000;
 /** Ring time assumed when estimating when the current show ends. */
 const RING_ALLOWANCE_MS = 60 * 1000;
+/**
+ * The pre-ring steps (user read, ffprobe, peer resolve) normally take seconds. If one never settles
+ * (keerthi1/arpitha2 2026-10-11: an ffprobe exited but Node never saw the exit, so its callback never
+ * fired), the call slot stayed reserved for hours: the payer was told "already on a call" and the
+ * scheduler tick waiting on it froze every ladder on the account. Past this, give up and fall back.
+ */
+const PLAN_TIMEOUT_MS = 60 * 1000;
+class StepTimeout extends Error {
+}
+function withStepTimeout(work, ms, step) {
+    let timer;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new StepTimeout(`${step} did not finish within ${Math.round(ms / 1000)}s`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
 /** Matches the allow-list: a real payer. */
 const PAID_THRESHOLD = 15;
 /**
@@ -60793,9 +60811,10 @@ class InHouseCallService {
         try {
             if (!(await this.isAvailable()))
                 return { status: 'unsupported' };
-            const durationSec = await this.deps.probeDurationSec(clipPath);
+            const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
+            const durationSec = await withStepTimeout(this.deps.probeDurationSec(clipPath), stepMs, 'probing the clip');
             const engine = this.getEngine();
-            const peer = await this.deps.resolvePeer(chatId);
+            const peer = await withStepTimeout(this.deps.resolvePeer(chatId), stepMs, 'resolving the peer');
             if (this.stopped)
                 return { status: 'error' };
             const record = await engine.call(peer, { file: clipPath, video: false, ringAsVideo: true }, {
@@ -60818,6 +60837,10 @@ class InHouseCallService {
             return { status: 'played' };
         }
         catch (error) {
+            if (error instanceof StepTimeout) {
+                this.logger.warn(`[in-house-calls] voice-proof ${chatId}: ${error.message}; giving up (voice note instead)`);
+                return { status: 'error' };
+            }
             if (/busy/i.test(error?.message ?? ''))
                 return { status: 'busy' };
             this.logger.error(`[in-house-calls] voice-proof call to ${chatId} failed`, error);
@@ -61012,10 +61035,16 @@ class InHouseCallService {
         if (this.withinWindow(this.mediaFailures, chatId, MEDIA_FAILED_WINDOW_MS))
             return { status: 'fallback', reason: 'media_failed_recently' };
         let planned;
+        const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
         try {
-            planned = await this.plan(chatId);
+            planned = await withStepTimeout(this.plan(chatId), stepMs, 'planning');
         }
         catch (error) {
+            if (error instanceof StepTimeout) {
+                this.logger.warn(`[in-house-calls] ${chatId}: ${error.message}; releasing the call slot and using the legacy ring`);
+                this.safeWarn(`In-house plan_timeout: ${chatId} ${error.message}`, 'plan_timeout');
+                return { status: 'fallback', reason: 'plan_timeout' };
+            }
             this.logger.error(`[in-house-calls] planning failed for ${chatId}`, error);
             return { status: 'fallback', reason: 'plan_error' };
         }
@@ -61040,7 +61069,7 @@ class InHouseCallService {
         let record;
         let peerKey = chatId;
         try {
-            const peer = await this.deps.resolvePeer(chatId);
+            const peer = await withStepTimeout(this.deps.resolvePeer(chatId), stepMs, 'resolving the peer');
             peerKey = String(peer?.id ?? chatId);
             if (this.cancelled.has(chatId) || this.stopped)
                 return { status: 'cancelled' };
@@ -61051,6 +61080,10 @@ class InHouseCallService {
         }
         catch (error) {
             void this.stopCheckpoint(chatId);
+            if (error instanceof StepTimeout) {
+                this.logger.warn(`[in-house-calls] ${chatId}: ${error.message}; releasing the call slot and using the legacy ring`);
+                return { status: 'fallback', reason: 'plan_timeout', videoId: plan.videoId, videoType: plan.videoType };
+            }
             // An incoming call took the last engine slot while we were planning: retry from the queue.
             if (/busy/i.test(error?.message ?? ''))
                 return { status: 'busy_engine' };
@@ -61523,6 +61556,67 @@ class InHouseCallService {
 
 /***/ },
 
+/***/ "./src/modules/calls/inhouse/ffprobe.ts"
+/*!**********************************************!*\
+  !*** ./src/modules/calls/inhouse/ffprobe.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FFPROBE_GRACE_MS: () => (/* binding */ FFPROBE_GRACE_MS),
+/* harmony export */   FFPROBE_TIMEOUT_MS: () => (/* binding */ FFPROBE_TIMEOUT_MS),
+/* harmony export */   runFfprobe: () => (/* binding */ runFfprobe)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:in-house-calls');
+const FFPROBE_TIMEOUT_MS = 20000;
+/** Extra wait for execFile's own timeout to report before the hard deadline gives up on the child. */
+const FFPROBE_GRACE_MS = 5000;
+/**
+ * Runs ffprobe and resolves with its stdout, or null on error/timeout. Never waits on the child's exit
+ * alone: on the fleet an ffprobe that had exited stayed a zombie (its exit was never reported to Node),
+ * execFile's callback never fired and the in-house call awaiting it hung for hours (arpitha2
+ * 2026-10-11). A hard deadline just past execFile's own timeout resolves null and kills the child.
+ */
+function runFfprobe(args, opts = {}) {
+    const timeoutMs = opts.timeoutMs ?? FFPROBE_TIMEOUT_MS;
+    const graceMs = opts.graceMs ?? FFPROBE_GRACE_MS;
+    return new Promise((resolve) => {
+        let settled = false;
+        let deadline;
+        const finish = (value) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(deadline);
+            resolve(value);
+        };
+        const child = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)(opts.bin ?? 'ffprobe', args, { timeout: timeoutMs }, (error, stdout) => {
+            finish(error ? null : String(stdout ?? ''));
+        });
+        deadline = setTimeout(() => {
+            if (settled)
+                return;
+            logger.warn(`[in-house-calls] ffprobe pid=${child.pid ?? '?'} never reported its exit within ${Math.round((timeoutMs + graceMs) / 1000)}s; continuing without it`);
+            try {
+                child.kill('SIGKILL');
+            }
+            catch { /* already gone */ }
+            finish(null);
+        }, timeoutMs + graceMs);
+        deadline.unref?.();
+    });
+}
+
+
+/***/ },
+
 /***/ "./src/modules/calls/inhouse/human-send.ts"
 /*!*************************************************!*\
   !*** ./src/modules/calls/inhouse/human-send.ts ***!
@@ -61582,38 +61676,39 @@ function createHumanSender(deps) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CallAllowList: () => (/* reexport safe */ _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList),
-/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__.InHouseCallService),
+/* harmony export */   CallAllowList: () => (/* reexport safe */ _CallAllowList__WEBPACK_IMPORTED_MODULE_6__.CallAllowList),
+/* harmony export */   InHouseCallService: () => (/* reexport safe */ _InHouseCallService__WEBPACK_IMPORTED_MODULE_16__.InHouseCallService),
 /* harmony export */   createInHouseCallService: () => (/* binding */ createInHouseCallService),
-/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.inHouseCallsSwitchState),
-/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled),
+/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_17__.inHouseCallsSwitchState),
+/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_17__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_18__.restoreCallPrivacyIfLeftOpen),
-/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_16__.setInHouseCallsOverride)
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_19__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_17__.setInHouseCallsOverride)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
-/* harmony import */ var _CallAllowList__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./CallAllowList */ "./src/modules/calls/inhouse/CallAllowList.ts");
-/* harmony import */ var _human_send__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./human-send */ "./src/modules/calls/inhouse/human-send.ts");
-/* harmony import */ var _input_user__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./input-user */ "./src/modules/calls/inhouse/input-user.ts");
-/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../../replier/human-typing */ "./src/replier/human-typing.ts");
-/* harmony import */ var _tg_calls__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/calls */ "../../packages/tg-calls/src/index.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
-/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
-/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _ffprobe__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./ffprobe */ "./src/modules/calls/inhouse/ffprobe.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _messages_callMessages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../../messages/callMessages */ "./src/messages/callMessages.ts");
+/* harmony import */ var _CallAllowList__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./CallAllowList */ "./src/modules/calls/inhouse/CallAllowList.ts");
+/* harmony import */ var _human_send__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./human-send */ "./src/modules/calls/inhouse/human-send.ts");
+/* harmony import */ var _input_user__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./input-user */ "./src/modules/calls/inhouse/input-user.ts");
+/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../../replier/human-typing */ "./src/replier/human-typing.ts");
+/* harmony import */ var _tg_calls__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/calls */ "../../packages/tg-calls/src/index.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _InHouseCallService__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./InHouseCallService */ "./src/modules/calls/inhouse/InHouseCallService.ts");
+/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./switch */ "./src/modules/calls/inhouse/switch.ts");
+/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./video-policy */ "./src/modules/calls/inhouse/video-policy.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
 
 
 
@@ -61635,8 +61730,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger('tg-aut:in-house-calls');
-const FFPROBE_TIMEOUT_MS = 20000;
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger('tg-aut:in-house-calls');
 /** Parallel in-house shows per account (each = one ntgcalls call + an ffmpeg audio/video pair). */
 const DEFAULT_MAX_CALLS = 3;
 function maxInHouseCalls(env = process.env) {
@@ -61659,34 +61754,32 @@ function binaryRuns(bin) {
     }
 }
 function probeDurationSec(url) {
-    if (!/^https?:\/\//i.test(url) && !fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(url)) {
+    if (!/^https?:\/\//i.test(url) && !fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(url)) {
         logger.warn(`[in-house-calls] video file missing: ${url} (set INHOUSE_VIDEO_DIR, or INHOUSE_VIDEO_CDN=on)`);
     }
-    return new Promise((resolve) => {
-        (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', url], { timeout: FFPROBE_TIMEOUT_MS }, (error, stdout) => {
-            const value = Number(String(stdout ?? '').trim());
-            resolve(!error && Number.isFinite(value) && value > 0 ? value : null);
-        });
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', url])
+        .then((stdout) => {
+        const value = Number(String(stdout ?? '').trim());
+        return stdout !== null && Number.isFinite(value) && value > 0 ? value : null;
     });
 }
 /** Width/height of the video stream, via ffprobe; mapped to the call size by pickCallVideoSize. */
 function probeVideoSize(url) {
-    return new Promise((resolve) => {
-        (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execFile)('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url], { timeout: FFPROBE_TIMEOUT_MS }, (error, stdout) => {
-            const m = /^(\d+)x(\d+)/.exec(String(stdout ?? '').trim());
-            resolve(!error && m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null);
-        });
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url])
+        .then((stdout) => {
+        const m = /^(\d+)x(\d+)/.exec(String(stdout ?? '').trim());
+        return m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_18__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null;
     });
 }
 /** InputUser from local caches only (entity cache, then the session's own cache); never a network call. */
 function cachedInputUser(client, chatId) {
-    const ref = (0,_input_user__WEBPACK_IMPORTED_MODULE_7__.usableUserRef)(_tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().get(chatId));
+    const ref = (0,_input_user__WEBPACK_IMPORTED_MODULE_8__.usableUserRef)(_tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__.EntityCacheManager.getInstance().get(chatId));
     if (ref)
-        return new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputUser(ref);
+        return new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputUser(ref);
     try {
         const peer = client.session.getInputEntity?.(chatId);
-        if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPeerUser)
-            return new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputUser({ userId: peer.userId, accessHash: peer.accessHash });
+        if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPeerUser)
+            return new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputUser({ userId: peer.userId, accessHash: peer.accessHash });
     }
     catch {
         /* not cached */
@@ -61696,65 +61789,65 @@ function cachedInputUser(client, chatId) {
 
 
 async function readCallPrivacy(client) {
-    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall() }));
+    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall() }));
     // Users already allowed come back with access hashes: cache them so a write keeps them.
     for (const user of result.users ?? []) {
-        if (user instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User)
-            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().put(user.id.toString(), user);
+        if (user instanceof telegram__WEBPACK_IMPORTED_MODULE_4__.Api.User)
+            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__.EntityCacheManager.getInstance().put(user.id.toString(), user);
     }
     const allowed = [];
     let disallowAll = false;
     for (const rule of result.rules ?? []) {
-        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueAllowUsers)
+        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_4__.Api.PrivacyValueAllowUsers)
             allowed.push(...rule.users.map((id) => id.toString()));
-        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PrivacyValueDisallowAll)
+        if (rule instanceof telegram__WEBPACK_IMPORTED_MODULE_4__.Api.PrivacyValueDisallowAll)
             disallowAll = true;
     }
     return { allowed, disallowAll };
 }
 function createCallAllowList(client) {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_18__.allowListStateFile)();
-    const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyKeyPhoneCall(), rules }));
-    return new _CallAllowList__WEBPACK_IMPORTED_MODULE_5__.CallAllowList({
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled)(),
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_19__.allowListStateFile)();
+    const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
+    return new _CallAllowList__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_17__.isInHouseCallsEnabled)(),
         listPaidChatIds: (limit) => db.listPaidChatIds(limit),
         resolvable: (chatIds) => chatIds.filter((id) => cachedInputUser(client, id) !== null),
         readPrivacy: () => readCallPrivacy(client),
         writeAllowList: async (chatIds) => {
             const users = chatIds.map((id) => cachedInputUser(client, id)).filter((u) => u !== null);
-            await setRules([new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyValueAllowUsers({ users }), new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyValueDisallowAll()]);
+            await setRules([new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyValueAllowUsers({ users }), new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyValueDisallowAll()]);
         },
-        writeNobody: async () => { await setRules([new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPrivacyValueDisallowAll()]); },
+        writeNobody: async () => { await setRules([new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyValueDisallowAll()]); },
         loadState: () => {
             try {
-                return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_1___default().readFileSync(stateFile, 'utf8'));
+                return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_2___default().readFileSync(stateFile, 'utf8'));
             }
             catch {
                 return null;
             }
         },
         saveState: (state) => {
-            fs__WEBPACK_IMPORTED_MODULE_1___default().mkdirSync(path__WEBPACK_IMPORTED_MODULE_2___default().dirname(stateFile), { recursive: true, mode: 0o700 });
-            fs__WEBPACK_IMPORTED_MODULE_1___default().writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 });
+            fs__WEBPACK_IMPORTED_MODULE_2___default().mkdirSync(path__WEBPACK_IMPORTED_MODULE_3___default().dirname(stateFile), { recursive: true, mode: 0o700 });
+            fs__WEBPACK_IMPORTED_MODULE_2___default().writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 });
         },
         logger: engineLogger,
     });
 }
 /** Wire the service to this account's Telegram client, its DB scope and the existing completion handlers. */
 function createInHouseCallService(client, hooks) {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_18__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_19__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
-    const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_6__.createHumanSender)({
+    const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
         markRead: async (chatId) => {
             const { TelegramManager } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../../core/TelegramManager */ "./src/core/TelegramManager.ts"));
             await TelegramManager.getInstance()?.dialogManager?.markAsRead(chatId);
         },
-        typingDurationMs: (text) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.calculateTypingDuration)(text),
-        showTyping: (chatId, ms) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_8__.showHumanTyping)(client, chatId, ms),
+        typingDurationMs: (text) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_9__.calculateTypingDuration)(text),
+        showTyping: (chatId, ms) => (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_9__.showHumanTyping)(client, chatId, ms),
         // Follow-ups can fire long after the call (persisted across restarts), when a bare chatId no
         // longer resolves: use the canonical automated-send resolver (stored accessHash / username).
         send: async (chatId, text, sendOpts) => {
@@ -61771,21 +61864,21 @@ function createInHouseCallService(client, hooks) {
         },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     });
-    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_15__.InHouseCallService({
+    return new _InHouseCallService__WEBPACK_IMPORTED_MODULE_16__.InHouseCallService({
         allowList: createCallAllowList(client),
         // The same pay-prompt voice notes the chat flow sends, from the client's working directory.
-        pitchClips: () => PITCH_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_2___default().resolve(process.cwd(), file)).filter((file) => fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(file)),
+        pitchClips: () => PITCH_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_3___default().resolve(process.cwd(), file)).filter((file) => fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(file)),
         payAgainPrompt: async (chatId, user, kind) => {
-            await sendLikeHuman(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
+            await sendLikeHuman(chatId, (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_5__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
         },
-        privacyText: (chatId) => (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_4__.callPrivacyMessage)(chatId),
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_16__.isInHouseCallsEnabled)(),
-        isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
+        privacyText: (chatId) => (0,_messages_callMessages__WEBPACK_IMPORTED_MODULE_5__.callPrivacyMessage)(chatId),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_17__.isInHouseCallsEnabled)(),
+        isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
         maxConcurrentCalls: maxCalls,
-        createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_9__.CallEngine(client, {
+        createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine(client, {
             logger: engineLogger,
-            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.callVideoParams)(),
-            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_17__.callEchoParams)(),
+            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_18__.callVideoParams)(),
+            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_18__.callEchoParams)(),
             maxConcurrentCalls: maxCalls,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
@@ -61823,21 +61916,21 @@ function createInHouseCallService(client, hooks) {
         // the Zoom link to that user gets its own attempt (and marks the chat if Telegram refuses it).
         reportFlood: (flood) => {
             if (flood.kind === 'peer')
-                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.notePeerFlood();
+                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate.notePeerFlood();
             else
-                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_14__.floodGate.noteFloodWait(flood.seconds * 1000);
+                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate.noteFloodWait(flood.seconds * 1000);
         },
         loadVoiceProofState: () => {
             try {
-                return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_1___default().readFileSync(proofStateFile, 'utf8'));
+                return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_2___default().readFileSync(proofStateFile, 'utf8'));
             }
             catch {
                 return null;
             }
         },
         saveVoiceProofState: (state) => {
-            fs__WEBPACK_IMPORTED_MODULE_1___default().mkdirSync(path__WEBPACK_IMPORTED_MODULE_2___default().dirname(proofStateFile), { recursive: true, mode: 0o700 });
-            fs__WEBPACK_IMPORTED_MODULE_1___default().writeFileSync(proofStateFile, JSON.stringify(state), { mode: 0o600 });
+            fs__WEBPACK_IMPORTED_MODULE_2___default().mkdirSync(path__WEBPACK_IMPORTED_MODULE_3___default().dirname(proofStateFile), { recursive: true, mode: 0o700 });
+            fs__WEBPACK_IMPORTED_MODULE_2___default().writeFileSync(proofStateFile, JSON.stringify(state), { mode: 0o600 });
         },
         followUp: async (chatId, delayMs) => {
             const { scheduleInHouseFollowUp } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../events/event-executor */ "./src/modules/events/event-executor.ts"));
@@ -61861,20 +61954,20 @@ function createInHouseCallService(client, hooks) {
         },
         vcuiLink: (chatId) => `https://ZomCall.netlify.app/${process.env.clientId}/${chatId}`,
         warn: async (text) => {
-            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.VC_WARNINGS, `${process.env.clientId ?? ''}: ${text}`);
+            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.VC_WARNINGS, `${process.env.clientId ?? ''}: ${text}`);
         },
         notify: async (text) => {
-            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.CLIENT_UPDATES, `${process.env.clientId ?? ''}: ${text}`);
+            await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, `${process.env.clientId ?? ''}: ${text}`);
         },
         requeue: hooks.requeue,
         isLineBusy: hooks.isLineBusy,
         resolvePeer: async (chatId) => {
-            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_10__.EntityCacheManager.getInstance().getEntity(chatId, client);
+            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__.EntityCacheManager.getInstance().getEntity(chatId, client);
             return entity ?? chatId;
         },
         probeDurationSec,
         probeVideoSize,
-        videoAvailable: (url) => /^https?:\/\//i.test(url) || fs__WEBPACK_IMPORTED_MODULE_1___default().existsSync(url),
+        videoAvailable: (url) => /^https?:\/\//i.test(url) || fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(url),
         logger: engineLogger,
     });
 }
