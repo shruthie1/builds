@@ -1734,6 +1734,8 @@ function messageRawScorePipeline(nowMs) {
                 },
             },
         },
+        // Sort only the score: sorting whole unwound channel docs exceeded Mongo's 32 MB in-memory sort limit.
+        { $project: { _id: 0, _rawScore: 1 } },
         { $sort: { _rawScore: 1 } },
         { $group: { _id: null, values: { $push: '$_rawScore' }, count: { $sum: 1 } } },
         { $project: { _id: 0, messageRawScoreValues: [{ values: '$values', count: '$count' }] } },
@@ -14695,6 +14697,39 @@ function generateEmojis() {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/expected-outcome-log.ts"
+/*!****************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/expected-outcome-log.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isExpectedTelegramLogOutcome: () => (/* binding */ isExpectedTelegramLogOutcome)
+/* harmony export */ });
+/**
+ * Telegram refusing for a normal reason (private/deleted channel, user privacy, reaction limits, bans, the OTHER
+ * user deactivated, floods...). Not a bug on our side: logged as WARN and never posted as an "Application error".
+ * Our own account being deactivated (USER_DEACTIVATED / USER_DEACTIVATED_BAN) is NOT in this list.
+ * Dependency-free so logger.ts and parseError.ts can both use it without import cycles.
+ */
+const EXPECTED_TG_OUTCOME_RE = /\b(CHANNEL_INVALID|CHANNEL_PRIVATE|CHANNEL_PUBLIC_GROUP_NA|USER_PRIVACY_RESTRICTED|REACTIONS_TOO_MANY|REACTION_INVALID|MESSAGE_NOT_MODIFIED|INVITE_REQUEST_SENT|USER_BANNED_IN_CHANNEL|MESSAGE_ID_INVALID|INPUT_USER_DEACTIVATED|PEER_FLOOD|CHAT_WRITE_FORBIDDEN|CHAT_SEND_PLAIN_FORBIDDEN|CHAT_SEND_MEDIA_FORBIDDEN|CHAT_RESTRICTED|SLOWMODE_WAIT(_\d+)?|USER_IS_BLOCKED|USER_NOT_PARTICIPANT|USERS_TOO_MUCH|CHANNELS_TOO_MUCH)\b|Could not find the input entity|chat refused by Telegram/;
+function isExpectedTelegramLogOutcome(err) {
+    if (err == null)
+        return false;
+    let text;
+    if (typeof err === 'string')
+        text = err;
+    else if (err instanceof Error)
+        text = `${err.message} ${err.errorMessage ?? ''}`;
+    else
+        text = String(err);
+    return EXPECTED_TG_OUTCOME_RE.test(text);
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/fetchWithTimeout.ts"
 /*!************************************************************!*\
   !*** ../../packages/tg-core/src/utils/fetchWithTimeout.ts ***!
@@ -15912,6 +15947,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var chalk__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(chalk__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+
 
 
 // ─── Level gating (consistent across all apps via the LOG_LEVEL env var) ──────
@@ -15983,10 +16020,24 @@ class Logger {
         process.stdout.write(line + "\n");
     }
     error(message, data = "", trace) {
+        // Telegram refusing for a normal reason is not a failure: WARN, from every call site (one list, no per-site drift).
+        if (Logger.isExpectedOutcome(message) || Logger.isExpectedOutcome(data))
+            return this.warn(message, data);
         if (!this.enabled("error"))
             return;
         const line = this.formatMessage("ERROR", message, this.getErrorColors(), data);
         process.stderr.write(line + (trace ? "\n" + chalk__WEBPACK_IMPORTED_MODULE_0___default().red.bold(trace) : "") + "\n");
+    }
+    static isExpectedOutcome(value) {
+        if (value == null || value === "")
+            return false;
+        if (typeof value === "string" || value instanceof Error)
+            return (0,_expected_outcome_log__WEBPACK_IMPORTED_MODULE_2__.isExpectedTelegramLogOutcome)(value);
+        if (typeof value === "object") {
+            const v = value;
+            return (0,_expected_outcome_log__WEBPACK_IMPORTED_MODULE_2__.isExpectedTelegramLogOutcome)(`${v.errorMessage ?? ""} ${typeof v.message === "string" ? v.message : ""}`);
+        }
+        return false;
     }
     warn(message, data = "") {
         if (!this.enabled("warn"))
@@ -16146,6 +16197,24 @@ class Logger {
     static success(message, context) {
         new Logger(context).success(message);
     }
+    /**
+     * GramJS prints raw RPC errors through console.error (e.g. `RPCError: 400: CHANNEL_INVALID (caused by
+     * channels.GetChannels)`, hundreds per hour). Route ONLY expected Telegram outcomes to console.warn (stdout);
+     * every other console.error is untouched. Idempotent; call once at process start.
+     */
+    static downgradeExpectedConsoleErrors() {
+        if (Logger.consoleFilterInstalled)
+            return;
+        Logger.consoleFilterInstalled = true;
+        const originalError = console.error.bind(console);
+        const originalWarn = console.warn.bind(console);
+        console.error = (...args) => {
+            if (args.some((a) => Logger.isExpectedOutcome(a)))
+                originalWarn(...args);
+            else
+                originalError(...args);
+        };
+    }
     /** ---------- CONSOLE OVERRIDES ---------- */
     static overrideConsole(serviceName = "Console") {
         const instance = new Logger(serviceName);
@@ -16158,6 +16227,7 @@ class Logger {
     }
 }
 Logger.threshold = resolveThreshold();
+Logger.consoleFilterInstalled = false;
 const logger = new Logger();
 
 
@@ -17436,6 +17506,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createError: () => (/* binding */ createError),
 /* harmony export */   extractMessage: () => (/* binding */ extractMessage),
 /* harmony export */   isAxiosError: () => (/* binding */ isAxiosError),
+/* harmony export */   isExpectedTelegramOutcome: () => (/* binding */ isExpectedTelegramOutcome),
 /* harmony export */   parseError: () => (/* binding */ parseError),
 /* harmony export */   safeStringify: () => (/* binding */ safeStringify)
 /* harmony export */ });
@@ -17443,6 +17514,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+
 
 
 
@@ -17462,6 +17535,10 @@ const DEFAULT_ERROR_CONFIG = {
     defaultMessage: 'An unknown error occurred',
     defaultError: 'UnknownError'
 };
+/** Expected Telegram refusal (WARN, no "Application error"); the list lives in expected-outcome-log.ts. */
+function isExpectedTelegramOutcome(message) {
+    return (0,_expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__.isExpectedTelegramLogOutcome)(String(message ?? ''));
+}
 /**
  * Safely stringifies objects of any depth
  * @param data - Data to stringify
@@ -17729,10 +17806,14 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         }
         // Prepare the Full message for logging
         const fullMessage = `${prefixStr} :: ${extractedMessage}`;
-        logger.error(fullMessage);
         // Extract errorMessage from Telegram errors
         const errObj = (err && typeof err === 'object') ? err : null;
         const telegramErrorMsg = typeof errObj?.errorMessage === 'string' ? errObj.errorMessage : '';
+        const expected = isExpectedTelegramOutcome(`${telegramErrorMsg} ${fullMessage}`);
+        if (expected)
+            logger.warn(fullMessage);
+        else
+            logger.error(fullMessage);
         // Prepare response object
         const response = {
             status,
@@ -17743,7 +17824,7 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         // Send notification if requested and applicable
         if (sendErr) {
             try {
-                const ignoreError = shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
+                const ignoreError = expected || shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
                 if (!ignoreError) {
                     const notificationMessage = telegramErrorMsg || extractedMessage;
                     const notification = {
@@ -22737,7 +22818,8 @@ class DialogManager {
         return (message.includes('Could not find the input entity') ||
             message.includes('CHAT_ID_INVALID') ||
             message.includes('CHANNEL_INVALID') ||
-            message.includes('PEER_ID_INVALID'));
+            message.includes('PEER_ID_INVALID') ||
+            message.includes('CHANNEL_PRIVATE'));
     }
     /**
      * Execute callback if provided, with error handling
@@ -25501,7 +25583,8 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('GroqProvider');
 const BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const MODEL = 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile was removed by Groq (404 model_not_found, 2026-10-13); gpt-oss-120b verified live.
+const MODEL = 'openai/gpt-oss-120b';
 const DEFAULT_TIMEOUT = 10000;
 const DEFAULT_MAX_TOKENS = 200;
 const DEFAULT_TEMPERATURE = 1;
@@ -25551,6 +25634,8 @@ class GroqProvider {
                         messages: [{ role: 'user', content: prompt }],
                         max_tokens: maxTokens,
                         temperature,
+                        // gpt-oss reasons before answering; keep that short so max_tokens goes to the reply.
+                        reasoning_effort: 'low',
                     }),
                     signal: AbortSignal.timeout(timeout),
                 });
@@ -27808,7 +27893,7 @@ class ReactionService {
             if (parsed.type === 'CHANNEL_RESTRICTED') {
                 logger.debug(failureLine);
             }
-            else if (parsed.type === 'REACTION_INVALID') {
+            else if (parsed.type === 'REACTION_INVALID' || parsed.type === 'TRANSIENT') {
                 logger.warn(failureLine);
             }
             else {
@@ -36349,6 +36434,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+
 
 
 
@@ -36495,7 +36582,12 @@ class CallManager {
                     return true;
                 }
                 catch (error) {
-                    logger.error(`[${this.instanceName}] Call request error:`, error);
+                    if ((0,_tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_6__.isExpectedTelegramLogOutcome)(error)) {
+                        logger.warn(`[${this.instanceName}] Call request error:`, error);
+                    }
+                    else {
+                        logger.error(`[${this.instanceName}] Call request error:`, error);
+                    }
                     this.endCall();
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to Request Call', false);
                     return false;
@@ -40527,6 +40619,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("index");
+// GramJS logs expected RPC refusals (CHANNEL_INVALID, ...) via console.error: route those to warn.
+_tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger.downgradeExpectedConsoleErrors();
 dotenv__WEBPACK_IMPORTED_MODULE_1___default().config();
 const __filename = (0,url__WEBPACK_IMPORTED_MODULE_4__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/index.ts");
 const __dirname = path__WEBPACK_IMPORTED_MODULE_3___default().dirname(__filename);
