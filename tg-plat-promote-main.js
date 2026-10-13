@@ -21698,7 +21698,8 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         // declaration only — the pipeline itself is unchanged and is proven against a real server
         // by scripts/verify-credit-payment.cjs.
         const pipeline = [
-            { $set: { __seen: { $in: [key, { $ifNull: ['$creditKeys', []] }] } } },
+            // `key` is wrapped in $literal: inside a pipeline a value starting with '$' would be read as a field path.
+            { $set: { __seen: { $in: [{ $literal: key }, { $ifNull: ['$creditKeys', []] }] } } },
             {
                 $set: {
                     payAmount: {
@@ -21722,7 +21723,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                         // Keeping the most RECENT keys is what matters — a replay arrives close
                         // behind the original, never 20 credits later.
                         $cond: ['$__seen', '$creditKeys',
-                            { $slice: [{ $concatArrays: [{ $ifNull: ['$creditKeys', []] }, [key]] },
+                            { $slice: [{ $concatArrays: [{ $ifNull: ['$creditKeys', []] }, { $literal: [key] }] },
                                     -CREDIT_KEY_HISTORY] }],
                     },
                 },
@@ -21964,15 +21965,16 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
         const pipeline = [
             {
                 $set: {
-                    chatId: id,
+                    // User text inside a pipeline update: a leading '$' would be read as a field path, so wrap it.
+                    chatId: { $literal: id },
                     firstSeenAt: { $ifNull: ['$firstSeenAt', now] },
                     lastSeenAt: now,
-                    ...(handle ? { handle } : {}),
+                    ...(handle ? { handle: { $literal: handle } } : {}),
                     ...(nameIsReal
                         ? {
                             displayNames: {
                                 $slice: [
-                                    { $setUnion: [{ $ifNull: ['$displayNames', []] }, [displayName]] },
+                                    { $setUnion: [{ $ifNull: ['$displayNames', []] }, { $literal: [displayName] }] },
                                     -DISPLAY_NAME_HISTORY,
                                 ],
                             },
@@ -21982,7 +21984,7 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
                         ? {
                             attributionChannelIds: {
                                 $slice: [
-                                    { $setUnion: [{ $ifNull: ['$attributionChannelIds', []] }, channels] },
+                                    { $setUnion: [{ $ifNull: ['$attributionChannelIds', []] }, { $literal: channels }] },
                                     -ATTRIBUTION_CHANNEL_CAP,
                                 ],
                             },
