@@ -16021,8 +16021,12 @@ class Logger {
     }
     error(message, data = "", trace) {
         // Telegram refusing for a normal reason is not a failure: WARN, from every call site (one list, no per-site drift).
-        if (Logger.isExpectedOutcome(message) || Logger.isExpectedOutcome(data))
-            return this.warn(message, data);
+        if (Logger.isExpectedOutcome(message) || Logger.isExpectedOutcome(data)) {
+            this.warn(message, data);
+            if (trace && this.enabled("warn"))
+                process.stdout.write(String(trace) + "\n");
+            return;
+        }
         if (!this.enabled("error"))
             return;
         const line = this.formatMessage("ERROR", message, this.getErrorColors(), data);
@@ -25653,6 +25657,10 @@ class GroqProvider {
                 }
                 const data = await res.json();
                 const text = data.choices?.[0]?.message?.content?.trim();
+                // gpt-oss spends part of max_tokens on reasoning: a reply cut at the limit is not usable, let the chain fall through.
+                if (data.choices?.[0]?.finish_reason === 'length') {
+                    throw new Error('Groq reply truncated at max_tokens');
+                }
                 if (!text) {
                     throw new Error('Groq returned empty response');
                 }
