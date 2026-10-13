@@ -20641,7 +20641,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!id || !profile)
             return false;
         return this.guard(`markAskBlocked(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud' }, { $set: { 'ask.blockedAt': new Date() } });
+            const res = await this.collection.updateOne(
+            // Only while the warning is still open: a credit that closed it in the meantime wins (no block).
+            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open' }, { $set: { 'ask.blockedAt': new Date() } });
             return res.matchedCount > 0;
         });
     }
