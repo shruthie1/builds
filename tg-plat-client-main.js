@@ -22925,8 +22925,12 @@ class Logger {
     }
     error(message, data = "", trace) {
         // Telegram refusing for a normal reason is not a failure: WARN, from every call site (one list, no per-site drift).
-        if (Logger.isExpectedOutcome(message) || Logger.isExpectedOutcome(data))
-            return this.warn(message, data);
+        if (Logger.isExpectedOutcome(message) || Logger.isExpectedOutcome(data)) {
+            this.warn(message, data);
+            if (trace && this.enabled("warn"))
+                process.stdout.write(String(trace) + "\n");
+            return;
+        }
         if (!this.enabled("error"))
             return;
         const line = this.formatMessage("ERROR", message, this.getErrorColors(), data);
@@ -33204,6 +33208,10 @@ class GroqProvider {
                 }
                 const data = await res.json();
                 const text = data.choices?.[0]?.message?.content?.trim();
+                // gpt-oss spends part of max_tokens on reasoning: a reply cut at the limit is not usable, let the chain fall through.
+                if (data.choices?.[0]?.finish_reason === 'length') {
+                    throw new Error('Groq reply truncated at max_tokens');
+                }
                 if (!text) {
                     throw new Error('Groq returned empty response');
                 }
@@ -40475,10 +40483,11 @@ class ApiKeyPool {
         else if (this.cursor >= this.activeKeys.length)
             this.cursor = 0;
     }
-    remove(key) {
+    /** Park this key (looked up now, so concurrent removals cannot shift it onto another key). */
+    remove(key, cooldownMs) {
         const idx = this.activeKeys.indexOf(key);
         if (idx >= 0)
-            this.removeAt(idx);
+            this.removeAt(idx, cooldownMs);
     }
 }
 /** Opaque id for a key in logs and token-budget maps (FNV-1a over the whole key); never reveals the secret. */
@@ -40743,7 +40752,7 @@ async function runWithKeys(opts) {
             const message = messageOf(error);
             opts.logger?.warn(`[${name}] error: ${message}`);
             if (isRateLimit(error, v2) && keyIndex >= 0) {
-                pool.removeAt(keyIndex, keyCooldownMs(error));
+                pool.remove(apiKey, keyCooldownMs(error));
                 if (!pool.hasKeys) {
                     throw new ProviderError(`All ${name} API keys expired due to rate limiting or quota exceeded`, { errorClass: 'quota' });
                 }
@@ -49847,15 +49856,21 @@ function escapeMarkdownV2(text) {
  * asterisks). An odd number of ** markers is escaped as plain text, so a stray marker can never break a send.
  */
 function toMarkdownV2(text) {
-    // **bold** and __italic__ pairs become MarkdownV2 markup; everything else (and any unpaired marker) is escaped.
-    let out = "";
-    let last = 0;
-    for (const m of text.matchAll(/\*\*([^]+?)\*\*|__([^]+?)__/g)) {
-        out += escapeMarkdownV2(text.slice(last, m.index));
-        out += m[1] !== undefined ? `*${escapeMarkdownV2(m[1])}*` : `_${escapeMarkdownV2(m[2])}_`;
-        last = (m.index ?? 0) + m[0].length;
-    }
-    return out + escapeMarkdownV2(text.slice(last));
+    // Markup is per line, so a marker inside an interpolated value can never pair with one on another line:
+    // a whole line `__text__` is italic; `**text**` pairs are bold within one line; everything else is escaped.
+    return text.split("\n").map((line) => {
+        const italic = /^__(.+)__$/.exec(line);
+        if (italic)
+            return `_${escapeMarkdownV2(italic[1])}_`;
+        let out = "";
+        let last = 0;
+        for (const m of line.matchAll(/\*\*(.+?)\*\*/g)) {
+            out += escapeMarkdownV2(line.slice(last, m.index));
+            out += `*${escapeMarkdownV2(m[1])}*`;
+            last = (m.index ?? 0) + m[0].length;
+        }
+        return out + escapeMarkdownV2(line.slice(last));
+    }).join("\n");
 }
 const ITALIC_NOTICE_KEYS = new Set(["reason", "error", "note", "text"]);
 /**
@@ -56783,7 +56798,7 @@ function fakeEvidenceCaption(chatId, imageDetails) {
 /** Ops notice for one screenshot: bold outcome title, italic detail lines, bold field names. */
 function screenshotNotice(title, chatId, imageDetails) {
     const [head, ...rest] = title.split("\n");
-    return [`**${head}**`, ...rest.filter(Boolean).map((l) => `__${l}__`), `**Amount :** ${Number(imageDetails.amount) || 0}`, `**ChatId :** ${chatId}`].join("\n");
+    return [`**${head}**`, ...rest.filter(Boolean).map((l) => { const kv = /^([A-Za-z][\w ]{0,20}) : (.*)$/.exec(l); return kv ? `**${kv[1]} :** ${kv[2]}` : `__${l}__`; }), `**Amount :** ${Number(imageDetails.amount) || 0}`, `**ChatId :** ${chatId}`].join("\n");
 }
 function paymentFlowFor(event, chatId, db, imageDetails) {
     const chatUrl = `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`;
@@ -56862,11 +56877,12 @@ async function processImage(event) {
                 logger.warn(`[ProcessImage] blocked user ${chatId}: proof-blocked screenshot ignored silently`);
                 return;
             }
-            // Ops must see the image to judge the call (this branch returns before the normal evidence post).
-            const fakeEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { parseMode: "HTML", caption: fakeEvidenceCaption(chatId, imageDetails) });
-            if (!fakeEvidenceSent) {
-                logger.error(`[ProcessImage] fake-screenshot evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
-            }
+            // Ops must see the image to judge the call. Fire-and-forget: the evidence post must never delay or abort the
+            // warning/block below.
+            void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { parseMode: "HTML", caption: fakeEvidenceCaption(chatId, imageDetails) }).then((sent) => {
+                if (!sent)
+                    logger.error(`[ProcessImage] fake-screenshot evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
+            }).catch((error) => logger.error(`[ProcessImage] fake-screenshot evidence photo failed for ${chatId}:`, error));
             if (textProven.length === 0) {
                 await politeOldPayment();
                 await (0,_index__WEBPACK_IMPORTED_MODULE_20__.sendMessageWithButton)(screenshotNotice(`NOT CREDITED: told "old payment"\nFlags : ${(imageDetails.proofReasons ?? []).join(", ") || "proof blocked"}`, chatId, imageDetails), "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
@@ -57221,8 +57237,10 @@ async function processImage(event) {
                                                     // VCUI path: link first, exactly as before.
                                                     if (!inHouse)
                                                         await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_23__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
-                                                    serviceStarted();
                                                     userDetails = await db.update(chatId, updatedData);
+                                                    // Keep the claim only once the paid amount is saved: if the save fails, the payer's resend
+                                                    // must still be credited (vcui gates the call on the saved payAmount).
+                                                    serviceStarted();
                                                     // In-house: after the update, so the re-call sees the new amount.
                                                     if (inHouse) {
                                                         await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_23__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_23__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
