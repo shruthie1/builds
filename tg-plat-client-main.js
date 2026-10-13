@@ -36542,9 +36542,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const MIN_CONFIDENCE_THRESHOLD = 0.35;
-/** Smart chain: hedge delay before the next image models start in parallel (VISION_HEDGE_MS; 0 = sequential). */
-const DEFAULT_HEDGE_MS = 6000;
-/** The primary plus this many image models form one hedged group. */
+/** Hedge delay before the next image models start in parallel (VISION_HEDGE_MS). 0 = sequential, the default since
+ * 2026-10-13: racing let a faster fallback (NVIDIA, Groq) answer for a slow Gemini and credit a "Proceed To Pay" screen. */
+const DEFAULT_HEDGE_MS = 0;
+/** The primary plus this many image models form one hedged group; sequentially, all of them run before any skip. */
 const HEDGE_GROUP_SIZE = 3;
 /** Skip the remaining image models once this many found no amount (text-only providers still run). */
 const SKIP_AFTER_JUDGED = 2;
@@ -36581,7 +36582,7 @@ function shouldFallbackForPaymentExtraction(e, noteMergedIntoNames) {
         reasons.push('no payer/payee name');
     if (!hasStatus)
         reasons.push('no transaction status markers');
-    return { fallback: paymentEvidence && (amountMissingOrZero || lowConfidence), reasons };
+    return { fallback: paymentEvidence && (amountMissingOrZero || lowConfidence), paymentEvidence, reasons };
 }
 function clip(message) {
     return message.length > 300 ? `${message.slice(0, 300)}...` : message;
@@ -36649,7 +36650,8 @@ async function analyzePaymentProof(image, opts = {}) {
     //  - once >= SKIP_AFTER_JUDGED image models looked at the image and found no amount, the remaining image models are
     //    skipped (Gemma: 0 wins in 196 rows, often a 20 s timeout).
     //  - text readers (RapidAPI, OCR-Space) form their own last stage: their amounts are OCR-grade, never the first word.
-    //  VISION_HEDGE_MS=0 restores the plain sequential chain.
+    //  Default since 2026-10-13 is VISION_HEDGE_MS=0: the plain sequential chain (owner: sequential is fine). The first
+    //  HEDGE_GROUP_SIZE image models (Gemini, Groq, NVIDIA) always get their turn, so the NVIDIA rescue still happens.
     const hedgeRaw = env.VISION_HEDGE_MS;
     const hedgeMs = hedgeRaw === undefined || hedgeRaw === '' ? DEFAULT_HEDGE_MS : Number(hedgeRaw);
     const hedging = Number.isFinite(hedgeMs) && hedgeMs > 0;
@@ -36686,8 +36688,10 @@ async function analyzePaymentProof(image, opts = {}) {
             const normalized = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.normalizeWire)(wire, { ocrText, nowMs, provider: provider.name, model, latencyMs, v2, dayOfMonth: opts.dayOfMonth });
             const extraction = normalized.extraction;
             extraction.rulesApplied.push(...rulesExtra);
-            // R09
-            if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0) {
+            // R09: only a payment-looking read moves on for low confidence (owner rule 2026-10-13: move next only when it is
+            // payment related and the amount is missing or the read is unsure); a low-confidence chat or selfie read stays with this provider.
+            if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0
+                && shouldFallbackForPaymentExtraction(extraction, !v2.has('R10b')).paymentEvidence) {
                 return fail('low_confidence', `Confidence ${extraction.confidence.toFixed(2)} below minimum threshold ${MIN_CONFIDENCE_THRESHOLD}`);
             }
             // R11: secondary extraction from the pre-check OCR text
@@ -36822,7 +36826,7 @@ async function analyzePaymentProof(image, opts = {}) {
         next = panel.length;
     }
     for (; next < imageModels.length; next++) {
-        if (judgedImage >= SKIP_AFTER_JUDGED) {
+        if (next >= HEDGE_GROUP_SIZE && judgedImage >= SKIP_AFTER_JUDGED) {
             logger.log(`[vision] ${providers[imageModels[next]].name} skipped: ${judgedImage} image models already found no amount`);
             continue;
         }
@@ -55545,7 +55549,13 @@ function isFailedPayment(imageData) {
 }
 function isValidPayment(imageData) {
     const text = imageData.text || '';
-    const hasSuccessSignal = imageData.isSuccess ||
+    // A screen that still has its pay button is never finished, whatever the model says (fallback models call
+    // "Proceed To Pay" a success). On such a screen only success words in the text count.
+    const isUnsubmittedPayScreen = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+        'proceed to pay', 'add a message', 'enter upi pin', 'enter your upi pin', 'swipe to pay', 'slide to pay',
+    ]);
+    const modelSuccess = imageData.isSuccess && !isUnsubmittedPayScreen;
+    const hasSuccessSignal = modelSuccess ||
         (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid successfully', 'payment successful', 'transaction successful', 'successful', 'completed', 'payment took', 'debited', 'credited', 'pay again']);
     const hasReferenceSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['transaction id', 'transaction no', 'transaction number', 'utr', 'ref no', 'reference no', 'reference number', 'rrn']);
     const hasAmountSignal = imageData.amount > 0 || /(?:₹|rs\.?|inr)\s*\d{1,5}|\b\d{2,5}\s*(?:rs|rupees?|₹)\b/i.test(text);
@@ -55557,7 +55567,7 @@ function isValidPayment(imageData) {
         hasKnownPayeeSignal,
     ].filter(Boolean).length;
     const hasStrongCompletionEvidence = (hasSuccessSignal && (hasReferenceSignal || hasAmountSignal || hasKnownPayeeSignal)) ||
-        (imageData.isSuccess && imageData.isFinished && strongEvidenceCount >= 2);
+        (modelSuccess && imageData.isFinished && strongEvidenceCount >= 2);
     const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
         'failed to connect', 'fazlu rehman',
         'genuine paid girl', 'call just',
@@ -55581,6 +55591,7 @@ function isValidPayment(imageData) {
         logger.debug(`[ImagePayment] Pre-payment prompt present; strongEvidence=${strongEvidenceCount}, success=${hasSuccessSignal}, ref=${hasReferenceSignal}, amount=${hasAmountSignal}, payee=${hasKnownPayeeSignal}`);
     }
     return (imageData.confidence > 0.9 ? imageData.isFinished : true) &&
+        (!isUnsubmittedPayScreen || hasStrongCompletionEvidence) &&
         !hasAlwaysInvalidContext &&
         (!hasPrePaymentPrompt || hasStrongCompletionEvidence) &&
         (!hasPendingOrProcessText || (hasPendingOrProcessText && hasStrongCompletionEvidence)) &&
