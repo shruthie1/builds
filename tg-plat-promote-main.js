@@ -14030,15 +14030,17 @@ class BotConfig {
     outboundMessage(message, parseMode, prefix = true) {
         return prefix === false ? message : this.prefixMessage(message, parseMode);
     }
-    formatNotificationMessage(message, options) {
+    formatNotificationMessage(message, options, category) {
+        // CLIENT_UPDATES ops notices use the plain house style (no severity icons); other channels are unchanged.
+        const houseStyle = category === ChannelCategory.CLIENT_UPDATES;
         if (typeof message !== 'string') {
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(message), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
         }
         if (options.rich) {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
         return { text: message, parseMode: options.parseMode };
     }
@@ -14054,7 +14056,7 @@ class BotConfig {
             return false;
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
-        const formatted = this.formatNotificationMessage(message, options);
+        const formatted = this.formatNotificationMessage(message, options, category);
         // Prepare request parameters
         const params = new URLSearchParams({
             chat_id: channelId,
@@ -14358,7 +14360,7 @@ class BotConfig {
         }
         // Add common options
         if (options.caption) {
-            const formattedCaption = this.formatNotificationMessage(options.caption, options);
+            const formattedCaption = this.formatNotificationMessage(options.caption, options, category);
             formData.append('caption', this.outboundMessage(formattedCaption.text, formattedCaption.parseMode, options.prefix));
             if (formattedCaption.parseMode)
                 formData.append('parse_mode', formattedCaption.parseMode);
@@ -16838,7 +16840,26 @@ function timestampValue(timestamp) {
 // Field labels that are redundant with the clientId already prefixed on every notification
 // by the sender. Dropped centrally so no call site can reintroduce the duplication.
 const REDUNDANT_FIELD_LABELS = new Set(['client', 'clientid', 'username']);
+function formatHouseStyle(input) {
+    const title = input.title || input.summary || 'Notification';
+    const italic = (v) => `<i>${escapeTelegramHtml(v)}</i>`;
+    const lines = [`<b>${escapeTelegramHtml(title)}</b>`];
+    if (input.summary && input.summary !== title)
+        lines.push(italic(input.summary));
+    for (const f of input.fields ?? []) {
+        if (REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase()))
+            continue;
+        lines.push(`<b>${escapeTelegramHtml(f.label)} :</b> ${escapeTelegramHtml(f.value)}`);
+    }
+    if (input.details)
+        lines.push(...(Array.isArray(input.details) ? input.details : [input.details]).map(italic));
+    if (input.footer)
+        lines.push(italic(input.footer));
+    return lines.join('\n');
+}
 function formatRichNotification(input) {
+    if (input.houseStyle)
+        return formatHouseStyle(input);
     const severity = input.severity ?? NotificationSeverity.INFO;
     const title = input.title || input.summary || 'Notification';
     // Each entry is a "block" — a group of lines rendered together. Blocks are joined by a
