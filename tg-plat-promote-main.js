@@ -20298,6 +20298,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PAYMENT_PROOF_TTL_INDEX: () => (/* binding */ PAYMENT_PROOF_TTL_INDEX),
 /* harmony export */   PAYMENT_PROOF_TTL_SECONDS: () => (/* binding */ PAYMENT_PROOF_TTL_SECONDS),
 /* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
+/* harmony export */   SERVED_NEAR_SCAN_LIMIT: () => (/* binding */ SERVED_NEAR_SCAN_LIMIT),
+/* harmony export */   SERVED_NEAR_SCAN_MAX_MS: () => (/* binding */ SERVED_NEAR_SCAN_MAX_MS),
 /* harmony export */   hexHamming: () => (/* binding */ hexHamming)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
@@ -20317,6 +20319,10 @@ const PAYMENT_PROOF_MAX_REASONS = 6;
 const NEAR_HASH_SCAN_LIMIT = 200;
 /** Default Hamming radius (of 256 bits) for "same image, re-encoded". */
 const NEAR_HASH_MAX_DISTANCE = 4;
+/** Served rows scanned for a near picture (any chat). ~200 credits/day fleet-wide, so this covers a few days. */
+const SERVED_NEAR_SCAN_LIMIT = 600;
+/** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
+const SERVED_NEAR_SCAN_MAX_MS = 1500;
 /** Hamming distance between two equal-length hex strings; Infinity when lengths differ or non-hex. */
 function hexHamming(a, b) {
     if (a.length !== b.length)
@@ -20371,6 +20377,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedAt;
         delete doc.servedService;
         delete doc.servedUtr;
+        delete doc.servedSha;
         return this.guardWrite(`insert(${chatId})`, async () => {
             try {
                 await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
@@ -20515,7 +20522,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             const filter = { chatId: id, profile, telegramMsgId };
             const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none).
-            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr' } }]);
+            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256' } }]);
             if (res.matchedCount > 0)
                 return 'served';
             const existing = await this.collection.find(filter).limit(1).next();
@@ -20527,6 +20534,129 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             this.logger.error(`[${this.collectionName}] markServed(${id}) failed: ${String(error?.message ?? error)}`);
             return 'error';
         }
+    }
+    /**
+     * Every SERVED row (any chat, any persona) that shares this screenshot's UTR or exact bytes, or whose picture is
+     * within NEAR_HASH_MAX_DISTANCE bits. The caller classifies them (repeat / edited / unrelated). The row of the
+     * message being judged is excluded. Null when the store failed (callers fail open).
+     */
+    async servedCandidates(query) {
+        const chatId = String(query.chatId || '').trim();
+        if (!chatId)
+            return [];
+        const self = { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
+        const served = { servedAt: { $exists: true }, $nor: [self] };
+        // Three independent lookups, each guarded on its own: a slow / failing near-picture scan must not hide an
+        // exact UTR or file match. Null only when every lookup that ran failed.
+        const lookups = [];
+        if (query.utr) {
+            const utr = query.utr;
+            lookups.push(this.guard(`servedCandidates.utr(${chatId})`, null, async () => ({
+                by: 'utr',
+                docs: (await this.collection.find({ utr, ...served }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
+            })));
+        }
+        if (query.imageSha256 && HEX64.test(query.imageSha256)) {
+            const sha = query.imageSha256;
+            lookups.push(this.guard(`servedCandidates.sha(${chatId})`, null, async () => ({
+                by: 'imageSha256',
+                docs: (await this.collection.find({ imageSha256: sha, ...served }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
+            })));
+        }
+        if (query.imageHash && HEX64.test(query.imageHash)) {
+            const hash = query.imageHash;
+            lookups.push(this.guard(`servedCandidates.near(${chatId})`, null, async () => {
+                const rows = await this.collection
+                    .find({ imageHash: { $exists: true }, ...served })
+                    .sort({ createdAt: -1 })
+                    .limit(SERVED_NEAR_SCAN_LIMIT)
+                    .maxTimeMS(SERVED_NEAR_SCAN_MAX_MS)
+                    .toArray();
+                const docs = [];
+                for (const doc of rows) {
+                    if (typeof doc.imageHash !== 'string')
+                        continue;
+                    const distance = hexHamming(hash, doc.imageHash);
+                    if (distance <= NEAR_HASH_MAX_DISTANCE)
+                        docs.push({ distance, doc });
+                }
+                return { by: 'imageHash', docs };
+            }));
+        }
+        if (lookups.length === 0)
+            return [];
+        const results = await Promise.all(lookups);
+        if (results.every((r) => r === null))
+            return null;
+        const out = [];
+        const seen = new Set();
+        for (const r of results) {
+            if (!r)
+                continue;
+            for (const { distance, doc } of r.docs) {
+                const key = String(doc._id ?? `${doc.chatId}:${doc.profile}:${doc.telegramMsgId}`);
+                if (seen.has(key))
+                    continue;
+                seen.add(key);
+                out.push({ by: r.by, distance, doc });
+            }
+        }
+        return out;
+    }
+    /** Record a request sent to the user about this screenshot (see PaymentProofAsk). True when the row exists. */
+    async openAsk(chatId, profile, telegramMsgId, kind, reasons = []) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        const ask = { kind, state: 'open', openedAt: new Date(), reasons: reasons.slice(0, PAYMENT_PROOF_MAX_REASONS) };
+        return this.guard(`openAsk(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId }, { $set: { ask } });
+            return res.matchedCount > 0;
+        });
+    }
+    /** Open requests of this chat + persona created at or after `since`, newest first. Null when the store failed. */
+    async openAsks(chatId, profile, since) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return [];
+        return this.guard(`openAsks(${id})`, null, () => this.collection
+            .find({ chatId: id, profile, createdAt: { $gte: since }, 'ask.state': 'open' })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .toArray());
+    }
+    /** Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false. */
+    async resolveAsk(chatId, profile, telegramMsgId, byMsgId) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        return this.guard(`resolveAsk(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': new Date(), 'ask.resolvedByMsgId': byMsgId } });
+            return res.matchedCount > 0;
+        });
+    }
+    /** The fake/edited flow blocked the user over this request (see PaymentProofAsk.blockedAt). */
+    async markAskBlocked(chatId, profile, telegramMsgId) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        return this.guard(`markAskBlocked(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud' }, { $set: { 'ask.blockedAt': new Date() } });
+            return res.matchedCount > 0;
+        });
+    }
+    /**
+     * Undo markServed when the credit itself failed (service never started), so the payer's retry of the same payment
+     * is judged again instead of being called a repeat.
+     */
+    async releaseServed(chatId, profile, telegramMsgId) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        return this.guard(`releaseServed(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '' } });
+            return res.matchedCount > 0;
+        });
     }
     /**
      * Create the TTL index, migrating an existing one whose expireAfterSeconds differs (it was 45 days):
@@ -20567,6 +20697,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         // (not utr) so it never shares a key pattern with utr_1 (older Mongo rejects two partial
         // indexes on one key pattern).
         await this.guardWrite('ensureIndexes(servedUtr unique)', () => c.createIndex({ servedUtr: 1 }, { name: 'servedUtr_unique', unique: true, partialFilterExpression: { servedUtr: { $exists: true } } }));
+        // Same guard per screenshot file: two personas crediting the same file at the same moment (no UTR read).
+        await this.guardWrite('ensureIndexes(servedSha unique)', () => c.createIndex({ servedSha: 1 }, { name: 'servedSha_unique', unique: true, partialFilterExpression: { servedSha: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
 }
