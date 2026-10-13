@@ -27621,7 +27621,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!id || !profile)
             return false;
         return this.guard(`markAskBlocked(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud' }, { $set: { 'ask.blockedAt': new Date() } });
+            const res = await this.collection.updateOne(
+            // Only while the warning is still open: a credit that closed it in the meantime wins (no block).
+            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open' }, { $set: { 'ask.blockedAt': new Date() } });
             return res.matchedCount > 0;
         });
     }
@@ -38314,8 +38316,13 @@ function createOcrSpaceProvider(opts = {}) {
             data = JSON.parse(raw);
         }
         catch (error) {
-            opts.logger?.warn(`[ocr-space] non-JSON response: ${error instanceof Error ? error.message : String(error)}; body: ${raw.slice(0, 200)}`);
-            data = {};
+            // An OCR-Space failure is "no answer", never "the image has no text" (that would reject a genuine payer
+            // without any model looking at the screenshot).
+            throw new Error(`ocr-space non-JSON response: ${error instanceof Error ? error.message : String(error)}; body: ${raw.slice(0, 200)}`);
+        }
+        // OCR-Space reports its own timeouts / internal errors as HTTP 200 with IsErroredOnProcessing and no results.
+        if (data?.IsErroredOnProcessing) {
+            throw new Error(`ocr-space processing error: ${String(Array.isArray(data.ErrorMessage) ? data.ErrorMessage.join('; ') : data.ErrorMessage ?? 'unknown').slice(0, 200)}`);
         }
         return data?.ParsedResults?.[0]?.ParsedText || '';
     }
@@ -40282,6 +40289,7 @@ const ONE_HOUR_MS = 60 * 60 * 1000;
 class ApiKeyPool {
     constructor(opts) {
         this.removedAt = new Map();
+        this.cooldownFor = new Map();
         this.cursor = 0;
         this.name = opts.name;
         this.originalKeys = [...opts.keys];
@@ -40304,9 +40312,10 @@ class ApiKeyPool {
     restoreExpired() {
         const now = this.now();
         for (const [key, removedTime] of this.removedAt.entries()) {
-            if (now - removedTime >= this.cooldownMs && this.originalKeys.includes(key) && !this.activeKeys.includes(key)) {
+            if (now - removedTime >= (this.cooldownFor.get(key) ?? this.cooldownMs) && this.originalKeys.includes(key) && !this.activeKeys.includes(key)) {
                 this.activeKeys.push(key);
                 this.removedAt.delete(key);
+                this.cooldownFor.delete(key);
                 this.onRestore?.(key);
                 this.logger?.log(`[${this.name}] restored API key after cooldown`);
             }
@@ -40327,12 +40336,17 @@ class ApiKeyPool {
     indexOf(key) { return this.activeKeys.indexOf(key); }
     /** Snapshot of active keys (second opinion picks the key with token-budget room). */
     active() { return [...this.activeKeys]; }
-    removeAt(index) {
+    /** `cooldownMs` overrides the pool default for this removal (a per-minute rate limit parks a key briefly). */
+    removeAt(index, cooldownMs) {
         if (index < 0 || index >= this.activeKeys.length)
             return;
         const key = this.activeKeys[index];
         this.activeKeys.splice(index, 1);
         this.removedAt.set(key, this.now());
+        if (cooldownMs !== undefined)
+            this.cooldownFor.set(key, cooldownMs);
+        else
+            this.cooldownFor.delete(key);
         this.onRemove?.(key);
         this.logger?.warn(`[${this.name}] removed API key (index ${index}), ${this.activeKeys.length} remaining; auto-restore after cooldown`);
         if (this.cursor > index)
@@ -40408,11 +40422,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   NOOP_LOGGER: () => (/* binding */ NOOP_LOGGER),
 /* harmony export */   ProviderError: () => (/* binding */ ProviderError),
+/* harmony export */   RATE_LIMIT_COOLDOWN_MS: () => (/* binding */ RATE_LIMIT_COOLDOWN_MS),
 /* harmony export */   classifyError: () => (/* binding */ classifyError),
 /* harmony export */   delay: () => (/* binding */ delay),
 /* harmony export */   isRateLimit: () => (/* binding */ isRateLimit),
 /* harmony export */   isRateLimitLegacy: () => (/* binding */ isRateLimitLegacy),
 /* harmony export */   isTransient: () => (/* binding */ isTransient),
+/* harmony export */   keyCooldownMs: () => (/* binding */ keyCooldownMs),
 /* harmony export */   runWithKeys: () => (/* binding */ runWithKeys),
 /* harmony export */   withTimeout: () => (/* binding */ withTimeout)
 /* harmony export */ });
@@ -40495,6 +40511,13 @@ function isRateLimit(err, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) 
     if (status !== undefined)
         return false;
     return /\b(429|403)\b|quota|rate.?limit|resource.?exhausted/i.test(message);
+}
+/** A plain HTTP 429 is a per-minute limit: park the key for 90 s. Daily quota / 403 keep the pool's long cooldown. */
+const RATE_LIMIT_COOLDOWN_MS = 90000;
+function keyCooldownMs(err) {
+    if (statusOf(err) !== 429)
+        return undefined;
+    return /quota|exhausted|per.?day|daily/i.test(messageOf(err)) ? undefined : RATE_LIMIT_COOLDOWN_MS;
 }
 /** R22: transient server/network hiccup worth one same-key retry. */
 function isTransient(err) {
@@ -40599,7 +40622,7 @@ async function runWithKeys(opts) {
             const message = messageOf(error);
             opts.logger?.warn(`[${name}] error: ${message}`);
             if (isRateLimit(error, v2) && keyIndex >= 0) {
-                pool.removeAt(keyIndex);
+                pool.removeAt(keyIndex, keyCooldownMs(error));
                 if (!pool.hasKeys) {
                     throw new ProviderError(`All ${name} API keys expired due to rate limiting or quota exceeded`, { errorClass: 'quota' });
                 }
@@ -48882,7 +48905,7 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
         logger.error(`[ERROR] Error sending call initiation message - chatId: ${chatId}:`, error);
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error sending call initiation message");
     }
-    await (0,_MessageUtils__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithButton)(`${reason} - CALL INITIATED - ${chatId} - ${userDetails.payAmount}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+    await (0,_MessageUtils__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithButton)(`**📞 Call started**\nReason: ${reason}\n💰 ₹${userDetails.payAmount}  •  💬 ${chatId}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
     const type = userDetails.demoGiven
         ? userDetails?.secondShow
             ? "3"
@@ -49691,11 +49714,21 @@ function escapeMarkdownV2(text) {
     return text;
 }
 /**
+ * Escape for MarkdownV2 and turn balanced **bold** pairs into real bold (escaping alone printed them as literal
+ * asterisks). An odd number of ** markers is escaped as plain text, so a stray marker can never break a send.
+ */
+function toMarkdownV2(text) {
+    const parts = text.split("**");
+    if (parts.length % 2 === 0)
+        return escapeMarkdownV2(text);
+    return parts.map((part, i) => (i % 2 === 1 && part ? `*${escapeMarkdownV2(part)}*` : escapeMarkdownV2(part))).join("");
+}
+/**
  * Send message with button
  */
 async function sendMessageWithButton(message, title, url) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.CLIENT_UPDATES, escapeMarkdownV2(message.replace(/\*\*/g, "*")), {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.CLIENT_UPDATES, toMarkdownV2(message), {
             parseMode: "MarkdownV2",
             replyMarkup: {
                 inline_keyboard: [
@@ -56299,15 +56332,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
-/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
-/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
-/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
-/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
-/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
-/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../helpers/stateResetHelper */ "./src/helpers/stateResetHelper.ts");
+/* harmony import */ var _event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../event-handlers/CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
+/* harmony import */ var _detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./detectFakeScreenshot */ "./src/imageUtils/detectFakeScreenshot.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
+/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+
 
 
 
@@ -56344,7 +56379,7 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__.Logger("tg-aut:process-image");
 const MAX_PAYMENT_AMOUNT = 10000;
 function scheduleProcessImageTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_27__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_28__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, context);
         });
@@ -56539,18 +56574,44 @@ async function holdForLaterAnalysis(event, chatId) {
 // Payment gate (owner rules 2026-10-13): payments/proof-gate/flow.ts decides; this wires it to Telegram + userData.
 /** Our payee VPAs: the live list from ums /upi-ids plus the built-in defaults. */
 function ownVpas() {
-    const builtIn = [_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.paytm1, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.paytm2, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.paytm3, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.ppay, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.bpay2, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.axisUPI, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.gpay, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.gpayid, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.defaultId];
-    return [...(Array.isArray(_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.allIds) ? _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_32__.UpiIds.allIds : []), ...builtIn].filter((v) => typeof v === "string" && v.length > 0);
+    const builtIn = [_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.paytm1, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.paytm2, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.paytm3, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.ppay, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.bpay2, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.axisUPI, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.gpay, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.gpayid, _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.defaultId];
+    return [...(Array.isArray(_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.allIds) ? _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_33__.UpiIds.allIds : []), ...builtIn].filter((v) => typeof v === "string" && v.length > 0);
+}
+/**
+ * Would this screenshot reach the payment gate (successful payment to us, not the failed / "connecting" /
+ * questionable-caption branches)? A blocked user's photo is only processed when it does; everything else from a
+ * blocked user stays silent (owner 2026-10-13).
+ */
+function reachesPaymentGate(imageDetails, sanitizedData, caption) {
+    const text = String(imageDetails.text ?? "").toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
+    return !!sanitizedData.isPaymentRelated && !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment
+        && !sanitizedData.isFailedPayment && !!imageDetails.isSuccess && !imageDetails.isFailed && !(0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__.isLocalFailed)(imageDetails)
+        && (0,_helpers__WEBPACK_IMPORTED_MODULE_20__.isNotQuestionable)(caption?.toLowerCase())
+        && !(text.startsWith("payment to") && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ["phonepe", "transfer details"]))
+        && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [`${process.env.name} connecting`, "failed to connect"]);
+}
+/** Evidence photo caption (HTML; every value escaped; well under Telegram's 1024-char caption limit). */
+function paymentEvidenceCaption(v) {
+    const ocr = String(v.text ?? "").replace(/[\r\n]+/g, " ").slice(0, 450);
+    return [
+        `<b>📸 Payment screenshot</b>`,
+        `👤 ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.broadcastName || "-")}  •  💬 <code>${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.chatId)}</code>`,
+        `💰 Read ₹${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.readAmount)}${v.amount !== v.readAmount ? ` (taken as ₹${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.amount)})` : ""}  •  Paid before ₹${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.payAmount ?? 0)}`,
+        `🎬 Demo ${v.demoGiven ? "given" : "not given"}  •  🖼 Invalid pics ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(v.invalidPhotoCount)}`,
+        ``,
+        `📝 <i>${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_24__.escapeTelegramHtml)(ocr)}</i>`,
+    ].join("\n");
 }
 /** Ops notice for one screenshot: outcome title + amount as read + chat + message (client id is prefixed by BotConfig). */
 function screenshotNotice(title, chatId, msgId, imageDetails) {
-    return `${title}\n₹${Number(imageDetails.amount) || 0} · chat ${chatId} · msg ${msgId}`;
+    const [head, ...rest] = title.split("\n");
+    return [`**${head}**`, ...rest, `💰 ₹${Number(imageDetails.amount) || 0}  •  💬 ${chatId}  •  🆔 ${msgId}`].join("\n");
 }
 function paymentFlowFor(event, chatId, db, imageDetails) {
     const chatUrl = `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`;
     const msgId = Number(event.message.id) || 0;
-    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_29__.proofGateFrom)(() => db.getRepositories?.() ?? null);
-    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_30__.PaymentFlow(gate, {
+    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_30__.proofGateFrom)(() => db.getRepositories?.() ?? null);
+    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_31__.PaymentFlow(gate, {
         reply: (message) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message }),
         notifyOps: (title) => (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(screenshotNotice(title, chatId, msgId, imageDetails), "Chat", chatUrl),
         block: () => db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0),
@@ -56575,12 +56636,20 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
-    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_31__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
+    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_32__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
 }
 async function processImage(event) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     // Set once a payment's credit is claimed; undone if the credit then throws (the payer's retry must not be a "repeat").
     let releaseClaim;
+    // Once a service (call / link / pics) has gone out, a later error must not free the claim (that would allow a
+    // second credit of the same payment).
+    const serviceStarted = () => { releaseClaim = undefined; };
+    const initiateCallKeepingClaim = async (...args) => {
+        const started = await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(...args);
+        serviceStarted();
+        return started;
+    };
     try {
         const chatId = event.message.chatId.toString();
         const photoBuffer = await (0,_downloadMedia__WEBPACK_IMPORTED_MODULE_17__.downloadMedia)(event);
@@ -56609,7 +56678,7 @@ async function processImage(event) {
                     message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_10__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_10__.OLD_PAYMENT_MESSAGES.length)],
                 });
             };
-            const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_30__.TEXT_PROVEN_BLOCKS.has(r));
+            const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_31__.TEXT_PROVEN_BLOCKS.has(r));
             const blockedUser = await db.read(chatId);
             if (blockedUser?.canReply === 0) {
                 // Blocked (only the fake-payment flow's blocks reach here): no reply, no ops notice (owner 2026-10-13).
@@ -56618,7 +56687,7 @@ async function processImage(event) {
             }
             if (textProven.length === 0) {
                 await politeOldPayment();
-                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(screenshotNotice(`NOT CREDITED: told "old payment" (model flagged: ${(imageDetails.proofReasons ?? []).join(",") || "proof blocked"})`, chatId, Number(event.message.id) || 0, imageDetails), "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(screenshotNotice(`❌ Not credited: told "old payment"\nModel flagged: ${(imageDetails.proofReasons ?? []).join(", ") || "proof blocked"}`, chatId, Number(event.message.id) || 0, imageDetails), "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                 return;
             }
             const flow = paymentFlowFor(event, chatId, db, imageDetails);
@@ -56634,12 +56703,16 @@ async function processImage(event) {
         // payment page unblocks). Anything that is not a successful payment to us is ignored: no reply, no ops notice,
         // no invalid-photo count or ban (owner 2026-10-13: no notices for blocked users).
         const blockedAnswering = userDetails?.canReply === 0;
-        if (blockedAnswering && !(sanitizedData.isPaymentMine && imageDetails.isSuccess && !imageDetails.isFailed && !(0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_7__.isLocalFailed)(imageDetails))) {
+        if (blockedAnswering && !reachesPaymentGate(imageDetails, sanitizedData, event.message?.text)) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: photo is not a successful payment to us, ignored silently`);
             return;
         }
         const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_18__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
+        if (blockedAnswering && !(amount > 11 && amount <= MAX_PAYMENT_AMOUNT)) {
+            logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
+            return;
+        }
         const text = imageDetails.text.toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
         imageDetails.text = text;
         // Track "please" in payment messages (desperation indicator)
@@ -56683,7 +56756,7 @@ async function processImage(event) {
             (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine)) {
             // Single message: the image WITH the analysis as its caption. (Previously this both
             // forwarded the image AND sent a separate text-only card — the same info twice.)
-            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: `${msg.slice(0, 500)}` });
+            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.BotConfig.getInstance().sendPhoto(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.ChannelCategory.CLIENT_UPDATES, photoBuffer, { caption: paymentEvidenceCaption({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }), parseMode: "HTML" });
             if (!paymentEvidenceSent) {
                 logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
             }
@@ -56710,7 +56783,7 @@ async function processImage(event) {
             }
         }
         if (!blockedAnswering && (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
-            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_25__.proceedWithCall)(userDetails, chatId, "Image Processed");
+            const callRequested = await (0,_event_handlers_CallInitiationService__WEBPACK_IMPORTED_MODULE_26__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
                 return true;
             }
@@ -56770,9 +56843,9 @@ async function processImage(event) {
                     }
                     else {
                         const fraudReasons = [
-                            ...((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_26__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_31__.fabricatedTextReasons)(imageDetails.text),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_31__.laxmiPayeeReasons)(imageDetails, ownVpas()),
+                            ...((0,_detectFakeScreenshot__WEBPACK_IMPORTED_MODULE_27__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_32__.fabricatedTextReasons)(imageDetails.text),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_32__.laxmiPayeeReasons)(imageDetails, ownVpas()),
                         ];
                         if (fraudReasons.length > 0) {
                             const flow = paymentFlowFor(event, chatId, db, imageDetails);
@@ -56789,7 +56862,7 @@ async function processImage(event) {
                                 scheduleProcessImageTask(async () => {
                                     await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.limitTime, Date.now() + 10 * 60 * 1000);
                                     await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
-                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`BLOCKED: fake screenshot (payment store unavailable, previous rule)`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
+                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`**🚫 BLOCKED: fake screenshot**\nPayment store unavailable, previous rule`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                 }, 20000, `processImage.fakeScreenshotLimit.${chatId}`);
                             });
                         }
@@ -56822,10 +56895,11 @@ async function processImage(event) {
                                             ": Trying to scam!!\n\n" +
                                             `Paid: ${didPayOthersResp.paid}\n` +
                                             `Demo: ${didPayOthersResp.demoGiven}`;
-                                        notifyProcessImage("crossClientPayment", "Cross-client payment suspicion", "User may have paid another client", imageUserFields(chatId, broadcastName, [
-                                            { label: "Paid", value: didPayOthersResp.paid || "none" },
-                                            { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
-                                        ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING, reply);
+                                        if (!blockedAnswering)
+                                            notifyProcessImage("crossClientPayment", "Cross-client payment suspicion", "User may have paid another client", imageUserFields(chatId, broadcastName, [
+                                                { label: "Paid", value: didPayOthersResp.paid || "none" },
+                                                { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
+                                            ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_13__.NotificationSeverity.WARNING, reply);
                                         didPayOthers = true;
                                     }
                                     const isWithinPastTenMinutesImage = (0,_utils_isWithinPastTenMinutes__WEBPACK_IMPORTED_MODULE_11__["default"])(imageDetails.time, userDetails);
@@ -56833,7 +56907,7 @@ async function processImage(event) {
                                     // handled the screenshot it has already replied and nothing below runs.
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails);
                                     // A PhonePe transaction id carries the real payment moment; it beats a missing or edited printed time.
-                                    const paymentMs = (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_31__.phonePeTxnTimeMs)(imageDetails.text)
+                                    const paymentMs = (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_32__.phonePeTxnTimeMs)(imageDetails.text)
                                         ?? (isWithinPastTenMinutesImage.isValid ? (isWithinPastTenMinutesImage.paymentMs ?? null) : null);
                                     const judged = await flow.judge({
                                         session: await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs)),
@@ -56844,14 +56918,18 @@ async function processImage(event) {
                                     });
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
+                                    if (blockedAnswering && !isPaymentProperlyMine?.isvalid) {
+                                        logger.warn(`[ProcessImage] blocked user ${chatId}: payment not accepted, ignored silently`);
+                                        return;
+                                    }
                                     if (isPaymentProperlyMine?.isvalid) {
                                         logger.log("Valid payment confirmed and processed.");
                                         // Smart state reset based on payment
                                         const oldPayAmount = userDetails.payAmount;
-                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__.resetStatesOnPayment)(chatId, userDetails, amount);
+                                        (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_25__.resetStatesOnPayment)(chatId, userDetails, amount);
                                         // Check if this is an upgrade
                                         if (amount > oldPayAmount && oldPayAmount > 0) {
-                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_24__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
+                                            (0,_helpers_stateResetHelper__WEBPACK_IMPORTED_MODULE_25__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
                                         }
                                         if (amount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, amount);
@@ -56875,7 +56953,7 @@ async function processImage(event) {
                                                         demoGiven: false,
                                                         payAmount: 50,
                                                     });
-                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
+                                                    await initiateCallKeepingClaim(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
                                                     // Reset counters
                                                     userChatState.pleaseRequestCount = 0;
                                                     // picCount reset handled in database via state reset helper
@@ -56939,7 +57017,7 @@ async function processImage(event) {
                                             if (amount >= 30 &&
                                                 amount >= userDetails.payAmount + 20 &&
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canStartService)(userDetails, amount)) {
-                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(amount, userDetails, "Reg");
+                                                await initiateCallKeepingClaim(amount, userDetails, "Reg");
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                             }
                                             else {
@@ -56957,14 +57035,16 @@ async function processImage(event) {
                                                     if (amount > userDetails.highestPayAmount) {
                                                         updatedData['highestPayAmount'] = amount;
                                                     }
-                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__.inHouseCallsActive)();
+                                                    const inHouse = await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.inHouseCallsActive)();
                                                     // VCUI path: link first, exactly as before.
                                                     if (!inHouse)
                                                         await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
+                                                    serviceStarted();
                                                     userDetails = await db.update(chatId, updatedData);
                                                     // In-house: after the update, so the re-call sees the new amount.
                                                     if (inHouse) {
-                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_28__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+                                                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.offerCallOrLink)(chatId, () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_22__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+                                                        serviceStarted();
                                                     }
                                                     await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`Told to Call`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`);
                                                 }
@@ -56981,7 +57061,7 @@ async function processImage(event) {
                                                                 // High score, upgrade to demo call
                                                                 userDetails.demoGiven = false;
                                                                 if (userDetails.payAmount <= 50) {
-                                                                    await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
+                                                                    await initiateCallKeepingClaim(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
                                                                 }
                                                                 // Reset counters
                                                                 userChatState.pleaseRequestCount = 0;
@@ -57056,14 +57136,14 @@ async function processImage(event) {
                                                             userDetails.callTime < Date.now() - 3 * 60 * 1000) {
                                                             if (amount < 50) {
                                                                 userDetails.demoGiven = false;
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
+                                                                await initiateCallKeepingClaim(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
                                                             }
                                                             else {
                                                                 let updatedAmount = userDetails.payAmount;
                                                                 if (!(0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetails)) {
                                                                     updatedAmount = userDetails.payAmount + 100;
                                                                 }
-                                                                await (0,_index__WEBPACK_IMPORTED_MODULE_19__.initiateCall)(updatedAmount, userDetails, "Re-initiated Call for Full Show");
+                                                                await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
                                                             }
                                                             (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
                                                             // await sendMessageWithButton(`, ${imageDetails.time}\n${isWithinPastTenMinutesImage.time}`, 'Chat', `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`)
@@ -57274,7 +57354,7 @@ async function processImage(event) {
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, "Error Processing image");
         const failedChat = event.message?.chatId?.toString?.() ?? "";
-        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`IMAGE PROCESSING FAILED: check this screenshot manually${releaseClaim ? " (payment was valid; credit claim released)" : ""}\nchat ${failedChat} · msg ${Number(event.message?.id) || 0}\n${String(error?.message ?? error).slice(0, 200)}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${failedChat}`);
+        await (0,_index__WEBPACK_IMPORTED_MODULE_19__.sendMessageWithButton)(`**🛑 Image processing failed: check manually**${releaseClaim ? "\nPayment was valid; credit claim released" : ""}\n💬 ${failedChat}  •  🆔 ${Number(event.message?.id) || 0}\n${String(error?.message ?? error).slice(0, 200)}`, "Chat", `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${failedChat}`);
         if (releaseClaim) {
             const release = releaseClaim;
             releaseClaim = undefined;
@@ -71747,6 +71827,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isStalePaymentTime: () => (/* binding */ isStalePaymentTime),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
+/* harmony export */   sameAmount: () => (/* binding */ sameAmount),
 /* harmony export */   samePayment: () => (/* binding */ samePayment)
 /* harmony export */ });
 /**
@@ -71789,7 +71870,7 @@ function normalizeUtr(raw) {
 function isRealReference(utr) {
     if (typeof utr !== 'string')
         return false;
-    if (/^\d{12}$/.test(utr) || /^\d{18}$/.test(utr) || /^T\d{20,22}$/.test(utr))
+    if (/^\d{12}$/.test(utr) || /^\d{18}$/.test(utr) || /^T?\d{20,22}$/.test(utr))
         return true;
     return /^[A-Z0-9]{12,35}$/.test(utr) && /[A-Z]/.test(utr) && /\d/.test(utr) && !/^T\d+$/.test(utr);
 }
@@ -71815,7 +71896,7 @@ function samePayment(facts, row) {
     const rowUtr = normalizeUtr(row.utr);
     if (rowUtr && facts.utr && rowUtr === facts.utr)
         return true;
-    return typeof row.amount === 'number' && row.amount > 0 && row.amount === facts.amount;
+    return typeof row.amount === 'number' && row.amount > 0 && sameAmount(row.amount, facts.amount);
 }
 function pictureDistance(a, b) {
     if (!a || !b || a.length !== b.length)
@@ -71835,6 +71916,27 @@ function rowTimeMs(row) {
 function sameChat(facts, row) {
     return row.chatId === facts.chatId && row.profile === facts.profile;
 }
+/** The same Telegram user (chat id is the user id, the same with every persona). */
+function sameUser(facts, row) {
+    return row.chatId === facts.chatId;
+}
+const GLYPH_PREFIXES = new Set(['1', '2', '7', '8']);
+/** Our price points (same list as imageUtils/normaliseAmount KNOWN_PRICE_POINTS). */
+const PRICE_POINTS = new Set([15, 20, 25, 30, 40, 50, 100, 150, 200, 300, 350, 400, 500, 600]);
+/** "7100" read for "₹100": the rupee glyph misread as a leading digit, only when what remains is one of our prices. */
+function withoutGlyph(amount) {
+    const s = String(amount);
+    if (s.length !== 4 || !GLYPH_PREFIXES.has(s[0]))
+        return amount;
+    const rest = Number(s.slice(1));
+    return PRICE_POINTS.has(rest) ? rest : amount;
+}
+/** Same amount, allowing the rupee-glyph misread on either side. */
+function sameAmount(a, b) {
+    if (typeof a !== 'number' || typeof b !== 'number')
+        return false;
+    return a === b || withoutGlyph(a) === b || a === withoutGlyph(b) || withoutGlyph(a) === withoutGlyph(b);
+}
 /**
  * Judge a screenshot against every CREDITED screenshot that shares its file, UTR or picture.
  * Repeat beats edited beats clear. A near picture alone is never a repeat (two genuine receipts from one app look
@@ -71853,21 +71955,29 @@ function classifyAgainstServed(facts, matches) {
         const rowUtr = normalizeUtr(row.utr);
         if (!facts.utr || rowUtr !== facts.utr)
             continue;
-        if (row.amount === facts.amount)
+        // Same UTR = the same payment. Same (or glyph-misread) or LOWER amount: a resend, "old payment". Only a HIGHER
+        // amount on a credited UTR is an edit (live: ₹20 credited, then the same ref at ₹50 / ₹150 / ₹350).
+        if (sameAmount(row.amount, facts.amount) || (typeof row.amount === 'number' && facts.amount < row.amount)) {
             return { kind: 'repeat', by: 'utr', sameChat: sameChat(facts, row), matched: row };
+        }
         edited ?? (edited = { kind: 'edited', reason: 'UTR_REUSED_OTHER_AMOUNT', matched: row });
     }
     for (const m of matches) {
         const row = m.doc;
+        // Picture rules compare a user only with their OWN credited screenshots: two users paying the same amount in
+        // the same app minutes apart have near-identical receipts.
+        if (!sameUser(facts, row))
+            continue;
         if (pictureDistance(facts.dHash, row.imageHash) > NEAR_PICTURE_BITS)
             continue;
         const rowUtr = normalizeUtr(row.utr);
         const theirTime = rowTimeMs(row);
-        if (row.amount === facts.amount && theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
+        const twoRealReferences = isRealReference(facts.utr) && isRealReference(rowUtr) && facts.utr !== rowUtr;
+        if (!twoRealReferences && sameAmount(row.amount, facts.amount) && theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
             return { kind: 'repeat', by: 'picture', sameChat: sameChat(facts, row), matched: row };
         }
         const freshReference = isRealReference(facts.utr) && facts.utr !== rowUtr;
-        const numbersChanged = row.amount !== facts.amount || (!!facts.utr && !!rowUtr && facts.utr !== rowUtr);
+        const numbersChanged = !sameAmount(row.amount, facts.amount) || (!!facts.utr && !!rowUtr && facts.utr !== rowUtr);
         if (numbersChanged && !freshReference)
             edited ?? (edited = { kind: 'edited', reason: 'EDITED_PICTURE', matched: row });
     }
@@ -71888,7 +71998,7 @@ function confirmsAsk(facts, asked) {
         return false;
     if (!isDifferentPicture(facts, asked))
         return false;
-    if (typeof asked.amount !== 'number' || asked.amount !== facts.amount)
+    if (!sameAmount(asked.amount, facts.amount))
         return false;
     const askedUtr = normalizeUtr(asked.utr);
     if (askedUtr && facts.utr && askedUtr !== facts.utr) {
@@ -71964,6 +72074,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', race: 'payment' };
 /** proof-check BLOCK reasons that rest on text printed on the screenshot (not on model judgement). */
 const TEXT_PROVEN_BLOCKS = new Set(['DISCLAIMER_LONG', 'BLOCKLIST_A']);
 /**
@@ -72028,31 +72139,35 @@ class PaymentFlow {
         await session.openAsk('fraud', reasons);
         if (secondFake) {
             this.io.warn(`[payment-gate] second fraud screenshot (${label}) inside the grace period for ${chatId}: blocking now`);
+            // Record the block first: a block without the record could never be answered by the real page.
+            if (!(await session.markBlocked())) {
+                this.io.warn(`[payment-gate] ${chatId}: could not record the block, not blocking (fail open)`);
+                return;
+            }
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_BLOCKED_MESSAGES));
             await this.io.block();
-            await session.markBlocked();
-            await this.io.notifyOps(`BLOCKED: fake/edited payment again (${label})`);
+            await this.io.notifyOps(`🚫 BLOCKED: fake/edited payment again\nReason: ${label}`);
             return;
         }
         this.io.warn(`[payment-gate] fraud screenshot (${label}) for ${chatId}: warned, blocking in ${_decide__WEBPACK_IMPORTED_MODULE_0__.FRAUD_GRACE_MS / 60000} min unless a real payment page arrives`);
         await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_WARNING_MESSAGES));
-        await this.io.notifyOps(`Told Fake/Edited screenshot (${label})\nBlock in 15 min unless real page`);
+        await this.io.notifyOps(`⚠️ Fake/edited screenshot: user warned\nReason: ${label}\nBlocked in 15 min unless the real payment page arrives`);
         this.io.schedule(async () => {
-            if (!(await this.gate.fraudAskStillOpen(chatId, profile, msgId)))
-                return;
             if ((await this.io.readCanReply()) === 0)
                 return;
+            // Atomic "still open → blocked" on the warning row: a credit that closed it first wins; no record, no block.
+            if (!(await this.gate.markAskBlocked(chatId, profile, msgId)))
+                return;
             await this.io.block();
-            await this.gate.markAskBlocked(chatId, profile, msgId);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_BLOCKED_MESSAGES));
-            await this.io.notifyOps(`BLOCKED: no real payment within 15 min (${label})`);
+            await this.io.notifyOps(`🚫 BLOCKED: no real payment within 15 min\nReason: ${label}`);
         }, _decide__WEBPACK_IMPORTED_MODULE_0__.FRAUD_GRACE_MS, `paymentGate.fraudBlock.${chatId}`);
     }
     /** Never says "duplicate" / "used" (owner wording): it is an old payment, pay again. */
-    async repeat(chatId, by, sameChat, matched) {
-        this.io.warn(`[payment-gate] repeat of a credited payment for ${chatId} (by ${by}, ${sameChat ? 'same chat' : `credited in ${matched}`}): not crediting`);
+    async repeat(chatId, by, where) {
+        this.io.warn(`[payment-gate] repeat of a credited payment for ${chatId} (by ${by}, ${where}): not crediting`);
         await this.io.reply(this.pick(_proof_check_messages__WEBPACK_IMPORTED_MODULE_2__.OLD_PAYMENT_MESSAGES));
-        await this.io.notifyOps(`Repeat payment screenshot (by ${by})\n${sameChat ? 'already credited in this chat' : `already credited: ${matched}`}`);
+        await this.io.notifyOps(`🔁 Repeat payment: not credited\nSame ${REPEAT_BY[by] ?? by}, ${where}`);
     }
     /**
      * The credit decision for a payment screenshot to us: the gate around `creditRules` (handleMyPayment).
@@ -72070,7 +72185,7 @@ class PaymentFlow {
             return { handled: true };
         }
         if (session && gate.kind === 'repeat') {
-            await this.repeat(session.facts.chatId, gate.by, gate.sameChat, `${gate.matched.profile}/${gate.matched.chatId}`);
+            await this.repeat(session.facts.chatId, gate.by, gate.sameChat ? 'already credited in this chat' : `already credited in ${gate.matched.profile}/${gate.matched.chatId}`);
             return { handled: true };
         }
         if (session && gate.kind === 'edited') {
@@ -72080,15 +72195,17 @@ class PaymentFlow {
         if (session && gate.kind === 'needs-real-page') {
             this.io.warn(`[payment-gate] ${session.facts.chatId} is under a fake-payment warning and this screenshot shows no real transaction reference: not crediting`);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_WARNING_MESSAGES));
-            await this.io.notifyOps('Under fake warning: screenshot without a real reference, not credited');
+            await this.io.notifyOps('⚠️ Under fake warning: not credited\nScreenshot shows no real transaction reference');
             return { handled: true };
         }
         let verdict = null;
         let confirmedBlocked = false;
-        if (session && gate.kind === 'confirms' && (await session.resolve(gate.asked))) {
-            this.io.log(`[payment-gate] payment for ${session.facts.chatId} confirmed by a second screenshot (request on msg ${gate.asked.telegramMsgId}, ${gate.asked.ask?.kind})`);
-            await this.io.notifyOps(`Payment CONFIRMED by second screenshot (${gate.asked.ask?.kind})`);
-            confirmedBlocked = !!gate.asked.ask?.blockedAt;
+        // The confirmed request is closed only after the credit claim succeeds (below), so a lost claim or a failure
+        // never leaves a blocked payer with a closed request and no way out.
+        const confirmed = session && gate.kind === 'confirms' ? gate.asked : null;
+        if (session && confirmed) {
+            this.io.log(`[payment-gate] payment for ${session.facts.chatId} confirmed by a second screenshot (request on msg ${confirmed.telegramMsgId}, ${confirmed.ask?.kind})`);
+            confirmedBlocked = !!confirmed.ask?.blockedAt;
             verdict = { isvalid: true, msg: '' };
         }
         if (!verdict) {
@@ -72100,7 +72217,7 @@ class PaymentFlow {
                     await session.openAsk('old_time', ['IMPOSSIBLE_REFERENCE']);
                     this.io.warn(`[payment-gate] ${f.chatId}: reference ${f.utr} has an impossible length, asked for the details page, not crediting yet`);
                     await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
-                    await notify(`Asked for payment details page (reference ${f.utr} has ${f.utr?.length} digits)\n₹${f.amount}`);
+                    await notify(`🕒 Asked for the payment details page\nReference ${f.utr} has ${f.utr?.length} digits (real ones have 12)`);
                     return { handled: true };
                 }
                 if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
@@ -72108,13 +72225,13 @@ class PaymentFlow {
                     if (answered && (await session.resolve(answered))) {
                         // Second, different screenshot after the request: credit by the normal rules, never ask twice.
                         this.io.log(`[payment-gate] ${f.chatId}: details page after the old-time request (msg ${answered.telegramMsgId}), crediting`);
-                        await this.io.notifyOps(`Payment ACCEPTED after details-page request (old time)\n${check.time ?? ''}`);
+                        await this.io.notifyOps(`✅ Payment accepted after the details page\n${check.time ?? ''}`.trim());
                     }
                     else {
                         await session.openAsk('old_time', ['STALE_PAYMENT_TIME']);
                         this.io.warn(`[payment-gate] old payment time for ${f.chatId} (${check.time ?? ''}): asked for the details page, not crediting yet`);
                         await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
-                        await notify(`Asked for payment details page (old time)\n${check.time ?? ''}`);
+                        await notify(`🕒 Asked for the payment details page\nOld payment time ${check.time ?? ''}`.trim());
                         return { handled: true };
                     }
                 }
@@ -72124,14 +72241,18 @@ class PaymentFlow {
             const claim = await session.claim();
             if (claim === 'lost') {
                 if (!blocked)
-                    await this.repeat(session.facts.chatId, 'utr-race', false, 'another chat/persona (same moment)');
+                    await this.repeat(session.facts.chatId, 'race', 'credited by another chat/persona at the same moment');
                 return { handled: true };
             }
             if (claim === 'again') {
                 // A duplicate Telegram update of a message that was already credited: it already got its reply/service.
                 this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId} already credited (duplicate update): not crediting again`);
-                await notify('Duplicate delivery of an already credited payment message: ignored');
+                await notify('♻️ Duplicate delivery of a credited message: ignored');
                 return { handled: true };
+            }
+            if (confirmed) {
+                await session.resolve(confirmed);
+                await notify(`✅ Payment confirmed by a second screenshot\nAnswered: ${confirmed.ask?.kind === 'fraud' ? 'fake warning' : 'details-page request'}`);
             }
             // A real, credited payment answers every open fake warning of this chat (even with another amount): close
             // them so the delayed block never fires. Only a block THIS flow set is lifted (never an operator's / ban).
@@ -72141,9 +72262,8 @@ class PaymentFlow {
                 await this.io.unblock();
             if (closed > 0 || unblock) {
                 this.io.warn(`[payment-gate] ${session.facts.chatId}: real payment credited, ${closed} fake warning(s) closed${unblock ? ', unblocked' : ''}`);
-                await this.io.notifyOps(`Real payment after fake warning: ${closed} warning(s) closed${unblock ? ', UNBLOCKED' : ''}`);
+                await this.io.notifyOps(`${unblock ? '🔓 UNBLOCKED: real payment after fake warning' : '✅ Real payment after fake warning'}\n${closed} warning(s) closed`);
             }
-            await this.io.notifyOps(`PAYMENT VALID: passed every check${session.facts.utr ? ` (ref ${session.facts.utr})` : ''}`);
             return { handled: false, verdict, release: () => session.release() };
         }
         return { handled: false, verdict };
@@ -72215,7 +72335,9 @@ class GateSession {
         const asked = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.findConfirmedAsk)(f, open, now);
         if (asked)
             return { kind: 'confirms', asked };
-        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) && open.some((r) => r.telegramMsgId !== f.msgId && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now)))
+        // Only inside the 15-min grace period or while the flow's block stands: a later, unrelated genuine payment
+        // whose UTR was not read must not be refused for the rest of the day.
+        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) && open.some((r) => r.telegramMsgId !== f.msgId && ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now) || (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now))))
             return { kind: 'needs-real-page' };
         return verdict;
     }
@@ -72339,15 +72461,6 @@ class ProofGate {
             return false;
         return withTimeout(store.markAskBlocked(chatId, profile, msgId), this.deps.timeoutMs, false, `markAskBlocked(${chatId})`);
     }
-    /** The fake/edited request on this screenshot is still open (unanswered). */
-    async fraudAskStillOpen(chatId, profile, msgId) {
-        const store = safeStore(this.deps);
-        if (!store)
-            return false;
-        const now = this.deps.now();
-        const rows = await withTimeout(store.openAsks(chatId, profile, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
-        return (rows ?? []).some((r) => r.telegramMsgId === msgId && r.ask?.kind === 'fraud' && r.ask.state === 'open');
-    }
 }
 function safeStore(deps) {
     try {
@@ -72423,6 +72536,13 @@ __webpack_require__.r(__webpack_exports__);
  */
 const MASKED_ID = /\b(?:utr|upi\s*ref(?:erence)?(?:\s*(?:no|number))?|transaction\s*id|txn\s*id|ref(?:erence)?\.?\s*(?:no|number))\.?\s*[:#]?\s*t?x{4,}/i;
 const SAMPLE_PAYMENT = /\bsample\s+payment\b/i;
+/**
+ * Receipt-generator / edited-failed-screen wording. Week of 2026-10-06: 10/10 screenshots with it were fakes (demo
+ * receipts, a ₹500 with a 2025 PhonePe id); real PhonePe says "Transaction Successful", real receipts never this.
+ * Live 2026-10-13 meghana1 5214628718: a red failed PhonePe screen edited to "Payment Successful ... has been
+ * completed successfully". (Not "has been successfully completed": a genuine PhonePe line uses that order.)
+ */
+const COMPLETED_SUCCESSFULLY = /\bhas\s+been\s+completed\s+successfully\b/i;
 function fabricatedTextReasons(text) {
     const t = String(text ?? '').replace(/\s+/g, ' ');
     const reasons = [];
@@ -72430,22 +72550,17 @@ function fabricatedTextReasons(text) {
         reasons.push('MASKED_TRANSACTION_ID');
     if (SAMPLE_PAYMENT.test(t))
         reasons.push('SAMPLE_PAYMENT');
+    if (COMPLETED_SUCCESSFULLY.test(t))
+        reasons.push('GENERATOR_SUCCESS_TEXT');
     return reasons;
 }
 /**
- * Owner 2026-10-13: receipts paid to a "laxmi..." payee are fake (laxmitorreaybp / "laxmi stores" on sowmya1
- * 1118222077, revvilaxmi@ybl). Our OWN Paytm QR displays the merchant as "Ravva Laxmi" (seen on genuine credited
- * payments to paytmqr...rgcfsaeesx4o), so that name and any payee that is one of our VPAs never count.
- * Only the PAYEE is judged: a payer who is called Laxmi is a customer, not a fake. The model's payee name / VPA is
- * used when present; the whole text (minus the payer's name) is the fallback when the model read no payee.
+ * Owner 2026-10-13: "laxmi" on a receipt means a fake (laxmitorreaybp / "laxmi stores" on sowmya1 1118222077,
+ * revvilaxmi@ybl); a payer is never called Laxmi. Exceptions: our OWN Paytm QR shows the merchant as "Ravva Laxmi",
+ * and any screenshot showing one of our VPAs.
  */
 function laxmiPayeeReasons(details, ownVpas) {
-    const payee = `${details.payeeName ?? ''} ${details.payeeUpiId ?? ''}`.trim();
-    let t = (payee || String(details.text ?? '')).toLowerCase();
-    const payer = String(details.payerName ?? '').toLowerCase().trim();
-    if (!payee && payer)
-        t = t.split(payer).join(' ');
-    t = t.replace(/ravva\s*laxmi/g, '');
+    const t = String(details.text ?? '').toLowerCase().replace(/ravva\s*laxmi/g, '');
     if (!t.includes('laxmi'))
         return [];
     const compact = t.replace(/\s+/g, '');
@@ -75251,8 +75366,9 @@ class Replier {
      * Main replier function
      */
     async replier(force) {
-        // Prevent concurrent execution
-        if (this.isRunning && !force) {
+        // Never run two loops at once; `force` only skips the empty-queue check (a second loop doubles the
+        // send rate and reorders replies).
+        if (this.isRunning) {
             return;
         }
         // Check if there's work to do
