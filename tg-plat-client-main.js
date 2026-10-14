@@ -17730,6 +17730,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isRetryable: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isRetryable),
 /* harmony export */   isSocksError: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.isSocksError),
 /* harmony export */   isSpamLimited: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_33__.isSpamLimited),
+/* harmony export */   isTelegramRetryExhausted: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_38__.isTelegramRetryExhausted),
 /* harmony export */   isTelegramRuntimeFailure: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_38__.isTelegramRuntimeFailure),
 /* harmony export */   isTransient: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isTransient),
 /* harmony export */   isUsableActiveChannelId: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isUsableActiveChannelId),
@@ -18824,6 +18825,7 @@ function isPermanentError(input) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isTelegramRetryExhausted: () => (/* binding */ isTelegramRetryExhausted),
 /* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure)
 /* harmony export */ });
 function errorText(error) {
@@ -18835,6 +18837,13 @@ function errorText(error) {
         return String(error.message ?? "");
     }
     return String(error ?? "");
+}
+/**
+ * GramJS gave up after its own retries on Telegram-side internal errors / short flood waits
+ * ("Request was unsuccessful N time(s)", telegram/client/users.js). Transient: nothing to fix on our side.
+ */
+function isTelegramRetryExhausted(error) {
+    return /Request was unsuccessful \d+ time\(s\)/.test(errorText(error));
 }
 /** True only for Telegram transport failures that require client runtime recreation. */
 function isTelegramRuntimeFailure(error) {
@@ -35201,7 +35210,12 @@ class ReactionService {
                 }
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Loop error');
+                if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+                    logger.warn(`[${this.instanceId}] [Reactions] Loop error (Telegram transient): ${error.message}`);
+                }
+                else {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Loop error');
+                }
                 await this.interruptibleSleep(this.config.ERROR_RECOVERY_DELAY_MS);
             }
         }
@@ -35682,7 +35696,14 @@ class ReactionService {
             return true;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Channel update failed');
+            // Telegram-side failure after GramJS's retries: the old pool stays and the next cycle retries, so it
+            // is a warning, not an "Application error" post (keerthi2/ramya2/sneha1, 2026-10-14).
+            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+                logger.warn(`[${this.instanceId}] [Reactions] Channel update failed (Telegram transient): ${error.message}`);
+            }
+            else {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Channel update failed');
+            }
             this.lastChannelUpdate = expectedLastUpdate;
             return false;
         }
@@ -48101,10 +48122,11 @@ function isAuthMine(auth) {
  * "12 Oct" or "Oct 12, 2026". Returns -1 (past / unparseable) rather than NaN.
  */
 function getdaysLeft(inputDate) {
-    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.parseSpamBotReleaseDate)(inputDate, new Date());
+    const now = Date.now(); // one clock for the year inference and the difference
+    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.parseSpamBotReleaseDate)(inputDate, new Date(now));
     if (!parsed)
         return -1;
-    return Math.ceil((parsed.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    return Math.ceil((parsed.getTime() - now) / (1000 * 60 * 60 * 24));
 }
 function parseObjectToString(obj) {
     if (typeof obj !== 'object' || obj === null) {
@@ -55571,7 +55593,7 @@ function isValidPayment(imageData) {
     const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
         'failed to connect', 'fazlu rehman',
         'genuine paid girl', 'call just',
-        'interactions', 'google ads', 'googleads',
+        'google ads', 'googleads',
         'channel created', 'photo updated',
         'joined this channel', 'subscribers', 'members,', 'user not found',
         'username not found', 'user does not exist', 'payment requests',
@@ -55579,6 +55601,10 @@ function isValidPayment(imageData) {
         "failed to connect", 'enter new',
         'search name', "netlify", "fetched", "free demo"
     ]);
+    // "interactions" marks stats/ads pages, but GPay's chat-thread view of a paid payment says "Your interactions
+    // with <payee> will appear here" (meghana1 chat 8784226986, 2026-10-14): void it only without a completed
+    // payment to our payee.
+    const hasInteractionsText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['interactions']);
     const hasPrePaymentPrompt = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
         'pay secure', 'pay securely', 'select payment method',
         'unable to process', 'sending money', 'add upi', 'try after',
@@ -55593,6 +55619,7 @@ function isValidPayment(imageData) {
     return (imageData.confidence > 0.9 ? imageData.isFinished : true) &&
         (!isUnsubmittedPayScreen || hasStrongCompletionEvidence) &&
         !hasAlwaysInvalidContext &&
+        (!hasInteractionsText || (hasStrongCompletionEvidence && hasKnownPayeeSignal)) &&
         (!hasPrePaymentPrompt || hasStrongCompletionEvidence) &&
         (!hasPendingOrProcessText || (hasPendingOrProcessText && hasStrongCompletionEvidence)) &&
         (!hasEnterAmountText ||
