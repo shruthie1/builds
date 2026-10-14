@@ -59955,6 +59955,10 @@ class CallManager {
         // The service covers planning → ringing → show; a chat only waiting on the legacy fallback ring is not on one.
         return this.inHouse?.isInCall?.(chatId) ?? false;
     }
+    /** When an in-house call with chatId last connected (undefined when none has since start). */
+    lastInHouseCallConnectedAt(chatId) {
+        return this.inHouse?.lastConnectedAt?.(chatId);
+    }
     /** The pay amount chatId's running in-house show was planned under (undefined when none is running). */
     inHouseShowPayAmount(chatId) {
         return this.inHouse?.showPayAmount?.(chatId);
@@ -61085,6 +61089,8 @@ class InHouseCallService {
         this.showPaid = new Map();
         /** Outgoing calls in progress: chats holding a slot (from play() start), plans by peer id, expected end per chat. */
         this.outgoing = new Set();
+        /** chatId -> when its last call connected (bounded: oldest dropped past 500). Lets queued chat replies spot that a call superseded them. */
+        this.connectedAt = new Map();
         this.outgoingPlans = new Map();
         this.showEnds = new Map();
         this.outgoingPeers = new Map();
@@ -61191,6 +61197,10 @@ class InHouseCallService {
         return held >= this.maxCalls || (this.engine?.isBusy() ?? false);
     }
     /** True while chatId is on (or being set up for) a call with this account. */
+    /** When a call with chatId last connected (show or pitch, either direction); undefined if none since start. */
+    lastConnectedAt(chatId) {
+        return this.connectedAt.get(chatId);
+    }
     isInCall(chatId) {
         return this.outgoing.has(chatId) || this.incomingPlans.has(chatId) || this.pitchCalls.has(chatId) || this.voiceProofCalls.has(chatId)
             || (this.engine?.isInCallWith?.(chatId) ?? false);
@@ -61727,6 +61737,11 @@ class InHouseCallService {
             engine.setIncomingPolicy(this.incomingPolicy);
             engine.on('connected', (record) => {
                 const plan = record.direction === 'outgoing' ? this.outgoingPlans.get(record.peerUserId) : this.incomingPlans.get(record.peerUserId);
+                const connectedChat = plan?.chatId ?? record.peerUserId;
+                this.connectedAt.delete(connectedChat);
+                this.connectedAt.set(connectedChat, this.now());
+                if (this.connectedAt.size > 500)
+                    this.connectedAt.delete(this.connectedAt.keys().next().value);
                 if (!plan)
                     return; // pitch, not a show
                 this.connectedChats.add(plan.chatId);
@@ -62971,7 +62986,9 @@ function voiceProofLimits(env = process.env) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   deferWhileOnCall: () => (/* binding */ deferWhileOnCall),
-/* harmony export */   isChatOnCall: () => (/* binding */ isChatOnCall)
+/* harmony export */   isChatOnCall: () => (/* binding */ isChatOnCall),
+/* harmony export */   isSupersededByCall: () => (/* binding */ isSupersededByCall),
+/* harmony export */   lastCallConnectedAt: () => (/* binding */ lastCallConnectedAt)
 /* harmony export */ });
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -62998,6 +63015,27 @@ function isChatOnCall(chatId) {
     catch {
         return false;
     }
+}
+/**
+ * When an in-house call with `chatId` last connected, or undefined (none since start, or anything missing).
+ * Never throws.
+ */
+function lastCallConnectedAt(chatId) {
+    try {
+        const key = String(chatId ?? '');
+        if (!key)
+            return undefined;
+        const at = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager?.lastInHouseCallConnectedAt?.(key);
+        return typeof at === 'number' && Number.isFinite(at) ? at : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+/** A queued chat reply written before the chat's last connected call: the call moved the conversation on. */
+function isSupersededByCall(chatId, pushedAt) {
+    const at = lastCallConnectedAt(chatId);
+    return at !== undefined && pushedAt < at;
 }
 /**
  * For delayed automated sends: when `chatId` is on a call right now, re-check every 30 s (up to ~50 min)
@@ -75099,9 +75137,11 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("re
  * Queue manager for reply items
  */
 class ReplierQueueManager {
-    constructor(maxSize = 500) {
+    /** `isStale`: an item the processor will drop anyway (a call connected since it was queued); never merged into. */
+    constructor(maxSize = 500, opts = {}) {
         this.queue = [];
         this.maxSize = maxSize;
+        this.isStale = opts.isStale ?? (() => false);
     }
     /**
      * Add reply item to queue with deduplication logic
@@ -75123,7 +75163,11 @@ class ReplierQueueManager {
             // Deduplication: If no file, merge with existing text-only item
             if (!file) {
                 const existingIndex = this.queue.findIndex(item => item.chatId === chatId && !item.file);
-                if (existingIndex !== -1) {
+                if (existingIndex !== -1 && this.isStale(this.queue[existingIndex])) {
+                    // Merging into it would drop the new reply along with the stale one: replace it instead.
+                    this.queue.splice(existingIndex, 1);
+                }
+                else if (existingIndex !== -1) {
                     // Merge messages
                     if (msg && msg !== '' && this.queue[existingIndex].msg && this.queue[existingIndex].msg !== '') {
                         if (this.queue[existingIndex].msg.length < 150) {
@@ -75397,15 +75441,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
-/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
-/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
-/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
-/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
+/* harmony import */ var _modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../modules/calls/on-call-guard */ "./src/modules/calls/on-call-guard.ts");
+/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
+/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
+/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
+/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
+/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
 /**
  * Main Replier Orchestrator
  * Coordinates all replier components
  */
+
 
 
 
@@ -75484,9 +75530,11 @@ class Replier {
         this.updateCount = 0; // Track updates for periodic cleanup
         this.config = config;
         this.rateLimitConfig = rateLimitConfig;
-        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_12__.ReplierQueueManager(config.maxRepliesArrSize);
-        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_13__.ReplierRateLimiter(rateLimitConfig);
-        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_14__.ReplierHealthChecker();
+        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_13__.ReplierQueueManager(config.maxRepliesArrSize, {
+            isStale: (item) => (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_12__.isSupersededByCall)(item.chatId, item.pushedAt),
+        });
+        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_14__.ReplierRateLimiter(rateLimitConfig);
+        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_15__.ReplierHealthChecker();
         // Initialize state persistence, THEN start processing to avoid race condition
         this.initializeStatePersistence().finally(() => {
             this.startPeriodicProcessing();
@@ -75497,7 +75545,7 @@ class Replier {
      */
     async initializeStatePersistence() {
         try {
-            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_15__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_16__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
             if (state) {
                 this.queueManager.restoreQueue(state.repliesArr);
                 this.rateLimiter.restoreQueues(state.minuteQueue, state.tenMinutesQueue, state.hourQueue);
@@ -75559,7 +75607,7 @@ class Replier {
             sleepTime: this.sleepTime,
             globalSleepTime: this.globalSleepTime
         };
-        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_15__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_16__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
     }
     /**
      * Push reply to queue
@@ -75660,7 +75708,7 @@ class Replier {
                     const isMsgLimitReached = (msgStats.totalCount > 3200 || msgStats.userCount > 300);
                     const canSend = this.rateLimiter.canSendMessage();
                     if (canSend) {
-                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_16__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
+                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_17__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
                     }
                     else {
                         this.queueManager.unshift(replyObj);
@@ -76069,6 +76117,12 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_14__.isChatOnCall)(replyObj.chatId)) {
             logger.log(`[replier] ${replyObj.chatId} is on a call; reply deferred 30s`);
             onRequeue({ ...replyObj, notBefore: Date.now() + ON_CALL_RECHECK_MS });
+            return;
+        }
+        // Written before a call that has since connected (e.g. "send the screenshot" to a text payment claim, then
+        // the screenshot came and the show played): out of date now, so it is dropped, not sent after the call.
+        if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_14__.isSupersededByCall)(replyObj.chatId, replyObj.pushedAt)) {
+            logger.log(`[replier] ${replyObj.chatId} reply dropped: queued before the call that connected since kind=${classifyReply(replyObj)}`);
             return;
         }
         const entity = await getEntity(replyObj.chatId, client);
