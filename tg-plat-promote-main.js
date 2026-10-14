@@ -12128,6 +12128,7 @@ function isPermanentError(input) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isTelegramRetryExhausted: () => (/* binding */ isTelegramRetryExhausted),
 /* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure)
 /* harmony export */ });
 function errorText(error) {
@@ -12139,6 +12140,13 @@ function errorText(error) {
         return String(error.message ?? "");
     }
     return String(error ?? "");
+}
+/**
+ * GramJS gave up after its own retries on Telegram-side internal errors / short flood waits
+ * ("Request was unsuccessful N time(s)", telegram/client/users.js). Transient: nothing to fix on our side.
+ */
+function isTelegramRetryExhausted(error) {
+    return /Request was unsuccessful \d+ time\(s\)/.test(errorText(error));
 }
 /** True only for Telegram transport failures that require client runtime recreation. */
 function isTelegramRuntimeFailure(error) {
@@ -27638,7 +27646,12 @@ class ReactionService {
                 }
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Loop error');
+                if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+                    logger.warn(`[${this.instanceId}] [Reactions] Loop error (Telegram transient): ${error.message}`);
+                }
+                else {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Loop error');
+                }
                 await this.interruptibleSleep(this.config.ERROR_RECOVERY_DELAY_MS);
             }
         }
@@ -28119,7 +28132,14 @@ class ReactionService {
             return true;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Channel update failed');
+            // Telegram-side failure after GramJS's retries: the old pool stays and the next cycle retries, so it
+            // is a warning, not an "Application error" post (keerthi2/ramya2/sneha1, 2026-10-14).
+            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+                logger.warn(`[${this.instanceId}] [Reactions] Channel update failed (Telegram transient): ${error.message}`);
+            }
+            else {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, '[Reactions] Channel update failed');
+            }
             this.lastChannelUpdate = expectedLastUpdate;
             return false;
         }
