@@ -12129,7 +12129,8 @@ function isPermanentError(input) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   isTelegramRetryExhausted: () => (/* binding */ isTelegramRetryExhausted),
-/* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure)
+/* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure),
+/* harmony export */   isTelegramTransportUnavailable: () => (/* binding */ isTelegramTransportUnavailable)
 /* harmony export */ });
 function errorText(error) {
     if (error instanceof Error)
@@ -12147,6 +12148,14 @@ function errorText(error) {
  */
 function isTelegramRetryExhausted(error) {
     return /Request was unsuccessful \d+ time\(s\)/.test(errorText(error));
+}
+/**
+ * The connection to Telegram is down or not answering (our own "X Timeout after Nms", GramJS
+ * "Cannot send requests while disconnected", socket errors). Transient: it clears when the link comes back,
+ * so it must not count against a per-item retry budget.
+ */
+function isTelegramTransportUnavailable(error) {
+    return /\bTimeout after \d+ms|Cannot send requests while disconnected|\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE)\b/.test(errorText(error));
 }
 /** True only for Telegram transport failures that require client runtime recreation. */
 function isTelegramRuntimeFailure(error) {
@@ -26801,6 +26810,8 @@ class ReactionRateLimiter {
         // --- Per-channel cooldowns ---
         this.channelLastReaction = new Map();
         this.channelDailyCount = new Map();
+        // Channels already warned about today: the check runs on every loop pass (prod: 2,944 identical lines a night).
+        this.channelLimitWarned = new Set();
         // --- Hourly reaction tracking ---
         this.hourlyReactionTimestamps = [];
         // --- Flood-per-hour tracking ---
@@ -26919,7 +26930,8 @@ class ReactionRateLimiter {
     hasReachedChannelLimit(channelId) {
         const count = this.channelDailyCount.get(channelId) ?? 0;
         const reached = count >= this.config.PER_CHANNEL_DAILY_LIMIT;
-        if (reached) {
+        if (reached && !this.channelLimitWarned.has(channelId)) {
+            this.channelLimitWarned.add(channelId);
             logger.warn(`[LIMIT] Channel ${channelId} daily limit reached: ${count}/${this.config.PER_CHANNEL_DAILY_LIMIT}`);
         }
         return reached;
@@ -27115,6 +27127,7 @@ class ReactionRateLimiter {
             this.stats.lastStatsReset = resetTimestamp;
             // Reset per-channel daily counts
             this.channelDailyCount.clear();
+            this.channelLimitWarned.clear();
             // Clean up stale channelLastReaction entries (>24h old) to prevent memory leak
             const staleThreshold = Date.now() - 24 * 60 * 60 * 1000;
             for (const [channelId, timestamp] of this.channelLastReaction.entries()) {
@@ -27132,6 +27145,7 @@ class ReactionRateLimiter {
         await this.flush();
         this.channelLastReaction.clear();
         this.channelDailyCount.clear();
+        this.channelLimitWarned.clear();
         this.hourlyReactionTimestamps.length = 0;
         this.hourlyFloodTimestamps.length = 0;
         logger.log(`Disposed`);
@@ -27646,7 +27660,7 @@ class ReactionService {
                 }
             }
             catch (error) {
-                if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+                if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramTransportUnavailable)(error)) {
                     logger.warn(`[${this.instanceId}] [Reactions] Loop error (Telegram transient): ${error.message}`);
                 }
                 else {
@@ -28134,7 +28148,7 @@ class ReactionService {
         catch (error) {
             // Telegram-side failure after GramJS's retries: the old pool stays and the next cycle retries, so it
             // is a warning, not an "Application error" post (keerthi2/ramya2/sneha1, 2026-10-14).
-            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error)) {
+            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramTransportUnavailable)(error)) {
                 logger.warn(`[${this.instanceId}] [Reactions] Channel update failed (Telegram transient): ${error.message}`);
             }
             else {
