@@ -18703,8 +18703,10 @@ function parseTelegramError(error, chatId, emoticon) {
     const tgMsg = extractTelegramErrorMessage(error);
     const combined = `${msg} ${tgMsg}`.toUpperCase();
     // --- Auth errors (check first, they're fatal) ---
+    // Whole codes only: INPUT_USER_DEACTIVATED (the OTHER user is gone) and USER_DEACTIVATED_BAN contain
+    // USER_DEACTIVATED (this account is gone), and a substring match reported the wrong one.
     for (const code of AUTH_ERROR_CODES) {
-        if (combined.includes(code)) {
+        if (new RegExp(`(?<![A-Z0-9_])${code}(?![A-Z0-9_])`).test(combined)) {
             return { type: 'AUTH_ERROR', code };
         }
     }
@@ -22630,12 +22632,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! big-integer */ "big-integer");
 /* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+
 
 
 
@@ -22649,7 +22653,7 @@ __webpack_require__.r(__webpack_exports__);
 // NOTE: isPermanentError + handlePermanentTelegramFailure were app-specific (coupled to app utils /
 // inhandlerUpdated). They are now INJECTED via DialogCallbacks (onIsPermanentError /
 // onPermanentFailure) so this shared package carries no app coupling.
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("DialogManager");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("DialogManager");
 /**
  * Enum for dialog types
  */
@@ -22729,7 +22733,7 @@ class DialogManager {
     notifyPersistentDialogMiss(dialogId, type, error) {
         const notification = {
             title: "Dialog lookup failed",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING,
             summary: `Dialog ${dialogId} could not be created from Telegram peer data`,
             fields: [
                 { label: "Dialog ID", value: dialogId },
@@ -22743,7 +22747,7 @@ class DialogManager {
         try {
             void (async () => {
                 try {
-                    const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+                    const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
                     if (sent === false) {
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("Dialog missing notification returned false"), `DialogManager.missingDialogNotification.${dialogId}`, false);
                     }
@@ -23430,7 +23434,7 @@ class DialogManager {
             const message = event.message;
             if (!message.peerId)
                 return;
-            const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(message.peerId);
+            const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(message.peerId);
             if (!dialogId)
                 return;
             // Convert seconds to milliseconds (from package: date is Unix timestamp in seconds)
@@ -23511,7 +23515,7 @@ class DialogManager {
      * Simplified with basic lock protection
      */
     async createDialogFromPeer(peerId, timestamp) {
-        const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(peerId);
+        const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(peerId);
         if (!dialogId) {
             return undefined;
         }
@@ -23527,12 +23531,12 @@ class DialogManager {
         this.dialogCreationLocks.add(dialogId);
         try {
             // Check EntityCacheManager first, then fall back to client.getEntity
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(dialogId);
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().get(dialogId);
             // .get() returns `| null`; the `if (!entity)` below covers both.
             let entity = cached;
             if (!entity) {
                 try {
-                    entity = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__.withTimeout)(() => this.client.getEntity(peerId), { timeout: 10000, errorMessage: `GetEntity timeout for ${dialogId}` });
+                    entity = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.getEntity(peerId), { timeout: 10000, errorMessage: `GetEntity timeout for ${dialogId}` });
                 }
                 catch (error) {
                     this.log('warn', 'Dialog entity unavailable, creating minimal peer-backed dialog', {
@@ -23543,7 +23547,7 @@ class DialogManager {
                 }
             }
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(dialogId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(dialogId, entity);
             }
             const dialogInfo = entity
                 ? this.createDialogInfoFromEntity(entity, dialogId, timestamp)
@@ -23998,7 +24002,7 @@ class DialogManager {
             }
             // Write-through: cache resolved entity into EntityCacheManager
             if (entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(dialogId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(dialogId, entity);
             }
             return entity;
         }
@@ -24020,7 +24024,7 @@ class DialogManager {
      */
     async getEntityForPeer(peer) {
         try {
-            const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(peer);
+            const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(peer);
             // The ENTITY CACHE must be keyed by the KIND-MARKED id, not the bare digits that
             // getPeerDialogId returns. Telegram's user / basic-group / channel id-spaces overlap, so
             // user X, chat -X and channel -100X can share trailing digits; EntityCacheManager's own
@@ -24032,13 +24036,13 @@ class DialogManager {
             // key (its other callers), so only the cache key is marked here.
             const cacheKey = peerCacheKey(peer);
             if (cacheKey) {
-                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(cacheKey);
+                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().get(cacheKey);
                 if (cached)
                     return cached;
             }
             const entity = await this.client.getEntity(peer);
             if (entity && cacheKey) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(cacheKey, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(cacheKey, entity);
             }
             return entity;
         }
@@ -24075,7 +24079,7 @@ class DialogManager {
                 dialogId = dialogIdorMessage;
             }
             else {
-                dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(dialogIdorMessage.peerId);
+                dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(dialogIdorMessage.peerId);
                 if (!dialogId) {
                     return;
                 }
@@ -24094,7 +24098,7 @@ class DialogManager {
             // Skip if already read
             if (dialog.unreadCount === 0) {
                 try {
-                    await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
+                    await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
                 }
                 catch (error) {
                     this.log('debug', 'Error marking already-read dialog as read', { dialogId, error: error instanceof Error ? error.message : String(error) });
@@ -24107,7 +24111,7 @@ class DialogManager {
             dialog.unreadCount = 0;
             try {
                 // Use GramJS high-level markAsRead method
-                await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
+                await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
                 // SUCCESS: Update was applied both locally and on server
                 const readContext = {
                     previousUnreadCount,
@@ -24328,6 +24332,11 @@ class DialogManager {
             }
         }
         catch (error) {
+            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__.isTelegramTransportUnavailable)(error)) {
+                // Telegram-side blip (ramya1 2026-10-15): the existing dialogs are kept and the next sync retries.
+                this.log('warn', 'Dialog fetch skipped (Telegram transient)', { error: error instanceof Error ? error.message : String(error) });
+                return null;
+            }
             const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to fetch dialogs from server');
             this.log('error', 'Error fetching dialogs from server', { error: error instanceof Error ? error.message : String(error) });
             await this.handlePermanentDialogFailure(error, 'fetchDialogsFromServer', errorDetails);
@@ -24690,7 +24699,7 @@ class DialogManager {
      * @returns boolean indicating if messages can be sent
      */
     canSendMsgsToChannel(channel) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.computeLiveCanSendMsgs)({
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)({
             channelId: channel.id?.toString(),
             broadcast: channel.broadcast === true,
             restricted: channel.restricted === true,
@@ -27749,6 +27758,9 @@ class ReactionService {
             }
             if (this.isExpectedReactionDenial(parsed.type)) {
                 logger.debug(`[${this.instanceId}] Reaction skipped | ${this.normalizeChannelId(channel.id)} | ${this.getDialogLogLabel(channel)} | ${parsed.type}`);
+            }
+            else if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramTransportUnavailable)(error)) {
+                logger.warn(`[${this.instanceId}] [Reactions] Channel ${channel.title} skipped (Telegram transient): ${error?.message ?? error}`);
             }
             else {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `[Reactions] Error in channel ${channel.title}`, false);
