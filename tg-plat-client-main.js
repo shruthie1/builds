@@ -5650,8 +5650,11 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             this.emit('busy-declined', info);
             return;
         }
-        // A voice call gets audio only even if the policy hands over a video file.
-        const media = { ...decision.media, video: info.video && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(decision.media) };
+        // A voice call gets audio only even if the policy hands over a video file, unless the policy asks to
+        // turn our camera on (videoOnVoiceCall: a paid show the caller is owed).
+        const sendVideo = (info.video || decision.media.videoOnVoiceCall === true) && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(decision.media);
+        const media = { ...decision.media, video: sendVideo };
+        this.logger.log(`[tg-calls] incoming ${info.video ? 'video' : 'voice'} call from ${info.peerUserId}: answering with ${sendVideo ? 'video' : 'audio only'}${sendVideo && !info.video ? ' (camera turned on)' : ''}`);
         const call = this.createActive('incoming', (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(pc.adminId), info.peerUsername, media, decision.options ?? {});
         call.inputCall = inputCall;
         call.record.callId = info.callId;
@@ -5721,8 +5724,9 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 ? { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true }
                 : shellMicrophone,
         };
-        // record.video is the ring type; a ringAsVideo call has no camera track to send.
-        if (call.record.video && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media)) {
+        // record.video is the ring type; a ringAsVideo call has no camera track to send. An incoming voice call
+        // gets the camera only when the policy turned it on (videoOnVoiceCall).
+        if ((0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media) && (call.record.video || media.videoOnVoiceCall === true)) {
             const video = media.size ? { ...this.video, width: media.size.width, height: media.size.height } : this.video;
             description.camera = {
                 mediaSource: MediaSource.SHELL, input: (0,_media__WEBPACK_IMPORTED_MODULE_6__.videoShellCommand)(media.file, video, this.ffmpeg, media.startSec),
@@ -61204,7 +61208,8 @@ class InHouseCallService {
                     this.incomingPlans.set(chatId, plan);
                     this.showPaid.set(chatId, Number(user.payAmount) || 0);
                     this.showEnds.set(chatId, this.now() + this.remainingMs(plan));
-                    return { action: 'answer', media: { file: plan.url, video: true, startSec: plan.startSec, size: plan.size }, options: this.callOptions(plan) };
+                    // A show is pending: always with video, even when they rang with the voice button.
+                    return { action: 'answer', media: { file: plan.url, video: true, videoOnVoiceCall: true, startSec: plan.startSec, size: plan.size }, options: this.callOptions(plan) };
                 }
                 if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
                     return { action: 'ignore' };
