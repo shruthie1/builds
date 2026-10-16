@@ -21023,6 +21023,13 @@ class BotConfig {
             });
             if (response.data?.ok === true) {
                 void this.recordSuccessfulBotSend(category, token, channelId);
+                const messageId = response.data?.result?.message_id;
+                if (typeof messageId === 'number') {
+                    try {
+                        options.onSent?.(messageId);
+                    }
+                    catch { /* a caller hook never fails the send */ }
+                }
                 return true;
             }
             throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendMessage');
@@ -50524,7 +50531,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isExitCommand: () => (/* binding */ isExitCommand),
 /* harmony export */   isResetCommand: () => (/* binding */ isResetCommand),
 /* harmony export */   isSpamBotMessage: () => (/* binding */ isSpamBotMessage),
-/* harmony export */   isTelegramSystemMessage: () => (/* binding */ isTelegramSystemMessage)
+/* harmony export */   isTelegramSystemMessage: () => (/* binding */ isTelegramSystemMessage),
+/* harmony export */   noteOwnExitBroadcast: () => (/* binding */ noteOwnExitBroadcast),
+/* harmony export */   resetOwnExitBroadcast: () => (/* binding */ resetOwnExitBroadcast)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -50864,12 +50873,32 @@ function getExitTargets() {
         .map((v) => (v ?? "").trim())
         .filter((v) => v.length >= MIN_EXIT_TARGET_LEN && !UNSAFE_EXIT_TARGETS.has(v.toLowerCase()));
 }
+/**
+ * This process's own pre-bootstrap "exit<target>" broadcast (ConnectTrigger) is meant for an OLDER instance. The new
+ * instance can receive it too once connected (prod 2026-10-16 shruthi1, a member of the CLIENT_UPDATES channel
+ * @clientupdates: its own broadcast arrived 24-46 s after boot and killed it ~58 times, 15:28-16:58 UTC). Matched by
+ * the exact message id the Bot API returned for our own send (no clocks): an older instance still exits on it.
+ */
+const ownExitMessageIds = new Set();
+function noteOwnExitBroadcast(messageIds) {
+    for (const id of messageIds)
+        ownExitMessageIds.add(id);
+}
+function resetOwnExitBroadcast() {
+    ownExitMessageIds.clear();
+}
 function isExitCommand(event) {
     const text = event.message.text;
     if (!text) {
         return false;
     }
-    return getExitTargets().some((target) => text === `exit${target}`);
+    if (!getExitTargets().some((target) => text === `exit${target}`))
+        return false;
+    if (ownExitMessageIds.has(Number(event.message.id))) {
+        logger.log(`[exit] ignoring ${text}: this process's own pre-bootstrap exit broadcast (msg ${event.message.id})`);
+        return false;
+    }
+    return true;
 }
 /**
  * Check if message is reset command
@@ -77453,6 +77482,7 @@ async function sendPreBootstrapExitFallback() {
         logger.warn("[ConnectTrigger] No valid exit fallback targets configured (username/clientId missing or unsafe e.g. 'root'); skipping pre-bootstrap exit notification");
         return;
     }
+    const ownMessageIds = [];
     for (const target of exitTargets) {
         const message = `exit${target}`;
         logger.info("[ConnectTrigger] Sending pre-bootstrap exit fallback message", {
@@ -77460,8 +77490,10 @@ async function sendPreBootstrapExitFallback() {
             target,
             message,
         });
-        await sendConnectTriggerNotification(message, `Error sending pre-bootstrap exit fallback notification for ${target}`, { literal: true });
+        await sendConnectTriggerNotification(message, `Error sending pre-bootstrap exit fallback notification for ${target}`, { literal: true, onSent: (id) => ownMessageIds.push(id) });
     }
+    // This process must not obey the broadcast it just sent (it is for an older instance).
+    (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_21__.noteOwnExitBroadcast)(ownMessageIds);
     logger.info("[ConnectTrigger] Waiting briefly after exit fallback broadcast before bootstrap", {
         delayMs: PRE_BOOTSTRAP_EXIT_FALLBACK_DELAY_MS,
         clientId: process.env.clientId,
@@ -77475,7 +77507,7 @@ async function sendConnectTriggerNotification(message, context, options = {}) {
         // exit, plus the structured connect-trigger alerts) go to CLIENT_UPDATES, not the Account
         // channel — these are deployment/lifecycle signals, not per-account operator alerts.
         if (options.literal) {
-            const sent = await botConfig.sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CLIENT_UPDATES, message, { prefix: false });
+            const sent = await botConfig.sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.CLIENT_UPDATES, message, { prefix: false, onSent: options.onSent });
             if (sent === false) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error("Connect trigger notification returned false"), context, false);
             }
