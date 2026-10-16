@@ -11840,6 +11840,72 @@ async function checktghealth(client, mobile, force, deps) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts"
+/*!********************************************************************!*\
+  !*** ../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   onFloodSleep: () => (/* binding */ onFloodSleep),
+/* harmony export */   parseFloodSleep: () => (/* binding */ parseFloodSleep),
+/* harmony export */   watchFloodSleeps: () => (/* binding */ watchFloodSleeps)
+/* harmony export */ });
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+// GramJS sleeps through a FLOOD_WAIT of up to floodSleepThreshold (60 s) INSIDE invoke() and retries (up to 5 times),
+// announcing it only at info level, which our ERROR log level hides. A caller's own timeout then reports
+// "Timeout after Nms" while Telegram is in fact rate-limiting that request (prod 2026-10-16 ramya1: 3,758 reaction
+// "timeouts" and 0 reactions in 20 h, nothing in the logs). This makes those sleeps visible and lets a feature act on them.
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("gramjs-flood");
+const SLEEP_LINE = /Sleeping for (\d+)s on flood wait \(Caused by ([\w.]+)\)/;
+const listeners = new WeakMap();
+function parseFloodSleep(message) {
+    const m = SLEEP_LINE.exec(String(message ?? ""));
+    return m ? { seconds: Number(m[1]), request: m[2] } : null;
+}
+/** Wrap the client's GramJS logger once: flood sleeps are logged as warnings and passed to the client's listeners. */
+function watchFloodSleeps(client) {
+    const log = client?._log;
+    if (!client || !log || typeof log.info !== "function")
+        return false;
+    if (log.__floodSleepWatched)
+        return true;
+    const original = log.info.bind(log);
+    log.info = (message) => {
+        const sleep = parseFloodSleep(message);
+        if (sleep) {
+            logger.warn(`[gramjs] flood wait ${sleep.seconds}s slept inside invoke (${sleep.request})`);
+            for (const fn of listeners.get(client) ?? []) {
+                try {
+                    fn(sleep);
+                }
+                catch { /* a listener never breaks GramJS logging */ }
+            }
+        }
+        return original(message);
+    };
+    log.__floodSleepWatched = true;
+    return true;
+}
+/** Subscribe to the client's in-invoke flood sleeps. Returns the unsubscribe. */
+function onFloodSleep(client, fn) {
+    if (!watchFloodSleeps(client))
+        return () => { };
+    const key = client;
+    let set = listeners.get(key);
+    if (!set) {
+        set = new Set();
+        listeners.set(key, set);
+    }
+    set.add(fn);
+    return () => { set?.delete(fn); };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/telegram-utils/getFullEntityInfo.ts"
 /*!**********************************************************************!*\
   !*** ../../packages/tg-core/src/telegram-utils/getFullEntityInfo.ts ***!
@@ -27278,14 +27344,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _ReactionCache__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./ReactionCache */ "../../packages/tg-reactions/src/ReactionCache.ts");
 /* harmony import */ var _tg_core_telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/getMessages */ "../../packages/tg-core/src/telegram-utils/getMessages.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./RuntimeRestrictionStore */ "../../packages/tg-reactions/src/RuntimeRestrictionStore.ts");
-/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_11___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_11__);
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+/* harmony import */ var _tg_core_telegram_utils_floodSleepWatch__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/floodSleepWatch */ "../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./RuntimeRestrictionStore */ "../../packages/tg-reactions/src/RuntimeRestrictionStore.ts");
+/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_12___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_12__);
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+
 
 
 
@@ -27315,7 +27383,7 @@ function selectRandomElements(array, n) {
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger( true ? __filename : 0);
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger( true ? __filename : 0);
 // Hardcoded restricted channels - shared across instances (Set for O(1) lookup)
 const HARDCODED_RESTRICTED_CHANNELS = new Set([
     '1798767939', process.env.updatesChannel, process.env.notifChannel,
@@ -27334,7 +27402,7 @@ const HARDCODED_RESTRICTED_CHANNELS = new Set([
     "1780733848", "1685018515", "2057393918", "1887746719", "1916123414",
     "1970767061", "2057158588"
 ].filter(Boolean));
-const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_13__.DEFAULT_REACTION_CONFIG;
+const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_14__.DEFAULT_REACTION_CONFIG;
 /**
  * Reaction service that automatically reacts to messages in channels/groups
  * with adaptive rate limiting, human-like behavior, and proactive flood prevention.
@@ -27342,6 +27410,20 @@ const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_13__.DEFAULT_REACTION_CON
 class ReactionService {
     constructor(client, dialogManager, config) {
         this.config = CONFIG;
+        // prod 2026-10-16 ramya1: Telegram flood-limited its reactions; GramJS slept and retried each SendReaction inside
+        // invoke() (invisible at our log level) long after our timeout gave up, and the next reaction 10-15 s later hit the
+        // same limit again: 3,758 "timeouts", 0 reactions in 20 h. So: a flood sleep on SendReaction is a flood, only one
+        // reaction request is in Telegram at a time, and a run of unanswered reactions pauses reactions with backoff.
+        this.reactionInFlightSince = 0;
+        this.reactionTimeoutStreak = 0;
+        this.reactionTimeoutPauses = 0;
+        this.unwatchFloodSleep = () => { };
+        this.IN_FLIGHT_MAX_MS = 10 * 60 * 1000;
+        this.IN_FLIGHT_WAIT_MS = 30 * 1000;
+        this.TIMEOUT_STREAK_PAUSE = 5;
+        // recordFlood adds its 1.5-2x buffer: about 30-40 min first, doubling, at most about 6-8 h.
+        this.TIMEOUT_PAUSE_BASE_S = 20 * 60;
+        this.TIMEOUT_PAUSE_MAX_S = 4 * 60 * 60;
         this.channels = [];
         /**
          * Full dialog entities (with accessHash) for the current reaction pool, keyed by bare dialog id.
@@ -27356,7 +27438,7 @@ class ReactionService {
          * plain Set, so any CHANNEL_RESTRICTED outcome dropped the channel for the life of the process
          * and the pool could only shrink (nidhi2 fell to 4 usable channels, meghana2 to 1).
          */
-        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_9__.RuntimeRestrictionStore();
+        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__.RuntimeRestrictionStore();
         this.isRunning = false;
         this.isStopped = true;
         this.isDisposed = false;
@@ -27405,6 +27487,10 @@ class ReactionService {
         // Max restricted IDs
         this.MAX_RESTRICTED_IDS = 5000;
         this.client = client;
+        this.unwatchFloodSleep = (0,_tg_core_telegram_utils_floodSleepWatch__WEBPACK_IMPORTED_MODULE_7__.onFloodSleep)(client, (sleep) => {
+            if (sleep.request === 'messages.SendReaction')
+                void this.onReactionFloodSleep(sleep.seconds);
+        });
         this.dialogManager = dialogManager;
         this.db = config.store;
         this.onAccountError = config.onAccountError;
@@ -27423,7 +27509,7 @@ class ReactionService {
         // Register this instance (replaces old entry)
         ReactionService.activeInstances.set(this.instanceId, this);
         // Initialize rate limiter
-        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_10__.ReactionRateLimiter({
+        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_11__.ReactionRateLimiter({
             instanceId: this.instanceId,
             minDelayMs: this.config.MIN_DELAY_MS,
             maxDelayMs: this.config.MAX_DELAY_MS,
@@ -27439,7 +27525,7 @@ class ReactionService {
                 this.rateLimiter.initialize()
             ]);
             // Generate per-instance emoticon preferences
-            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_13__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
+            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_14__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
             this.instanceId);
             logger.info(`[${this.instanceId}] Reaction service initialized`);
             if (!this.autoStart || this.isDisposed) {
@@ -27543,6 +27629,7 @@ class ReactionService {
         }
         this.isDisposed = true;
         this.stop();
+        this.unwatchFloodSleep();
         if (this.startupTimer) {
             clearTimeout(this.startupTimer);
             this.startupTimer = null;
@@ -27649,6 +27736,11 @@ class ReactionService {
                     await this.interruptibleSleep(browseDelay);
                     continue;
                 }
+                if (this.reactionStillPending()) {
+                    logger.debug(`[${this.instanceId}] Previous reaction request still pending in Telegram; waiting`);
+                    await this.interruptibleSleep(this.IN_FLIGHT_WAIT_MS);
+                    continue;
+                }
                 // Perform reaction
                 const reactionResult = await this.reactToRandomMessage();
                 if (reactionResult === 'success') {
@@ -27751,7 +27843,7 @@ class ReactionService {
             return 'success';
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__.parseTelegramError)(error, channel.id);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, channel.id);
             if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRuntimeFailure)(error)) {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return 'error';
@@ -27788,7 +27880,7 @@ class ReactionService {
                 useCache: false,
                 // Invalid/private targets must leave this account's rotation instead of being
                 // retried as an empty history on every reaction loop.
-                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
+                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
             });
             if (!messages || messages.length === 0) {
                 return null;
@@ -27822,7 +27914,7 @@ class ReactionService {
                 messages.length = 0;
                 messages = null;
             }
-            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
+            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
                 await this.onReactionError(error, chatId, undefined, chatLabel);
                 return null;
             }
@@ -27836,6 +27928,10 @@ class ReactionService {
         if (!chatId) {
             logger.warn(`[${this.instanceId}] Invalid chat ID for message ${message.id}`);
             throw new Error('Invalid chat ID');
+        }
+        if (this.reactionStillPending()) {
+            logger.debug(`[${this.instanceId}] Previous reaction request still pending in Telegram; not sending another`);
+            return false;
         }
         try {
             const emoticon = await (0,_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.getRandomReaction)(this.client, chatId);
@@ -27881,7 +27977,41 @@ class ReactionService {
             msgId: message.id,
             reaction: [new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ReactionEmoji({ emoticon })]
         });
-        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => this.client.invoke(request), { timeout: this.config.REACTION_TIMEOUT_MS });
+        // Our timeout does not cancel the request: GramJS keeps it (and its flood-wait retries) going. Track it until it
+        // settles so no second reaction is sent meanwhile.
+        const started = Date.now();
+        this.reactionInFlightSince = started;
+        const call = this.client.invoke(request);
+        const settled = () => { if (this.reactionInFlightSince === started)
+            this.reactionInFlightSince = 0; };
+        call.then(settled, settled);
+        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => call, { timeout: this.config.REACTION_TIMEOUT_MS });
+    }
+    /** A reaction request is still in Telegram (given up on after IN_FLIGHT_MAX_MS: GramJS has no request timeout). */
+    reactionStillPending() {
+        return this.reactionInFlightSince > 0 && Date.now() - this.reactionInFlightSince < this.IN_FLIGHT_MAX_MS;
+    }
+    /** GramJS slept through a FLOOD_WAIT on SendReaction: Telegram is rate-limiting reactions. */
+    async onReactionFloodSleep(seconds) {
+        logger.warn(`[${this.instanceId}] Telegram flood wait ${seconds}s on reactions (slept inside GramJS): pausing reactions`);
+        this.emitReactionOutcome('flood');
+        try {
+            await this.rateLimiter.recordFlood(seconds);
+        }
+        catch (error) {
+            logger.error(`[${this.instanceId}] Failed to record flood: ${error}`);
+        }
+    }
+    /** TIMEOUT_STREAK_PAUSE reactions in a row got no answer: pause reactions, doubling each time until one succeeds. */
+    async noteReactionTimeout() {
+        this.reactionTimeoutStreak += 1;
+        if (this.reactionTimeoutStreak < this.TIMEOUT_STREAK_PAUSE)
+            return;
+        this.reactionTimeoutStreak = 0;
+        const seconds = Math.min(this.TIMEOUT_PAUSE_BASE_S * 2 ** this.reactionTimeoutPauses, this.TIMEOUT_PAUSE_MAX_S);
+        this.reactionTimeoutPauses += 1;
+        logger.warn(`[${this.instanceId}] ${this.TIMEOUT_STREAK_PAUSE} reactions in a row got no answer from Telegram: pausing reactions (pause #${this.reactionTimeoutPauses}, base ${Math.round(seconds / 60)} min)`);
+        await this.rateLimiter.recordFlood(seconds);
     }
     getMessageChatLabel(message) {
         const chat = message.chat;
@@ -27902,6 +28032,8 @@ class ReactionService {
     }
     // ==================== Event Handlers ====================
     async onReactionSuccess() {
+        this.reactionTimeoutStreak = 0;
+        this.reactionTimeoutPauses = 0;
         try {
             await this.rateLimiter.recordSuccess();
         }
@@ -27935,7 +28067,7 @@ class ReactionService {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return;
             }
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_12__.parseTelegramError)(error, chatId, attemptedEmoticon);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId, attemptedEmoticon);
             const failureLine = `[${this.instanceId}] REACT failure | ${chatId} | ${chatLabel} | ${parsed.type} | ${attemptedEmoticon || 'unknown'}`;
             if (parsed.type === 'CHANNEL_RESTRICTED') {
                 logger.debug(failureLine);
@@ -28003,6 +28135,8 @@ class ReactionService {
                 case 'TRANSIENT':
                     await this.rateLimiter.recordFailure();
                     logger.debug(`[${this.instanceId}] Transient error: ${parsed.message}`);
+                    if (/\bTimeout after \d+ms/.test(error?.message ?? ''))
+                        await this.noteReactionTimeout();
                     break;
                 case 'SLOWMODE_WAIT':
                     logger.debug(`[${this.instanceId}] Slowmode wait: ${parsed.seconds}s in ${chatId}`);
@@ -28109,7 +28243,7 @@ class ReactionService {
             }
             const oldChannels = this.channels;
             // Pre-filter: check Redis cache for channels known to have reactions disabled
-            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_8__.RedisClient.getClient();
+            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__.RedisClient.getClient();
             const dialogsWithReactionStatus = await Promise.all(allDialogs.map(async (ch) => {
                 if (!ch.id || this.isChannelRestricted(ch.id))
                     return { ch, usable: false };
@@ -28187,7 +28321,7 @@ class ReactionService {
         if (!entity || !('id' in entity)) {
             throw new Error('Invalid dialog entity');
         }
-        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_11___default()(entity.id);
+        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_12___default()(entity.id);
         // Decide by entity class, not dialog flags: GramJS sets isGroup for megagroups too, so checking
         // isGroup first turned every supergroup (a Channel) into a PeerChat with the channel's id.
         const className = entity.className;
@@ -28491,7 +28625,7 @@ class ReactionService {
         // positive TTL within the failure window. (Before the cache-TTL change, "any TTL" meant
         // failure — that heuristic no longer holds now that confirmed markers also expire.)
         try {
-            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_8__.RedisClient.getClient();
+            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__.RedisClient.getClient();
             const ttl = await redis.ttl(`reactions::${normalizedId}`);
             const isTransientFailure = ttl > 0 && ttl <= _ReactionCache__WEBPACK_IMPORTED_MODULE_4__.FETCH_FAILURE_TTL;
             if (!isTransientFailure) {
