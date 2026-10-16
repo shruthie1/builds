@@ -14184,6 +14184,13 @@ class BotConfig {
             });
             if (response.data?.ok === true) {
                 void this.recordSuccessfulBotSend(category, token, channelId);
+                const messageId = response.data?.result?.message_id;
+                if (typeof messageId === 'number') {
+                    try {
+                        options.onSent?.(messageId);
+                    }
+                    catch { /* a caller hook never fails the send */ }
+                }
                 return true;
             }
             throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendMessage');
