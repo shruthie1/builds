@@ -55928,10 +55928,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payments/payment-chat-guard */ "./src/payments/payment-chat-guard.ts");
 /**
  * State Reset Helper
  * Intelligently resets UserState counters based on user progression and payment state
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:state-reset-helper");
@@ -55941,6 +55943,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg
  */
 function resetStatesOnPayment(chatId, userDetails, newPaymentAmount) {
     logger.debug(`[StateReset] Payment received: ${newPaymentAmount}₹ for chatId: ${chatId}`);
+    (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_2__.notePaymentCredited)(chatId);
     // Always reset payment failure tracking on successful payment
     const userState = _state_UserState__WEBPACK_IMPORTED_MODULE_0__.stateManager.getUserState(chatId);
     userState.paymentFailedCount = 0;
@@ -63708,13 +63711,16 @@ function strongerKind(a, b) {
     const y = b ?? 'answer';
     return rank[x] >= rank[y] ? x : y;
 }
-/** Newer chat state made a message queued at `queuedAt` wrong. */
-function supersededReason(chatId, queuedAt) {
+/** Newer chat state made a message queued at `queuedAt` wrong. `text`/`file` given: a pay ask is stale once a payment was credited after it was queued. */
+function supersededReason(chatId, queuedAt, text, file) {
     const call = (0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_0__.lastCallConnectedAt)(chatId);
     if (call !== undefined && queuedAt < call)
         return 'queued before the call that connected since';
     if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.isSupersededByPaymentVerdict)(chatId, queuedAt))
         return 'queued before the payment answer';
+    if ((text !== undefined || file !== undefined) && carriesPitch(text, file) && (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.creditedSince)(chatId, queuedAt)) {
+        return 'pay ask queued before the payment was credited';
+    }
     return null;
 }
 const SEND = { send: true, reason: '' };
@@ -63747,10 +63753,10 @@ function awaitingReply(chatId, now = Date.now()) {
     return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.msSince)(chatId, 'user', now) < (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.msSince)(chatId, 'replied', now);
 }
 /** Delivery check for a message that already passed decide() at its start (or is an answer / system message). */
-function stillFits(chatId, kind = 'answer', queuedAt = Date.now(), now = Date.now()) {
+function stillFits(chatId, kind = 'answer', queuedAt = Date.now(), now = Date.now(), text, file) {
     if (kind === 'system')
         return SEND;
-    const superseded = supersededReason(chatId, queuedAt);
+    const superseded = supersededReason(chatId, queuedAt, text, file);
     if (superseded)
         return { send: false, reason: superseded };
     if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.fraudWarningOpen)(chatId, now))
@@ -70957,19 +70963,30 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   trackedSetTimeout: () => (/* binding */ trackedSetTimeout)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../payments/payment-chat-guard */ "./src/payments/payment-chat-guard.ts");
 /**
  * Timeout Helper for Pattern Handlers
  * Wraps setTimeout to automatically track timeouts for cleanup (prevents memory leaks)
  */
 
+
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("timeoutHelper");
 /**
  * Tracked setTimeout - automatically tracks timeout for cleanup
  * Use this instead of raw setTimeout in pattern handlers
+ *
+ * A follow-up decided before a payment was credited to the chat is dropped: every delayed pattern follow-up is a pay
+ * ask / price nudge for the pre-payment state (prod 2026-10-16 ramya2 6478434284: "Pay and Msg" + payment links 20 s
+ * after the screenshot was credited).
  */
 function trackedSetTimeout(context, callback, delay) {
+    const scheduledAt = Date.now();
     const timeout = setTimeout(async () => {
         try {
+            if (context.chatId && (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.creditedSince)(String(context.chatId), scheduledAt)) {
+                logger.log(`[pattern-followup] ${context.chatId}: dropped, a payment was credited after it was scheduled`);
+                return;
+            }
             await callback();
         }
         catch (error) {
@@ -71898,9 +71915,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FRAUD_REMINDER_EVERY_MS: () => (/* binding */ FRAUD_REMINDER_EVERY_MS),
 /* harmony export */   claimFraudReminder: () => (/* binding */ claimFraudReminder),
 /* harmony export */   clearFraudWarning: () => (/* binding */ clearFraudWarning),
+/* harmony export */   creditedSince: () => (/* binding */ creditedSince),
 /* harmony export */   fraudWarningOpen: () => (/* binding */ fraudWarningOpen),
 /* harmony export */   isSupersededByPaymentVerdict: () => (/* binding */ isSupersededByPaymentVerdict),
 /* harmony export */   noteFraudWarning: () => (/* binding */ noteFraudWarning),
+/* harmony export */   notePaymentCredited: () => (/* binding */ notePaymentCredited),
 /* harmony export */   notePaymentPhoto: () => (/* binding */ notePaymentPhoto),
 /* harmony export */   notePaymentVerdict: () => (/* binding */ notePaymentVerdict),
 /* harmony export */   paymentPhotoSince: () => (/* binding */ paymentPhotoSince),
@@ -71932,6 +71951,19 @@ function isSupersededByPaymentVerdict(chatId, pushedAt) {
     const at = (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'paymentVerdict');
     return at !== undefined && pushedAt < at;
 }
+/** A payment was credited to this chat. */
+function notePaymentCredited(chatId, at = Date.now()) {
+    (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.noteMoment)(chatId, 'paymentCredited', at);
+}
+/**
+ * A payment was credited after `sinceMs`: a pay ask decided before it is stale (prod 2026-10-16 ramya2 6478434284:
+ * "Done now come vc" during the screenshot check got the unpaid menu + a 20 s "Pay and Msg" follow-up; ₹50 was credited
+ * 1 s later and both still went out).
+ */
+function creditedSince(chatId, sinceMs) {
+    const at = (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'paymentCredited');
+    return at !== undefined && sinceMs < at;
+}
 function noteFraudWarning(chatId, at = Date.now()) {
     (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.noteMoment)(chatId, 'fraudWarned', at);
 }
@@ -71950,7 +71982,7 @@ function claimFraudReminder(chatId, now = Date.now()) {
     return true;
 }
 function resetPaymentChatGuard() {
-    (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.resetChatMoments)('paymentPhoto', 'paymentVerdict', 'fraudWarned', 'fraudReminder');
+    (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.resetChatMoments)('paymentPhoto', 'paymentVerdict', 'paymentCredited', 'fraudWarned', 'fraudReminder');
 }
 
 
@@ -76722,7 +76754,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         // One voice per chat (outbound/chat-voice): newer chat state (a call connected, the payment gate answered), a
         // fake-payment warning, a call in progress, or (nudges) the user writing since can make this item wrong now.
         // The pace rules ran when the item was queued (replier/index pushToReplies).
-        const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt);
+        const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt, Date.now(), replyObj.msg, replyObj.file);
         if (!voice.send) {
             logger.log(`[replier] ${replyObj.chatId} reply dropped: ${voice.reason} kind=${classifyReply(replyObj)}`);
             return;
@@ -88459,7 +88491,7 @@ __webpack_require__.r(__webpack_exports__);
 // Not here on purpose: live call machinery (plans, peers, promises), in-flight payment sequencing, caches. Those are
 // runtime objects of this process, not chat history.
 const MOMENTS = new Set([
-    'user', 'replied', 'pitch', 'demo', 'greeting', 'autoCall', 'paymentPhoto', 'paymentVerdict', 'fraudWarned',
+    'user', 'replied', 'pitch', 'demo', 'greeting', 'autoCall', 'paymentPhoto', 'paymentVerdict', 'paymentCredited', 'fraudWarned',
     'fraudReminder', 'demoPricePrompt', 'callRequestBlockedUntil',
 ]);
 const MAX_CHATS = 5000;
@@ -88927,6 +88959,7 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
             const payAmount = userDetails.payAmount || 0;
             const upsellMessage = (0,_messages_upsellMessages__WEBPACK_IMPORTED_MODULE_13__.getUpsellMessage)(payAmount);
             if (sendQR) {
+                const decidedAt = Date.now();
                 scheduleAskToPayTask(async () => {
                     if ((0,_modules_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_10__.isChatOnCall)(chatId)) {
                         logger.log(`[askToPay] ${chatId} went on a call before the delayed QR send; skipping`);
@@ -88938,13 +88971,13 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
                         await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithTimeout)(client, peer, {
                             message: paymentMessage,
                             file: await _FileSender__WEBPACK_IMPORTED_MODULE_7__.fileSender.getFileHandle('./QR.jpg')
-                        }, { voice: force ? 'system' : 'pitch' });
+                        }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
                         logger.log(`[askToPay] Payment request with QR sent to ${userDetails.username || chatId}, payAmount: ${payAmount}`);
                     }
                     catch (fileError) {
                         logger.error(`[askToPay] Failed to send QR, sending text only:`, fileError);
                         try {
-                            await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithTimeout)(client, peer, { message: paymentMessage }, { voice: force ? 'system' : 'pitch' });
+                            await (0,_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.sendMessageWithTimeout)(client, peer, { message: paymentMessage }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
                         }
                         catch (fallbackError) {
                             logger.error(`[askToPay] Failed to send fallback text payment request:`, fallbackError);
@@ -89218,6 +89251,7 @@ function textOf(value) {
  */
 async function sendMessageWithTimeout(client, entityLike, sendMessageParams, 
 /** voice: what the message is for the per-chat voice check; direct sends default to system (never dropped). */
+/** queuedAt: when a delayed send was decided (a pay ask decided before a credit is dropped). Default now. */
 options = {}) {
     if (isOwnChannel(entityLike))
         return (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_2__.sendMessageWithTimeout)(client, entityLike, sendMessageParams, options);
@@ -89226,7 +89260,7 @@ options = {}) {
     const text = typeof sendMessageParams.message === 'string' ? sendMessageParams.message : undefined;
     const file = sendMessageParams.file;
     // Delivery check only: callers that start an unsolicited message (askToPay) ran decide() at its start.
-    const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.stillFits)(chatId, options.voice ?? 'system');
+    const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.stillFits)(chatId, options.voice ?? 'system', options.queuedAt ?? Date.now(), Date.now(), text, file);
     if (!voice.send) {
         logger.log(`[voice] ${chatId}: ${options.voice} not sent: ${voice.reason}`);
         return undefined;
