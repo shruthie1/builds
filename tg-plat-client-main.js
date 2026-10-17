@@ -62336,14 +62336,18 @@ class InHouseCallService {
             return { status: 'cancelled', videoId: plan.videoId };
         if (!connected) {
             if (record.endReason === 'privacy_restricted') {
-                if (!this.withinWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS)) {
+                if (this.claimWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS)) {
                     // The first notice also carries the VCUI link: a blocked payer must not wait ~10 min with no way to watch.
                     const link = this.deps.vcuiLink?.(chatId);
                     const text = (this.deps.privacyText?.(chatId) ?? PRIVACY_MESSAGE) + (link ? `\n\n**Or call me on Zoom here**👇👇\n${link}` : '');
-                    // Queued, not awaited (flood back-off must not keep the call slot). Stamp only once it went out:
-                    // a failed send must not silence the notice for 30 min.
-                    void this.safeSend(chatId, text, true).then((sent) => { if (sent)
-                        this.claimWindow(this.privacyNotices, chatId, PRIVACY_NOTICE_COOLDOWN_MS); });
+                    // Queued, not awaited (flood back-off must not keep the call slot). Claimed before sending so a
+                    // second blocked ring during the send does not queue a duplicate; released if the send fails, so a
+                    // failed notice is not silenced for 30 min.
+                    const claimedAt = this.privacyNotices.get(chatId);
+                    void this.safeSend(chatId, text, true).then((sent) => {
+                        if (!sent && this.privacyNotices.get(chatId) === claimedAt)
+                            this.privacyNotices.delete(chatId);
+                    });
                 }
                 // One probe ladder (5/15/45 min) + one ops warning per episode, no time-based re-arm: re-arming
                 // on every blocked ring looped forever (a failed probe scheduled the next one). The episode
