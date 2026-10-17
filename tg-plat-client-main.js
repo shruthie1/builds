@@ -18000,6 +18000,50 @@ async function checktghealth(client, mobile, force, deps) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   declinePasswordReset: () => (/* binding */ declinePasswordReset),
+/* harmony export */   isResetRequestMissing: () => (/* binding */ isResetRequestMissing)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+// We decline a password reset pre-emptively after every login code, usually when none was requested. Telegram then
+// answers RESET_REQUEST_MISSING: nothing to decline, not an error (prod 2026-10-17 nidhi1: logged as an error 6 times).
+
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("password-reset");
+function isResetRequestMissing(error) {
+    const text = error instanceof Error
+        ? `${error.message} ${error.errorMessage ?? ""}`
+        : String(error);
+    return text.includes("RESET_REQUEST_MISSING");
+}
+/** Decline any pending password reset. Returns false when there was none; any other failure is thrown. */
+async function declinePasswordReset(client, context = "") {
+    try {
+        await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.DeclinePasswordReset());
+        logger.info(`password reset declined ${context}`.trim());
+        return true;
+    }
+    catch (error) {
+        if (!isResetRequestMissing(error))
+            throw error;
+        logger.info(`no password reset pending ${context}`.trim());
+        return false;
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts"
 /*!********************************************************************!*\
   !*** ../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts ***!
@@ -20449,9 +20493,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)
 /* harmony export */ });
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! axios */ "axios");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
@@ -20459,14 +20503,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+
 
 
 
 
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-core:telegram-bots-config');
-const initWarnedTokens = new Set();
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -20511,10 +20556,13 @@ class BotConfig {
         this.initialized = false;
         this.initializing = false;
         this.initPromise = null;
-        this.initRetries = 0;
         this.envFingerprint = "";
-        this.MAX_RETRIES = 3;
-        this.RETRY_DELAY = 2000; // 2 seconds
+        this.loadedAt = 0;
+        this.refreshing = null;
+        this.pendingUsage = new Map();
+        this.usageFlushTimer = null;
+        this.BOT_REFRESH_MS = 30 * 60000;
+        this.USAGE_FLUSH_MS = 60000;
         this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS = 60000;
         // Immediate initialization with fallback to lazy initialization
         this.initPromise = this.initialize();
@@ -20556,12 +20604,11 @@ class BotConfig {
         }
         return this.initPromise;
     }
-    async reloadFromEnv() {
+    async reload() {
         if (this.initializing) {
             await this.ready();
         }
         this.initialized = false;
-        this.initRetries = 0;
         this.initPromise = this.initialize();
         await this.initPromise;
     }
@@ -20580,11 +20627,14 @@ class BotConfig {
         if (nextFingerprint === this.envFingerprint) {
             return;
         }
-        logger.info('Telegram channel configuration changed; reloading BotConfig from environment');
-        await this.reloadFromEnv();
+        logger.info('Telegram channel configuration changed; reloading BotConfig');
+        await this.reload();
     }
     /**
-     * Initialize the configuration by fetching bot data
+     * Load the bot pools. The Mongo `bots` collection is the source: CMS creates, health-checks and retires bots
+     * there. A TELEGRAM_CHANNEL_CONFIG_* env value is only the fallback, for a category with no active bot in Mongo
+     * or when Mongo is unreachable. A category whose Mongo bots are all retired uses them only when env has none,
+     * so it never goes dark.
      */
     async initialize() {
         if (this.initialized || this.initializing) {
@@ -20592,84 +20642,104 @@ class BotConfig {
         }
         try {
             this.initializing = true;
-            logger.debug('Initializing Telegram channel configuration...');
-            const envKeys = Object.keys(process.env).filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'));
-            const nextCategoryMap = new Map();
-            for (const key of envKeys) {
-                const value = process.env[key];
-                if (!value)
-                    continue;
-                try {
-                    const [channelId, description = '', botTokensStr] = value.split('::');
-                    const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean);
-                    if (!channelId || !botTokens || botTokens.length === 0) {
-                        logger.debug(`Invalid configuration for ${key}: missing channelId or botTokens`);
-                        continue;
-                    }
-                    const category = this.getCategoryFromDescription(description);
-                    if (!category) {
-                        logger.debug(`Invalid category in description for ${key}: ${description}`);
-                        continue;
-                    }
-                    const validBotTokens = [];
-                    const botUsernames = [];
-                    for (const token of botTokens) {
-                        try {
-                            const username = await this.fetchUsername(token);
-                            if (!username) {
-                                logger.debug(`Invalid bot token in ${category}`);
-                                continue;
-                            }
-                            validBotTokens.push(token);
-                            botUsernames.push(username);
-                        }
-                        catch (error) {
-                            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error fetching username for token in ${category}:`, false);
-                        }
-                    }
-                    if (botUsernames.length === 0) {
-                        logger.debug(`No valid bot usernames found for ${category}`);
-                        continue;
-                    }
-                    nextCategoryMap.set(category, {
-                        botTokens: validBotTokens,
-                        botUsernames,
-                        lastUsedIndex: -1,
-                        channelId,
-                        botCooldownUntil: validBotTokens.map(() => 0),
-                    });
-                }
-                catch (error) {
-                    logger.error(`Error processing configuration for ${key}:`, error);
-                }
-            }
-            await this.loadMongoBotFallbacks(nextCategoryMap);
-            // Initialize bots after configuration is loaded
-            await this.initializeBots(nextCategoryMap);
-            this.categoryMap = nextCategoryMap;
+            this.categoryMap = await this.buildCategoryMap(await this.fetchMongoBotDocs());
             this.envFingerprint = this.currentEnvFingerprint();
-            this.initialized = true;
+            this.loadedAt = Date.now();
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            logger.error('Failed to initialize BotConfig:', error);
-            if (this.initRetries < this.MAX_RETRIES) {
-                this.initRetries++;
-                logger.info(`Retrying initialization (attempt ${this.initRetries}/${this.MAX_RETRIES})...`);
-                // Reset state for retry
-                this.initializing = false;
-                this.initPromise = null;
-                // Wait before retrying
-                await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
-                return this.initialize();
-            }
-            else {
-                logger.error(`Failed to initialize after ${this.MAX_RETRIES} attempts`);
-                throw error;
-            }
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to initialize BotConfig', false);
         }
         finally {
+            this.initialized = true;
             this.initializing = false;
+        }
+    }
+    async buildCategoryMap(docs) {
+        const categoryMap = new Map();
+        const usable = (docs ?? []).filter(isUsableBot);
+        this.addMongoBots(categoryMap, usable.filter(doc => !isRetiredBot(doc)));
+        await this.addEnvBots(categoryMap);
+        this.addMongoBots(categoryMap, usable.filter(isRetiredBot));
+        return categoryMap;
+    }
+    /** Re-read the bots collection every BOT_REFRESH_MS so a bot CMS retires (or adds) applies without a restart. */
+    refreshIfStale() {
+        if (this.refreshing || Date.now() - this.loadedAt < this.BOT_REFRESH_MS || !this.getMongoUri()) {
+            return;
+        }
+        this.refreshing = (async () => {
+            const docs = await this.fetchMongoBotDocs();
+            this.loadedAt = Date.now();
+            if (!docs)
+                return; // Mongo unreachable: keep the pools we have, try again next interval.
+            const next = await this.buildCategoryMap(docs);
+            this.carryBotState(this.categoryMap, next);
+            this.categoryMap = next;
+        })()
+            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
+            .finally(() => { this.refreshing = null; });
+    }
+    /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
+    carryBotState(previous, next) {
+        for (const [category, data] of next) {
+            const old = previous.get(category);
+            if (!old)
+                continue;
+            data.botCooldownUntil = data.botTokens.map(token => {
+                const i = old.botTokens.indexOf(token);
+                return i >= 0 ? old.botCooldownUntil[i] || 0 : 0;
+            });
+        }
+    }
+    async addEnvBots(categoryMap) {
+        const envKeys = Object.keys(process.env).filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'));
+        for (const key of envKeys) {
+            const value = process.env[key];
+            if (!value)
+                continue;
+            try {
+                const [channelId, description = '', botTokensStr] = value.split('::');
+                const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean);
+                if (!channelId || !botTokens || botTokens.length === 0) {
+                    logger.debug(`Invalid configuration for ${key}: missing channelId or botTokens`);
+                    continue;
+                }
+                const category = this.getCategoryFromDescription(description);
+                if (!category) {
+                    logger.debug(`Invalid category in description for ${key}: ${description}`);
+                    continue;
+                }
+                if (categoryMap.has(category))
+                    continue; // the bots collection has active bots for it
+                // Env tokens are not health-checked by CMS: validate them here.
+                const validBotTokens = [];
+                const botUsernames = [];
+                for (const token of botTokens) {
+                    const username = await this.fetchUsername(token, category);
+                    if (!username) {
+                        logger.debug(`Invalid bot token in ${category}`);
+                        continue;
+                    }
+                    validBotTokens.push(token);
+                    botUsernames.push(username);
+                }
+                if (botUsernames.length === 0) {
+                    logger.debug(`No valid bot usernames found for ${category}`);
+                    continue;
+                }
+                logger.info(`${category}: no active bot in the bots collection, using ${key}`);
+                categoryMap.set(category, {
+                    botTokens: validBotTokens,
+                    botUsernames,
+                    lastUsedIndex: -1,
+                    channelId,
+                    botCooldownUntil: validBotTokens.map(() => 0),
+                });
+            }
+            catch (error) {
+                logger.error(`Error processing configuration for ${key}:`, error);
+            }
         }
     }
     /**
@@ -20704,10 +20774,11 @@ class BotConfig {
     getMongoBotCollectionName() {
         return (process.env.TELEGRAM_BOT_CONFIG_COLLECTION || process.env.MONGO_BOT_CONFIG_COLLECTION || 'bots').trim() || 'bots';
     }
-    async loadMongoBotFallbacks(categoryMap) {
+    /** All bot docs, or null when Mongo is not configured or unreachable (the caller falls back to env). */
+    async fetchMongoBotDocs() {
         const uri = this.getMongoUri();
         if (!uri) {
-            return;
+            return null;
         }
         try {
             const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
@@ -20718,12 +20789,11 @@ class BotConfig {
             });
             try {
                 await client.connect();
-                const docs = await client
+                return await client
                     .db(this.getMongoBotDatabaseName())
                     .collection(this.getMongoBotCollectionName())
                     .find({})
                     .toArray();
-                this.mergeMongoBotDocs(categoryMap, docs);
             }
             finally {
                 await client.close();
@@ -20731,15 +20801,12 @@ class BotConfig {
         }
         catch (error) {
             (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
+            return null;
         }
     }
-    mergeMongoBotDocs(categoryMap, docs) {
-        let loadedBots = 0;
+    /** Add Mongo bots for every category not already in the map (one channel per category). */
+    addMongoBots(categoryMap, docs) {
         const grouped = new Map();
-        // Use only non-retired bots for a category that has at least one; a category whose bots are
-        // ALL retired keeps every bot (the previous behaviour) so it never goes dark.
-        const hasActive = new Set(docs.filter(d => !isRetiredBot(d) && isUsableBot(d)).map(d => String(d.category)));
-        docs = docs.filter(d => !isRetiredBot(d) || !hasActive.has(String(d.category)));
         for (const doc of docs) {
             const category = this.getExactCategory(doc.category);
             const channelId = typeof doc.channelId === 'string' ? doc.channelId.trim() : '';
@@ -20760,14 +20827,10 @@ class BotConfig {
             if (!current.botTokens.includes(token)) {
                 current.botTokens.push(token);
                 current.botUsernames.push(username || `${category.toLowerCase()}_${current.botTokens.length}`);
-                loadedBots++;
             }
             grouped.set(category, current);
         }
         for (const [category, data] of grouped) {
-            if (categoryMap.has(category) || data.botTokens.length === 0) {
-                continue;
-            }
             categoryMap.set(category, {
                 botTokens: data.botTokens,
                 botUsernames: data.botUsernames,
@@ -20776,14 +20839,11 @@ class BotConfig {
                 botCooldownUntil: data.botTokens.map(() => 0),
             });
         }
-        if (grouped.size > 0) {
-            logger.info(`Loaded ${loadedBots} Mongo bot configs across ${grouped.size} fallback categories`);
-        }
     }
     /**
      * Fetch bot username from token
      */
-    async fetchUsername(token) {
+    async fetchUsername(token, category) {
         if (!token || typeof token !== 'string' || token.length < 10) {
             return '';
         }
@@ -20794,6 +20854,13 @@ class BotConfig {
             return res.data?.ok ? res.data.result.username : '';
         }
         catch (error) {
+            // A revoked token stays in the remote TELEGRAM_CHANNEL_CONFIG_* value (CMS's bot repair only covers the
+            // bots collection) and was logged as an error on every boot of every process (2026-10-17: UNAUTH_CALLS).
+            // It is skipped either way; name it once so it can be removed from config.
+            if (error?.response?.status === 401) {
+                logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
+                return '';
+            }
             (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
@@ -20872,11 +20939,31 @@ class BotConfig {
         const rateLimited = this.markBotRateLimited(data, category, botIndex, error);
         return rateLimited && data.botTokens.length > 1 && this.hasAnotherAvailableBot(data);
     }
-    async recordSuccessfulBotSend(category, token, channelId) {
-        const uri = this.getMongoUri();
-        if (!uri) {
+    /** Count a successful send; counts are written to the bots collection in one batch per USAGE_FLUSH_MS. */
+    recordSuccessfulBotSend(category, token, channelId) {
+        if (!this.getMongoUri()) {
             return;
         }
+        const key = `${category}\u0000${token}\u0000${channelId}`;
+        const entry = this.pendingUsage.get(key) ?? { category, token, channelId, count: 0, lastUsed: new Date() };
+        entry.count++;
+        entry.lastUsed = new Date();
+        this.pendingUsage.set(key, entry);
+        if (!this.usageFlushTimer) {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_4__.scheduleUnrefTimeout)(() => {
+                this.usageFlushTimer = null;
+                void this.flushBotUsage();
+            }, this.USAGE_FLUSH_MS);
+        }
+    }
+    /** Write the pending send counts (one Mongo connection per flush, not per send). */
+    async flushBotUsage() {
+        const uri = this.getMongoUri();
+        if (this.pendingUsage.size === 0 || !uri) {
+            return;
+        }
+        const batch = [...this.pendingUsage.values()];
+        this.pendingUsage.clear();
         try {
             const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
             const client = new MongoClient(uri, {
@@ -20886,19 +20973,20 @@ class BotConfig {
             });
             try {
                 await client.connect();
-                const now = new Date();
-                await client
+                const collection = client
                     .db(this.getMongoBotDatabaseName())
-                    .collection(this.getMongoBotCollectionName())
-                    .updateOne({ category, token, channelId }, {
-                    $set: {
-                        lastUsed: now,
-                        updatedAt: now,
-                    },
-                    $inc: {
-                        'stats.messagesSent': 1,
-                    },
-                });
+                    .collection(this.getMongoBotCollectionName());
+                for (const { category, token, channelId, count, lastUsed } of batch) {
+                    await collection.updateOne({ category, token, channelId }, {
+                        $set: {
+                            lastUsed,
+                            updatedAt: new Date(),
+                        },
+                        $inc: {
+                            'stats.messagesSent': count,
+                        },
+                    });
+                }
             }
             finally {
                 await client.close();
@@ -20946,7 +21034,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = (process.env.clientId ?? 'unknown').toUpperCase();
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml)(clientId) : clientId;
     }
     prefixMessage(message, parseMode) {
         return `${this.clientPrefix(parseMode)}: ${message}`;
@@ -20958,13 +21046,13 @@ class BotConfig {
         // CLIENT_UPDATES ops notices use the plain house style (no severity icons); other channels are unchanged.
         const houseStyle = category === ChannelCategory.CLIENT_UPDATES;
         if (typeof message !== 'string') {
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
         }
         if (options.rich) {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
         return { text: message, parseMode: options.parseMode };
     }
@@ -21022,7 +21110,7 @@ class BotConfig {
                 timeout: 10000 // 10 second timeout
             });
             if (response.data?.ok === true) {
-                void this.recordSuccessfulBotSend(category, token, channelId);
+                this.recordSuccessfulBotSend(category, token, channelId);
                 const messageId = response.data?.result?.message_id;
                 if (typeof messageId === 'number') {
                     try {
@@ -21215,7 +21303,7 @@ class BotConfig {
                 },
             });
             if (response.data?.ok === true) {
-                void this.recordSuccessfulBotSend(category, token, channelId);
+                this.recordSuccessfulBotSend(category, token, channelId);
                 return true;
             }
             throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendMediaGroup');
@@ -21403,7 +21491,7 @@ class BotConfig {
                 },
             });
             if (response.data?.ok === true) {
-                void this.recordSuccessfulBotSend(category, token, channelId);
+                this.recordSuccessfulBotSend(category, token, channelId);
                 return true;
             }
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
@@ -21419,43 +21507,6 @@ class BotConfig {
         }
     }
     /**
-     * Initialize bots with /start command
-     */
-    async initializeBots(categoryMap = this.categoryMap) {
-        logger.debug('Initializing bots with /start command...');
-        const initPromises = [];
-        for (const [category, data] of categoryMap) {
-            for (const token of data.botTokens) {
-                const promise = (async () => {
-                    try {
-                        const botInfo = await axios__WEBPACK_IMPORTED_MODULE_0___default().get(`https://api.telegram.org/bot${token}/getMe`, {
-                            timeout: 5000
-                        });
-                        if (!botInfo.data?.ok) {
-                            logger.error(`Failed to get bot info for ${category}`);
-                            return;
-                        }
-                        logger.info(`Successfully initialized bot for ${category}`);
-                    }
-                    catch (error) {
-                        // Transient (getMe timeouts ~20/day/process): warn once per token per process.
-                        if (!initWarnedTokens.has(token)) {
-                            initWarnedTokens.add(token);
-                            const reason = error instanceof Error ? error.message : String(error);
-                            logger.warn(`Failed to initialize bot for ${category}: ${reason.split(token).join('<token>')}`);
-                        }
-                        else {
-                            logger.debug(`Bot init still failing for ${category}`);
-                        }
-                    }
-                })();
-                initPromises.push(promise);
-            }
-        }
-        // Wait for all initialization attempts to complete
-        await Promise.allSettled(initPromises);
-    }
-    /**
      * Ensure the class is initialized before performing operations
      */
     async ensureInitialized() {
@@ -21466,6 +21517,7 @@ class BotConfig {
             }
         }
         await this.reloadIfEnvChanged();
+        this.refreshIfStale();
     }
     /**
      * Check if a category is configured
@@ -50537,24 +50589,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   noteOwnExitBroadcast: () => (/* binding */ noteOwnExitBroadcast),
 /* harmony export */   resetOwnExitBroadcast: () => (/* binding */ resetOwnExitBroadcast)
 /* harmony export */ });
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _app__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../app */ "./src/app.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__);
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _globalState__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./globalState */ "./src/event-handlers/globalState.ts");
-/* harmony import */ var _core_Config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../core/Config */ "./src/core/Config.ts");
-/* harmony import */ var _core_setup_client__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../core/setup-client */ "./src/core/setup-client.ts");
-/* harmony import */ var _core_spam_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../core/spam-state */ "./src/core/spam-state.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../core/dbservice */ "./src/core/dbservice.ts");
+/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _app__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../app */ "./src/app.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__);
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _globalState__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./globalState */ "./src/event-handlers/globalState.ts");
+/* harmony import */ var _core_Config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../core/Config */ "./src/core/Config.ts");
+/* harmony import */ var _core_setup_client__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../core/setup-client */ "./src/core/setup-client.ts");
+/* harmony import */ var _core_spam_state__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../core/spam-state */ "./src/core/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
 /**
  * System Message Handler
  * Handles system messages from Telegram (SpamBot, system notifications, etc.)
@@ -50576,7 +50627,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:system-message-handler");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:system-message-handler");
 // Constants for system message handling
 const SPAMBOT_CHAT_ID = "178220800";
 const TELEGRAM_SYSTEM_CHAT_ID = "777000";
@@ -50587,9 +50638,9 @@ const RESET_COMMAND = "rstll";
  * blocks/throws into the SystemMessageHandler call sites that set daysLeft.
  */
 function persistTgautDaysLeft(daysLeft) {
-    _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
+    _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
         .updateTgautClientStat(daysLeft)
-        .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
+        .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
 }
 /**
  * Persist the SpamBot verdict on this account's bufferClients row (CMS reads spamStatus /
@@ -50597,13 +50648,13 @@ function persistTgautDaysLeft(daysLeft) {
  * never throws into the handler.
  */
 function persistSpamStatus(mobile, spamStatus, limitedUntil) {
-    (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.setSpamState)(spamStatus, limitedUntil);
+    (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_13__.setSpamState)(spamStatus, limitedUntil);
     if (!mobile) {
         logger.warn("Cannot persist spam status: account mobile is unknown");
         return;
     }
     try {
-        _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()
+        _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
             .recordSpamStatus(mobile, {
             spamStatus,
             limitedUntil,
@@ -50614,45 +50665,45 @@ function persistSpamStatus(mobile, spamStatus, limitedUntil) {
             if (!recorded)
                 logger.warn(`Spam status '${spamStatus}' not recorded for ${mobile}: no bufferClients row or DB unavailable`);
         })
-            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false));
+            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to persist bufferClients spam status", false));
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to persist bufferClients spam status", false);
     }
 }
 /** Ask CMS to swap this client's account (archiveOld + formalities). Never throws. */
 async function requestSpamSwap(reason, days) {
     try {
-        const runtimeBase = (0,_core_Config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
+        const runtimeBase = (0,_core_Config__WEBPACK_IMPORTED_MODULE_11__.getRuntimeConfigBaseOrNull)();
         if (!runtimeBase) {
             logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
             return;
         }
         const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${days}&formalities=true&reason=${encodeURIComponent(reason)}`;
-        const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout, process.env.clientId);
+        const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_12__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_14__.fetchWithTimeout, process.env.clientId);
         if (!setupResult.swapped) {
             logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "SystemMessageHandler.requestSpamSwap", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "SystemMessageHandler.requestSpamSwap", false);
     }
 }
 const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
 const PASSWORD_RESET_SLEEP_MS = 2000; // 2 seconds
 const HARSH_TRIGGER_DAYS = 5;
 function scheduleSystemMessageTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_9__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_8__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, context, false);
         });
     }, delayMs);
 }
-async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, tags = ["system-message"]) {
+async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO, tags = ["system-message"]) {
     try {
         // clientId is added by the sender's prefix; don't repeat Client/Username on every message.
         // Only the caller-supplied fields (the ones actually relevant to THIS event) are included.
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
             severity,
             title,
             summary,
@@ -50660,11 +50711,11 @@ async function notifySystemMessage(context, title, summary, fields = [], severit
             tags,
         });
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("System message notification returned false"), `SystemMessageHandler.notification.${context}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(new Error("System message notification returned false"), `SystemMessageHandler.notification.${context}`, false);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `SystemMessageHandler.notification.${context}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `SystemMessageHandler.notification.${context}`, false);
     }
 }
 /**
@@ -50672,7 +50723,7 @@ async function notifySystemMessage(context, title, summary, fields = [], severit
  */
 async function handleExitCommand(event) {
     logger.log(`EXITTING PROCESS!! request from received message`);
-    await notifySystemMessage("exit", "Exit command", "Exit requested via Telegram message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "exit"]);
+    await notifySystemMessage("exit", "Exit command", "Exit requested via Telegram message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "exit"]);
     try {
         await this.destroy();
     }
@@ -50681,7 +50732,7 @@ async function handleExitCommand(event) {
     }
     // shutdown() calls process.exit(0) internally; catch in case it throws before that
     try {
-        await (0,_app__WEBPACK_IMPORTED_MODULE_7__.shutdown)("Exit Request from Msg");
+        await (0,_app__WEBPACK_IMPORTED_MODULE_6__.shutdown)("Exit Request from Msg");
     }
     catch (error) {
         logger.error("[EXIT] shutdown threw, forcing exit(1):", error);
@@ -50694,9 +50745,9 @@ async function handleExitCommand(event) {
 async function handleSpamBotMessage(event) {
     const spamBotText = event.message.text || "SpamBot sent an empty message";
     logger.log("SpamBot:", spamBotText);
-    const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.claimSpamBotNotification)(this.mobile ?? process.env.mobile ?? "unknown", typeof event.message.id === "number" ? event.message.id : null);
+    const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__.claimSpamBotNotification)(this.mobile ?? process.env.mobile ?? "unknown", typeof event.message.id === "number" ? event.message.id : null);
     const mobile = this.mobile ?? process.env.mobile;
-    switch ((0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.classifySpamBotMessage)(spamBotText)) {
+    switch ((0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__.classifySpamBotMessage)(spamBotText)) {
         case "released":
             if (!(await handleAutomaticallyReleased(event, shouldNotify, mobile)) && shouldNotify) {
                 await notifyGenericSpamBotMessage(spamBotText);
@@ -50706,17 +50757,17 @@ async function handleSpamBotMessage(event) {
             persistSpamStatus(mobile, "free", null);
             await handleGoodNews.call(this);
             if (shouldNotify) {
-                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"]);
+                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"]);
             }
             return;
         case "harsh-warning":
-            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
+            (0,_globalState__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(HARSH_TRIGGER_DAYS);
             persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
             persistSpamStatus(mobile, "harsh", null);
             if (shouldNotify) {
-                await notifySystemMessage("harsh-warning", "SpamBot harsh-limit warning", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
+                await notifySystemMessage("harsh-warning", "SpamBot harsh-limit warning", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
             }
-            await requestSpamSwap("SpamBot harsh limit (indefinite)", _core_spam_state__WEBPACK_IMPORTED_MODULE_14__.HARSH_SWAP_DAYS);
+            await requestSpamSwap("SpamBot harsh limit (indefinite)", _core_spam_state__WEBPACK_IMPORTED_MODULE_13__.HARSH_SWAP_DAYS);
             return;
         default:
             if (shouldNotify)
@@ -50724,36 +50775,36 @@ async function handleSpamBotMessage(event) {
     }
 }
 async function notifyGenericSpamBotMessage(text) {
-    await notifySystemMessage("spambot", "SpamBot message", text, [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot"]);
+    await notifySystemMessage("spambot", "SpamBot message", text, [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "spambot"]);
 }
 /**
  * Handle automatically released message
  */
 async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
     try {
-        const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
+        const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__.extractSpamBotReleaseDate)(event.message.text || "");
         if (!date) {
             logger.warn("SpamBot release notice did not contain a parseable release date");
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.sanitizeLimitedDaysLeft)(-1);
+            (0,_globalState__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(sanitized);
             persistTgautDaysLeft(sanitized);
             return false;
         }
-        const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
+        const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
         if (!limitedUntil) {
             logger.warn(`SpamBot release date "${date}" could not be parsed`);
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.sanitizeLimitedDaysLeft)(-1);
+            (0,_globalState__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(sanitized);
             persistTgautDaysLeft(sanitized);
             return false;
         }
-        const days = (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.daysUntil)(limitedUntil);
+        const days = (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_13__.daysUntil)(limitedUntil);
         // A "limited until <date>" notice ALWAYS means the account is limited. getdaysLeft returns 0 for a
         // today date and -1 for a past date; storing either raw would misclassify — 0 hit the pacing/cap
         // split, and -1 collides with the healthy sentinel (marking a limited account HEALTHY). Sanitize to
         // a value that is unambiguously limited (>= 1). Only an explicit "good news" writes -1.
-        const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
-        (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
+        const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.sanitizeLimitedDaysLeft)(days);
+        (0,_globalState__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(storedDaysLeft);
         persistTgautDaysLeft(storedDaysLeft);
         persistSpamStatus(mobile, "limited", limitedUntil);
         logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
@@ -50761,14 +50812,14 @@ async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
             await notifySystemMessage("automatically-released", "Restriction days left", "", [
                 { label: "Release date", value: date },
                 { label: "Days left", value: days },
-            ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
+            ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
         }
-        if (days >= _core_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP) {
+        if (days >= _core_spam_state__WEBPACK_IMPORTED_MODULE_13__.MIN_LIMIT_DAYS_FOR_SWAP) {
             logger.debug(`[EDGE CASE] Dated limit of ${days} days - requesting client swap`);
-            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.swapDaysForLimitedUntil)(limitedUntil));
+            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_core_spam_state__WEBPACK_IMPORTED_MODULE_13__.swapDaysForLimitedUntil)(limitedUntil));
         }
         else {
-            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_core_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP}`);
+            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_core_spam_state__WEBPACK_IMPORTED_MODULE_13__.MIN_LIMIT_DAYS_FOR_SWAP}`);
         }
         return true;
     }
@@ -50781,7 +50832,7 @@ async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
  * Handle good news message
  */
 async function handleGoodNews() {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const userPromoteStats = await db.readPromoteStatsTime();
     const lastUpdatedTimeStamp = userPromoteStats?.lastUpdatedTimeStamp ?? 0;
     logger.log(`[SPECIAL CASE] Good news message received - isActive: ${userPromoteStats?.isActive}, lastUpdated: ${lastUpdatedTimeStamp || 'N/A'}`);
@@ -50810,7 +50861,7 @@ async function handleGoodNews() {
             }
         }
     }
-    (0,_globalState__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(-1);
+    (0,_globalState__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(-1);
     persistTgautDaysLeft(-1);
     logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
 }
@@ -50820,31 +50871,31 @@ async function handleGoodNews() {
 async function handleTelegramSystemMessage(event) {
     const text = event.message.text?.toLowerCase() ?? '';
     if (text.includes("login code")) {
-        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.removeOtherAuths)(event.client);
+        await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.removeOtherAuths)(event.client);
         const chatId = event.message.chatId?.toString?.() ?? "unknown";
         scheduleSystemMessageTask(async () => {
-            await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.DeclinePasswordReset());
+            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_15__.declinePasswordReset)(event.client, chatId);
         }, PASSWORD_RESET_DECLINE_DELAY_MS, `handleTelegramSystemMessage.delayedDeclinePasswordReset.${chatId}`);
     }
     if (text.includes("request to reset account")) {
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(PASSWORD_RESET_SLEEP_MS);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(PASSWORD_RESET_SLEEP_MS);
         try {
-            await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.DeclinePasswordReset());
+            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_15__.declinePasswordReset)(event.client);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error declining password reset");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error declining password reset");
         }
     }
-    await notifySystemMessage("telegram-system", "Telegram system message", event.message.text || "Telegram sent an empty system message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, ["system-message", "telegram"]);
+    await notifySystemMessage("telegram-system", "Telegram system message", event.message.text || "Telegram sent an empty system message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO, ["system-message", "telegram"]);
 }
 /**
  * Handle reset command
  */
 async function handleResetCommand(event) {
-    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
+    const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const chatId = event.message.chatId.toString();
     await db.delete(chatId);
-    await (0,_core_utils__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
+    await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
 }
 /**
  * Check if message is from SpamBot
@@ -76019,10 +76070,19 @@ class ReplierRateLimiter {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   isPermanentRecipientError: () => (/* binding */ isPermanentRecipientError),
-/* harmony export */   isRecipientDeactivatedError: () => (/* binding */ isRecipientDeactivatedError)
+/* harmony export */   isRecipientDeactivatedError: () => (/* binding */ isRecipientDeactivatedError),
+/* harmony export */   isVoiceForbiddenError: () => (/* binding */ isVoiceForbiddenError)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 
+/**
+ * The recipient does not accept voice messages (Telegram privacy setting). Permanent for voice notes only: text still
+ * reaches them (prod 2026-10-17 meghana2: a voice reply retried 5 times on VOICE_MESSAGES_FORBIDDEN).
+ */
+function isVoiceForbiddenError(error) {
+    const raw = (error instanceof Error ? error.message : String(error)).toUpperCase();
+    return raw.includes('VOICE_MESSAGES_FORBIDDEN');
+}
 /** A deactivated recipient cannot recover; retrying only burns account send attempts. */
 function isRecipientDeactivatedError(error) {
     const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__.parseTelegramError)(error);
@@ -76856,6 +76916,17 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             // The user's next message clears the mark (one fresh attempt per message they send).
             _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
             logger.warn(`[replier] PEER_FLOOD: Telegram refused chatId=${replyObj.chatId}; reply dropped, not retried until the user writes again kind=${classifyReply(replyObj)}`);
+            return;
+        }
+        if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_15__.isVoiceForbiddenError)(error) && replyObj.file) {
+            // They refuse voice messages: never retry the voice note. The text (if any) still goes, as plain text.
+            if (replyObj.msg) {
+                logger.warn(`[replier] ${replyObj.chatId} refuses voice messages: sending the reply as text only kind=${classifyReply(replyObj)}`);
+                onRequeue({ ...replyObj, file: undefined });
+            }
+            else {
+                logger.warn(`[replier] ${replyObj.chatId} refuses voice messages: voice-only reply dropped`);
+            }
             return;
         }
         if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_15__.isPermanentRecipientError)(error)) {
