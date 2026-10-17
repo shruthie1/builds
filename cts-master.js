@@ -18975,9 +18975,10 @@ let BotsService = BotsService_1 = class BotsService {
         this.maxPendingUpdates = 100;
         this.minHealthyBotsPerCategory = 2;
         this.maxBotCreationsPerRun = 1;
-        this.maxPendingAdminRepairsPerRun = 1;
+        this.maxPendingAdminRepairsPerRun = 3;
         this.maxPendingAdminRepairAttempts = 3;
         this.healthCheckJob = null;
+        this.reachSweepJob = null;
         this.flushTimer = null;
         this.destroyed = false;
         this.replaceInProgress = false;
@@ -19023,6 +19024,16 @@ let BotsService = BotsService_1 = class BotsService {
             }
         });
         console.log(`[BotHealth] daily bot health-check scheduled (cron '${BotsService_1.HEALTH_JOB_CRON}' ${BotsService_1.HEALTH_JOB_TZ})`);
+        this.reachSweepJob = schedule.scheduleJob(BotsService_1.REACH_SWEEP_JOB_NAME, BotsService_1.REACH_SWEEP_CRON, BotsService_1.HEALTH_JOB_TZ, async () => {
+            if (this.destroyed)
+                return;
+            try {
+                await this.sweepChannelReach();
+            }
+            catch (err) {
+                (0, utils_1.parseError)(err, '[BotHealth] channel-reach sweep failed', false);
+            }
+        });
     }
     onModuleDestroy() {
         this.destroyed = true;
@@ -19031,6 +19042,11 @@ let BotsService = BotsService_1 = class BotsService {
         }
         catch { }
         this.healthCheckJob = null;
+        try {
+            this.reachSweepJob?.cancel?.();
+        }
+        catch { }
+        this.reachSweepJob = null;
         if (this.flushTimer) {
             clearInterval(this.flushTimer);
             this.flushTimer = null;
@@ -19301,7 +19317,7 @@ let BotsService = BotsService_1 = class BotsService {
             this.cache.set(`category:${category}`, availableBots);
             availableBots.forEach(bot => this.cache.set(`bot:${bot._id}`, bot));
         }
-        availableBots = availableBots.filter(bot => this.isSelectable(bot));
+        availableBots = availableBots.filter(bot => this.isSelectable(bot) && !this.cache.get(`bench:${bot._id}`));
         if (availableBots.length === 0) {
             await this.alertCategoryUnhealthy(category);
             return false;
@@ -19325,6 +19341,60 @@ let BotsService = BotsService_1 = class BotsService {
         }
         console.error(`Failed to send for category ${category} after trying all ${availableBots.length} available bot(s).`);
         return false;
+    }
+    noteUnreachableSend(bot, error) {
+        const err = error;
+        const description = String(err?.response?.data?.description || err?.message || '');
+        if (!/chat not found|bot is not a member|bot was kicked|not enough rights|need administrator rights|CHAT_WRITE_FORBIDDEN/i.test(description))
+            return false;
+        const benchKey = `bench:${bot._id}`;
+        if (this.cache.get(benchKey))
+            return true;
+        this.cache.set(benchKey, true, BotsService_1.UNREACHABLE_BENCH_S);
+        this.evictBotFromSendCache(bot);
+        console.warn(`[BotHealth] @${bot.username} (${bot.category}) cannot post to ${bot.channelId}: ${description.slice(0, 120)}; benched`);
+        void this.probeReachAndDemote(bot, false).catch(probeError => (0, utils_1.parseError)(probeError, `[BotHealth] reach confirm @${bot.username}`, false));
+        return true;
+    }
+    async probeReachAndDemote(bot, dryRun, proposedActions) {
+        if (!bot.token || !bot.channelId)
+            return 'unknown';
+        const reach = await this.probeChannelAlive(bot.token, bot.channelId);
+        if (reach !== 'dead')
+            return reach;
+        proposedActions?.push(`demote @${bot.username} to pending_admin (getChat: cannot reach ${bot.channelId})`);
+        if (!dryRun) {
+            await this.botModel.updateOne({ _id: bot._id, lifecycle: { $nin: ['pending_admin', 'manual_attention'] } }, {
+                $set: { lifecycle: 'pending_admin', lifecycleReason: 'getChat: bot cannot reach its channel', lifecycleUpdatedAt: new Date(), status: 'inactive' },
+            }).exec();
+            this.evictBotFromSendCache(bot);
+        }
+        console.warn(`[BotHealth] cannot reach channel: @${bot.username} (${bot.category} ${bot.channelId})`);
+        return reach;
+    }
+    async sweepChannelReach() {
+        if (this.replaceInProgress)
+            return { probed: 0, demoted: 0, skipped: 'health run in progress' };
+        this.replaceInProgress = true;
+        let probed = 0, demoted = 0;
+        try {
+            const bots = await this.botModel.find().lean().exec();
+            for (const bot of bots) {
+                if (!this.isSelectable(bot) || !bot.channelId)
+                    continue;
+                probed++;
+                if ((await this.probeReachAndDemote(bot, false)) === 'dead')
+                    demoted++;
+                await this.sleep(1200);
+            }
+            if (demoted > 0)
+                await this.refreshBotCache();
+            console.log(`[BotHealth] channel-reach sweep: probed=${probed} demoted=${demoted}`);
+            return { probed, demoted };
+        }
+        finally {
+            this.replaceInProgress = false;
+        }
     }
     async alertCategoryUnhealthy(category) {
         const key = `category-unhealthy-alert:${category}`;
@@ -19458,6 +19528,8 @@ let BotsService = BotsService_1 = class BotsService {
             return response.data?.ok === true;
         }
         catch (error) {
+            if (this.noteUnreachableSend(bot, error))
+                return false;
             (0, utils_1.parseError)(error, `Failed to execute sendMessage for bot ${bot.username}`);
             return false;
         }
@@ -19500,6 +19572,8 @@ let BotsService = BotsService_1 = class BotsService {
             return response.data?.ok === true;
         }
         catch (error) {
+            if (this.noteUnreachableSend(bot, error))
+                return false;
             (0, utils_1.parseError)(error, `Failed to execute ${method} for bot ${bot.username}`);
             return false;
         }
@@ -19569,6 +19643,8 @@ let BotsService = BotsService_1 = class BotsService {
             return response.data?.ok === true;
         }
         catch (error) {
+            if (this.noteUnreachableSend(bot, error))
+                return false;
             (0, utils_1.parseError)(error, `Failed to execute sendMediaGroup for bot ${bot.username}`);
             return false;
         }
@@ -19771,7 +19847,7 @@ let BotsService = BotsService_1 = class BotsService {
                     const sendsNow = lifecycle === 'active_verified' || lifecycle === 'dead_token';
                     if (sendsNow && bot.channelId) {
                         await this.sleep(1200);
-                        const reach = await this.probeChannelAlive(bot.token, bot.channelId);
+                        const reach = await this.probeReachAndDemote(bot, Boolean(options.dryRun), proposedActions);
                         const key = `${bot.category}::${bot.channelId}`;
                         const tally = channelReach.get(key) ?? { category: String(bot.category), channelId: bot.channelId, alive: 0, dead: 0 };
                         if (reach === 'alive')
@@ -19779,16 +19855,6 @@ let BotsService = BotsService_1 = class BotsService {
                         if (reach === 'dead')
                             tally.dead++;
                         channelReach.set(key, tally);
-                        if (reach === 'dead') {
-                            proposedActions.push(`demote @${bot.username} to pending_admin (getChat: cannot reach ${bot.channelId})`);
-                            if (!options.dryRun) {
-                                await this.botModel.updateOne({ _id: bot._id }, {
-                                    $set: { lifecycle: 'pending_admin', lifecycleReason: 'getChat: bot cannot reach its channel', lifecycleUpdatedAt: new Date(), status: 'inactive' },
-                                }).exec();
-                                this.evictBotFromSendCache(bot);
-                            }
-                            console.warn(`[BotHealth] cannot reach channel: @${bot.username} (${bot.category} ${bot.channelId})`);
-                        }
                     }
                 }
                 else if (check.verdict === 'dead') {
@@ -19904,16 +19970,26 @@ let BotsService = BotsService_1 = class BotsService {
         if (options.pendingCategory !== undefined && typeof options.pendingCategory !== 'string') {
             throw new Error('pendingCategory must be a string');
         }
-        const pending = await this.botModel
+        const due = await this.botModel
             .find({
             lifecycle: 'pending_admin',
             ...(options.pendingCategory ? { category: options.pendingCategory } : {}),
             $or: [{ nextRepairAt: { $exists: false } }, { nextRepairAt: { $lte: now } }],
         })
             .sort({ nextRepairAt: 1, createdAt: 1 })
-            .limit(pendingLimit)
+            .limit(500)
             .lean()
             .exec();
+        const liveByCategory = new Map();
+        for (const b of await this.botModel.find({}, { category: 1, lifecycle: 1, status: 1 }).lean().exec()) {
+            if (this.isSelectable(b))
+                liveByCategory.set(String(b.category), (liveByCategory.get(String(b.category)) || 0) + 1);
+        }
+        const pending = due
+            .map((bot, order) => ({ bot, order, live: liveByCategory.get(String(bot.category)) || 0 }))
+            .sort((a, b) => a.live - b.live || a.order - b.order)
+            .slice(0, pendingLimit)
+            .map(entry => entry.bot);
         for (const bot of pending) {
             const attempts = bot.repairAttempts || 0;
             if (attempts >= this.maxPendingAdminRepairAttempts) {
@@ -20418,6 +20494,9 @@ exports.BotsService = BotsService;
 BotsService.HEALTH_JOB_NAME = 'bot-health-check';
 BotsService.HEALTH_JOB_CRON = '30 3 * * *';
 BotsService.HEALTH_JOB_TZ = 'Asia/Kolkata';
+BotsService.REACH_SWEEP_JOB_NAME = 'bot-reach-sweep';
+BotsService.REACH_SWEEP_CRON = '15 */3 * * *';
+BotsService.UNREACHABLE_BENCH_S = 30 * 60;
 exports.BotsService = BotsService = BotsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(bot_schema_1.Bot.name)),
