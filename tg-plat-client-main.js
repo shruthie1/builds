@@ -20493,9 +20493,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)
 /* harmony export */ });
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! axios */ "axios");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
@@ -20503,15 +20503,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 
 
 
 
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-core:telegram-bots-config');
+const initWarnedTokens = new Set();
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -20556,13 +20555,10 @@ class BotConfig {
         this.initialized = false;
         this.initializing = false;
         this.initPromise = null;
+        this.initRetries = 0;
         this.envFingerprint = "";
-        this.loadedAt = 0;
-        this.refreshing = null;
-        this.pendingUsage = new Map();
-        this.usageFlushTimer = null;
-        this.BOT_REFRESH_MS = 30 * 60000;
-        this.USAGE_FLUSH_MS = 60000;
+        this.MAX_RETRIES = 3;
+        this.RETRY_DELAY = 2000; // 2 seconds
         this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS = 60000;
         // Immediate initialization with fallback to lazy initialization
         this.initPromise = this.initialize();
@@ -20604,11 +20600,12 @@ class BotConfig {
         }
         return this.initPromise;
     }
-    async reload() {
+    async reloadFromEnv() {
         if (this.initializing) {
             await this.ready();
         }
         this.initialized = false;
+        this.initRetries = 0;
         this.initPromise = this.initialize();
         await this.initPromise;
     }
@@ -20627,14 +20624,11 @@ class BotConfig {
         if (nextFingerprint === this.envFingerprint) {
             return;
         }
-        logger.info('Telegram channel configuration changed; reloading BotConfig');
-        await this.reload();
+        logger.info('Telegram channel configuration changed; reloading BotConfig from environment');
+        await this.reloadFromEnv();
     }
     /**
-     * Load the bot pools. The Mongo `bots` collection is the source: CMS creates, health-checks and retires bots
-     * there. A TELEGRAM_CHANNEL_CONFIG_* env value is only the fallback, for a category with no active bot in Mongo
-     * or when Mongo is unreachable. A category whose Mongo bots are all retired uses them only when env has none,
-     * so it never goes dark.
+     * Initialize the configuration by fetching bot data
      */
     async initialize() {
         if (this.initialized || this.initializing) {
@@ -20642,104 +20636,84 @@ class BotConfig {
         }
         try {
             this.initializing = true;
-            this.categoryMap = await this.buildCategoryMap(await this.fetchMongoBotDocs());
+            logger.debug('Initializing Telegram channel configuration...');
+            const envKeys = Object.keys(process.env).filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'));
+            const nextCategoryMap = new Map();
+            for (const key of envKeys) {
+                const value = process.env[key];
+                if (!value)
+                    continue;
+                try {
+                    const [channelId, description = '', botTokensStr] = value.split('::');
+                    const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean);
+                    if (!channelId || !botTokens || botTokens.length === 0) {
+                        logger.debug(`Invalid configuration for ${key}: missing channelId or botTokens`);
+                        continue;
+                    }
+                    const category = this.getCategoryFromDescription(description);
+                    if (!category) {
+                        logger.debug(`Invalid category in description for ${key}: ${description}`);
+                        continue;
+                    }
+                    const validBotTokens = [];
+                    const botUsernames = [];
+                    for (const token of botTokens) {
+                        try {
+                            const username = await this.fetchUsername(token);
+                            if (!username) {
+                                logger.debug(`Invalid bot token in ${category}`);
+                                continue;
+                            }
+                            validBotTokens.push(token);
+                            botUsernames.push(username);
+                        }
+                        catch (error) {
+                            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Error fetching username for token in ${category}:`, false);
+                        }
+                    }
+                    if (botUsernames.length === 0) {
+                        logger.debug(`No valid bot usernames found for ${category}`);
+                        continue;
+                    }
+                    nextCategoryMap.set(category, {
+                        botTokens: validBotTokens,
+                        botUsernames,
+                        lastUsedIndex: -1,
+                        channelId,
+                        botCooldownUntil: validBotTokens.map(() => 0),
+                    });
+                }
+                catch (error) {
+                    logger.error(`Error processing configuration for ${key}:`, error);
+                }
+            }
+            await this.loadMongoBotFallbacks(nextCategoryMap);
+            // Initialize bots after configuration is loaded
+            await this.initializeBots(nextCategoryMap);
+            this.categoryMap = nextCategoryMap;
             this.envFingerprint = this.currentEnvFingerprint();
-            this.loadedAt = Date.now();
+            this.initialized = true;
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to initialize BotConfig', false);
+            logger.error('Failed to initialize BotConfig:', error);
+            if (this.initRetries < this.MAX_RETRIES) {
+                this.initRetries++;
+                logger.info(`Retrying initialization (attempt ${this.initRetries}/${this.MAX_RETRIES})...`);
+                // Reset state for retry
+                this.initializing = false;
+                this.initPromise = null;
+                // Wait before retrying
+                await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+                return this.initialize();
+            }
+            else {
+                logger.error(`Failed to initialize after ${this.MAX_RETRIES} attempts`);
+                throw error;
+            }
         }
         finally {
-            this.initialized = true;
             this.initializing = false;
-        }
-    }
-    async buildCategoryMap(docs) {
-        const categoryMap = new Map();
-        const usable = (docs ?? []).filter(isUsableBot);
-        this.addMongoBots(categoryMap, usable.filter(doc => !isRetiredBot(doc)));
-        await this.addEnvBots(categoryMap);
-        this.addMongoBots(categoryMap, usable.filter(isRetiredBot));
-        return categoryMap;
-    }
-    /** Re-read the bots collection every BOT_REFRESH_MS so a bot CMS retires (or adds) applies without a restart. */
-    refreshIfStale() {
-        if (this.refreshing || Date.now() - this.loadedAt < this.BOT_REFRESH_MS || !this.getMongoUri()) {
-            return;
-        }
-        this.refreshing = (async () => {
-            const docs = await this.fetchMongoBotDocs();
-            this.loadedAt = Date.now();
-            if (!docs)
-                return; // Mongo unreachable: keep the pools we have, try again next interval.
-            const next = await this.buildCategoryMap(docs);
-            this.carryBotState(this.categoryMap, next);
-            this.categoryMap = next;
-        })()
-            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
-            .finally(() => { this.refreshing = null; });
-    }
-    /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
-    carryBotState(previous, next) {
-        for (const [category, data] of next) {
-            const old = previous.get(category);
-            if (!old)
-                continue;
-            data.botCooldownUntil = data.botTokens.map(token => {
-                const i = old.botTokens.indexOf(token);
-                return i >= 0 ? old.botCooldownUntil[i] || 0 : 0;
-            });
-        }
-    }
-    async addEnvBots(categoryMap) {
-        const envKeys = Object.keys(process.env).filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'));
-        for (const key of envKeys) {
-            const value = process.env[key];
-            if (!value)
-                continue;
-            try {
-                const [channelId, description = '', botTokensStr] = value.split('::');
-                const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean);
-                if (!channelId || !botTokens || botTokens.length === 0) {
-                    logger.debug(`Invalid configuration for ${key}: missing channelId or botTokens`);
-                    continue;
-                }
-                const category = this.getCategoryFromDescription(description);
-                if (!category) {
-                    logger.debug(`Invalid category in description for ${key}: ${description}`);
-                    continue;
-                }
-                if (categoryMap.has(category))
-                    continue; // the bots collection has active bots for it
-                // Env tokens are not health-checked by CMS: validate them here.
-                const validBotTokens = [];
-                const botUsernames = [];
-                for (const token of botTokens) {
-                    const username = await this.fetchUsername(token, category);
-                    if (!username) {
-                        logger.debug(`Invalid bot token in ${category}`);
-                        continue;
-                    }
-                    validBotTokens.push(token);
-                    botUsernames.push(username);
-                }
-                if (botUsernames.length === 0) {
-                    logger.debug(`No valid bot usernames found for ${category}`);
-                    continue;
-                }
-                logger.info(`${category}: no active bot in the bots collection, using ${key}`);
-                categoryMap.set(category, {
-                    botTokens: validBotTokens,
-                    botUsernames,
-                    lastUsedIndex: -1,
-                    channelId,
-                    botCooldownUntil: validBotTokens.map(() => 0),
-                });
-            }
-            catch (error) {
-                logger.error(`Error processing configuration for ${key}:`, error);
-            }
         }
     }
     /**
@@ -20774,11 +20748,10 @@ class BotConfig {
     getMongoBotCollectionName() {
         return (process.env.TELEGRAM_BOT_CONFIG_COLLECTION || process.env.MONGO_BOT_CONFIG_COLLECTION || 'bots').trim() || 'bots';
     }
-    /** All bot docs, or null when Mongo is not configured or unreachable (the caller falls back to env). */
-    async fetchMongoBotDocs() {
+    async loadMongoBotFallbacks(categoryMap) {
         const uri = this.getMongoUri();
         if (!uri) {
-            return null;
+            return;
         }
         try {
             const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
@@ -20789,11 +20762,12 @@ class BotConfig {
             });
             try {
                 await client.connect();
-                return await client
+                const docs = await client
                     .db(this.getMongoBotDatabaseName())
                     .collection(this.getMongoBotCollectionName())
                     .find({})
                     .toArray();
+                this.mergeMongoBotDocs(categoryMap, docs);
             }
             finally {
                 await client.close();
@@ -20801,12 +20775,15 @@ class BotConfig {
         }
         catch (error) {
             (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
-            return null;
         }
     }
-    /** Add Mongo bots for every category not already in the map (one channel per category). */
-    addMongoBots(categoryMap, docs) {
+    mergeMongoBotDocs(categoryMap, docs) {
+        let loadedBots = 0;
         const grouped = new Map();
+        // Use only non-retired bots for a category that has at least one; a category whose bots are
+        // ALL retired keeps every bot (the previous behaviour) so it never goes dark.
+        const hasActive = new Set(docs.filter(d => !isRetiredBot(d) && isUsableBot(d)).map(d => String(d.category)));
+        docs = docs.filter(d => !isRetiredBot(d) || !hasActive.has(String(d.category)));
         for (const doc of docs) {
             const category = this.getExactCategory(doc.category);
             const channelId = typeof doc.channelId === 'string' ? doc.channelId.trim() : '';
@@ -20827,10 +20804,14 @@ class BotConfig {
             if (!current.botTokens.includes(token)) {
                 current.botTokens.push(token);
                 current.botUsernames.push(username || `${category.toLowerCase()}_${current.botTokens.length}`);
+                loadedBots++;
             }
             grouped.set(category, current);
         }
         for (const [category, data] of grouped) {
+            if (categoryMap.has(category) || data.botTokens.length === 0) {
+                continue;
+            }
             categoryMap.set(category, {
                 botTokens: data.botTokens,
                 botUsernames: data.botUsernames,
@@ -20839,11 +20820,14 @@ class BotConfig {
                 botCooldownUntil: data.botTokens.map(() => 0),
             });
         }
+        if (grouped.size > 0) {
+            logger.info(`Loaded ${loadedBots} Mongo bot configs across ${grouped.size} fallback categories`);
+        }
     }
     /**
      * Fetch bot username from token
      */
-    async fetchUsername(token, category) {
+    async fetchUsername(token) {
         if (!token || typeof token !== 'string' || token.length < 10) {
             return '';
         }
@@ -20854,13 +20838,6 @@ class BotConfig {
             return res.data?.ok ? res.data.result.username : '';
         }
         catch (error) {
-            // A revoked token stays in the remote TELEGRAM_CHANNEL_CONFIG_* value (CMS's bot repair only covers the
-            // bots collection) and was logged as an error on every boot of every process (2026-10-17: UNAUTH_CALLS).
-            // It is skipped either way; name it once so it can be removed from config.
-            if (error?.response?.status === 401) {
-                logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
-                return '';
-            }
             (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
@@ -20939,31 +20916,11 @@ class BotConfig {
         const rateLimited = this.markBotRateLimited(data, category, botIndex, error);
         return rateLimited && data.botTokens.length > 1 && this.hasAnotherAvailableBot(data);
     }
-    /** Count a successful send; counts are written to the bots collection in one batch per USAGE_FLUSH_MS. */
-    recordSuccessfulBotSend(category, token, channelId) {
-        if (!this.getMongoUri()) {
-            return;
-        }
-        const key = `${category}\u0000${token}\u0000${channelId}`;
-        const entry = this.pendingUsage.get(key) ?? { category, token, channelId, count: 0, lastUsed: new Date() };
-        entry.count++;
-        entry.lastUsed = new Date();
-        this.pendingUsage.set(key, entry);
-        if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_4__.scheduleUnrefTimeout)(() => {
-                this.usageFlushTimer = null;
-                void this.flushBotUsage();
-            }, this.USAGE_FLUSH_MS);
-        }
-    }
-    /** Write the pending send counts (one Mongo connection per flush, not per send). */
-    async flushBotUsage() {
+    async recordSuccessfulBotSend(category, token, channelId) {
         const uri = this.getMongoUri();
-        if (this.pendingUsage.size === 0 || !uri) {
+        if (!uri) {
             return;
         }
-        const batch = [...this.pendingUsage.values()];
-        this.pendingUsage.clear();
         try {
             const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
             const client = new MongoClient(uri, {
@@ -20973,20 +20930,19 @@ class BotConfig {
             });
             try {
                 await client.connect();
-                const collection = client
+                const now = new Date();
+                await client
                     .db(this.getMongoBotDatabaseName())
-                    .collection(this.getMongoBotCollectionName());
-                for (const { category, token, channelId, count, lastUsed } of batch) {
-                    await collection.updateOne({ category, token, channelId }, {
-                        $set: {
-                            lastUsed,
-                            updatedAt: new Date(),
-                        },
-                        $inc: {
-                            'stats.messagesSent': count,
-                        },
-                    });
-                }
+                    .collection(this.getMongoBotCollectionName())
+                    .updateOne({ category, token, channelId }, {
+                    $set: {
+                        lastUsed: now,
+                        updatedAt: now,
+                    },
+                    $inc: {
+                        'stats.messagesSent': 1,
+                    },
+                });
             }
             finally {
                 await client.close();
@@ -21034,7 +20990,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = (process.env.clientId ?? 'unknown').toUpperCase();
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.escapeTelegramHtml)(clientId) : clientId;
     }
     prefixMessage(message, parseMode) {
         return `${this.clientPrefix(parseMode)}: ${message}`;
@@ -21046,13 +21002,13 @@ class BotConfig {
         // CLIENT_UPDATES ops notices use the plain house style (no severity icons); other channels are unchanged.
         const houseStyle = category === ChannelCategory.CLIENT_UPDATES;
         if (typeof message !== 'string') {
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
         }
         if (options.rich) {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_4__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
         return { text: message, parseMode: options.parseMode };
     }
@@ -21110,7 +21066,7 @@ class BotConfig {
                 timeout: 10000 // 10 second timeout
             });
             if (response.data?.ok === true) {
-                this.recordSuccessfulBotSend(category, token, channelId);
+                void this.recordSuccessfulBotSend(category, token, channelId);
                 const messageId = response.data?.result?.message_id;
                 if (typeof messageId === 'number') {
                     try {
@@ -21303,7 +21259,7 @@ class BotConfig {
                 },
             });
             if (response.data?.ok === true) {
-                this.recordSuccessfulBotSend(category, token, channelId);
+                void this.recordSuccessfulBotSend(category, token, channelId);
                 return true;
             }
             throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendMediaGroup');
@@ -21491,7 +21447,7 @@ class BotConfig {
                 },
             });
             if (response.data?.ok === true) {
-                this.recordSuccessfulBotSend(category, token, channelId);
+                void this.recordSuccessfulBotSend(category, token, channelId);
                 return true;
             }
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
@@ -21507,6 +21463,43 @@ class BotConfig {
         }
     }
     /**
+     * Initialize bots with /start command
+     */
+    async initializeBots(categoryMap = this.categoryMap) {
+        logger.debug('Initializing bots with /start command...');
+        const initPromises = [];
+        for (const [category, data] of categoryMap) {
+            for (const token of data.botTokens) {
+                const promise = (async () => {
+                    try {
+                        const botInfo = await axios__WEBPACK_IMPORTED_MODULE_0___default().get(`https://api.telegram.org/bot${token}/getMe`, {
+                            timeout: 5000
+                        });
+                        if (!botInfo.data?.ok) {
+                            logger.error(`Failed to get bot info for ${category}`);
+                            return;
+                        }
+                        logger.info(`Successfully initialized bot for ${category}`);
+                    }
+                    catch (error) {
+                        // Transient (getMe timeouts ~20/day/process): warn once per token per process.
+                        if (!initWarnedTokens.has(token)) {
+                            initWarnedTokens.add(token);
+                            const reason = error instanceof Error ? error.message : String(error);
+                            logger.warn(`Failed to initialize bot for ${category}: ${reason.split(token).join('<token>')}`);
+                        }
+                        else {
+                            logger.debug(`Bot init still failing for ${category}`);
+                        }
+                    }
+                })();
+                initPromises.push(promise);
+            }
+        }
+        // Wait for all initialization attempts to complete
+        await Promise.allSettled(initPromises);
+    }
+    /**
      * Ensure the class is initialized before performing operations
      */
     async ensureInitialized() {
@@ -21517,7 +21510,6 @@ class BotConfig {
             }
         }
         await this.reloadIfEnvChanged();
-        this.refreshIfStale();
     }
     /**
      * Check if a category is configured
