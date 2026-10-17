@@ -53680,41 +53680,32 @@ exports.RedisClient = void 0;
 const ioredis_1 = __importDefault(__webpack_require__(/*! ioredis */ "ioredis"));
 const logger_1 = __webpack_require__(/*! ./logger */ "./src/utils/logger.ts");
 const logger = new logger_1.Logger(__filename);
+const DEFAULT_REDIS_URI = "redis://127.0.0.1:6379";
+function describeRedisUri(uri) {
+    try {
+        const u = new URL(uri);
+        return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+    }
+    catch {
+        return "REDIS_URI(unparseable)";
+    }
+}
 class RedisClient {
     constructor() {
     }
     static getClient() {
         if (!RedisClient.instance) {
-            const isRemote = process.env.REDIS_MODE === "remote";
-            const config = {
-                host: process.env.REDIS_HOST || (isRemote ? "0.0.0.0" : "127.0.0.1"),
-                port: Number(process.env.REDIS_PORT) || 6379,
-                password: process.env.REDIS_PASSWORD?.trim() || undefined,
-                db: Number(process.env.REDIS_DB) || 0,
-                retryStrategy: (times) => {
-                    const delay = Math.min(times * 100, 3000);
-                    logger.warn(`Retrying Redis connection (${times}) after ${delay}ms`);
-                    return delay;
-                },
+            const uri = process.env.REDIS_URI?.trim() || DEFAULT_REDIS_URI;
+            const target = describeRedisUri(uri);
+            const retryStrategy = (times) => {
+                const delay = Math.min(times * 100, 3000);
+                logger.warn(`Retrying Redis connection (${times}) after ${delay}ms`);
+                return delay;
             };
             try {
-                const uri = process.env.REDIS_URI?.trim();
-                if (uri) {
-                    try {
-                        const u = new URL(uri);
-                        config.host = `${u.protocol}//${u.hostname}`;
-                        config.port = Number(u.port) || config.port;
-                    }
-                    catch {
-                        config.host = 'REDIS_URI';
-                    }
-                    RedisClient.instance = new ioredis_1.default(uri, { retryStrategy: config.retryStrategy });
-                }
-                else {
-                    RedisClient.instance = new ioredis_1.default(config);
-                }
+                RedisClient.instance = new ioredis_1.default(uri, { retryStrategy });
                 RedisClient.instance.on("connect", () => {
-                    logger.log(`Connected to Redis at ${config.host}:${config.port}, DB: ${config.db}`);
+                    logger.log(`Connected to Redis at ${target}`);
                 });
                 RedisClient.instance.on("error", (err) => {
                     logger.error("Redis connection error:", err.message);
