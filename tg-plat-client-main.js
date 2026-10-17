@@ -25360,7 +25360,11 @@ const DEFAULTS = {
     maxDelayMs: 60000,
     requestTimeoutMs: 15000,
     cacheMaxAgeMs: 7 * 24 * 60 * MINUTE,
+    mongoTimeoutMs: 12000,
 };
+const HANDOFF_MAX_AGE_MS = 10 * MINUTE;
+const BOOT_STRIP_KEYS = ['_id', 'createdAt', 'updatedAt', '__v'];
+const DEFAULT_BOOTSTRAP_FILE = '/root/.tg-bootstrap.env';
 /**
  * Ordered, de-duplicated config bases.
  *
@@ -25426,6 +25430,118 @@ async function fetchFromBase(fetchImpl, base, clientId, apiKey, timeoutMs) {
     const sharedConfig = await fetchJson(fetchImpl, `${base}/configuration`, apiKey, timeoutMs);
     return { ...clientConfig, ...sharedConfig };
 }
+function isNonEmptyObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+/** Same shape the HTTP API returns: plain JSON, no bookkeeping fields. */
+function normalizeBootDoc(doc) {
+    if (!doc || typeof doc !== 'object')
+        return null;
+    const plain = JSON.parse(JSON.stringify(doc));
+    for (const key of BOOT_STRIP_KEYS)
+        delete plain[key];
+    return plain;
+}
+/** Minimal KEY=VALUE parser for the bootstrap file (tg-core carries no dotenv dependency). */
+function parseEnvFile(text) {
+    const out = {};
+    for (const rawLine of text.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#'))
+            continue;
+        const eq = line.indexOf('=');
+        if (eq <= 0)
+            continue;
+        const key = line.slice(0, eq).replace(/^export\s+/, '').trim();
+        let value = line.slice(eq + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+            value = value.slice(1, -1);
+        out[key] = value;
+    }
+    return out;
+}
+/** Error class only: driver messages can carry hostnames and must never reach an alert or a log. */
+function safeMongoError(error) {
+    const err = error;
+    return `${err?.name || 'Error'}${err?.code !== undefined ? ` code=${String(err.code)}` : ''}`;
+}
+/** Default reader: one short-lived connection, three parallel-safe reads, always closed. */
+const defaultMongoReader = async (uri, clientId) => {
+    const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
+    const client = new MongoClient(uri, {
+        maxPoolSize: 1,
+        serverSelectionTimeoutMS: 8000,
+        connectTimeoutMS: 8000,
+        appName: `rt-${clientId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64),
+    });
+    try {
+        await client.connect();
+        const db = client.db(process.env.TG_BOOT_MONGO_DB || 'tgclients');
+        const [configuration, clientDoc] = await Promise.all([
+            db.collection('configuration').findOne({}),
+            db.collection('clients').findOne({ clientId }),
+        ]);
+        return { configuration: normalizeBootDoc(configuration), client: normalizeBootDoc(clientDoc) };
+    }
+    finally {
+        await Promise.race([client.close(true).catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 2000))]);
+    }
+};
+/**
+ * Mongo boot source. Returns null when it is not configured or switched off (inert: no alert),
+ * `{ failure }` when it was configured but unusable, `{ config }` on success.
+ * Order: loader handoff (once, same clientId, < 10 min) > TG_BOOT_MONGO_URI env > bootstrap file.
+ */
+async function tryMongoSource(options, env, clientId, now, timeoutMs, log) {
+    const host = options.handoffHost ?? globalThis;
+    const handoff = host.__TG_BOOT__;
+    if (handoff && typeof handoff === 'object') {
+        const fresh = handoff.v === 1 && typeof handoff.at === 'number' && now() - handoff.at < HANDOFF_MAX_AGE_MS && handoff.at <= now() + MINUTE;
+        const matches = handoff.clientId === clientId;
+        if (!fresh)
+            delete host.__TG_BOOT__; // stale: it holds secrets, do not keep it around
+        if (fresh && matches) {
+            delete host.__TG_BOOT__; // single use: later refreshes must read live
+            if (isNonEmptyObject(handoff.configuration) && isNonEmptyObject(handoff.client)) {
+                log('config from loader Mongo handoff');
+                return { config: { ...handoff.client, ...handoff.configuration } };
+            }
+            log('loader Mongo handoff incomplete; reading Mongo directly');
+        }
+    }
+    let uri = env.TG_BOOT_MONGO_URI;
+    let killSwitch = env.TG_BOOT_MONGO;
+    if (!uri || killSwitch === undefined) {
+        try {
+            const file = parseEnvFile(node_fs__WEBPACK_IMPORTED_MODULE_0___default().readFileSync(options.bootstrapFile ?? env.TG_BOOTSTRAP_FILE ?? DEFAULT_BOOTSTRAP_FILE, 'utf8'));
+            uri = uri || file.TG_BOOT_MONGO_URI;
+            killSwitch = killSwitch ?? file.TG_BOOT_MONGO;
+        }
+        catch {
+            // no bootstrap file: the Mongo source is simply not configured on this VM
+        }
+    }
+    if (String(killSwitch ?? '').trim().toLowerCase() === 'off' || !uri)
+        return null;
+    try {
+        const reader = options.mongoReader ?? defaultMongoReader;
+        let timer;
+        const docs = await Promise.race([
+            reader(uri, clientId),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('mongo boot read timed out')), timeoutMs); }),
+        ]).finally(() => clearTimeout(timer));
+        if (!isNonEmptyObject(docs?.configuration))
+            throw new Error('configuration document missing or empty');
+        if (!isNonEmptyObject(docs?.client))
+            throw new Error(`clients document missing or empty for ${clientId}`);
+        return { config: { ...docs.client, ...docs.configuration } };
+    }
+    catch (error) {
+        const failure = safeMongoError(error);
+        log(`mongo boot source failed (${failure}); falling back to HTTP`);
+        return { failure };
+    }
+}
 async function loadRuntimeConfig(options) {
     const env = options.env ?? process.env;
     const fetchImpl = options.fetchImpl ?? fetch;
@@ -25444,6 +25560,22 @@ async function loadRuntimeConfig(options) {
     const cacheUsable = !!cached?.config && Object.keys(cached.config).length > 0
         && now() - cached.savedAt <= settings.cacheMaxAgeMs;
     const deadline = now() + (cacheUsable ? settings.cachedDeadlineMs : settings.liveDeadlineMs);
+    let mongoFailure;
+    const mongo = await tryMongoSource(options, env, clientId, now, settings.mongoTimeoutMs, log);
+    if (mongo && 'config' in mongo) {
+        const recoveredOutage = readJson(outagePath) ?? undefined;
+        try {
+            writeSecretJson(cachePath, { savedAt: now(), config: mongo.config });
+            if (recoveredOutage)
+                node_fs__WEBPACK_IMPORTED_MODULE_0___default().rmSync(outagePath, { force: true });
+        }
+        catch (error) {
+            log(`config cache write failed (${errorMessage(error)}); continuing with live config`);
+        }
+        return { source: 'live', base: 'mongo', config: mongo.config, attempts: 1, recoveredOutage };
+    }
+    if (mongo && 'failure' in mongo)
+        mongoFailure = mongo.failure;
     let attempts = 0;
     let lastError = bases.length ? null : new Error('no runtime config base (RUNTIME_CONFIG_BASE/tgcms/cms/tgmanager)');
     let delay = settings.baseDelayMs;
@@ -25461,7 +25593,7 @@ async function loadRuntimeConfig(options) {
                 catch (error) {
                     log(`config cache write failed (${errorMessage(error)}); continuing with live config`);
                 }
-                return { source: 'live', base, config, attempts, recoveredOutage };
+                return { source: 'live', base, config, attempts, recoveredOutage, mongoFailure };
             }
             catch (error) {
                 lastError = error;
@@ -25475,7 +25607,7 @@ async function loadRuntimeConfig(options) {
     }
     if (cacheUsable && cached) {
         log(`config service unreachable after ${attempts} attempts; booting from cached config saved ${new Date(cached.savedAt).toISOString()}`);
-        return { source: 'cache', base: null, config: cached.config, attempts, cacheSavedAt: cached.savedAt };
+        return { source: 'cache', base: null, config: cached.config, attempts, cacheSavedAt: cached.savedAt, mongoFailure };
     }
     const previous = options.recordOutage === false ? null : readJson(outagePath);
     if (options.recordOutage !== false)
@@ -25498,16 +25630,22 @@ function applyRuntimeConfig(config, env = process.env) {
 /** Operator alert text for a boot that is not a plain live fetch, or null when there is nothing to say. */
 function describeRuntimeConfigBoot(result, service, clientId, now = Date.now()) {
     const minutes = (ms) => Math.max(1, Math.round(ms / MINUTE));
+    const notices = [];
+    if (result.mongoFailure) {
+        notices.push(`⚠️ ${service} ${clientId}: Mongo boot source failed (${result.mongoFailure}); `
+            + `${result.source === 'cache' ? 'booted on cached config' : `booted via HTTP ${result.base ?? ''}`.trim()}. `
+            + `Check /root/.tg-bootstrap.env and Atlas access for the tg-boot user.`);
+    }
     if (result.source === 'cache') {
-        return `⚠️ ${service} ${clientId}: config service unreachable after ${result.attempts} attempts — booted on cached config `
-            + `from ${minutes(now - (result.cacheSavedAt ?? now))} min ago. Retrying live config in the background.`;
+        notices.push(`⚠️ ${service} ${clientId}: config service unreachable after ${result.attempts} attempts — booted on cached config `
+            + `from ${minutes(now - (result.cacheSavedAt ?? now))} min ago. Retrying live config in the background.`);
     }
-    if (result.recoveredOutage) {
+    else if (result.recoveredOutage) {
         const outage = result.recoveredOutage;
-        return `✅ ${service} ${clientId}: config service reachable again after ~${minutes(now - outage.firstFailureAt)} min `
-            + `(${outage.failedBoots} failed boot${outage.failedBoots === 1 ? '' : 's'}; last error: ${outage.lastError}).`;
+        notices.push(`✅ ${service} ${clientId}: config service reachable again after ~${minutes(now - outage.firstFailureAt)} min `
+            + `(${outage.failedBoots} failed boot${outage.failedBoots === 1 ? '' : 's'}; last error: ${outage.lastError}).`);
     }
-    return null;
+    return notices.length ? notices.join('\n') : null;
 }
 /**
  * After a cache boot, keep trying the live service so the cache is refreshed and operators learn
