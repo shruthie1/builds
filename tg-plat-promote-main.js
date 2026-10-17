@@ -14067,7 +14067,7 @@ class BotConfig {
         const cooldowns = data.botCooldownUntil.filter(Boolean);
         const earliest = cooldowns.length > 0 ? Math.min(...cooldowns) : now + this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS;
         const waitMs = Math.max(0, earliest - now);
-        logger.warn(`All bots for ${category} are rate-limited; skipping notification for ${Math.ceil(waitMs / 1000)}s`);
+        logger.warn(`All bots for ${category} are rate-limited or cannot reach the channel; skipping notification for ${Math.ceil(waitMs / 1000)}s`);
         return null;
     }
     markBotRateLimited(data, category, botIndex, error) {
