@@ -18980,7 +18980,6 @@ const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bot_schema_1 = __webpack_require__(/*! ./schemas/bot.schema */ "./src/components/bots/schemas/bot.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src/components/users/users.service.ts");
-const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 let BotsService = BotsService_1 = class BotsService {
     constructor(botModel, moduleRef) {
@@ -18994,8 +18993,8 @@ let BotsService = BotsService_1 = class BotsService {
         this.maxPendingAdminRepairAttempts = 3;
         this.healthCheckJob = null;
         this.reachSweepJob = null;
-        this.adminActionReadiness = new Map();
-        this.mainManagerMobile = null;
+        this.adminActionBlocks = new Map();
+        this.maxRepairAdminTries = 2;
         this.flushTimer = null;
         this.destroyed = false;
         this.replaceInProgress = false;
@@ -20340,27 +20339,36 @@ let BotsService = BotsService_1 = class BotsService {
         const botId = String(botInfo?.id ?? '');
         if (!botId)
             throw new Error('could not resolve new bot id from getBotInfo');
-        const adminMobile = await this.resolveChannelAdminMobile(channelId);
-        if (!adminMobile)
-            throw new Error(`no controllable admin account found for channel ${channelId}`);
         const desired = {
             changeInfo: true, postMessages: true, editMessages: true, deleteMessages: true,
             banUsers: true, inviteUsers: true, pinMessages: true, addAdmins: false,
             anonymous: true, manageCall: true,
         };
-        const granted = await this.intersectWithPromoterRights(adminMobile, channelId, desired);
-        await this.humanDelay();
-        try {
-            await this.telegramService.promoteBotInChannel(adminMobile, channelId, botId, botUsername, granted);
-        }
-        catch (err) {
-            if (this.isFloodSignal(err)) {
-                throw new Error(`FLOOD/spam signal promoting via ${adminMobile} in ${channelId} — aborting to protect the manager account: ${err?.message || err}`);
+        let lastErr = null;
+        for (let attempt = 0; attempt < this.maxRepairAdminTries; attempt++) {
+            const adminMobile = await this.resolveChannelAdminMobile(channelId);
+            if (!adminMobile)
+                break;
+            const granted = await this.intersectWithPromoterRights(adminMobile, channelId, desired);
+            await this.humanDelay();
+            try {
+                await this.telegramService.promoteBotInChannel(adminMobile, channelId, botId, botUsername, granted);
+                console.log(`[BotHealth] attempted add of @${botUsername} to channel ${channelId} via ${adminMobile}`);
+                return botId;
             }
-            throw err;
+            catch (err) {
+                lastErr = err;
+                if (this.isTargetSideError(err))
+                    throw err;
+                this.noteAdminActionFailure(adminMobile, err);
+            }
         }
-        console.log(`[BotHealth] attempted add of @${botUsername} to channel ${channelId} via ${adminMobile}`);
-        return botId;
+        if (!lastErr)
+            throw new Error(`no controllable admin account found for channel ${channelId}`);
+        if (this.isFloodSignal(lastErr)) {
+            throw new Error(`FLOOD/spam signal promoting in ${channelId} (accounts tried: ${this.maxRepairAdminTries}): ${lastErr?.message || lastErr}`);
+        }
+        throw lastErr;
     }
     async verifyBotIsChannelAdmin(channelId, botId, botToken) {
         await this.sleep(3000);
@@ -20432,57 +20440,26 @@ let BotsService = BotsService_1 = class BotsService {
             if (f)
                 facts.set(channelId, f);
         }
-        const configured = (process.env.channelManagerPrimary || '').trim();
-        let primary;
-        let how = 'configured';
-        if (configured) {
-            const [p] = await this.findHealthyAccountsByIdentity([configured], []);
-            const ready = p?.tgId ? await this.accountReadyForAdminActions(p.mobile, !dryRun) : { usable: false, reason: 'expired, no session, in a pool, or no tgId' };
-            if (p?.tgId && ready.usable)
-                primary = p;
-            else
-                failures.push(`channelManagerPrimary …${configured.slice(-4)} is not usable (${ready.reason}); picking another main manager`);
-        }
-        if (!primary) {
-            const reach = new Map();
-            for (const f of facts.values())
-                for (const a of f.admins)
-                    if (a.rank === 'creator' || a.permissions.addAdmins)
-                        reach.set(a.userId, (reach.get(a.userId) || 0) + 1);
-            const ours = reach.size ? await this.findHealthyAccountsByIdentity([], [...reach.keys()]) : [];
-            const ranked = ours.filter(u => u.tgId && u.mobile !== critical).sort((x, y) => (reach.get(String(y.tgId)) || 0) - (reach.get(String(x.tgId)) || 0));
-            for (const u of ranked) {
-                if ((await this.accountReadyForAdminActions(u.mobile, !dryRun)).usable) {
-                    primary = u;
-                    how = 'auto';
-                    break;
-                }
-            }
-        }
-        if (!primary?.tgId) {
-            this.mainManagerMobile = null;
-            failures.push('no usable main manager: every candidate account is limited, busy or unhealthy; repairs fall back to @myvcacc');
-            return { failures, proposedActions, stopPrivilegedWork: false };
-        }
-        if (!dryRun)
-            this.mainManagerMobile = primary.mobile;
-        const primaryMobile = primary.mobile;
-        const tail = primaryMobile.slice(-4);
+        const canAddIds = new Set();
+        for (const f of facts.values())
+            for (const a of f.admins)
+                if (a.rank === 'creator' || a.permissions.addAdmins)
+                    canAddIds.add(a.userId);
+        const ours = canAddIds.size ? await this.findHealthyAccountsByIdentity([], [...canAddIds]) : [];
+        const repairIds = new Set(ours.filter(u => u.tgId && u.mobile !== critical).map(u => String(u.tgId)));
+        const managing = new Set(ours.map(u => u.mobile));
         let covered = 0;
-        let readable = 0;
         const missing = [];
         for (const [channelId, { category, bots: channelBots }] of channels) {
             const f = facts.get(channelId);
             if (!f)
                 continue;
-            readable++;
-            const me = f.admins.find(a => a.userId === String(primary.tgId));
-            if (me && (me.rank === 'creator' || me.permissions.addAdmins))
+            if (f.admins.some(a => (a.rank === 'creator' || a.permissions.addAdmins) && repairIds.has(a.userId)))
                 covered++;
             else
-                missing.push({ channelId, category, bots: channelBots, isMember: Boolean(me) });
+                missing.push({ channelId, category, bots: channelBots });
         }
-        const coverage = `Main manager …${tail} (${how}) can add bots in ${covered}/${readable} chats${missing.length ? ` (next: ${missing[0].category})` : ''}`;
+        const coverage = `Own repair admin (besides @myvcacc) in ${covered}/${facts.size} chats${missing.length ? ` (next: ${missing[0].category})` : ''}`;
         if (missing.length === 0)
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         const target = missing[0];
@@ -20497,82 +20474,99 @@ let BotsService = BotsService_1 = class BotsService {
         if (!promoter) {
             const bot = caps[0]?.bot;
             if (!bot) {
-                failures.push(`${target.category}: no active bot is admin there; cannot add the main manager`);
+                failures.push(`${target.category}: no active bot is admin there; cannot add a repair admin`);
                 return { failures, proposedActions, stopPrivilegedWork: false, coverage };
             }
-            proposedActions.push(`grant add-admins to @${bot.username} in ${target.category} via an admin account (step 1 of adding main manager …${tail})`);
+            proposedActions.push(`grant add-admins to @${bot.username} in ${target.category} via an admin account (step 1 of adding a repair admin)`);
             if (dryRun)
                 return { failures, proposedActions, stopPrivilegedWork: false, coverage };
-            const adminMobile = await this.resolveChannelAdminMobile(target.channelId);
-            if (!adminMobile || adminMobile === primaryMobile) {
-                failures.push(`${target.category}: no admin account of ours can give a bot add-admins`);
-                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
-            }
             const desired = {
                 changeInfo: true, postMessages: true, editMessages: true, deleteMessages: true,
                 banUsers: true, inviteUsers: true, pinMessages: true, addAdmins: true, anonymous: false, manageCall: true,
             };
-            const granted = await this.intersectWithPromoterRights(adminMobile, target.channelId, desired);
-            if (!granted.addAdmins) {
-                failures.push(`${target.category}: promoter …${adminMobile.slice(-4)} lacks add-admins`);
-                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
-            }
-            try {
-                await this.humanDelay();
-                const botId = String(bot.token).split(':')[0];
-                await this.telegramService.promoteBotInChannel(adminMobile, target.channelId, botId, bot.username, granted);
-                console.log(`[BotHealth] granted add-admins to @${bot.username} in ${target.category} via …${adminMobile.slice(-4)}`);
-            }
-            catch (err) {
-                failures.push(`${target.category}: granting add-admins to @${bot.username} failed: ${err?.message || err}`);
-                if (this.isFloodSignal(err))
-                    return { failures, proposedActions, stopPrivilegedWork: true, coverage };
+            const botId = String(bot.token).split(':')[0];
+            for (let attempt = 0; attempt < this.maxRepairAdminTries; attempt++) {
+                const adminMobile = await this.resolveChannelAdminMobile(target.channelId);
+                if (!adminMobile) {
+                    failures.push(`${target.category}: no usable admin account of ours can give a bot add-admins`);
+                    break;
+                }
+                const granted = await this.intersectWithPromoterRights(adminMobile, target.channelId, desired);
+                if (!granted.addAdmins) {
+                    failures.push(`${target.category}: promoter …${adminMobile.slice(-4)} lacks add-admins`);
+                    break;
+                }
+                try {
+                    await this.humanDelay();
+                    await this.telegramService.promoteBotInChannel(adminMobile, target.channelId, botId, bot.username, granted);
+                    console.log(`[BotHealth] granted add-admins to @${bot.username} in ${target.category} via …${adminMobile.slice(-4)}`);
+                    break;
+                }
+                catch (err) {
+                    failures.push(`${target.category}: granting add-admins to @${bot.username} via …${adminMobile.slice(-4)} failed: ${err?.message || err}`);
+                    if (this.isTargetSideError(err))
+                        break;
+                    this.noteAdminActionFailure(adminMobile, err);
+                }
             }
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         }
-        if (!target.isMember && !inviter) {
-            failures.push(`${target.category}: no bot can create an invite link for the main manager`);
+        if (!inviter) {
+            failures.push(`${target.category}: no bot can create an invite link for a repair admin`);
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         }
-        proposedActions.push(`add main manager …${tail} as admin in ${target.category} (${target.isMember ? 'already a member' : 'join by one-use invite link'}, promoted by @${promoter.bot.username})`);
+        proposedActions.push(`add a random dormant account as repair admin in ${target.category} (join by one-use invite link, promoted by @${promoter.bot.username})`);
         if (dryRun)
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
-        let link = null;
-        try {
-            if (!target.isMember && inviter) {
+        const pool = await this.usersService.getDormantAccounts(this.maxRepairAdminTries * 4).catch(() => []);
+        const managers = new Set(this.getChannelManagerMobiles());
+        const candidates = pool.filter(u => u?.mobile && u.tgId && !managers.has(u.mobile) && !managing.has(u.mobile) && !this.adminActionBlocked(u.mobile));
+        if (candidates.length === 0) {
+            failures.push(`${target.category}: no dormant account available to become repair admin`);
+            return { failures, proposedActions, stopPrivilegedWork: false, coverage };
+        }
+        for (const cand of candidates.slice(0, this.maxRepairAdminTries)) {
+            const tail = cand.mobile.slice(-4);
+            let link = null;
+            let step = 'invite';
+            try {
                 const invite = await this.botApi(inviter.bot.token, 'createChatInviteLink', {
-                    chat_id: target.channelId, member_limit: 1, expire_date: Math.floor(Date.now() / 1000) + 3600, name: 'main manager',
+                    chat_id: target.channelId, member_limit: 1, expire_date: Math.floor(Date.now() / 1000) + 3600, name: 'repair admin',
                 });
                 link = String(invite?.invite_link || '');
                 await this.humanDelay();
-                await this.telegramService.joinByInviteLink(primary.mobile, link);
+                step = 'join';
+                await this.telegramService.joinByInviteLink(cand.mobile, link);
                 await this.humanDelay();
+                step = 'promote';
+                const r = promoter.rights;
+                await this.botApi(promoter.bot.token, 'promoteChatMember', {
+                    chat_id: target.channelId, user_id: String(cand.tgId),
+                    can_manage_chat: true, can_promote_members: true,
+                    can_post_messages: r.can_post_messages, can_edit_messages: r.can_edit_messages, can_delete_messages: r.can_delete_messages,
+                    can_invite_users: r.can_invite_users, can_restrict_members: r.can_restrict_members, can_pin_messages: r.can_pin_messages,
+                    can_change_info: r.can_change_info, can_manage_video_chats: r.can_manage_video_chats,
+                });
+                const after = await this.readChannelViaBots(target.channelId);
+                const me = after?.admins.find(a => a.userId === String(cand.tgId));
+                if (me && (me.rank === 'creator' || me.permissions.addAdmins)) {
+                    console.log(`[BotHealth] …${tail} is now repair admin with add-admins in ${target.category}`);
+                }
+                else {
+                    failures.push(`${target.category}: repair admin …${tail} promotion not visible in the admin list`);
+                }
+                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
             }
-            const r = promoter.rights;
-            await this.botApi(promoter.bot.token, 'promoteChatMember', {
-                chat_id: target.channelId, user_id: String(primary.tgId),
-                can_manage_chat: true, can_promote_members: true,
-                can_post_messages: r.can_post_messages, can_edit_messages: r.can_edit_messages, can_delete_messages: r.can_delete_messages,
-                can_invite_users: r.can_invite_users, can_restrict_members: r.can_restrict_members, can_pin_messages: r.can_pin_messages,
-                can_change_info: r.can_change_info, can_manage_video_chats: r.can_manage_video_chats,
-            });
-            const after = await this.readChannelViaBots(target.channelId);
-            const me = after?.admins.find(a => a.userId === String(primary.tgId));
-            if (me && (me.rank === 'creator' || me.permissions.addAdmins)) {
-                console.log(`[BotHealth] main manager …${tail} is now admin with add-admins in ${target.category}`);
+            catch (err) {
+                failures.push(`${target.category}: ${step} for repair admin …${tail} failed: ${err?.message || err}`);
+                if (step === 'invite' || (step === 'promote' && this.isTargetSideError(err))) {
+                    return { failures, proposedActions, stopPrivilegedWork: this.isFloodSignal(err), coverage };
+                }
+                this.noteAdminActionFailure(cand.mobile, err);
             }
-            else {
-                failures.push(`${target.category}: main manager …${tail} promotion not visible in the admin list`);
-            }
-        }
-        catch (err) {
-            failures.push(`${target.category}: adding main manager …${tail} failed: ${err?.message || err}`);
-            if (this.isFloodSignal(err))
-                return { failures, proposedActions, stopPrivilegedWork: true, coverage };
-        }
-        finally {
-            if (link && inviter) {
-                await this.botApi(inviter.bot.token, 'revokeChatInviteLink', { chat_id: target.channelId, invite_link: link }).catch(() => undefined);
+            finally {
+                if (link)
+                    await this.botApi(inviter.bot.token, 'revokeChatInviteLink', { chat_id: target.channelId, invite_link: link }).catch(() => undefined);
             }
         }
         return { failures, proposedActions, stopPrivilegedWork: false, coverage };
@@ -20601,40 +20595,25 @@ let BotsService = BotsService_1 = class BotsService {
         }
         return out;
     }
-    async accountReadyForAdminActions(mobile, probe = true) {
-        const now = Date.now();
-        const cached = this.adminActionReadiness.get(mobile);
-        if (cached && now < cached.until)
-            return cached;
-        if (!probe)
-            return { usable: true, reason: 'not checked (dry run)' };
-        let r;
-        try {
-            r = await (0, spambot_probe_1.probeSpamBot)(mobile, { totalTimeoutMs: spambot_probe_1.SPAMBOT_TOTAL_TIMEOUT_MS });
-        }
-        catch (error) {
-            r = { status: 'unknown', limitedUntil: null, error: error?.message || String(error) };
-        }
-        const day = 24 * 60 * 60 * 1000;
-        let verdict;
-        if (r.status === 'free')
-            verdict = { usable: true, reason: 'free', until: now + day };
-        else if (r.status === 'limited') {
-            const limitEnd = r.limitedUntil ? r.limitedUntil.getTime() : now + day;
-            verdict = { usable: false, reason: `spam-limited until ${r.limitedUntil ? r.limitedUntil.toISOString().slice(0, 10) : 'unknown'}`, until: Math.min(Math.max(limitEnd, now + 60 * 60 * 1000), now + 7 * day) };
-        }
-        else if (r.status === 'harsh')
-            verdict = { usable: false, reason: 'harsh spam limit', until: now + 7 * day };
-        else if (r.busy)
-            verdict = { usable: false, reason: 'busy in another flow', until: now + 10 * 60 * 1000 };
-        else if (r.sendFailed || r.connectFailed)
-            verdict = { usable: false, reason: `SpamBot check failed: ${(r.error || 'unknown').slice(0, 80)}`, until: now + 6 * 60 * 60 * 1000 };
-        else
-            verdict = { usable: true, reason: 'SpamBot inconclusive', until: now + 6 * 60 * 60 * 1000 };
-        this.adminActionReadiness.set(mobile, verdict);
-        if (!verdict.usable)
-            console.warn(`[BotHealth] …${mobile.slice(-4)} not used for admin actions: ${verdict.reason}`);
-        return verdict;
+    adminActionBlocked(mobile) {
+        const b = this.adminActionBlocks.get(mobile);
+        if (!b)
+            return false;
+        if (Date.now() < b.until)
+            return true;
+        this.adminActionBlocks.delete(mobile);
+        return false;
+    }
+    noteAdminActionFailure(mobile, err) {
+        const hour = 60 * 60 * 1000;
+        const limited = this.isFloodSignal(err) || /restricted|limited|USER_CHANNELS_TOO_MUCH|CHANNELS_TOO_MUCH/i.test(String(err?.errorMessage || err?.message || err));
+        const reason = String(err?.errorMessage || err?.message || err).slice(0, 80);
+        this.adminActionBlocks.set(mobile, { reason, until: Date.now() + (limited ? 24 : 6) * hour });
+        console.warn(`[BotHealth] …${mobile.slice(-4)} skipped for admin actions for ${limited ? 24 : 6}h: ${reason}`);
+    }
+    isTargetSideError(err) {
+        const m = String(err?.errorMessage || err?.message || err);
+        return /not enough rights|CHAT_ADMIN_REQUIRED|RIGHT_FORBIDDEN|ADMINS_TOO_MUCH|can't (promote|demote)|BOT_|chat not found|Too Many Requests|retry after/i.test(m);
     }
     async readChannelViaBots(channelId) {
         const bots = await this.botModel.find({ channelId, token: { $exists: true } }).lean().exec();
@@ -20733,15 +20712,10 @@ let BotsService = BotsService_1 = class BotsService {
         if (scored.length === 0)
             return null;
         const critical = (process.env.channelManagerBackup || '').trim();
-        const main = this.mainManagerMobile || (process.env.channelManagerPrimary || '').trim();
-        const rank = (c) => c.score - (critical && c.mobile === critical ? 10 : 0) + (main && c.mobile === main ? 10 : 0);
+        const rank = (c) => c.score - (critical && c.mobile === critical ? 10 : 0);
         scored.sort((x, y) => rank(y) - rank(x));
-        const seen = new Set();
         for (const candidate of scored) {
-            if (seen.has(candidate.mobile))
-                continue;
-            seen.add(candidate.mobile);
-            if ((await this.accountReadyForAdminActions(candidate.mobile)).usable)
+            if (!this.adminActionBlocked(candidate.mobile))
                 return candidate.mobile;
         }
         return null;
@@ -48407,6 +48381,36 @@ let UsersService = UsersService_1 = class UsersService {
         const seen = new Set(foreign.map(u => u.mobile));
         const fill = (await sample({}, limit)).filter(u => !seen.has(u.mobile));
         return [...foreign, ...fill].slice(0, limit);
+    }
+    async getDormantAccounts(limit = 10, idleDays = 30) {
+        const cutoff = new Date(Date.now() - idleDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const excluded = [];
+        try {
+            excluded.push(...await this.telegramService.getOwnAccountMobiles());
+        }
+        catch { }
+        try {
+            excluded.push(...(await this.clientsService.findAll()).map(c => c?.mobile).filter(Boolean));
+        }
+        catch { }
+        const sample = (mobile, n) => this.userModel.aggregate([
+            {
+                $match: {
+                    expired: { $ne: true },
+                    session: { $exists: true, $nin: [null, ''] },
+                    tgId: { $exists: true, $nin: [null, ''] },
+                    mobile: { $exists: true, $nin: [null, '', ...excluded], ...mobile },
+                    lastActive: { $lt: cutoff },
+                },
+            },
+            { $sample: { size: Math.max(1, n) } },
+        ]).exec();
+        const seen = new Set();
+        const unique = (docs) => docs.filter(u => !seen.has(u.mobile) && !seen.has(`tg:${u.tgId}`) && seen.add(u.mobile) && seen.add(`tg:${u.tgId}`));
+        const foreign = unique(await sample({ $not: /^\+?91/ }, limit));
+        if (foreign.length >= limit)
+            return foreign.slice(0, limit);
+        return [...foreign, ...unique(await sample({}, limit))].slice(0, limit);
     }
     hasQueryConstraint(query, field) {
         if (!query || typeof query !== 'object')
