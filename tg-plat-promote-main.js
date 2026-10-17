@@ -13075,6 +13075,30 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_1__.Logger( true ? __filename : 0);
+const DEFAULT_REDIS_URI = "redis://127.0.0.1:6379";
+/** Resolves the single supported Redis config source: REDIS_URI (local-dev default otherwise). */
+function resolveRedisUri() {
+    return process.env.REDIS_URI?.trim() || DEFAULT_REDIS_URI;
+}
+/** protocol//hostname:port only; never credentials. */
+function describeRedisUri(uri) {
+    try {
+        const u = new URL(uri);
+        return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+    }
+    catch {
+        return "REDIS_URI(unparseable)";
+    }
+}
+/** Logical DB from the URI path (/N), 0 when absent. */
+function redisDbFromUri(uri) {
+    try {
+        return Number(new URL(uri).pathname.replace(/^\//, "")) || 0;
+    }
+    catch {
+        return 0;
+    }
+}
 /**
  * Singleton Redis client with strong typing and extended utility methods.
  */
@@ -13089,85 +13113,34 @@ class RedisClient {
      */
     static getClient() {
         if (!RedisClient.instance) {
-            const isRemote = process.env.REDIS_MODE === "remote";
-            const host = process.env.REDIS_HOST || (isRemote ? "0.0.0.0" : "127.0.0.1");
-            const port = Number(process.env.REDIS_PORT) || 6379;
-            const db = Number(process.env.REDIS_DB) || 0;
-            const rawPassword = process.env.REDIS_PASSWORD;
-            const trimmedPassword = rawPassword?.trim();
-            const hasPassword = !!trimmedPassword;
-            logger.log(`[Redis Init] Mode: ${isRemote ? 'remote' : 'local'}, Host: ${host}:${port}, DB: ${db}`);
-            logger.log(`[Redis Init] Auth: ${hasPassword ? 'yes' : 'no'}, REDIS_PASSWORD env set: ${rawPassword !== undefined}, REDIS_PASSWORD length: ${rawPassword?.length ?? 0}, trimmed length: ${trimmedPassword?.length ?? 0}`);
+            const uri = resolveRedisUri();
+            const target = describeRedisUri(uri);
             const config = {
-                host,
-                port,
-                password: process.env.REDIS_PASSWORD?.trim() || undefined,
-                db,
-                // Memory optimization: lazy connection - only connects when first command is sent
                 lazyConnect: true,
-                // Prevent memory bloat: limit retries per request to avoid queue buildup
-                maxRetriesPerRequest: 3,
-                // Connection health checks
+                maxRetriesPerRequest: 2,
                 enableReadyCheck: true,
-                // Connection timeout (10 seconds for local, 15 seconds for remote)
-                connectTimeout: isRemote ? 15000 : 10000,
-                // Keep-alive to prevent connection drops (30 seconds)
+                connectTimeout: 15000,
                 keepAlive: 30000,
-                // Prefer IPv4 to avoid DNS resolution overhead
                 family: 4,
-                // Disable offline queue to prevent memory accumulation when disconnected
                 enableOfflineQueue: false,
-                // Memory optimization for remote Redis: reduce buffer sizes
-                ...(isRemote ? {
-                    // Reduce command queue size for remote connections
-                    maxRetriesPerRequest: 2,
-                    // Shorter connection timeout for faster failure detection
-                    connectTimeout: 15000,
-                    // Disable command queue buffering when disconnected (critical for remote)
-                    enableOfflineQueue: false,
-                } : {}),
                 retryStrategy: (times) => {
                     const delay = Math.min(times * 100, 3000); // Exponential backoff, max 3s
                     logger.warn(`[Redis Retry] Attempt ${times}/10, next retry in ${delay}ms. Status: ${RedisClient.instance?.status ?? 'unknown'}`);
                     // Limit retries to prevent infinite reconnection attempts (memory leak prevention)
                     if (times > 10) {
-                        logger.error(`[Redis Retry] Connection failed after ${times} attempts, giving up. Check: 1) Redis server running? 2) Host/port correct? 3) Password correct? 4) Firewall rules?`);
+                        logger.error(`[Redis Retry] Connection failed after ${times} attempts, giving up. Check: 1) Redis server running? 2) REDIS_URI correct? 3) Credentials correct? 4) Firewall rules?`);
                         return null; // Stop retrying
                     }
                     return delay;
                 },
             };
             try {
-                logger.debug(`Creating new Redis instance with config:`, {
-                    host: config.host,
-                    port: config.port,
-                    db: config.db,
-                    lazyConnect: config.lazyConnect,
-                    connectTimeout: config.connectTimeout,
-                    enableOfflineQueue: config.enableOfflineQueue
-                });
-                // REDIS_URI (e.g. rediss://user:pass@host:port for a managed TLS Redis/Valkey) wins over
-                // REDIS_HOST/PORT/PASSWORD; ioredis enables TLS for rediss://. Same option set either way.
-                const uri = process.env.REDIS_URI?.trim();
-                if (uri) {
-                    const { host: _h, port: _p, password: _pw, db: _db, ...opts } = config;
-                    const target = (() => { try {
-                        const u = new URL(uri);
-                        return `${u.protocol}//${u.hostname}:${u.port}`;
-                    }
-                    catch {
-                        return 'REDIS_URI';
-                    } })();
-                    logger.log(`[Redis Init] Using REDIS_URI ${target}`);
-                    config.host = target;
-                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(uri, opts);
-                }
-                else {
-                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(config);
-                }
+                logger.log(`[Redis Init] Using REDIS_URI ${target}`);
+                // ioredis enables TLS for rediss://
+                RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(uri, config);
                 // Store event handler references for cleanup
                 const connectHandler = () => {
-                    logger.log(`✅ Connected to ${config.host}:${config.port}, DB: ${config.db}`);
+                    logger.log(`✅ Connected to ${target}`);
                 };
                 const readyHandler = () => {
                     logger.log("✅ Client ready");
@@ -13181,11 +13154,7 @@ class RedisClient {
                         err.code === 'NOAUTH';
                     if (isAuthError) {
                         logger.error(`❌ Redis AUTH FAILURE: ${err.message}`);
-                        logger.error(`[Redis Auth Debug] Server requires authentication. Check REDIS_PASSWORD env var.`);
-                        logger.error(`[Redis Auth Debug] REDIS_PASSWORD is ${process.env.REDIS_PASSWORD !== undefined ? 'set' : 'NOT set'}, password passed to config: ${!!config.password}`);
-                        if (config.password) {
-                            logger.error(`[Redis Auth Debug] Password length: ${config.password.length}, first char: '${config.password[0]}', last char: '${config.password[config.password.length - 1]}'`);
-                        }
+                        logger.error(`[Redis Auth Debug] Server requires authentication. Check the credentials in REDIS_URI.`);
                     }
                     else {
                         logger.error(`❌ Connection error: ${err.message}${err.code ? ` (code: ${err.code})` : ''}`);
@@ -13392,7 +13361,7 @@ class RedisClient {
             const isAuthError = errorMsg.includes('NOAUTH') || errorMsg.includes('AUTH') || errorMsg.includes('WRONGPASS');
             if (isAuthError) {
                 logger.error(`[Redis Health] AUTH FAILED: ${errorMsg}`);
-                logger.error(`[Redis Health] Ensure REDIS_PASSWORD env var is set correctly. Current status: ${RedisClient.instance?.status ?? 'no instance'}`);
+                logger.error(`[Redis Health] Ensure the credentials in REDIS_URI are correct. Current status: ${RedisClient.instance?.status ?? 'no instance'}`);
             }
             else {
                 logger.error(`[Redis Health] Failed - ${errorMsg} (status: ${RedisClient.instance?.status ?? 'no instance'})`);
@@ -13641,7 +13610,7 @@ class RedisClient {
         const client = await RedisClient.getReadyClient();
         try {
             const info = await client.info("keyspace");
-            const db = Number(process.env.REDIS_DB) || 0;
+            const db = redisDbFromUri(resolveRedisUri());
             const dbKey = `db${db}`;
             const match = info.match(new RegExp(`${dbKey}:keys=(\\d+)`));
             return {
@@ -32299,9 +32268,7 @@ class UserDataDtoCrud {
     }
     getPromotionRedisStatus() {
         const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_4__.readPromotionFeatureFlags)(process.env);
-        const configured = Boolean(process.env.REDIS_URI?.trim() ||
-            process.env.REDIS_HOST?.trim() ||
-            process.env.redisHost?.trim());
+        const configured = Boolean(process.env.REDIS_URI?.trim());
         const required = promotionFlags.redisChannelLock || promotionFlags.conversionAttribution;
         const status = this.promotionRedis?.status ?? "not_initialized";
         return {
@@ -32342,10 +32309,6 @@ class UserDataDtoCrud {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
             const redisUrl = process.env.REDIS_URI?.trim() || undefined;
-            const redisHost = process.env.REDIS_HOST?.trim() || process.env.redisHost?.trim() || undefined;
-            const redisPassword = process.env.REDIS_PASSWORD?.trim() || undefined;
-            const redisDb = Number(process.env.REDIS_DB || process.env.redisDb) || 0;
-            const redisPort = Number(process.env.REDIS_PORT || process.env.redisPort) || 6379;
             let redis;
             const redisOptions = {
                 connectTimeout: 5000,
@@ -32358,18 +32321,10 @@ class UserDataDtoCrud {
             // if Redis is not configured or unreachable, fail hard so the misconfiguration
             // surfaces (the outer catch reports via parseError) instead of silently
             // running a degraded promotion engine.
-            if (!redisUrl && !redisHost) {
-                throw new Error('Promotion Redis is mandatory but not configured (set REDIS_URI or REDIS_HOST)');
+            if (!redisUrl) {
+                throw new Error('Promotion Redis is mandatory but not configured (set REDIS_URI)');
             }
-            redis = redisUrl
-                ? new Redis(redisUrl, redisOptions)
-                : new Redis({
-                    ...redisOptions,
-                    host: redisHost,
-                    port: redisPort,
-                    db: redisDb,
-                    ...(redisPassword ? { password: redisPassword } : {}),
-                });
+            redis = new Redis(redisUrl, redisOptions);
             this.promotionRedis = redis;
             redis.on?.('error', (error) => {
                 const message = error instanceof Error ? error.message : String(error);
@@ -32378,7 +32333,7 @@ class UserDataDtoCrud {
             try {
                 await redis.connect?.();
                 await redis.ping?.();
-                logger.log(`Redis connected for promotion runtime locks/attribution (${redisUrl ? 'url' : `${redisHost}:${redisPort}/${redisDb}`})`);
+                logger.log(`Redis connected for promotion runtime locks/attribution (REDIS_URI)`);
             }
             catch (error) {
                 await this.closePromotionRedis();
