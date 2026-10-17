@@ -2382,7 +2382,7 @@ exports.ConfigurationController = ConfigurationController;
 __decorate([
     (0, common_1.Get)(),
     (0, common_1.UseInterceptors)(interceptors_1.CloudflareCacheInterceptor),
-    (0, decorators_1.CloudflareCache)(3600, 60),
+    (0, decorators_1.NoCache)(),
     (0, swagger_1.ApiOperation)({ summary: 'Get configuration data' }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
@@ -25978,7 +25978,7 @@ __decorate([
 __decorate([
     (0, common_1.Get)(),
     (0, common_1.UseInterceptors)(interceptors_1.CloudflareCacheInterceptor),
-    (0, decorators_1.CloudflareCache)(3600, 60),
+    (0, decorators_1.NoCache)(),
     (0, swagger_1.ApiOperation)({ summary: 'Get all clients' }),
     (0, swagger_1.ApiOkResponse)({ type: [client_schema_1.Client] }),
     __metadata("design:type", Function),
@@ -50939,6 +50939,13 @@ const ALLOWED_ORIGINS = [
     'https://tg-chats.netlify.app',
     'https://report-upi.netlify.app',
 ].map((origin) => origin.toLowerCase());
+const ORIGIN_ONLY_PATHS = [
+    /^\/clients\/maskedcls(?:$|[/?])/i,
+    /^\/upi-ids(?:$|[/?])/i,
+    /^\/timestamps(?:$|[/?])/i,
+    /^\/folders(?:$|[/?])/i,
+    /^\/tgsignup(?:$|[/?])/i,
+];
 const IGNORE_PATHS = [
     '/',
     '/exit',
@@ -51004,7 +51011,7 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
         else if (ALLOWED_IPS.includes(clientIp)) {
             passedReason = 'IP allowed';
         }
-        else if (origin && this.isOriginAllowed(origin)) {
+        else if (origin && this.isOriginAllowed(origin) && this.isOriginOnlyPath(path, url, originalUrl)) {
             passedReason = 'Origin allowed';
         }
         if (passedReason) {
@@ -51095,6 +51102,10 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
             }
         }
         return false;
+    }
+    isOriginOnlyPath(...urls) {
+        const candidates = urls.filter(Boolean);
+        return candidates.length > 0 && candidates.every((u) => ORIGIN_ONLY_PATHS.some((re) => re.test(u)));
     }
     isOriginAllowed(origin) {
         try {
