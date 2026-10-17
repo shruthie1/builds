@@ -18334,7 +18334,9 @@ let BotsController = class BotsController {
         const runInBackground = String(async ?? '').toLowerCase() === 'true' || async === '1';
         const options = { dryRun: String(dryRun ?? '').toLowerCase() === 'true' || dryRun === '1' };
         if (runInBackground) {
-            void this.botsService.validateAndReplaceBots(options).catch(() => undefined);
+            void this.botsService.validateAndReplaceBots(options)
+                .then(res => console.log(`[BotHealth] run done dryRun=${options.dryRun} ${JSON.stringify(res)}`))
+                .catch(() => undefined);
             return { started: true, mode: 'async', dryRun: options.dryRun, note: 'running in background; inspect CMS logs for the summary' };
         }
         return this.botsService.validateAndReplaceBots(options);
