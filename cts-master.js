@@ -19937,10 +19937,16 @@ let BotsService = BotsService_1 = class BotsService {
             }
             for (const dc of deadChannels)
                 failures.push(`DEAD CHANNEL: ${dc} — sends silently no-op; repair/rotate the channel`);
-            if (!options.dryRun) {
-                await this.sendHealthSummary({ checked: bots.length, alive, dead, unknown, replaced, toppedUp, deadRemaining: deadBots.length - replaced, failures });
+            const adminCoverage = await this.auditAdminCoverage();
+            for (const c of adminCoverage) {
+                if (c.repairAdmins === 0)
+                    failures.push(`NO REPAIR ADMIN: ${c.category} (channel ${c.channelId}) — none of our accounts can add bots; make a manager account admin with Add Admins`);
             }
-            return { checked: bots.length, alive, dead, unknown, replaced, toppedUp, failures, dryRun: Boolean(options.dryRun), proposedActions, deadChannels };
+            const singleAdmin = adminCoverage.filter(c => c.repairAdmins === 1).map(c => c.category);
+            if (!options.dryRun) {
+                await this.sendHealthSummary({ checked: bots.length, alive, dead, unknown, replaced, toppedUp, deadRemaining: deadBots.length - replaced, failures, singleAdmin });
+            }
+            return { checked: bots.length, alive, dead, unknown, replaced, toppedUp, failures, dryRun: Boolean(options.dryRun), proposedActions, deadChannels, adminCoverage };
         }
         finally {
             this.replaceInProgress = false;
@@ -20015,7 +20021,7 @@ let BotsService = BotsService_1 = class BotsService {
                 const botId = String(info?.id || '');
                 if (!botId)
                     throw new Error('could not resolve pending bot id');
-                const alreadyAdmin = await this.verifyBotIsChannelAdmin(bot.channelId, botId);
+                const alreadyAdmin = await this.verifyBotIsChannelAdmin(bot.channelId, botId, bot.token);
                 if (alreadyAdmin) {
                     proposedActions.push(`activate verified pending-admin @${bot.username}`);
                     if (!options.dryRun) {
@@ -20029,7 +20035,7 @@ let BotsService = BotsService_1 = class BotsService {
                 proposedActions.push(`add/verify pending-admin @${bot.username} in ${bot.channelId}`);
                 if (!options.dryRun) {
                     await this.addBotToChannelAsAdmin(bot.channelId, bot.token, bot.username);
-                    if (!(await this.verifyBotIsChannelAdmin(bot.channelId, botId))) {
+                    if (!(await this.verifyBotIsChannelAdmin(bot.channelId, botId, bot.token))) {
                         throw new Error('post-add verification failed: bot is not listed as a channel admin');
                     }
                     await this.botModel.updateOne({ _id: bot._id, lifecycle: 'pending_admin' }, {
@@ -20123,7 +20129,7 @@ let BotsService = BotsService_1 = class BotsService {
         });
         try {
             const botId = await this.addBotToChannelAsAdmin(channelId, botToken, username);
-            const verified = await this.verifyBotIsChannelAdmin(channelId, botId);
+            const verified = await this.verifyBotIsChannelAdmin(channelId, botId, botToken);
             if (!verified) {
                 throw new Error('post-add verification failed: bot is not listed as an admin of the channel');
             }
@@ -20189,7 +20195,7 @@ let BotsService = BotsService_1 = class BotsService {
                 if (!botId)
                     continue;
                 await this.addBotToChannelAsAdmin(channelId, bot.token, bot.username);
-                if (!(await this.verifyBotIsChannelAdmin(channelId, botId)))
+                if (!(await this.verifyBotIsChannelAdmin(channelId, botId, bot.token)))
                     continue;
                 await this.botModel.updateOne({ _id: bot._id }, {
                     $set: { lifecycle: 'active_verified', lifecycleReason: 'reused: re-added to channel as admin', lifecycleUpdatedAt: new Date(), lastAdminVerifiedAt: new Date(), status: 'active', repairAttempts: 0 },
@@ -20324,8 +20330,23 @@ let BotsService = BotsService_1 = class BotsService {
         console.log(`[BotHealth] attempted add of @${botUsername} to channel ${channelId} via ${adminMobile}`);
         return botId;
     }
-    async verifyBotIsChannelAdmin(channelId, botId) {
+    async verifyBotIsChannelAdmin(channelId, botId, botToken) {
         await this.sleep(3000);
+        if (botToken) {
+            try {
+                const res = await axios_1.default.get(`https://api.telegram.org/bot${botToken}/getChatMember`, {
+                    params: { chat_id: channelId, user_id: botId }, timeout: 12000,
+                });
+                const status = res.data?.ok ? res.data.result?.status : null;
+                if (status)
+                    return status === 'administrator' || status === 'creator';
+            }
+            catch (error) {
+                const httpStatus = error?.response?.status;
+                if (httpStatus === 400 || httpStatus === 403)
+                    return false;
+            }
+        }
         for (const viewerMobile of [...this.getChannelManagerMobiles(), ...(await this.getHealthyAccountMobiles(10))]) {
             try {
                 const admins = await this.telegramService.getGroupAdmins(viewerMobile, channelId);
@@ -20339,14 +20360,74 @@ let BotsService = BotsService_1 = class BotsService {
         }
         return false;
     }
+    async auditAdminCoverage() {
+        const bots = await this.botModel.find().lean().exec();
+        const channels = new Map();
+        for (const b of bots)
+            if (this.isSelectable(b) && b.channelId && !channels.has(b.channelId))
+                channels.set(b.channelId, String(b.category));
+        const out = [];
+        for (const [channelId, category] of channels) {
+            try {
+                const facts = await this.readChannelViaBots(channelId);
+                if (!facts) {
+                    out.push({ category, channelId, repairAdmins: null });
+                    continue;
+                }
+                const canAdd = facts.admins.filter(a => a.rank === 'creator' || a.permissions.addAdmins).map(a => a.userId);
+                const ours = canAdd.length ? await this.findHealthyAccountsByIdentity([], canAdd) : [];
+                out.push({ category, channelId, repairAdmins: ours.length });
+            }
+            catch {
+                out.push({ category, channelId, repairAdmins: null });
+            }
+        }
+        return out;
+    }
+    async readChannelViaBots(channelId) {
+        const bots = await this.botModel.find({ channelId, token: { $exists: true } }).lean().exec();
+        const ordered = [...bots.filter(b => this.isSelectable(b)), ...bots.filter(b => !this.isSelectable(b) && this.lifecycleOf(b) !== 'dead_token')];
+        for (const bot of ordered.slice(0, 5)) {
+            try {
+                const res = await axios_1.default.get(`https://api.telegram.org/bot${bot.token}/getChatAdministrators`, { params: { chat_id: channelId }, timeout: 12000 });
+                if (!res?.data?.ok || !Array.isArray(res.data.result))
+                    continue;
+                const admins = res.data.result
+                    .filter((a) => a?.user && !a.user.is_bot)
+                    .map((a) => ({
+                    userId: String(a.user.id),
+                    rank: a.status === 'creator' ? 'creator' : 'admin',
+                    permissions: {
+                        changeInfo: Boolean(a.can_change_info), postMessages: Boolean(a.can_post_messages),
+                        editMessages: Boolean(a.can_edit_messages), deleteMessages: Boolean(a.can_delete_messages),
+                        banUsers: Boolean(a.can_restrict_members), inviteUsers: Boolean(a.can_invite_users),
+                        pinMessages: Boolean(a.can_pin_messages), addAdmins: Boolean(a.can_promote_members),
+                        anonymous: Boolean(a.is_anonymous), manageCall: Boolean(a.can_manage_video_chats),
+                    },
+                }));
+                let about = '';
+                try {
+                    const chat = await axios_1.default.get(`https://api.telegram.org/bot${bot.token}/getChat`, { params: { chat_id: channelId }, timeout: 12000 });
+                    about = String(chat?.data?.result?.description || '');
+                }
+                catch { }
+                return { admins, about };
+            }
+            catch {
+                continue;
+            }
+        }
+        return null;
+    }
     getChannelManagerMobiles() {
         return [process.env.channelManagerPrimary, process.env.channelManagerBackup]
             .map(m => (m || '').trim())
             .filter(Boolean);
     }
     async resolveChannelAdminMobile(channelId) {
-        const viewers = [...this.getChannelManagerMobiles(), ...(await this.getHealthyAccountMobiles(15))];
-        let admins = null;
+        const viaBots = await this.readChannelViaBots(channelId);
+        const viewers = viaBots ? [] : [...this.getChannelManagerMobiles(), ...(await this.getHealthyAccountMobiles(15))];
+        let admins = viaBots && viaBots.admins.length > 0 ? viaBots.admins : null;
         for (const viewer of viewers) {
             try {
                 const res = await this.telegramService.getGroupAdmins(viewer, channelId);
@@ -20360,7 +20441,9 @@ let BotsService = BotsService_1 = class BotsService {
             }
         }
         const aboutMobiles = new Set();
-        for (const viewer of viewers) {
+        for (const m of (viaBots?.about || '').match(/\d{10,13}/g) || [])
+            aboutMobiles.add(m);
+        for (const viewer of aboutMobiles.size > 0 ? [] : viewers) {
             let about = '';
             try {
                 about = await this.telegramService.getChannelAbout(viewer, channelId);
@@ -20377,15 +20460,13 @@ let BotsService = BotsService_1 = class BotsService {
         const adminTgIds = (admins || []).map((a) => String(a?.userId ?? a?.id ?? '')).filter(Boolean);
         const healthy = await this.findHealthyAccountsByIdentity([...aboutMobiles], adminTgIds);
         const byMobile = new Map(healthy.map(u => [u.mobile, u]));
+        const scored = [];
         for (const m of aboutMobiles) {
             if (byMobile.has(m))
-                return m;
+                scored.push({ mobile: m, score: 3 });
         }
-        if (!admins)
-            return null;
         const byTgId = new Map(healthy.filter(u => u.tgId).map(u => [String(u.tgId), u]));
-        const scored = [];
-        for (const a of admins) {
+        for (const a of admins || []) {
             const tgId = String(a?.userId ?? a?.id ?? '');
             const ours = byTgId.get(tgId);
             if (!ours)
@@ -20399,7 +20480,9 @@ let BotsService = BotsService_1 = class BotsService {
         }
         if (scored.length === 0)
             return null;
-        scored.sort((x, y) => y.score - x.score);
+        const critical = (process.env.channelManagerBackup || '').trim();
+        const rank = (c) => c.score - (critical && c.mobile === critical ? 10 : 0);
+        scored.sort((x, y) => rank(y) - rank(x));
         return scored[0].mobile;
     }
     async intersectWithPromoterRights(promoterMobile, channelId, desired) {
@@ -20408,7 +20491,8 @@ let BotsService = BotsService_1 = class BotsService {
             const promoterTgId = promoterUser?.tgId ? String(promoterUser.tgId) : null;
             if (!promoterTgId)
                 return desired;
-            const admins = await this.telegramService.getGroupAdmins(promoterMobile, channelId);
+            const viaBots = await this.readChannelViaBots(channelId);
+            const admins = viaBots?.admins.length ? viaBots.admins : await this.telegramService.getGroupAdmins(promoterMobile, channelId);
             const me = (Array.isArray(admins) ? admins : []).find((a) => String(a?.userId ?? a?.id) === promoterTgId);
             const perms = me?.permissions;
             if (!perms || me?.rank === 'creator')
@@ -20481,6 +20565,9 @@ let BotsService = BotsService_1 = class BotsService {
             `Checked: ${s.checked} | Alive: ${s.alive} | Dead: ${s.dead} | Unknown: ${s.unknown}`,
             `Replaced: ${s.replaced} | Topped up: ${s.toppedUp} | Dead remaining: ${s.deadRemaining}`,
         ];
+        if (s.singleAdmin?.length) {
+            lines.push(`Only one of our accounts can add bots in: ${s.singleAdmin.join(', ')}`);
+        }
         if (s.failures.length) {
             const shown = s.failures.slice(0, 10).map(f => `• ${f}`);
             if (s.failures.length > 10)
