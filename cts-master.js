@@ -39711,13 +39711,13 @@ const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ./client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const organic_activity_1 = __webpack_require__(/*! ./organic-activity */ "./src/components/shared/organic-activity.ts");
-Object.defineProperty(exports, "performOrganicActivity", ({ enumerable: true, get: function () { return organic_activity_1.performOrganicActivity; } }));
+Object.defineProperty(exports, "performOrganicActivity", { enumerable: true, get: function () { return organic_activity_1.performOrganicActivity; } });
 const warmup_phases_1 = __webpack_require__(/*! ./warmup-phases */ "./src/components/shared/warmup-phases.ts");
-Object.defineProperty(exports, "getWarmupPhaseAction", ({ enumerable: true, get: function () { return warmup_phases_1.getWarmupPhaseAction; } }));
-Object.defineProperty(exports, "WarmupPhase", ({ enumerable: true, get: function () { return warmup_phases_1.WarmupPhase; } }));
-Object.defineProperty(exports, "calculateWarmupPriority", ({ enumerable: true, get: function () { return warmup_phases_1.calculateWarmupPriority; } }));
-Object.defineProperty(exports, "isAccountReady", ({ enumerable: true, get: function () { return warmup_phases_1.isAccountReady; } }));
-Object.defineProperty(exports, "isAccountWarmingUp", ({ enumerable: true, get: function () { return warmup_phases_1.isAccountWarmingUp; } }));
+Object.defineProperty(exports, "getWarmupPhaseAction", { enumerable: true, get: function () { return warmup_phases_1.getWarmupPhaseAction; } });
+Object.defineProperty(exports, "WarmupPhase", { enumerable: true, get: function () { return warmup_phases_1.WarmupPhase; } });
+Object.defineProperty(exports, "calculateWarmupPriority", { enumerable: true, get: function () { return warmup_phases_1.calculateWarmupPriority; } });
+Object.defineProperty(exports, "isAccountReady", { enumerable: true, get: function () { return warmup_phases_1.isAccountReady; } });
+Object.defineProperty(exports, "isAccountWarmingUp", { enumerable: true, get: function () { return warmup_phases_1.isAccountWarmingUp; } });
 const mobile_utils_1 = __webpack_require__(/*! ./mobile-utils */ "./src/components/shared/mobile-utils.ts");
 exports.ClientStatus = {
     ACTIVE: 'active',
