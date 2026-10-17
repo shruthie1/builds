@@ -13146,7 +13146,25 @@ class RedisClient {
                     connectTimeout: config.connectTimeout,
                     enableOfflineQueue: config.enableOfflineQueue
                 });
-                RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(config);
+                // REDIS_URI (e.g. rediss://user:pass@host:port for a managed TLS Redis/Valkey) wins over
+                // REDIS_HOST/PORT/PASSWORD; ioredis enables TLS for rediss://. Same option set either way.
+                const uri = process.env.REDIS_URI?.trim();
+                if (uri) {
+                    const { host: _h, port: _p, password: _pw, db: _db, ...opts } = config;
+                    const target = (() => { try {
+                        const u = new URL(uri);
+                        return `${u.protocol}//${u.hostname}:${u.port}`;
+                    }
+                    catch {
+                        return 'REDIS_URI';
+                    } })();
+                    logger.log(`[Redis Init] Using REDIS_URI ${target}`);
+                    config.host = target;
+                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(uri, opts);
+                }
+                else {
+                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(config);
+                }
                 // Store event handler references for cleanup
                 const connectHandler = () => {
                     logger.log(`✅ Connected to ${config.host}:${config.port}, DB: ${config.db}`);
