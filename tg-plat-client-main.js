@@ -19914,6 +19914,30 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_1__.Logger( true ? __webpack_filename__ : 0);
+const DEFAULT_REDIS_URI = "redis://127.0.0.1:6379";
+/** Resolves the single supported Redis config source: REDIS_URI (local-dev default otherwise). */
+function resolveRedisUri() {
+    return process.env.REDIS_URI?.trim() || DEFAULT_REDIS_URI;
+}
+/** protocol//hostname:port only; never credentials. */
+function describeRedisUri(uri) {
+    try {
+        const u = new URL(uri);
+        return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+    }
+    catch {
+        return "REDIS_URI(unparseable)";
+    }
+}
+/** Logical DB from the URI path (/N), 0 when absent. */
+function redisDbFromUri(uri) {
+    try {
+        return Number(new URL(uri).pathname.replace(/^\//, "")) || 0;
+    }
+    catch {
+        return 0;
+    }
+}
 /**
  * Singleton Redis client with strong typing and extended utility methods.
  */
@@ -19928,85 +19952,34 @@ class RedisClient {
      */
     static getClient() {
         if (!RedisClient.instance) {
-            const isRemote = process.env.REDIS_MODE === "remote";
-            const host = process.env.REDIS_HOST || (isRemote ? "0.0.0.0" : "127.0.0.1");
-            const port = Number(process.env.REDIS_PORT) || 6379;
-            const db = Number(process.env.REDIS_DB) || 0;
-            const rawPassword = process.env.REDIS_PASSWORD;
-            const trimmedPassword = rawPassword?.trim();
-            const hasPassword = !!trimmedPassword;
-            logger.log(`[Redis Init] Mode: ${isRemote ? 'remote' : 'local'}, Host: ${host}:${port}, DB: ${db}`);
-            logger.log(`[Redis Init] Auth: ${hasPassword ? 'yes' : 'no'}, REDIS_PASSWORD env set: ${rawPassword !== undefined}, REDIS_PASSWORD length: ${rawPassword?.length ?? 0}, trimmed length: ${trimmedPassword?.length ?? 0}`);
+            const uri = resolveRedisUri();
+            const target = describeRedisUri(uri);
             const config = {
-                host,
-                port,
-                password: process.env.REDIS_PASSWORD?.trim() || undefined,
-                db,
-                // Memory optimization: lazy connection - only connects when first command is sent
                 lazyConnect: true,
-                // Prevent memory bloat: limit retries per request to avoid queue buildup
-                maxRetriesPerRequest: 3,
-                // Connection health checks
+                maxRetriesPerRequest: 2,
                 enableReadyCheck: true,
-                // Connection timeout (10 seconds for local, 15 seconds for remote)
-                connectTimeout: isRemote ? 15000 : 10000,
-                // Keep-alive to prevent connection drops (30 seconds)
+                connectTimeout: 15000,
                 keepAlive: 30000,
-                // Prefer IPv4 to avoid DNS resolution overhead
                 family: 4,
-                // Disable offline queue to prevent memory accumulation when disconnected
                 enableOfflineQueue: false,
-                // Memory optimization for remote Redis: reduce buffer sizes
-                ...(isRemote ? {
-                    // Reduce command queue size for remote connections
-                    maxRetriesPerRequest: 2,
-                    // Shorter connection timeout for faster failure detection
-                    connectTimeout: 15000,
-                    // Disable command queue buffering when disconnected (critical for remote)
-                    enableOfflineQueue: false,
-                } : {}),
                 retryStrategy: (times) => {
                     const delay = Math.min(times * 100, 3000); // Exponential backoff, max 3s
                     logger.warn(`[Redis Retry] Attempt ${times}/10, next retry in ${delay}ms. Status: ${RedisClient.instance?.status ?? 'unknown'}`);
                     // Limit retries to prevent infinite reconnection attempts (memory leak prevention)
                     if (times > 10) {
-                        logger.error(`[Redis Retry] Connection failed after ${times} attempts, giving up. Check: 1) Redis server running? 2) Host/port correct? 3) Password correct? 4) Firewall rules?`);
+                        logger.error(`[Redis Retry] Connection failed after ${times} attempts, giving up. Check: 1) Redis server running? 2) REDIS_URI correct? 3) Credentials correct? 4) Firewall rules?`);
                         return null; // Stop retrying
                     }
                     return delay;
                 },
             };
             try {
-                logger.debug(`Creating new Redis instance with config:`, {
-                    host: config.host,
-                    port: config.port,
-                    db: config.db,
-                    lazyConnect: config.lazyConnect,
-                    connectTimeout: config.connectTimeout,
-                    enableOfflineQueue: config.enableOfflineQueue
-                });
-                // REDIS_URI (e.g. rediss://user:pass@host:port for a managed TLS Redis/Valkey) wins over
-                // REDIS_HOST/PORT/PASSWORD; ioredis enables TLS for rediss://. Same option set either way.
-                const uri = process.env.REDIS_URI?.trim();
-                if (uri) {
-                    const { host: _h, port: _p, password: _pw, db: _db, ...opts } = config;
-                    const target = (() => { try {
-                        const u = new URL(uri);
-                        return `${u.protocol}//${u.hostname}:${u.port}`;
-                    }
-                    catch {
-                        return 'REDIS_URI';
-                    } })();
-                    logger.log(`[Redis Init] Using REDIS_URI ${target}`);
-                    config.host = target;
-                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(uri, opts);
-                }
-                else {
-                    RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(config);
-                }
+                logger.log(`[Redis Init] Using REDIS_URI ${target}`);
+                // ioredis enables TLS for rediss://
+                RedisClient.instance = new (ioredis__WEBPACK_IMPORTED_MODULE_0___default())(uri, config);
                 // Store event handler references for cleanup
                 const connectHandler = () => {
-                    logger.log(`✅ Connected to ${config.host}:${config.port}, DB: ${config.db}`);
+                    logger.log(`✅ Connected to ${target}`);
                 };
                 const readyHandler = () => {
                     logger.log("✅ Client ready");
@@ -20020,11 +19993,7 @@ class RedisClient {
                         err.code === 'NOAUTH';
                     if (isAuthError) {
                         logger.error(`❌ Redis AUTH FAILURE: ${err.message}`);
-                        logger.error(`[Redis Auth Debug] Server requires authentication. Check REDIS_PASSWORD env var.`);
-                        logger.error(`[Redis Auth Debug] REDIS_PASSWORD is ${process.env.REDIS_PASSWORD !== undefined ? 'set' : 'NOT set'}, password passed to config: ${!!config.password}`);
-                        if (config.password) {
-                            logger.error(`[Redis Auth Debug] Password length: ${config.password.length}, first char: '${config.password[0]}', last char: '${config.password[config.password.length - 1]}'`);
-                        }
+                        logger.error(`[Redis Auth Debug] Server requires authentication. Check the credentials in REDIS_URI.`);
                     }
                     else {
                         logger.error(`❌ Connection error: ${err.message}${err.code ? ` (code: ${err.code})` : ''}`);
@@ -20231,7 +20200,7 @@ class RedisClient {
             const isAuthError = errorMsg.includes('NOAUTH') || errorMsg.includes('AUTH') || errorMsg.includes('WRONGPASS');
             if (isAuthError) {
                 logger.error(`[Redis Health] AUTH FAILED: ${errorMsg}`);
-                logger.error(`[Redis Health] Ensure REDIS_PASSWORD env var is set correctly. Current status: ${RedisClient.instance?.status ?? 'no instance'}`);
+                logger.error(`[Redis Health] Ensure the credentials in REDIS_URI are correct. Current status: ${RedisClient.instance?.status ?? 'no instance'}`);
             }
             else {
                 logger.error(`[Redis Health] Failed - ${errorMsg} (status: ${RedisClient.instance?.status ?? 'no instance'})`);
@@ -20480,7 +20449,7 @@ class RedisClient {
         const client = await RedisClient.getReadyClient();
         try {
             const info = await client.info("keyspace");
-            const db = Number(process.env.REDIS_DB) || 0;
+            const db = redisDbFromUri(resolveRedisUri());
             const dbKey = `db${db}`;
             const match = info.match(new RegExp(`${dbKey}:keys=(\\d+)`));
             return {
@@ -42700,6 +42669,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _utils_redis_uri__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/redis-uri */ "./src/utils/redis-uri.ts");
 // const { execSync } = require('child_process');
 // try {
 //     execSync(`npm install`, { stdio: 'inherit' });
@@ -42707,6 +42677,7 @@ __webpack_require__.r(__webpack_exports__);
 //     console.error(`Error installing  modules:`, error);
 //     execSync(`refresh`, { stdio: 'inherit' });
 // }
+
 
 
 
@@ -42760,8 +42731,8 @@ async function getDataAndSetEnvVariables(url) {
             }
             logger.debug(`⚙️ CONFIG payload | ${process.env.clientId || 'unknown-client'} | keys ${keyCount}`);
             for (const key in jsonData) {
-                if (key == "REDIS_HOST") {
-                    logger.log(`⚙️ CONFIG redis | ${key} | ${jsonData[key]}`);
+                if (key == "REDIS_URI") {
+                    logger.log(`⚙️ CONFIG redis | REDIS_URI | ${(0,_utils_redis_uri__WEBPACK_IMPORTED_MODULE_3__.describeRedisUri)(String(jsonData[key]))}`);
                 }
                 process.env[key] = jsonData[key];
             }
@@ -44099,10 +44070,6 @@ class UserDataDtoCrud {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
             const redisUrl = process.env.REDIS_URI?.trim() || undefined;
-            const redisHost = process.env.REDIS_HOST?.trim() || process.env.redisHost?.trim() || undefined;
-            const redisPassword = process.env.REDIS_PASSWORD?.trim() || undefined;
-            const redisDb = Number(process.env.REDIS_DB || process.env.redisDb) || 0;
-            const redisPort = Number(process.env.REDIS_PORT || process.env.redisPort) || 6379;
             let redis;
             const redisOptions = {
                 connectTimeout: 5000,
@@ -44115,18 +44082,10 @@ class UserDataDtoCrud {
             // if Redis is not configured or unreachable, fail hard so the misconfiguration
             // surfaces (the outer catch reports via parseError) instead of silently
             // running a degraded promotion engine.
-            if (!redisUrl && !redisHost) {
-                throw new Error('Promotion Redis is mandatory but not configured (set REDIS_URI or REDIS_HOST)');
+            if (!redisUrl) {
+                throw new Error('Promotion Redis is mandatory but not configured (set REDIS_URI)');
             }
-            redis = redisUrl
-                ? new Redis(redisUrl, redisOptions)
-                : new Redis({
-                    ...redisOptions,
-                    host: redisHost,
-                    port: redisPort,
-                    db: redisDb,
-                    ...(redisPassword ? { password: redisPassword } : {}),
-                });
+            redis = new Redis(redisUrl, redisOptions);
             this.promotionRedis = redis;
             redis.on?.('error', (error) => {
                 const message = error instanceof Error ? error.message : String(error);
@@ -44135,7 +44094,7 @@ class UserDataDtoCrud {
             try {
                 await redis.connect?.();
                 await redis.ping?.();
-                logger.log(`Redis connected for promotion runtime locks/attribution (${redisUrl ? 'url' : `${redisHost}:${redisPort}/${redisDb}`})`);
+                logger.log(`Redis connected for promotion runtime locks/attribution (REDIS_URI)`);
             }
             catch (error) {
                 await this.closePromotionRedis();
@@ -46623,10 +46582,8 @@ class JobManager {
             // Warn if memory usage is high
             if (memUsage.heapUsed > 400 * 1024 * 1024) { // 400MB
                 logger.warn(`[Memory Cleanup] ⚠️ High memory usage detected: ${heapUsedMB}MB`);
-                // Additional warning for remote Redis
-                if (process.env.REDIS_MODE === "remote") {
-                    logger.warn(`[Memory Cleanup] ⚠️ Using remote Redis - network buffering may increase memory usage`);
-                }
+                // Redis is always remote (managed REDIS_URI)
+                logger.warn(`[Memory Cleanup] ⚠️ Using remote Redis - network buffering may increase memory usage`);
             }
         }
         catch (error) {
@@ -82619,9 +82576,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_memory_diagnostics__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../utils/memory-diagnostics */ "./src/utils/memory-diagnostics.ts");
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _utils_redis_uri__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../utils/redis-uri */ "./src/utils/redis-uri.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+
 
 
 
@@ -82782,7 +82741,7 @@ function buildRouteMessages() {
     return Object.fromEntries(Object.entries(rawMessages).filter(([, value]) => value !== undefined));
 }
 function requiredHealthCheck(snapshot, component) {
-    const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.findHealthCheck)(snapshot, component);
+    const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.findHealthCheck)(snapshot, component);
     if (!check) {
         throw new Error(`${component} health check is missing from service health snapshot`);
     }
@@ -82790,15 +82749,15 @@ function requiredHealthCheck(snapshot, component) {
 }
 function sendTelegramReconnectFailure(res, options) {
     const cause = new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: options.requestId,
         component: "telegram.connection",
         owner: "telegram",
         summary: "Manual Telegram reconnect failed",
         error: cause,
-        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthFailureAction)(cause, "recover"),
+        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthFailureAction)(cause, "recover"),
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation: "telegram-reconnect",
         readOnly: false,
         error: options.error,
@@ -82813,15 +82772,15 @@ function sendTelegramReconnectFailure(res, options) {
 }
 function sendMongoConnectFailure(res, options) {
     const cause = new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: options.requestId,
         component: "database.mongo",
         owner: "database",
         summary: "Manual Mongo connect failed",
         error: cause,
-        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthFailureAction)(cause, "recover"),
+        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthFailureAction)(cause, "recover"),
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation: "mongo-connect",
         readOnly: false,
         error: options.error,
@@ -82837,8 +82796,8 @@ function sendMongoConnectFailure(res, options) {
     });
 }
 async function sendDatabaseSystemUnavailable(req, res, operation, error, message) {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error,
@@ -82848,7 +82807,7 @@ async function sendDatabaseSystemUnavailable(req, res, operation, error, message
     });
 }
 function sendDatabaseSystemFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -82856,18 +82815,18 @@ function sendDatabaseSystemFailure(req, res, operation, error, errorText, summar
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
 }
 async function sendTelegramConnectionUnavailable(req, res, operation, error, readOnly) {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error,
@@ -82876,7 +82835,7 @@ async function sendTelegramConnectionUnavailable(req, res, operation, error, rea
     });
 }
 function sendTelegramOperationFailure(req, res, operation, error, errorText, summary, readOnly) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "telegram.connection",
         owner: "telegram",
@@ -82884,17 +82843,17 @@ function sendTelegramOperationFailure(req, res, operation, error, errorText, sum
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
 }
 function sendStorageOperationFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "cloudinary",
         owner: "storage",
@@ -82902,18 +82861,18 @@ function sendStorageOperationFailure(req, res, operation, error, errorText, summ
         error,
         action: "recover",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
 }
 function sendReactionOperationFailure(req, res, options) {
     const cause = options.cause ?? new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "reaction.service",
         owner: "reaction",
@@ -82922,11 +82881,11 @@ function sendReactionOperationFailure(req, res, options) {
         action: options.action,
         metadata: options.metadata,
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation: options.operation,
         readOnly: options.readOnly,
         error: options.error,
-        message: options.message ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(cause),
+        message: options.message ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(cause),
         evidence,
         extra: options.extra,
         requestId: req.requestId,
@@ -82936,7 +82895,7 @@ function sendSystemOperationFailure(req, res, options) {
     if (res.headersSent) {
         return;
     }
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: options.component,
         owner: options.owner,
@@ -82944,11 +82903,11 @@ function sendSystemOperationFailure(req, res, options) {
         error: options.cause,
         action: options.action,
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation: options.operation,
         readOnly: options.readOnly,
         error: options.errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(options.cause),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(options.cause),
         evidence,
         requestId: req.requestId,
     });
@@ -83271,8 +83230,8 @@ router.get("/reconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE
     let beforeHealth;
     let beforeCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(beforeHealth);
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(beforeHealth);
         beforeCheck = requiredHealthCheck(beforeHealth, "telegram.connection");
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
             sendTelegramReconnectFailure(res, {
@@ -83297,10 +83256,10 @@ router.get("/reconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE
             const connection = client._sender?._connection;
             await client._sender?.disconnect();
             const result = await client._sender?.connect(connection, true);
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
             const afterCheck = requiredHealthCheck(afterHealth, "telegram.connection");
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(afterCheck);
+            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth);
+            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(afterCheck);
             const success = statusCode === 200;
             const message = success
                 ? `Reconnected successfully | Result: ${result}`
@@ -83339,7 +83298,7 @@ router.get("/reconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE
         sendTelegramReconnectFailure(res, {
             requestId: req.requestId,
             error: "Failed to reconnect",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
             beforeHealth,
             beforeCheck,
         });
@@ -83465,10 +83424,10 @@ router.get("/getpid", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21
  */
 router.get("/refreshenv", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        logger.log(`[refreshenv] Before refresh - REDIS_HOST: ${process.env.REDIS_HOST ?? 'NOT SET'}, REDIS_PORT: ${process.env.REDIS_PORT ?? 'NOT SET'}, REDIS_MODE: ${process.env.REDIS_MODE ?? 'NOT SET'}, REDIS_PASSWORD: ${process.env.REDIS_PASSWORD ? `set (length: ${process.env.REDIS_PASSWORD.length})` : 'NOT SET'}`);
+        logger.log(`[refreshenv] Before refresh - REDIS_URI: ${(0,_utils_redis_uri__WEBPACK_IMPORTED_MODULE_26__.describeRedisUri)()}`);
         await (0,_core_Config__WEBPACK_IMPORTED_MODULE_5__.getDataAndSetEnvVariables)((0,_core_Config__WEBPACK_IMPORTED_MODULE_5__.buildClientConfigUrl)());
         await (0,_core_Config__WEBPACK_IMPORTED_MODULE_5__.getDataAndSetEnvVariables)((0,_core_Config__WEBPACK_IMPORTED_MODULE_5__.buildSharedConfigUrl)());
-        logger.log(`[refreshenv] After refresh - REDIS_HOST: ${process.env.REDIS_HOST ?? 'NOT SET'}, REDIS_PORT: ${process.env.REDIS_PORT ?? 'NOT SET'}, REDIS_MODE: ${process.env.REDIS_MODE ?? 'NOT SET'}, REDIS_PASSWORD: ${process.env.REDIS_PASSWORD ? `set (length: ${process.env.REDIS_PASSWORD.length})` : 'NOT SET'}`);
+        logger.log(`[refreshenv] After refresh - REDIS_URI: ${(0,_utils_redis_uri__WEBPACK_IMPORTED_MODULE_26__.describeRedisUri)()}`);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /refreshenv endpoint");
@@ -83610,16 +83569,16 @@ router.get("/connecttomongo", _middlewares_leader_middleware__WEBPACK_IMPORTED_M
     let afterHealth;
     let afterCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         beforeCheck = requiredHealthCheck(beforeHealth, "database.mongo");
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(beforeHealth);
         const userDataDtoCrud = _core_dbservice__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance();
         const wasConnected = userDataDtoCrud.isConnected;
         const result = wasConnected ? true : await userDataDtoCrud.connect();
-        afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         afterCheck = requiredHealthCheck(afterHealth, "database.mongo");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
-        const healthStatusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(afterCheck);
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth);
+        const healthStatusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(afterCheck);
         const success = Boolean(result) && healthStatusCode === 200;
         if (res.headersSent) {
             return;
@@ -83649,7 +83608,7 @@ router.get("/connecttomongo", _middlewares_leader_middleware__WEBPACK_IMPORTED_M
         sendMongoConnectFailure(res, {
             requestId: req.requestId,
             error: "Failed to connect to MongoDB",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
             beforeHealth,
             beforeCheck,
             afterHealth,
@@ -83675,10 +83634,10 @@ router.get("/disconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
     let beforeHealth;
     let beforeCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         beforeCheck = requiredHealthCheck(beforeHealth, "telegram.connection");
         await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.deleteInstance();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         const afterCheck = requiredHealthCheck(afterHealth, "telegram.connection");
         res.status(200).json({
             operation: "telegram-disconnect",
@@ -83689,14 +83648,14 @@ router.get("/disconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
             afterHealth,
             beforeCheck,
             afterCheck,
-            beforeRecoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(beforeHealth),
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth),
+            beforeRecoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(beforeHealth),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth),
             requestId: req.requestId,
         });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /disconnect endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
@@ -83709,7 +83668,7 @@ router.get("/disconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
             readOnly: false,
             success: false,
             error: "Failed to disconnect",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
             ...(beforeHealth ? { beforeHealth } : {}),
             ...(beforeCheck ? { beforeCheck } : {}),
             health: evidence.health,
@@ -84120,10 +84079,10 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             let check;
             let evidence;
             if (activeHealth.connected) {
-                const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-                check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.findHealthCheck)(snapshot, "redis.connection");
+                const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+                check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.findHealthCheck)(snapshot, "redis.connection");
                 if (!check) {
-                    evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+                    evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
                         requestId: req.requestId,
                         component: "redis.connection",
                         owner: "redis",
@@ -84136,7 +84095,7 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                 }
             }
             else {
-                evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+                evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
                     requestId: req.requestId,
                     component: "redis.connection",
                     owner: "redis",
@@ -84147,7 +84106,7 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                 });
                 check = evidence.check;
             }
-            res.status(check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(check) : 503).json({
+            res.status(check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(check) : 503).json({
                 operation: "active-redis-health-check",
                 readOnly: false,
                 ...passiveHealth,
@@ -84163,10 +84122,10 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             });
             return;
         }
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.findHealthCheck)(snapshot, "redis.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.findHealthCheck)(snapshot, "redis.connection");
         if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "redis.connection",
                 owner: "redis",
@@ -84189,21 +84148,21 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         }
         const metadata = check.metadata ?? {};
         const connected = typeof metadata.connected === "boolean" ? metadata.connected : check.status === "healthy";
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(check)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(check)).json({
             operation: "redis-health",
             readOnly: true,
             connected,
             health: snapshot,
             healthStatus: check.status,
             check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(snapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(snapshot),
             requestId: req.requestId,
         });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error checking Redis health");
         if (!active) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "redis.connection",
                 owner: "redis",
@@ -84224,13 +84183,13 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             });
             return;
         }
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "redis.connection",
             owner: "redis",
             summary: "Active Redis health check failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -84263,15 +84222,15 @@ router.get("/redis/health", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
 router.post("/redis/reconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
     try {
         logger.log("API: Force reconnecting to Redis...");
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(beforeHealth);
         const beforeCheck = requiredHealthCheck(beforeHealth, "redis.connection");
         const result = await _state_UserState__WEBPACK_IMPORTED_MODULE_25__.stateManager.forceReconnectRedis();
         const syncStatus = _state_UserState__WEBPACK_IMPORTED_MODULE_25__.stateManager.getSyncStatus();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         const afterCheck = requiredHealthCheck(afterHealth, "redis.connection");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(afterCheck);
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(afterCheck);
         const success = Boolean(result.success) && statusCode === 200;
         if (success) {
             logger.log(`✅ Redis reconnected. Synced ${result.dirtyUsers} users.`);
@@ -84316,20 +84275,20 @@ router.post("/redis/reconnect", _middlewares_leader_middleware__WEBPACK_IMPORTED
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error reconnecting to Redis");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "redis.connection",
             owner: "redis",
             summary: "Manual Redis reconnect failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthFailureAction)(error, "recover"),
         });
         res.status(evidence.statusCode).json({
             operation: "redis-reconnect",
             readOnly: false,
             success: false,
             error: "Failed to reconnect to Redis",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -84467,8 +84426,8 @@ router.post("/reactions/clear-restricted", _middlewares_leader_middleware__WEBPA
  */
 router.post("/reactions/restart", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(beforeHealth);
         const beforeCheck = requiredHealthCheck(beforeHealth, "reaction.service");
         const telegramManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
         let reactor = telegramManager.reactorInstance;
@@ -84477,10 +84436,10 @@ router.post("/reactions/restart", _middlewares_leader_middleware__WEBPACK_IMPORT
             const recreated = telegramManager.ensureReactionService();
             reactor = telegramManager.reactorInstance;
             if (!recreated || !reactor) {
-                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
-                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.findHealthCheck)(afterHealth, "reaction.service") ?? beforeCheck;
-                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
-                res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(afterCheck)).json({
+                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
+                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.findHealthCheck)(afterHealth, "reaction.service") ?? beforeCheck;
+                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth);
+                res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(afterCheck)).json({
                     operation: "reaction-restart",
                     readOnly: false,
                     success: false,
@@ -84498,10 +84457,10 @@ router.post("/reactions/restart", _middlewares_leader_middleware__WEBPACK_IMPORT
             }
         }
         await reactor.restart();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_26__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_27__.buildTgAutHealthSnapshot)(req.requestId);
         const afterCheck = requiredHealthCheck(afterHealth, "reaction.service");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_27__.healthCheckHttpStatus)(afterCheck);
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_28__.healthCheckHttpStatus)(afterCheck);
         const success = statusCode === 200;
         if (success) {
             logger.log("✅ Reaction service restarted");
@@ -84527,20 +84486,20 @@ router.post("/reactions/restart", _middlewares_leader_middleware__WEBPACK_IMPORT
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error restarting reaction service");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "reaction.service",
             owner: "reaction",
             summary: "Manual reaction service restart failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthFailureAction)(error, "recover"),
         });
         res.status(evidence.statusCode).json({
             operation: "reaction-restart",
             readOnly: false,
             success: false,
             error: "Failed to restart reaction service",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_28__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -91565,10 +91524,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
+/* harmony import */ var _redis_uri__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./redis-uri */ "./src/utils/redis-uri.ts");
 /**
  * Memory Diagnostics Utility
  * Helps identify memory consumption differences across VPS instances
  */
+
 
 
 
@@ -91582,9 +91543,7 @@ async function collectMemoryDiagnostics() {
         environment: {
             clientId: process.env.clientId || "default",
             mobile: process.env.mobile || "default",
-            redisMode: process.env.REDIS_MODE || "local",
-            redisHost: process.env.REDIS_HOST || "127.0.0.1",
-            redisDb: process.env.REDIS_DB || "0",
+            redisUri: (0,_redis_uri__WEBPACK_IMPORTED_MODULE_4__.describeRedisUri)(),
             nodeEnv: "development" || 0,
         },
         redis: {
@@ -91654,7 +91613,7 @@ async function collectMemoryDiagnostics() {
                 `Consider reviewing TTL settings and cleaning up expired keys.`);
         }
         // Check for environment variable differences
-        if (diagnostics.environment.redisMode === "remote") {
+        if (process.env.REDIS_URI?.trim()) {
             diagnostics.recommendations.push("Using remote Redis. Network latency and connection pooling may affect memory usage.");
         }
         if (diagnostics.environment.nodeEnv === "development") {
@@ -91676,9 +91635,7 @@ async function logMemoryDiagnostics() {
     logger.log("Environment Variables:");
     logger.log(`  clientId: ${diagnostics.environment.clientId}`);
     logger.log(`  mobile: ${diagnostics.environment.mobile}`);
-    logger.log(`  REDIS_MODE: ${diagnostics.environment.redisMode}`);
-    logger.log(`  REDIS_HOST: ${diagnostics.environment.redisHost}`);
-    logger.log(`  REDIS_DB: ${diagnostics.environment.redisDb}`);
+    logger.log(`  REDIS_URI: ${diagnostics.environment.redisUri}`);
     logger.log(`  NODE_ENV: ${diagnostics.environment.nodeEnv}`);
     logger.log("\nRedis Memory:");
     if (diagnostics.redis.memoryInfo) {
@@ -91735,12 +91692,9 @@ function compareDiagnostics(diag1, diag2) {
         differences.push(`Different mobile: "${diag1.environment.mobile}" vs "${diag2.environment.mobile}"`);
         warnings.push("Different mobile numbers load different ReplierState, causing different memory usage!");
     }
-    if (diag1.environment.redisDb !== diag2.environment.redisDb) {
-        differences.push(`Different Redis DB: "${diag1.environment.redisDb}" vs "${diag2.environment.redisDb}"`);
-        warnings.push("Different Redis databases contain different data!");
-    }
-    if (diag1.environment.redisMode !== diag2.environment.redisMode) {
-        differences.push(`Different Redis mode: "${diag1.environment.redisMode}" vs "${diag2.environment.redisMode}"`);
+    if (diag1.environment.redisUri !== diag2.environment.redisUri) {
+        differences.push(`Different Redis: "${diag1.environment.redisUri}" vs "${diag2.environment.redisUri}"`);
+        warnings.push("Different Redis instances contain different data!");
     }
     // Compare key sizes
     const userStateDiff = Math.abs((diag1.redis.keySizes.userState || 0) - (diag2.redis.keySizes.userState || 0));
@@ -91763,6 +91717,34 @@ function compareDiagnostics(diag1, diag2) {
         warnings.push(`One instance is managing ${stateCountDiff} more user states, causing higher memory usage`);
     }
     return { differences, warnings };
+}
+
+
+/***/ },
+
+/***/ "./src/utils/redis-uri.ts"
+/*!********************************!*\
+  !*** ./src/utils/redis-uri.ts ***!
+  \********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   describeRedisUri: () => (/* binding */ describeRedisUri)
+/* harmony export */ });
+/** Describes REDIS_URI for logs/diagnostics: set/not-set plus protocol//hostname:port. Never includes credentials. */
+function describeRedisUri(raw = process.env.REDIS_URI) {
+    const uri = raw?.trim();
+    if (!uri)
+        return "not set";
+    try {
+        const u = new URL(uri);
+        return `set (${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""})`;
+    }
+    catch {
+        return "set (unparseable)";
+    }
 }
 
 
