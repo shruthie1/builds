@@ -18980,6 +18980,7 @@ const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bot_schema_1 = __webpack_require__(/*! ./schemas/bot.schema */ "./src/components/bots/schemas/bot.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src/components/users/users.service.ts");
+const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 let BotsService = BotsService_1 = class BotsService {
     constructor(botModel, moduleRef) {
@@ -18993,6 +18994,8 @@ let BotsService = BotsService_1 = class BotsService {
         this.maxPendingAdminRepairAttempts = 3;
         this.healthCheckJob = null;
         this.reachSweepJob = null;
+        this.adminActionReadiness = new Map();
+        this.mainManagerMobile = null;
         this.flushTimer = null;
         this.destroyed = false;
         this.replaceInProgress = false;
@@ -20413,14 +20416,7 @@ let BotsService = BotsService_1 = class BotsService {
     async ensureManagerCoverage(dryRun) {
         const failures = [];
         const proposedActions = [];
-        const primaryMobile = (process.env.channelManagerPrimary || '').trim();
-        if (!primaryMobile)
-            return { failures: ['channelManagerPrimary is not set: no main manager, repairs fall back to other accounts / @myvcacc'], proposedActions, stopPrivilegedWork: false };
-        const tail = primaryMobile.slice(-4);
-        const [primary] = await this.findHealthyAccountsByIdentity([primaryMobile], []);
-        if (!primary?.tgId) {
-            return { failures: [`channelManagerPrimary …${tail} is not usable (expired, no session, in a pool, or no tgId): set a healthy account`], proposedActions, stopPrivilegedWork: false };
-        }
+        const critical = (process.env.channelManagerBackup || '').trim();
         const bots = await this.botModel.find().lean().exec();
         const channels = new Map();
         for (const b of bots) {
@@ -20430,21 +20426,62 @@ let BotsService = BotsService_1 = class BotsService {
             entry.bots.push(b);
             channels.set(b.channelId, entry);
         }
+        const facts = new Map();
+        for (const channelId of channels.keys()) {
+            const f = await this.readChannelViaBots(channelId);
+            if (f)
+                facts.set(channelId, f);
+        }
+        const configured = (process.env.channelManagerPrimary || '').trim();
+        let primary;
+        let how = 'configured';
+        if (configured) {
+            const [p] = await this.findHealthyAccountsByIdentity([configured], []);
+            const ready = p?.tgId ? await this.accountReadyForAdminActions(p.mobile) : { usable: false, reason: 'expired, no session, in a pool, or no tgId' };
+            if (p?.tgId && ready.usable)
+                primary = p;
+            else
+                failures.push(`channelManagerPrimary …${configured.slice(-4)} is not usable (${ready.reason}); picking another main manager`);
+        }
+        if (!primary) {
+            const reach = new Map();
+            for (const f of facts.values())
+                for (const a of f.admins)
+                    if (a.rank === 'creator' || a.permissions.addAdmins)
+                        reach.set(a.userId, (reach.get(a.userId) || 0) + 1);
+            const ours = reach.size ? await this.findHealthyAccountsByIdentity([], [...reach.keys()]) : [];
+            const ranked = ours.filter(u => u.tgId && u.mobile !== critical).sort((x, y) => (reach.get(String(y.tgId)) || 0) - (reach.get(String(x.tgId)) || 0));
+            for (const u of ranked) {
+                if ((await this.accountReadyForAdminActions(u.mobile)).usable) {
+                    primary = u;
+                    how = 'auto';
+                    break;
+                }
+            }
+        }
+        if (!primary?.tgId) {
+            this.mainManagerMobile = null;
+            failures.push('no usable main manager: every candidate account is limited, busy or unhealthy; repairs fall back to @myvcacc');
+            return { failures, proposedActions, stopPrivilegedWork: false };
+        }
+        this.mainManagerMobile = primary.mobile;
+        const primaryMobile = primary.mobile;
+        const tail = primaryMobile.slice(-4);
         let covered = 0;
         let readable = 0;
         const missing = [];
         for (const [channelId, { category, bots: channelBots }] of channels) {
-            const facts = await this.readChannelViaBots(channelId);
-            if (!facts)
+            const f = facts.get(channelId);
+            if (!f)
                 continue;
             readable++;
-            const me = facts.admins.find(a => a.userId === String(primary.tgId));
+            const me = f.admins.find(a => a.userId === String(primary.tgId));
             if (me && (me.rank === 'creator' || me.permissions.addAdmins))
                 covered++;
             else
                 missing.push({ channelId, category, bots: channelBots, isMember: Boolean(me) });
         }
-        const coverage = `Main manager …${tail} can add bots in ${covered}/${readable} chats${missing.length ? ` (next: ${missing[0].category})` : ''}`;
+        const coverage = `Main manager …${tail} (${how}) can add bots in ${covered}/${readable} chats${missing.length ? ` (next: ${missing[0].category})` : ''}`;
         if (missing.length === 0)
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         const target = missing[0];
@@ -20458,22 +20495,27 @@ let BotsService = BotsService_1 = class BotsService {
         const inviter = caps.find(c => c.rights.can_invite_users);
         if (!promoter) {
             const bot = caps[0]?.bot;
-            if (!bot)
-                return { failures: [`${target.category}: no active bot is admin there; cannot add the main manager`], proposedActions, stopPrivilegedWork: false, coverage };
+            if (!bot) {
+                failures.push(`${target.category}: no active bot is admin there; cannot add the main manager`);
+                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
+            }
             proposedActions.push(`grant add-admins to @${bot.username} in ${target.category} via an admin account (step 1 of adding main manager …${tail})`);
             if (dryRun)
                 return { failures, proposedActions, stopPrivilegedWork: false, coverage };
             const adminMobile = await this.resolveChannelAdminMobile(target.channelId);
             if (!adminMobile || adminMobile === primaryMobile) {
-                return { failures: [`${target.category}: no admin account of ours can give a bot add-admins`], proposedActions, stopPrivilegedWork: false, coverage };
+                failures.push(`${target.category}: no admin account of ours can give a bot add-admins`);
+                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
             }
             const desired = {
                 changeInfo: true, postMessages: true, editMessages: true, deleteMessages: true,
                 banUsers: true, inviteUsers: true, pinMessages: true, addAdmins: true, anonymous: false, manageCall: true,
             };
             const granted = await this.intersectWithPromoterRights(adminMobile, target.channelId, desired);
-            if (!granted.addAdmins)
-                return { failures: [`${target.category}: promoter …${adminMobile.slice(-4)} lacks add-admins`], proposedActions, stopPrivilegedWork: false, coverage };
+            if (!granted.addAdmins) {
+                failures.push(`${target.category}: promoter …${adminMobile.slice(-4)} lacks add-admins`);
+                return { failures, proposedActions, stopPrivilegedWork: false, coverage };
+            }
             try {
                 await this.humanDelay();
                 const botId = String(bot.token).split(':')[0];
@@ -20488,7 +20530,8 @@ let BotsService = BotsService_1 = class BotsService {
             return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         }
         if (!target.isMember && !inviter) {
-            return { failures: [`${target.category}: no bot can create an invite link for the main manager`], proposedActions, stopPrivilegedWork: false, coverage };
+            failures.push(`${target.category}: no bot can create an invite link for the main manager`);
+            return { failures, proposedActions, stopPrivilegedWork: false, coverage };
         }
         proposedActions.push(`add main manager …${tail} as admin in ${target.category} (${target.isMember ? 'already a member' : 'join by one-use invite link'}, promoted by @${promoter.bot.username})`);
         if (dryRun)
@@ -20556,6 +20599,39 @@ let BotsService = BotsService_1 = class BotsService {
             }
         }
         return out;
+    }
+    async accountReadyForAdminActions(mobile) {
+        const now = Date.now();
+        const cached = this.adminActionReadiness.get(mobile);
+        if (cached && now < cached.until)
+            return cached;
+        let r;
+        try {
+            r = await (0, spambot_probe_1.probeSpamBot)(mobile, { totalTimeoutMs: spambot_probe_1.SPAMBOT_TOTAL_TIMEOUT_MS });
+        }
+        catch (error) {
+            r = { status: 'unknown', limitedUntil: null, error: error?.message || String(error) };
+        }
+        const day = 24 * 60 * 60 * 1000;
+        let verdict;
+        if (r.status === 'free')
+            verdict = { usable: true, reason: 'free', until: now + day };
+        else if (r.status === 'limited') {
+            const limitEnd = r.limitedUntil ? r.limitedUntil.getTime() : now + day;
+            verdict = { usable: false, reason: `spam-limited until ${r.limitedUntil ? r.limitedUntil.toISOString().slice(0, 10) : 'unknown'}`, until: Math.min(Math.max(limitEnd, now + 60 * 60 * 1000), now + 7 * day) };
+        }
+        else if (r.status === 'harsh')
+            verdict = { usable: false, reason: 'harsh spam limit', until: now + 7 * day };
+        else if (r.busy)
+            verdict = { usable: false, reason: 'busy in another flow', until: now + 10 * 60 * 1000 };
+        else if (r.sendFailed || r.connectFailed)
+            verdict = { usable: false, reason: `SpamBot check failed: ${(r.error || 'unknown').slice(0, 80)}`, until: now + 6 * 60 * 60 * 1000 };
+        else
+            verdict = { usable: true, reason: 'SpamBot inconclusive', until: now + 6 * 60 * 60 * 1000 };
+        this.adminActionReadiness.set(mobile, verdict);
+        if (!verdict.usable)
+            console.warn(`[BotHealth] …${mobile.slice(-4)} not used for admin actions: ${verdict.reason}`);
+        return verdict;
     }
     async readChannelViaBots(channelId) {
         const bots = await this.botModel.find({ channelId, token: { $exists: true } }).lean().exec();
@@ -20654,10 +20730,18 @@ let BotsService = BotsService_1 = class BotsService {
         if (scored.length === 0)
             return null;
         const critical = (process.env.channelManagerBackup || '').trim();
-        const main = (process.env.channelManagerPrimary || '').trim();
+        const main = this.mainManagerMobile || (process.env.channelManagerPrimary || '').trim();
         const rank = (c) => c.score - (critical && c.mobile === critical ? 10 : 0) + (main && c.mobile === main ? 10 : 0);
         scored.sort((x, y) => rank(y) - rank(x));
-        return scored[0].mobile;
+        const seen = new Set();
+        for (const candidate of scored) {
+            if (seen.has(candidate.mobile))
+                continue;
+            seen.add(candidate.mobile);
+            if ((await this.accountReadyForAdminActions(candidate.mobile)).usable)
+                return candidate.mobile;
+        }
+        return null;
     }
     async intersectWithPromoterRights(promoterMobile, channelId, desired) {
         try {
