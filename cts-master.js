@@ -53698,7 +53698,21 @@ class RedisClient {
                 },
             };
             try {
-                RedisClient.instance = new ioredis_1.default(config);
+                const uri = process.env.REDIS_URI?.trim();
+                if (uri) {
+                    try {
+                        const u = new URL(uri);
+                        config.host = `${u.protocol}//${u.hostname}`;
+                        config.port = Number(u.port) || config.port;
+                    }
+                    catch {
+                        config.host = 'REDIS_URI';
+                    }
+                    RedisClient.instance = new ioredis_1.default(uri, { retryStrategy: config.retryStrategy });
+                }
+                else {
+                    RedisClient.instance = new ioredis_1.default(config);
+                }
                 RedisClient.instance.on("connect", () => {
                     logger.log(`Connected to Redis at ${config.host}:${config.port}, DB: ${config.db}`);
                 });
