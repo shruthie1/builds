@@ -19730,28 +19730,6 @@ let BotsService = BotsService_1 = class BotsService {
             return 'unknown';
         }
     }
-    async probeCategoryChannels(bots) {
-        const probes = new Map();
-        for (const bot of bots) {
-            if (!bot.channelId || !bot.token)
-                continue;
-            if (this.lifecycleOf(bot) === 'dead_token')
-                continue;
-            const key = `${bot.category}::${bot.channelId}`;
-            if (!probes.has(key))
-                probes.set(key, { category: String(bot.category), channelId: bot.channelId, token: bot.token });
-        }
-        const deadChannels = [];
-        for (const { category, channelId, token } of probes.values()) {
-            const verdict = await this.probeChannelAlive(token, channelId);
-            if (verdict === 'dead') {
-                deadChannels.push(`${category} (channel ${channelId})`);
-                console.error(JSON.stringify({ event: 'dead_channel_detected', category, channelId }));
-            }
-            await this.sleep(1200);
-        }
-        return deadChannels;
-    }
     async validateAndReplaceBots(options = {}) {
         const empty = (failure) => ({
             checked: 0, alive: 0, dead: 0, unknown: 0, replaced: 0, toppedUp: 0,
@@ -19766,6 +19744,7 @@ let BotsService = BotsService_1 = class BotsService {
         const proposedActions = [];
         let alive = 0, dead = 0, unknown = 0, replaced = 0;
         const deadBots = [];
+        const channelReach = new Map();
         let creationBudget = this.maxBotCreationsPerRun;
         let stopPrivilegedWork = false;
         try {
@@ -19788,6 +19767,28 @@ let BotsService = BotsService_1 = class BotsService {
                     }
                     else if (!options.dryRun) {
                         await this.botModel.updateOne({ _id: bot._id }, { $set: { lastValidatedAt: new Date() } }).exec();
+                    }
+                    const sendsNow = lifecycle === 'active_verified' || lifecycle === 'dead_token';
+                    if (sendsNow && bot.channelId) {
+                        await this.sleep(1200);
+                        const reach = await this.probeChannelAlive(bot.token, bot.channelId);
+                        const key = `${bot.category}::${bot.channelId}`;
+                        const tally = channelReach.get(key) ?? { category: String(bot.category), channelId: bot.channelId, alive: 0, dead: 0 };
+                        if (reach === 'alive')
+                            tally.alive++;
+                        if (reach === 'dead')
+                            tally.dead++;
+                        channelReach.set(key, tally);
+                        if (reach === 'dead') {
+                            proposedActions.push(`demote @${bot.username} to pending_admin (getChat: cannot reach ${bot.channelId})`);
+                            if (!options.dryRun) {
+                                await this.botModel.updateOne({ _id: bot._id }, {
+                                    $set: { lifecycle: 'pending_admin', lifecycleReason: 'getChat: bot cannot reach its channel', lifecycleUpdatedAt: new Date(), status: 'inactive' },
+                                }).exec();
+                                this.evictBotFromSendCache(bot);
+                            }
+                            console.warn(`[BotHealth] cannot reach channel: @${bot.username} (${bot.category} ${bot.channelId})`);
+                        }
                     }
                 }
                 else if (check.verdict === 'dead') {
@@ -19861,7 +19862,13 @@ let BotsService = BotsService_1 = class BotsService {
                     (0, utils_1.parseError)(err, `[BotHealth] ${msg}`, false);
                 }
             }
-            const deadChannels = await this.probeCategoryChannels(bots);
+            const deadChannels = [];
+            for (const { category, channelId, alive, dead } of channelReach.values()) {
+                if (alive > 0 || dead === 0)
+                    continue;
+                deadChannels.push(`${category} (channel ${channelId})`);
+                console.error(JSON.stringify({ event: 'dead_channel_detected', category, channelId }));
+            }
             for (const dc of deadChannels)
                 failures.push(`DEAD CHANNEL: ${dc} — sends silently no-op; repair/rotate the channel`);
             if (!options.dryRun) {
