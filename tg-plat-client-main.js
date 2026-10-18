@@ -17671,6 +17671,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.createPhoneCallState),
 /* harmony export */   currentScopeIdentity: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.currentScopeIdentity),
 /* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.decodePhoneCallData),
+/* harmony export */   describeSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_34__.describeSpamBotReply),
 /* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.destroyPhoneCallState),
 /* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.encodePhoneCallData),
 /* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
@@ -19318,6 +19319,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* binding */ SPAM_BOT_USERNAME),
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
+/* harmony export */   describeSpamBotReply: () => (/* binding */ describeSpamBotReply),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
 /* harmony export */   parseSpamBotReleaseDate: () => (/* binding */ parseSpamBotReleaseDate),
 /* harmony export */   readLatestSpamBotReply: () => (/* binding */ readLatestSpamBotReply),
@@ -19447,6 +19449,23 @@ function parseSpamBotReleaseDate(raw, now = new Date()) {
         return null;
     return result;
 }
+/** Reads a SpamBot reply into a status line for notices; the raw text stays in the notice details. */
+function describeSpamBotReply(text, now = new Date()) {
+    const kind = classifySpamBotMessage(text);
+    if (kind === "healthy")
+        return { label: "No limits", limitedUntil: null, healthy: true };
+    if (kind === "harsh-warning")
+        return { label: "Harsh-limit warning", limitedUntil: null, healthy: false };
+    const raw = extractSpamBotReleaseDate(text);
+    const until = raw ? parseSpamBotReleaseDate(raw, now) : null;
+    if (until)
+        return { label: "Limited", limitedUntil: until.toISOString(), healthy: false };
+    if (kind === "released")
+        return { label: "Limited (end date unreadable)", limitedUntil: null, healthy: false };
+    if (/\b(limited|restricted)\b/i.test(text))
+        return { label: "Limited (no end date)", limitedUntil: null, healthy: false };
+    return { label: "Unrecognised reply", limitedUntil: null, healthy: false };
+}
 /**
  * Claims a concrete SpamBot reply for notification. The manual endpoint and
  * the inbound event handler run in the same process; this prevents them from
@@ -19490,16 +19509,15 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         return { latestReply, replyIsFresh };
     }
     try {
+        const status = describeSpamBotReply(latestReply.text);
         const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            severity: _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
-            title: "Manual SpamBot health check",
-            summary: replyIsFresh
-                ? "SpamBot replied to the manual health probe."
-                : "Manual probe was sent; this is the latest SpamBot reply currently available.",
+            severity: status.healthy ? _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.SUCCESS : _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
+            title: `SpamBot check: ${status.label}`,
             fields: [
                 { label: "Mobile", value: mobile },
-                { label: "Reply time", value: latestReply.receivedAt ?? "unknown" },
-                { label: "Reply fresh", value: replyIsFresh },
+                ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : []),
+                { label: "Replied", value: latestReply.receivedAt ?? "unknown" },
+                ...(replyIsFresh ? [] : [{ label: "Note", value: "No new reply yet; this is the last one", code: false }]),
             ],
             details: latestReply.text,
             tags: ["spambot", "manual-health-check"],
@@ -44153,6 +44171,8 @@ class TelegramManager {
                         { label: "Mobile", value: this.mobile },
                         ...(connectedPhone ? [{ label: "Phone", value: connectedPhone }] : []),
                     ],
+                    // Deploy waves and the randomized 24-30 h maintenance restarts: one table per hour via the UMS digest.
+                    digest: { key: "tg-aut-connected", quietMs: 60 * 60 * 1000, row: { Mobile: String(this.mobile ?? ""), ...(connectedPhone ? { Phone: String(connectedPhone) } : {}) } },
                     tags: ["tg-aut", "telegram-manager", "connected"],
                 }, `${this.mobile}: Failed to send connected notification`);
                 // Register handlers exactly once
@@ -45888,27 +45908,37 @@ function scheduleInhandlerTask(callback, delayMs, context) {
         void callback().catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, context));
     }, delayMs);
 }
-function listValue(value) {
-    if (!Array.isArray(value) || value.length === 0) {
-        return "none";
-    }
-    const capped = value.slice(0, 20).map(item => String(item)).join(", ");
-    return value.length > 20 ? `${capped} …(+${value.length - 20} more)` : capped;
+const SPAM_NAMES_SHOWN = 10;
+function nameList(value) {
+    if (!Array.isArray(value) || value.length === 0)
+        return "-";
+    const shown = value.slice(0, SPAM_NAMES_SHOWN).map(item => String(item)).join(", ");
+    return value.length > SPAM_NAMES_SHOWN ? `${shown} +${value.length - SPAM_NAMES_SHOWN} more` : shown;
 }
 function listLength(value) {
     return Array.isArray(value) ? value.length : 0;
 }
-function notifySpamLimit(context, title, summary, chatId, broadcastName, textedClientCount, severity) {
-    const fullSummary = `${summary} ${broadcastName || "Unknown"} (${chatId}) — recent ${textedClientCount.count ?? 0}, total ${listLength(textedClientCount.list)}, day ${listLength(textedClientCount.lastDay)}, hour ${listLength(textedClientCount.lastHour)}.`;
+/** One notice per spam limit: who, the score that tripped it, and which other profiles they texted when. */
+function notifySpamLimit(context, title, chatId, broadcastName, textedClientCount, severity) {
     void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.USER_WARNINGS, {
         severity,
         title,
-        summary: fullSummary,
-        details: [
-            `All texted clients: ${listValue(textedClientCount.list)}`,
-            `Last day: ${listValue(textedClientCount.lastDay)}`,
-            `Last hour: ${listValue(textedClientCount.lastHour)}`,
+        fields: [
+            { label: "User", value: broadcastName || "Unknown", code: false },
+            { label: "Chat", value: chatId },
+            { label: "Spam score", value: textedClientCount.count ?? 0, code: false },
         ],
+        tables: [{
+                title: "Other profiles texted",
+                columns: ["Window", "Profiles", "Names"],
+                // textedClientCount.lastHour holds the last 30 minutes (dbservice THIRTY_MIN_MS).
+                rows: [
+                    ["Last 30 min", listLength(textedClientCount.lastHour), nameList(textedClientCount.lastHour)],
+                    ["Last 24 h", listLength(textedClientCount.lastDay), nameList(textedClientCount.lastDay)],
+                    ["All time", listLength(textedClientCount.list), nameList(textedClientCount.list)],
+                ],
+                numeric: [1],
+            }],
         tags: ["inhandler", "spam-limit"],
     }).then((sent) => {
         if (sent === false) {
@@ -46079,9 +46109,9 @@ async function eventPrint(event, allMsg) {
                         const textedClientCount = await db.textedClientCount(chatId);
                         if (textedClientCount.count < 5) {
                             if (textedClientCount.lastDay.length > 3 || textedClientCount.lastHour.length > 2) {
-                                notifySpamLimit("softSpam", "Spam burst warning", "Recent text bursts crossed the soft spam threshold.", chatId, broadcastName, textedClientCount, _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.WARNING);
-                                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_16__.markInbound)(event, "ignored", `soft-spam limit (${textedClientCount.lastHour.length} accounts texted in 1h, ${textedClientCount.lastDay.length} in 1d)`);
                                 const maxtime = Math.max(Math.min(textedClientCount.count - 2, Number.MAX_SAFE_INTEGER), 1);
+                                notifySpamLimit("softSpam", `Possible spammer: replies paused ${maxtime} h`, chatId, broadcastName, textedClientCount, _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.WARNING);
+                                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_16__.markInbound)(event, "ignored", `soft-spam limit (${textedClientCount.lastHour.length} accounts texted in 1h, ${textedClientCount.lastDay.length} in 1d)`);
                                 await db.updateSingleKey(chatId, _dbservice__WEBPACK_IMPORTED_MODULE_2__.user.limitTime, currentTime + (maxtime * 60 * 60 * 1000));
                             }
                             else {
@@ -46099,7 +46129,7 @@ async function eventPrint(event, allMsg) {
                         }
                         else {
                             await db.updateSingleKey(chatId, _dbservice__WEBPACK_IMPORTED_MODULE_2__.user.limitTime, (currentTime + (24 * 60 * 60 * 1000)));
-                            notifySpamLimit("hardSpam", "Spammer limit applied", "Recent text bursts crossed the hard spam threshold.", chatId, broadcastName, textedClientCount, _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL);
+                            notifySpamLimit("hardSpam", "Spammer: replies paused 24 h", chatId, broadcastName, textedClientCount, _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.WARNING);
                             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_16__.markInbound)(event, "ignored", `hard-spam limit 24h (texted ${textedClientCount.count} accounts)`);
                         }
                     }
@@ -48277,15 +48307,23 @@ async function callToPaid() {
             }
         }
         logger.log("CallIds:", due.length);
-        await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            title: "Auto calls initiated",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.INFO,
-            summary: "tg-aut started auto-call outreach for recent paid users.",
-            fields: [
-                { label: "Users", value: Math.min(due.length, AUTO_CALL_MAX_PER_RUN) },
-            ],
-            tags: ["tg-aut", "calls", "paid-users"],
-        }, "TgAutCoreUtils.notification.autoCalls");
+        // Every client runs this hourly job: nothing due means nothing to say, and the rest go to the
+        // UMS digest so the channel gets one table per run instead of one message per client.
+        if (due.length > 0) {
+            await sendCoreUtilsNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                title: "Auto calls initiated",
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.INFO,
+                fields: [
+                    { label: "Users", value: Math.min(due.length, AUTO_CALL_MAX_PER_RUN) },
+                ],
+                tags: ["tg-aut", "calls", "paid-users"],
+                digest: {
+                    key: "tg-aut-auto-calls",
+                    sortBy: "Calling",
+                    row: { Calling: Math.min(due.length, AUTO_CALL_MAX_PER_RUN), Due: due.length },
+                },
+            }, "TgAutCoreUtils.notification.autoCalls");
+        }
         for (const user of due.slice(0, AUTO_CALL_MAX_PER_RUN)) {
             logger.log("call Id: ", user.chatId.toString());
             (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_31__.noteMoment)(user.chatId.toString(), 'autoCall');
@@ -48501,6 +48539,11 @@ async function asktoPay(client, time) {
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.INFO,
                 summary: report.summary(),
                 fields: [{ label: "Client", value: process.env.clientId ?? "unknown" }],
+                digest: {
+                    key: "tg-aut-unreachable",
+                    sortBy: "Unreachable",
+                    row: { Unreachable: report.unreachableTotal, Detail: report.summary() },
+                },
                 tags: ["asktopay", "unreachable"],
             }, "asktoPay.summary");
         }
@@ -51397,7 +51440,14 @@ function scheduleSystemMessageTask(callback, delayMs, context) {
         });
     }, delayMs);
 }
-async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO, tags = ["system-message"]) {
+/**
+ * Healthy SpamBot replies are routine: one fleet table via the UMS digest. Limits stay individual.
+ * Probes are staggered per account, so the digest waits up to an hour instead of 4 min.
+ */
+function healthyDigest(mobile) {
+    return { key: "tg-aut-spambot-healthy", quietMs: 60 * 60 * 1000, row: { Mobile: String(mobile ?? "unknown") } };
+}
+async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO, tags = ["system-message"], details, digest) {
     try {
         // clientId is added by the sender's prefix; don't repeat Client/Username on every message.
         // Only the caller-supplied fields (the ones actually relevant to THIS event) are included.
@@ -51406,6 +51456,8 @@ async function notifySystemMessage(context, title, summary, fields = [], severit
             title,
             summary,
             fields,
+            ...(details ? { details } : {}),
+            ...(digest ? { digest } : {}),
             tags,
         });
         if (sent === false) {
@@ -51455,7 +51507,7 @@ async function handleSpamBotMessage(event) {
             persistSpamStatus(mobile, "free", null);
             await handleGoodNews.call(this);
             if (shouldNotify) {
-                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"]);
+                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"], undefined, healthyDigest(mobile));
             }
             return;
         case "harsh-warning":
@@ -51473,7 +51525,8 @@ async function handleSpamBotMessage(event) {
     }
 }
 async function notifyGenericSpamBotMessage(text) {
-    await notifySystemMessage("spambot", "SpamBot message", text, [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "spambot"]);
+    const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_4__.describeSpamBotReply)(text);
+    await notifySystemMessage("spambot", `SpamBot: ${status.label}`, "", status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : [], status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING, ["system-message", "spambot"], text, status.healthy ? healthyDigest(process.env.mobile) : undefined);
 }
 /**
  * Handle automatically released message
