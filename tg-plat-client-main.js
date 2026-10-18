@@ -33316,6 +33316,11 @@ const DEFAULT_RESCHEDULE_MS = 30000;
 const DEFAULT_INTER_EVENT_MS = 1000;
 /** Flood-limited events (PEER_FLOOD / FLOOD_WAIT) come back after this long. */
 const DEFAULT_DEFER_MS = 15 * 60 * 1000;
+/**
+ * A running scheduler fires a step within one tick (20 s); ladder gaps are 1-15 min. A step later
+ * than this only happens after a restart, outage or swap: its message would read like a bot.
+ */
+const DEFAULT_STALE_MS = 10 * 60 * 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const consoleLogger = {
     log: (m) => console.log(`[tg-events:scheduler] ${m}`),
@@ -33332,6 +33337,7 @@ class EventScheduler {
         this.rescheduleMs = opts.rescheduleMs ?? DEFAULT_RESCHEDULE_MS;
         this.deferMs = opts.deferMs ?? DEFAULT_DEFER_MS;
         this.interEventMs = opts.interEventMs ?? DEFAULT_INTER_EVENT_MS;
+        this.staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
         this.logger = opts.logger ?? consoleLogger;
     }
     start() {
@@ -33370,6 +33376,7 @@ class EventScheduler {
         if (events.length === 0)
             return;
         this.logger.log(`tick: ${events.length} due event(s) for clientId=${this.clientId}`);
+        events = await this.dropStale(events, now);
         for (const event of events) {
             let outcome;
             try {
@@ -33384,6 +33391,36 @@ class EventScheduler {
             if (this.interEventMs > 0)
                 await sleep(this.interEventMs);
         }
+    }
+    /**
+     * Stale steps: a message more than staleMs late is dropped unsent; a late call is dropped when the
+     * same chat has a newer due call, so a backlog becomes one ring, not a run of them.
+     */
+    async dropStale(events, now) {
+        const newestCall = new Map();
+        for (const e of events) {
+            if (e.type === 'call')
+                newestCall.set(e.chatId, Math.max(newestCall.get(e.chatId) ?? -Infinity, e.time));
+        }
+        const keep = [];
+        for (const e of events) {
+            const late = now - e.time;
+            const stale = late > this.staleMs && (e.type !== 'call' || e.time < (newestCall.get(e.chatId) ?? e.time));
+            if (!stale) {
+                keep.push(e);
+                continue;
+            }
+            this.logger.warn(`STALE ${e.type} chat=${e.chatId} id=${String(e._id)} — ${Math.round(late / 60000)} min late, dropping (NOT sent)`);
+            if (!e._id)
+                continue;
+            try {
+                await this.store.deleteById(e._id);
+            }
+            catch (err) {
+                this.logger.error(`deleting stale event ${String(e._id)} failed`, err);
+            }
+        }
+        return keep;
     }
     async applyOutcome(event, outcome, now) {
         if (!event._id)
@@ -60978,6 +61015,8 @@ class CallManager {
     constructor(client, options = {}) {
         this.currentCall = null;
         this.callQueue = [];
+        /** Queued operator calls (tgchats call button): in-house only, never the legacy blind ring. */
+        this.noLegacyRing = new Set();
         this.processing = false;
         this.MAX_QUEUE_SIZE = 1000; // Maximum queue size to prevent unbounded growth
         this.inHouse = null;
@@ -61025,19 +61064,25 @@ class CallManager {
     isCallActive() {
         return this.currentCall !== null;
     }
-    addToQueue(chatId) {
+    addToQueue(chatId, opts = {}) {
+        if (opts.noLegacyRing)
+            this.noLegacyRing.add(chatId);
         if (this.callQueue.includes(chatId)) {
             logger.log(`[CallManager] ChatId ${chatId} already in queue, skipping`);
             return;
         }
         if (this.inFlight.has(chatId) || this.inHouse?.isInCall?.(chatId)) {
             logger.log(`[CallManager] ChatId ${chatId} is already on a call, skipping`);
+            if (opts.noLegacyRing)
+                this.noLegacyRing.delete(chatId);
             return;
         }
         // Enforce maximum queue size
         if (this.callQueue.length >= this.MAX_QUEUE_SIZE) {
             logger.warn(`[CallManager] Queue size limit reached (${this.MAX_QUEUE_SIZE}), removing oldest entry`);
-            this.callQueue.shift(); // Remove oldest entry
+            const dropped = this.callQueue.shift(); // Remove oldest entry
+            if (dropped)
+                this.noLegacyRing.delete(dropped);
         }
         // Every in-house slot is taken: tell this payer roughly how long.
         if (this.inHouse?.isBusy?.())
@@ -61052,6 +61097,7 @@ class CallManager {
         const index = this.callQueue.indexOf(chatId);
         if (index > -1) {
             this.callQueue.splice(index, 1);
+            this.noLegacyRing.delete(chatId);
             return true;
         }
         return false;
@@ -61187,11 +61233,17 @@ class CallManager {
                     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_BUSY_WAIT_MS);
                     return;
                 }
-                if (result.status !== 'fallback')
+                if (result.status !== 'fallback') {
+                    this.clearNoLegacyRing(chatId);
                     return;
+                }
             }
             catch (error) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] in-house call failed for ${chatId}; using legacy ring`, false);
+            }
+            if (this.clearNoLegacyRing(chatId)) {
+                logger.log(`[CallManager] operator call ${chatId}: in-house could not serve it; no legacy ring`);
+                return;
             }
             // The legacy ring holds a single line: fallback rings from parallel in-house calls queue up.
             const ring = this.legacyLine.then(async () => {
@@ -61203,7 +61255,15 @@ class CallManager {
             await ring;
             return;
         }
+        if (this.clearNoLegacyRing(chatId)) {
+            logger.log(`[CallManager] operator call ${chatId}: in-house switch is off; no legacy ring`);
+            return;
+        }
         await this.requestCall(chatId, true);
+    }
+    /** Drops chatId's operator-call mark; true when it had one. */
+    clearNoLegacyRing(chatId) {
+        return this.noLegacyRing.delete(chatId);
     }
     /** The in-house service while the switch is on (loaded lazily, so it costs nothing when off). */
     async getInHouse() {
@@ -61809,6 +61869,7 @@ function isCallSetupInProgress(chatId, now = Date.now()) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   operatorCall: () => (/* binding */ operatorCall),
 /* harmony export */   requestCall: () => (/* binding */ requestCall)
 /* harmony export */ });
 /* harmony import */ var _core_dbservice__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/dbservice */ "./src/core/dbservice.ts");
@@ -61862,6 +61923,30 @@ async function requestCall(chatId, force = false, source = "Default") {
         }
         return false;
     }
+}
+/**
+ * Operator call (tgchats call button): a real in-house video call with the user's next video, or a
+ * reason why not. Never the legacy blind ring, and no external ladder.
+ */
+async function operatorCall(chatId) {
+    const user = await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().read(chatId);
+    if (!user)
+        return { called: false, reason: 'user_not_found' };
+    const callManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance().callManager;
+    const inHouse = await callManager.getInHouse();
+    if (!inHouse)
+        return { called: false, reason: 'in_house_off' };
+    if (!(await inHouse.isAvailable()))
+        return { called: false, reason: 'in_house_unavailable' };
+    if (callManager.isOnInHouseCall(chatId))
+        return { called: false, reason: 'already_on_call' };
+    if (inHouse.isCallLimited())
+        return { called: false, reason: 'call_limited' };
+    if (!(await inHouse.isEligible(chatId)))
+        return { called: false, reason: 'not_eligible' };
+    logger.log(`[operator-call] ${chatId}: queued in-house call`);
+    callManager.addToQueue(chatId, { noLegacyRing: true });
+    return { called: true };
 }
 
 
@@ -62917,6 +63002,13 @@ class InHouseCallService {
     callOptions(plan) {
         const remainingMs = plan.durationSec ? (plan.durationSec - plan.startSec) * 1000 + CAP_SLACK_MS : NO_DURATION_CAP_MS;
         return { maxDurationMs: Math.max(remainingMs, CAP_SLACK_MS), hangupOnMediaEnd: true };
+    }
+    /** Would VCUI show chatId a call right now (same rule play() plans under)? */
+    async isEligible(chatId) {
+        const user = await this.deps.readUser(chatId);
+        if (!user)
+            return false;
+        return (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(await this.deps.readOtherProfiles(chatId), this.now()), this.now());
     }
     /** Eligibility, video choice and resume offset — null when VCUI would not have shown a call. */
     async plan(chatId) {
@@ -85989,6 +86081,45 @@ router.get("/requestcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPOR
         sendTelegramOperationFailure(req, res, operation, error, "Failed to request call", "Telegram call request failed", false);
     }
 });
+/**
+ * @swagger
+ * /operatorcall/{chatId}:
+ *   get:
+ *     summary: Operator call (tgchats call button; POST works too)
+ *     description: Queues a real in-house video call with the user's next video. Never a legacy blind ring; returns a reason when no video call can be made.
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ called: true } or { called: false, reason }"
+ */
+async function handleOperatorCall(req, res) {
+    const operation = "operator-call";
+    const chatId = req.params.chatId?.trim();
+    if (!chatId) {
+        res.status(400).json({ operation, readOnly: false, success: false, called: false, error: "chatId is required", requestId: req.requestId });
+        return;
+    }
+    try {
+        if (!(await getTelegramManagerForOperation(req, res, operation)))
+            return;
+        const result = await (0,_modules_calls__WEBPACK_IMPORTED_MODULE_5__.operatorCall)(chatId);
+        res.status(200).json({ operation, readOnly: false, success: result.called, ...result, chatId, requestId: req.requestId });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `Error in /operatorcall endpoint, ${chatId}`);
+        sendTelegramOperationFailure(req, res, operation, error, "Failed to start operator call", "Telegram operator call failed", false);
+    }
+}
+router.get("/operatorcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, handleOperatorCall);
+router.post("/operatorcall/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_19__.leaderOnlyMiddleware, handleOperatorCall);
 /**
  * @swagger
  * /chat/{chatId}:
