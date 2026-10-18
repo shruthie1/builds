@@ -21127,6 +21127,13 @@ class BotConfig {
     async sendLiteral(category, text, options = {}) {
         return this.sendPlainMessage(category, text, { prefix: false, onSent: options.onSent });
     }
+    /**
+     * A plain client-prefixed HTML text message (classic sendMessage, no rich card, no link preview). For the
+     * compact one-glance notices (user warnings, promotion sent/deleted). `html` must already be escaped.
+     */
+    async sendHtml(category, html, options = {}) {
+        return this.sendPlainMessage(category, html, { ...options, parseMode: 'HTML', disableWebPagePreview: true });
+    }
     /** Send a structured notice as a Bot API rich message (classic sendMessage only as the 400/404 fallback). */
     async sendMessage(category, message, options = {}) {
         // Opt-in digest (message.digest): queued in Redis for the UMS flusher, which posts one table.
@@ -24254,6 +24261,8 @@ function escapeTelegramHtml(value) {
 function formatRichField(field) {
     const label = escapeTelegramHtml(field.label);
     const value = escapeTelegramHtml(field.value);
+    if (field.url)
+        return `<b>${label}:</b> <a href="${escapeTelegramHtml(field.url)}">${value}</a>`;
     return field.code === false
         ? `<b>${label}:</b> ${value}`
         : `<b>${label}:</b> <code>${value}</code>`;
@@ -24296,13 +24305,29 @@ function formatHouseStyle(input) {
     for (const f of input.fields ?? []) {
         if (REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase()))
             continue;
-        lines.push(`<b>${escapeTelegramHtml(f.label)} :</b> ${escapeTelegramHtml(f.value)}`);
+        const value = f.url ? `<a href="${escapeTelegramHtml(f.url)}">${escapeTelegramHtml(f.value)}</a>` : escapeTelegramHtml(f.value);
+        lines.push(`<b>${escapeTelegramHtml(f.label)} :</b> ${value}`);
     }
+    for (const block of plainQuoteBlocks(input))
+        lines.push(...block);
     if (input.details)
         lines.push(...(Array.isArray(input.details) ? input.details : [input.details]).map(italic));
     if (input.footer)
         lines.push(italic(input.footer));
     return lines.join('\n');
+}
+// Message content as a quote (the classic-sendMessage fallback used to drop it entirely).
+function plainQuoteBlocks(input) {
+    const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel ?? 'Message', text: input.quote, collapsed: input.quoteCollapsed }] : []), ...(input.quotes ?? [])];
+    const blocks = [];
+    for (const q of quotes) {
+        if (!q.text || !q.text.trim())
+            continue;
+        const text = q.text.length > 3000 ? `${q.text.slice(0, 3000)}…` : q.text;
+        const tag = 'collapsed' in q && q.collapsed ? 'blockquote expandable' : 'blockquote';
+        blocks.push([...(q.label ? [`<b>${escapeTelegramHtml(q.label)}</b>`] : []), `<${tag}>${escapeTelegramHtml(text)}</blockquote>`]);
+    }
+    return blocks;
 }
 function formatRichNotification(input) {
     if (input.houseStyle)
@@ -24320,6 +24345,8 @@ function formatRichNotification(input) {
     if (fields.length) {
         blocks.push(fields.map(formatRichField));
     }
+    // Message content as a quote (the classic-sendMessage fallback used to drop it entirely).
+    blocks.push(...plainQuoteBlocks(input));
     if (input.details) {
         const details = Array.isArray(input.details) ? input.details : [input.details];
         blocks.push(details.map((detail) => escapeTelegramHtml(detail)));
@@ -25686,6 +25713,8 @@ function cellValue(field) {
     if (unix !== null)
         return timeTag(unix, field.value instanceof Date ? field.value.toISOString() : String(field.value));
     const text = String(field.value ?? '');
+    if (field.url)
+        return `<a href="${attr(field.url)}">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(text)}</a>`;
     if (field.code === false || text.length > 60 || /\s/.test(text.trim()))
         return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(text);
     return `<code>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(text)}</code>`;
@@ -25709,17 +25738,21 @@ function buttonTag(button, index) {
     return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
 }
 const LONG_QUOTE_CHARS = 800;
+/** Up to this many short fields render as one "Label value · Label value" line instead of a table. */
+const INLINE_FIELDS_MAX = 3;
+const INLINE_FIELD_CHARS = 40;
 /**
  * Message content as a label + quote (owner, 2026-10-18): never in a table cell or <code>. Line breaks and
  * runs of spaces are kept exactly; long text collapses.
  */
-function quoteBlock(label, text) {
+function quoteBlock(label, text, collapsed = false) {
     const clipped = text.length > 3000 ? `${text.slice(0, 3000)}…` : text;
     const body = (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(clipped.replace(/\r\n?/g, '\n').replace(/^\n+|\s+$/g, ''))
         .replace(/ {2,}/g, (m) => '&nbsp;'.repeat(m.length))
         .replace(/\n/g, '<br/>');
-    const tag = clipped.length > LONG_QUOTE_CHARS ? 'blockquote expandable' : 'blockquote';
-    return `<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label)}</b></p><blockquote${tag === 'blockquote' ? '' : ' expandable'}>${body}</blockquote>`;
+    const tag = collapsed || clipped.length > LONG_QUOTE_CHARS ? 'blockquote expandable' : 'blockquote';
+    const heading = label ? `<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label)}</b></p>` : '';
+    return `${heading}<blockquote${tag === 'blockquote' ? '' : ' expandable'}>${body}</blockquote>`;
 }
 function renderTable(table) {
     const numeric = new Set(table.numeric ?? []);
@@ -25747,20 +25780,24 @@ function formatRichMessageHtml(input, opts = {}) {
     const title = input.title || input.summary || 'Notification';
     const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? _notification_format__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO]} `;
     const prefix = opts.prefix ? `${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)} · ` : '';
-    const parts = [`<h3>${icon}${prefix}${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</h3>`];
+    // A bold line, not <h3>: the big heading made every card tall (owner, 2026-10-18).
+    const parts = [`<p><b>${icon}${prefix}${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`];
     if (opts.imageId)
         parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
     if (input.summary && input.summary !== title)
         parts.push(`<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>`);
     const fields = visibleFields(input);
-    if (fields.length) {
+    if (fields.length && input.fieldLayout !== 'table' && fields.length <= INLINE_FIELDS_MAX && fields.every((f) => String(f.value ?? '').length <= INLINE_FIELD_CHARS)) {
+        parts.push(`<p>${fields.map((f) => `${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)} ${cellValue(f)}`).join(' · ')}</p>`);
+    }
+    else if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
         parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
     }
-    const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel || 'Message', text: input.quote }] : []), ...(input.quotes ?? [])];
+    const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel ?? 'Message', text: input.quote, collapsed: input.quoteCollapsed }] : []), ...(input.quotes ?? [])];
     for (const q of quotes) {
         if (q.text && q.text.trim())
-            parts.push(quoteBlock(q.label, q.text));
+            parts.push(quoteBlock(q.label, q.text, 'collapsed' in q && q.collapsed === true));
     }
     for (const table of input.tables ?? [])
         parts.push(renderTable(table));
@@ -51860,26 +51897,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_9___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _notices_chat_notice__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../notices/chat-notice */ "./src/notices/chat-notice.ts");
-/* harmony import */ var _utils_forwardUtils__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/forwardUtils */ "./src/utils/forwardUtils.ts");
-/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
-/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
-/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../state/UserState */ "./src/state/UserState.ts");
-/* harmony import */ var _messages_paymentLinks__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../messages/paymentLinks */ "./src/messages/paymentLinks.ts");
-/* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../../messages/messageUtils */ "./src/messages/messageUtils.ts");
-/* harmony import */ var _messages_standardMessages__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../../messages/standardMessages */ "./src/messages/standardMessages.ts");
-/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../../modules/events/event-executor */ "./src/modules/events/event-executor.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _CallInitiationService__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
-/* harmony import */ var _MessageResponseService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../MessageResponseService */ "./src/event-handlers/MessageResponseService.ts");
-/* harmony import */ var _EventAggregationService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../EventAggregationService */ "./src/event-handlers/EventAggregationService.ts");
-/* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../../inbound/inbound-decision */ "./src/inbound/inbound-decision.ts");
-/* harmony import */ var _PictureEventQueue__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../PictureEventQueue */ "./src/event-handlers/PictureEventQueue.ts");
-/* harmony import */ var _helpers_abuseDetectionHelper__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../../helpers/abuseDetectionHelper */ "./src/helpers/abuseDetectionHelper.ts");
-/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
-/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _notices_chat_notice__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../notices/chat-notice */ "./src/notices/chat-notice.ts");
+/* harmony import */ var _utils_forwardUtils__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../utils/forwardUtils */ "./src/utils/forwardUtils.ts");
+/* harmony import */ var _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram-utils/FileSender */ "./src/telegram-utils/FileSender.ts");
+/* harmony import */ var _telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../telegram-utils/flood-safe-send */ "./src/telegram-utils/flood-safe-send.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _messages_paymentLinks__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../../messages/paymentLinks */ "./src/messages/paymentLinks.ts");
+/* harmony import */ var _messages_messageUtils__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../../messages/messageUtils */ "./src/messages/messageUtils.ts");
+/* harmony import */ var _messages_standardMessages__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../../messages/standardMessages */ "./src/messages/standardMessages.ts");
+/* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _modules_events_event_executor__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../../modules/events/event-executor */ "./src/modules/events/event-executor.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _CallInitiationService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../CallInitiationService */ "./src/event-handlers/CallInitiationService.ts");
+/* harmony import */ var _MessageResponseService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../MessageResponseService */ "./src/event-handlers/MessageResponseService.ts");
+/* harmony import */ var _EventAggregationService__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../EventAggregationService */ "./src/event-handlers/EventAggregationService.ts");
+/* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../../inbound/inbound-decision */ "./src/inbound/inbound-decision.ts");
+/* harmony import */ var _PictureEventQueue__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../PictureEventQueue */ "./src/event-handlers/PictureEventQueue.ts");
+/* harmony import */ var _helpers_abuseDetectionHelper__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../../helpers/abuseDetectionHelper */ "./src/helpers/abuseDetectionHelper.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
 /**
  * Existing User Handler
  * Handles messages from existing users
@@ -51915,23 +51953,38 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 /** Is a payment request (fake warning / details-page ask) open for this chat? Fails to false. */
 function hasOpenPaymentRequest(chatId, kind) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_30__.proofGateFrom)(() => db.getRepositories?.() ?? null);
+    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_31__.proofGateFrom)(() => db.getRepositories?.() ?? null);
     return gate.hasAnswerableAsk(chatId, (process.env.dbcoll || "").toLowerCase(), kind).catch(() => false);
 }
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:existing-user-handler");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_23__.Logger("tg-aut:existing-user-handler");
 async function sendUserWarningNotification(message, context, options) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.USER_WARNINGS, message, options);
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(new Error("Existing user warning notification returned false"), context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(new Error("Existing user warning notification returned false"), context, false);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, context, false);
     }
+}
+async function sendUserWarningLine(html, context) {
+    try {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.ChannelCategory.USER_WARNINGS, `\n${html}`);
+        if (sent === false) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(new Error("Existing user warning notification returned false"), context, false);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, context, false);
+    }
+}
+function userLink(chatId, name) {
+    return `<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_11__.escapeTelegramHtml)((0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_12__.chatUrl)(chatId))}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_11__.escapeTelegramHtml)(name || chatId)}</a>`;
 }
 function isPaymentAccessIssue(text) {
     const hasPaymentTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["scan", "scanner", "qr", "bar", "gpay", "google pay", "phonepe", "paytm", "upi", "payment"]);
@@ -51964,18 +52017,18 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         // Handle special commands
         if (await handleSpecialCommands.call(this, event, text, chatId)) {
             logger.debug(`[SPECIAL CASE] Special command handled for chatId: ${chatId}, command: ${text.substring(0, 20)}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "special-command");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "special-command");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         await this.client.connect();
         logger.debug(`[NewMessage] ${broadcastName}_${userDetails?.payAmount}: `, `${text} | paidReply: ${userDetails?.paidReply} | demoGiven: ${userDetails?.demoGiven}`);
         // Check if user should be banned using centralized abuse detection
-        const abuseResult = await (0,_helpers_abuseDetectionHelper__WEBPACK_IMPORTED_MODULE_28__.checkAndHandleAbuse)(chatId, userDetails);
+        const abuseResult = await (0,_helpers_abuseDetectionHelper__WEBPACK_IMPORTED_MODULE_29__.checkAndHandleAbuse)(chatId, userDetails);
         userDetails = abuseResult.userDetails;
         if (abuseResult.banned) {
             logger.warn(`[EDGE CASE] User banned via abuse detection - chatId: ${chatId}, cheatCount: ${userDetails.cheatCount}, reason: ${abuseResult.reason}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", `abuse-ban (${abuseResult.reason})`);
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", `abuse-ban (${abuseResult.reason})`);
             return; // User banned, stop processing
         }
         // Handle media messages
@@ -51997,8 +52050,8 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         // (at most every 2 min) instead of normal chat (prod 2026-10-15: flirty replies right after the warning).
         if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_4__.fraudWarningOpen)(chatId)) {
             if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_4__.claimFraudReminder)(chatId))
-                await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_3__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_17__.pickOneMsg)([..._payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_6__.FRAUD_REMINDER_MESSAGES]), undefined, 'system');
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "fake-warning-open");
+                await (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_3__.respond)(event, (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_18__.pickOneMsg)([..._payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_6__.FRAUD_REMINDER_MESSAGES]), undefined, 'system');
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "fake-warning-open");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
@@ -52006,25 +52059,25 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         const detectionResult = await handleCheatDetection.call(this, event, userDetails, text, broadcastName, chatId);
         if (detectionResult.detected) {
             logger.warn(`[EDGE CASE] Cheat detection triggered for chatId: ${chatId}, payAmount: ${userDetails.payAmount}, cheatCount: ${userDetails.cheatCount}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "cheat-detection");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "cheat-detection");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // "Paid" / "already paid" while a details-page ask is open: answer the claim (the page is still missing).
         if (await handlePaymentClaimWhileAsked.call(this, event, text, chatId)) {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "payment-claim-ask-open");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "payment-claim-ask-open");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // Handle please/response requests
         if (await handlePleaseRequests.call(this, event, userDetails, text, chatId)) {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "please-request");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "please-request");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // Handle payment-related messages
         if (await handlePaymentMessages.call(this, event, userDetails, text, broadcastName, chatId)) {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "payment-message");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "payment-message");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
@@ -52041,7 +52094,7 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         }
         if (userDetails.canReply === 0) {
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "canReply=0");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "canReply=0");
             if (userDetails.lastMsgTimeStamp < Date.now() - 5 * 24 * 60 * 60 * 1000) {
                 logger.debug(`[EDGE CASE] User inactive for 5 days - chatId: ${chatId}`);
                 // D3: totalCount: 10 here is the "treat as established" flag, not a message count.
@@ -52050,7 +52103,7 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         }
         if (userDetails.totalCount >= 100) {
             logger.debug(`[EDGE CASE] User reached max message count - chatId: ${chatId}, totalCount: ${userDetails.totalCount}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", `max-messages (totalCount=${userDetails.totalCount})`);
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", `max-messages (totalCount=${userDetails.totalCount})`);
         }
     }
     await updateUserStats(db, chatId, senderJson.firstName, userDetails);
@@ -52100,20 +52153,15 @@ async function handleCheatDetection(event, userDetails, text, broadcastName, cha
     if (!isCheatPattern) {
         return { detected: false, type: null };
     }
-    await sendUserWarningNotification({
-        title: "Cheat pattern detected",
-        fields: [{ label: "User", value: broadcastName, code: false }],
-        quote: event.message.text,
-        quoteLabel: "User said",
-        buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_11__.chatUrl)(event.chatId.toString()) }],
-    }, "ExistingUserHandler.cheatWarningNotification");
+    // Owner, 2026-10-18: the original one-liner, "<CLIENT>: <linked name>: <what they said>", plain text.
+    await sendUserWarningLine(`${userLink(event.chatId.toString(), broadcastName)}: ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_11__.escapeTelegramHtml)(event.message.text ?? "")}`, "ExistingUserHandler.cheatWarningNotification");
     try {
         userDetails = await updateCheatCount(chatId, userDetails);
         await handleCheatResponse(event, userDetails, chatId);
     }
     catch (error) {
         logger.error(`[ERROR] Error handling cheat detection for chatId ${chatId}:`, error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, "Error handling cheat detection");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, "Error handling cheat detection");
     }
     return { detected: true, type: 'cheat' };
 }
@@ -52121,19 +52169,19 @@ async function handleCheatDetection(event, userDetails, text, broadcastName, cha
  * Handle cheat response (user calling service fake/cheat)
  */
 async function handleCheatResponse(event, userDetails, chatId) {
-    const cheatTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getCheatAccusationTimestamp(chatId) || Date.now() - 80000;
+    const cheatTimestamp = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getCheatAccusationTimestamp(chatId) || Date.now() - 80000;
     // Check cooldown for cheat responses
     if (cheatTimestamp >= Date.now() - CONSTANTS.CHEAT_RESPONSE_COOLDOWN_MS) {
         logger.debug(`[EDGE CASE] Cheat detected but within cooldown - chatId: ${chatId}, timeSinceLastCheat: ${Date.now() - cheatTimestamp}ms`);
         return;
     }
     logger.warn(`[EDGE CASE] Cheat detected - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-    _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.setCheatAccusationTimestamp(chatId);
+    _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.setCheatAccusationTimestamp(chatId);
     try {
         await sendCheatResponseMessage(event, userDetails);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, `ExistingUserHandler.cheatResponseMessage.${chatId}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `ExistingUserHandler.cheatResponseMessage.${chatId}`, false);
         await sendUserWarningNotification({
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_10__.NotificationSeverity.WARNING,
             title: "Cheat response message failed",
@@ -52161,9 +52209,9 @@ async function handleCheatResponse(event, userDetails, chatId) {
 async function sendCheatResponseMessage(event, userDetails) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__.sleep)(2000);
     const msgElement = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["No Dear", "Not at All", "No Baby, Please Wait!!", "Network issue baby", "I Love you Babyyy😚", "I Want to kiss you😚", "Its me only baby😚😚", "No Dear, Please understand"], 1)[0];
-    await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => event.message.respond({
+    await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_30__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => event.message.respond({
         message: `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-    }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => event.message.respond({ message: `**${msgElement}**\n\n${text}` }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callText', kind: 'call-text' }));
+    }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => event.message.respond({ message: `**${msgElement}**\n\n${text}` }), { chatId: userDetails.chatId.toString(), label: 'existingUser.callText', kind: 'call-text' }));
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__.sleep)(2000);
 }
 /**
@@ -52212,7 +52260,7 @@ async function handleCheatCallInitiation(userDetails, chatId, event) {
     const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     if (updatedAmount >= 250) {
         logger.debug(`[EDGE CASE] Premium tier cheat call - resetting cheat count - chatId: ${chatId}, amount: ${updatedAmount}`);
-        await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.initiateCall)(updatedAmount, userDetails, `Cheat count:${userDetails.cheatCount}\nCheat-initiated Call - 1:`);
+        await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.initiateCall)(updatedAmount, userDetails, `Cheat count:${userDetails.cheatCount}\nCheat-initiated Call - 1:`);
     }
     else if ((updatedAmount < 100 && userDetails.videos.length < 3) || (updatedAmount >= 100 && userDetails.videos.length < 5)) {
         logger.debug(`[EDGE CASE] Cheat call initiation - chatId: ${chatId}, amount: ${updatedAmount}, videos: ${userDetails.videos.length}`);
@@ -52231,7 +52279,7 @@ async function handleCheatCallInitiation(userDetails, chatId, event) {
             // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
             await db.update(chatId, { cheatCount: -2, graceFlag: true });
         }
-        await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.initiateCall)(updatedAmount, userDetails, `Cheat count: ${userDetails.cheatCount}\nCheat-initiated Call:`);
+        await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.initiateCall)(updatedAmount, userDetails, `Cheat count: ${userDetails.cheatCount}\nCheat-initiated Call:`);
         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
     }
     else {
@@ -52246,9 +52294,9 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
     if (userDetails.payAmount >= 15) {
         if (userDetails.payAmount >= 30) {
             logger.debug(`[EDGE CASE] Cheat without demo - sending call message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => event.message.respond({
+            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_30__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => event.message.respond({
                 message: `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`,
-            }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => event.message.respond({ message: text }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallText', kind: 'call-text' }));
+            }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallLink', kind: 'link' }), (text) => (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => event.message.respond({ message: text }), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallText', kind: 'call-text' }));
         }
         else if ((userDetails.payAmount < 30 && userDetails.cheatCount > 2) || userDetails.cheatCount > 3) {
             logger.debug(`[EDGE CASE] Cheat without demo - initiating call - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, cheatCount: ${userDetails.cheatCount}`);
@@ -52259,7 +52307,7 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
                 userDetails.cheatCount = -2;
                 // D2: dual-write. graceFlag carries the meaning; cheatCount: -2 stays until readers move.
                 await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().update(chatId, { cheatCount: -2, graceFlag: true });
-                await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.initiateCall)(updatedAmount, userDetails, `Cheat count:${userDetails.cheatCount}\nCheat-initiated Call - 2:`);
+                await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.initiateCall)(updatedAmount, userDetails, `Cheat count:${userDetails.cheatCount}\nCheat-initiated Call - 2:`);
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
             }
             else {
@@ -52294,20 +52342,20 @@ async function handlePleaseRequests(event, userDetails, text, chatId) {
     if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_4__.paymentPhotoSince)(chatId, Date.now() - _payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_4__.PAYMENT_ACTIVITY_WINDOW_MS) || (await hasOpenPaymentRequest(chatId))) {
         return false;
     }
-    const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
-    const plsCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getPleaseRequestCount(chatId);
+    const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getUserState(chatId);
+    const plsCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getPleaseRequestCount(chatId);
     if (plsCount > CONSTANTS.MAX_PLEASE_COUNT) {
         logger.warn(`[EDGE CASE] Please count exceeded - chatId: ${chatId}, plsCount: ${plsCount}, payAmount: ${userDetails.payAmount}`);
         userChatState.pleaseRequestCount = -2;
         // Persist: direct getUserState() mutations are not auto-dirtied, so the reset
         // would be lost on the next restart without this.
-        _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.markUserDirty(chatId);
+        _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.markUserDirty(chatId);
         let updatedAmount = userDetails.payAmount;
         if (updatedAmount >= 250) {
             logger.debug(`[EDGE CASE] Initiating call for premium user - chatId: ${chatId}, amount: ${updatedAmount}`);
             userChatState.pleaseRequestCount = 0;
             userDetails.callTime = 0;
-            await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.initiateCall)(updatedAmount, userDetails, `Please count:${plsCount}\nPlease-initiated Call:`);
+            await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.initiateCall)(updatedAmount, userDetails, `Please count:${plsCount}\nPlease-initiated Call:`);
         }
         else if ((updatedAmount < 100 && userDetails.videos.length < 3) || (updatedAmount >= 100 && userDetails.videos.length < 5)) {
             logger.debug(`[EDGE CASE] Initiating call due to please count - chatId: ${chatId}, amount: ${updatedAmount}, videos: ${userDetails.videos.length}`);
@@ -52321,17 +52369,17 @@ async function handlePleaseRequests(event, userDetails, text, chatId) {
                     logger.debug(`[EDGE CASE] Resetting secondShow for high tier user - chatId: ${chatId}`);
                 }
             }
-            await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_23__.initiateCall)(updatedAmount, userDetails, `Please count:${plsCount}\nPlease-initiated Call:`);
+            await (0,_CallInitiationService__WEBPACK_IMPORTED_MODULE_24__.initiateCall)(updatedAmount, userDetails, `Please count:${plsCount}\nPlease-initiated Call:`);
         }
     }
     else {
         if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["voice", "tell", "pic", "photo"])) {
             userChatState.pleaseRequestCount = plsCount - 1;
-            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.markUserDirty(chatId);
+            _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.markUserDirty(chatId);
             logger.debug(`[EDGE CASE] Reducing please count - chatId: ${chatId}, newCount: ${userChatState.pleaseRequestCount}`);
         }
         else {
-            _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementPleaseRequestCount(chatId);
+            _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementPleaseRequestCount(chatId);
             logger.debug(`[EDGE CASE] Incrementing please count - chatId: ${chatId}, newCount: ${userChatState.pleaseRequestCount}`);
         }
     }
@@ -52347,14 +52395,14 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
     }
     if (userDetails.payAmount > 10 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["same", "old", "prev"]) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["qr", "paytm", "link", "phonepe", "scanner"])) {
         logger.debug(`[PAYMENT] Old QR request - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
-            message: `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_17__.pickOneMsg)(["Hmm Yeah!!", "Haa Yep..!!", "Haaa yaa....!"])}\nFinish Payment and Send me **FULL Screenshot!!**`,
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
+            message: `${(0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_18__.pickOneMsg)(["Hmm Yeah!!", "Haa Yep..!!", "Haaa yaa....!"])}\nFinish Payment and Send me **FULL Screenshot!!**`,
         });
         return true;
     }
     if (isPaymentAccessIssue(text)) {
         logger.warn(`[PAYMENT] Access issue | ${chatId} | ${text.substring(0, 80)}`);
-        await (0,_MessageResponseService__WEBPACK_IMPORTED_MODULE_24__.respToFailedMSg)(event, text, broadcastName);
+        await (0,_MessageResponseService__WEBPACK_IMPORTED_MODULE_25__.respToFailedMSg)(event, text, broadcastName);
         return true;
     }
     // Handle QR code requests
@@ -52363,16 +52411,16 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["new", "gpay", "other"])) {
                 logger.debug(`[PAYMENT] New QR code request - chatId: ${chatId}`);
                 const index = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["1", "2"], 1)[0];
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
                     message: `GPAY QR CODE - ${index}👆👆`,
-                    file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle(`QR${index}.jpg`),
+                    file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandle(`QR${index}.jpg`),
                 });
             }
             else {
                 logger.debug(`[PAYMENT] Standard QR code request - chatId: ${chatId}`);
-                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
-                    message: `${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_18__.qr}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_18__.link}`,
-                    file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle("QR.jpg"),
+                await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
+                    message: `${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_19__.qr}\n\n${_messages_standardMessages__WEBPACK_IMPORTED_MODULE_19__.link}`,
+                    file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandle("QR.jpg"),
                 });
             }
         }
@@ -52385,7 +52433,7 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
     if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["otp", "login"])) {
         if (!broadcastName.endsWith("bot")) {
             logger.debug(`[PAYMENT] OTP request - chatId: ${chatId}`);
-            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
                 message: "Check Telegram Messages!!\n\nOTP comes in Telegram",
             });
         }
@@ -52397,7 +52445,7 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
     // Handle blank screen issues
     if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["blank", "black", "dark", "white"]) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["pussy"]) && userDetails.payAmount > 15 && (userDetails.callTime == 0 || userDetails.callTime > Date.now() - 15 * 60 * 1000)) {
         logger.warn(`[EDGE CASE] Blank screen issue reported - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, callTime: ${userDetails.callTime}`);
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
             message: `Please open in another mobile or **Chrome** browser!!\n\nCopy paste the link!!`,
         });
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
@@ -52416,9 +52464,9 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
         return true;
     }
     // Handle UPI ID confirmations
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, [..._services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_19__.UpiIds.allIds, "lakshmi stores", "ravva lakshmi"])) {
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, [..._services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_20__.UpiIds.allIds, "lakshmi stores", "ravva lakshmi"])) {
         logger.debug(`[PAYMENT] UPI ID confirmation - chatId: ${chatId}, text: ${text.substring(0, 50)}`);
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
             message: `**Yes**\n\nPay NOW and Send me Screenshot!!`,
         });
         return true;
@@ -52427,7 +52475,7 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
     if (!broadcastName.endsWith("bot") && chatId !== CONSTANTS.SPECIAL_USER_ID && !event.message.media?.className?.includes("Media") && isPaymentFailureMessage(text)) {
         if (userDetails && userDetails.paidReply && !((userDetails.payAmount > 25 && userDetails.demoGiven) || (userDetails.payAmount > 80 && userDetails.secondShow))) {
             logger.warn(`[EDGE CASE] Payment failure message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, demoGiven: ${userDetails.demoGiven}, secondShow: ${userDetails.secondShow}`);
-            await (0,_MessageResponseService__WEBPACK_IMPORTED_MODULE_24__.respToFailedMSg)(event, text, broadcastName);
+            await (0,_MessageResponseService__WEBPACK_IMPORTED_MODULE_25__.respToFailedMSg)(event, text, broadcastName);
             return true;
         }
         else {
@@ -52484,31 +52532,31 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
     if (broadcastName.endsWith("bot")) {
         return false;
     }
-    const failedCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getPaymentFailedCount(chatId);
+    const failedCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getPaymentFailedCount(chatId);
     // Handle GPay requests (not "only")
     if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["google pay", " gpay"]) || (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_3__.startswith)(text, ["gpay"])) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_8__.contains)(text, ["only", "sirf", "not", "cant", "nahi", "unab"])) {
         logger.debug(`[PAYMENT] GPay request (not only) - chatId: ${chatId}, failedCount: ${failedCount}`);
         if (failedCount > 0) {
             logger.debug(`[EDGE CASE] GPay request with previous failures - sending QR directly - chatId: ${chatId}`);
             const index = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["1", "2"], 1)[0];
-            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
                 message: `GPAY QR CODE - ${index}👆👆`,
-                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle(`QR${index}.jpg`),
+                file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandle(`QR${index}.jpg`),
             });
         }
         else {
             logger.debug(`[PAYMENT] First GPay request - sending explanation - chatId: ${chatId}`);
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__.sleep)(5000);
-            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.floodSafe)(() => event.message.reply({
-                message: `<b>I Dont have GPay!!\n\nOnly "PhonePe / PayTm"/</b>Others!!\n\nTry these👇\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_16__.payLinks.gpay1}1 - Doubt (Try Once)\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_16__.payLinks.gpay2}2 - Doubt (Try Once)\n\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_16__.payLinks.paytm3} - Working\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_16__.payLinks.phonepe3} - Working`,
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.floodSafe)(() => event.message.reply({
+                message: `<b>I Dont have GPay!!\n\nOnly "PhonePe / PayTm"/</b>Others!!\n\nTry these👇\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_17__.payLinks.gpay1}1 - Doubt (Try Once)\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_17__.payLinks.gpay2}2 - Doubt (Try Once)\n\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_17__.payLinks.paytm3} - Working\n${_messages_paymentLinks__WEBPACK_IMPORTED_MODULE_17__.payLinks.phonepe3} - Working`,
                 parseMode: "html",
             }), { chatId, label: 'existingUser.gpayInfo' });
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__.sleep)(3000);
-            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
                 message: `Pay with **PhonePe** or **PayTm**, I will give you **10Rs Discount!!**`,
             });
         }
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, "@miscmessages", {
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, "@miscmessages", {
             message: `${process.env.clientId?.toUpperCase()}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${broadcastName}</a>: ${text}`,
             parseMode: "html",
             linkPreview: false,
@@ -52520,11 +52568,11 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
         logger.debug(`[PAYMENT] GPay "only" request - chatId: ${chatId}`);
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_9__.sleep)(5000);
         const index = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_2__.selectRandomElements)(["1", "2"], 1)[0];
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, chatId, {
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, chatId, {
             message: `GPAY QR CODE - ${index}👆👆`,
-            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_13__.fileSender.getFileHandle(`QR${index}.jpg`),
+            file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_14__.fileSender.getFileHandle(`QR${index}.jpg`),
         });
-        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.sendMessageWithTimeout)(event.client, "@miscmessages", {
+        await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_15__.sendMessageWithTimeout)(event.client, "@miscmessages", {
             message: `${process.env.clientId?.toUpperCase()}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${broadcastName}</a>: ${text}`,
             parseMode: "html",
             linkPreview: false,
@@ -52538,7 +52586,7 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
  */
 async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
     const dialogManager = this.dialogManager;
-    const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
+    const userChatState = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.getUserState(chatId);
     const invalidPhotoTimestamp = userChatState.invalidPhotoTimestamp;
     // Always mark as read first to prevent message accumulation
     await dialogManager.markAsRead(event.message);
@@ -52550,18 +52598,18 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
     if (Date.now() <= invalidPhotoTimestamp + CONSTANTS.PHOTO_COOLDOWN_MS && !(await answering())) {
         const timeSinceLastPhoto = Date.now() - invalidPhotoTimestamp;
         logger.debug(`[EDGE CASE] Recent photo detected - skipping - chatId: ${chatId}, timeSinceLastPhoto: ${timeSinceLastPhoto}ms, cooldown: ${CONSTANTS.PHOTO_COOLDOWN_MS}ms`);
-        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "photo-cooldown");
+        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "photo-cooldown");
         return true;
     }
     // Handle non-photo media
     if (event.message.media?.className !== "MessageMediaPhoto") {
         logger.debug(`[EDGE CASE] Invalid media type detected - chatId: ${chatId}, className: ${event.message.media?.className}`);
-        await (0,_utils_forwardUtils__WEBPACK_IMPORTED_MODULE_12__.forwardtoUnwanted)(event, broadcastName);
-        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", `non-photo media (${event.message.media?.className})`);
+        await (0,_utils_forwardUtils__WEBPACK_IMPORTED_MODULE_13__.forwardtoUnwanted)(event, broadcastName);
+        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", `non-photo media (${event.message.media?.className})`);
         return true;
     }
     // Check photo processing eligibility
-    const newInvalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.incrementInvalidPhotoCount(chatId);
+    const newInvalidPhotoCount = _state_UserState__WEBPACK_IMPORTED_MODULE_16__.stateManager.incrementInvalidPhotoCount(chatId);
     const baseEligible = chatId !== CONSTANTS.SPECIAL_USER_ID && !event.message.forward;
     let canProcessPhoto = baseEligible &&
         userDetails.canReply !== 0 &&
@@ -52575,9 +52623,9 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
     if (canProcessPhoto) {
         logger.debug(`[MEDIA] Enqueuing photo for processing - chatId: ${chatId}, photoCount: ${newInvalidPhotoCount}, max: ${CONSTANTS.MAX_PHOTOS_PER_DAY}`);
         try {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "photo-queued-for-analysis");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "photo-queued-for-analysis");
             (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_4__.notePaymentPhoto)(chatId);
-            await _PictureEventQueue__WEBPACK_IMPORTED_MODULE_27__.pictureEventQueue.enqueue(event);
+            await _PictureEventQueue__WEBPACK_IMPORTED_MODULE_28__.pictureEventQueue.enqueue(event);
             return true;
         }
         catch (error) {
@@ -52586,7 +52634,7 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
             try {
                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
                 logger.warn(`[MEDIA] Deleted image due to processing error - chatId: ${chatId}`);
-                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "error", "photo-processing-failed; image deleted");
+                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "error", "photo-processing-failed; image deleted");
             }
             catch (deleteError) {
                 logger.error(`[ERROR] Failed to delete image after processing error - chatId: ${chatId}:`, deleteError);
@@ -52600,8 +52648,8 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
                 event.message.forward ? "forwarded message" :
                     "max photo limit reached";
         logger.warn(`[EDGE CASE] Photo not processed - chatId: ${chatId}, reason: ${reason}, photoCount: ${newInvalidPhotoCount}`);
-        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", `photo not processed (${reason})`);
-        await (0,_utils_forwardUtils__WEBPACK_IMPORTED_MODULE_12__.forwardtoUnwanted)(event, broadcastName);
+        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", `photo not processed (${reason})`);
+        await (0,_utils_forwardUtils__WEBPACK_IMPORTED_MODULE_13__.forwardtoUnwanted)(event, broadcastName);
         return true;
     }
 }
@@ -52616,29 +52664,29 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
             userDetails.canReply !== 0);
     if (shouldHandleEvent) {
         if (event.message.text && event.message.text !== "") {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "deferred", "aggregating");
-            await (0,_EventAggregationService__WEBPACK_IMPORTED_MODULE_25__.createOrUpdateEventsMap)(event);
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "deferred", "aggregating");
+            await (0,_EventAggregationService__WEBPACK_IMPORTED_MODULE_26__.createOrUpdateEventsMap)(event);
         }
         else {
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "empty-text");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "empty-text");
         }
     }
     else {
         if (!userDetails) {
             logger.debug(`[EDGE CASE] No user details found - chatId: ${chatId}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "no-user-details");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "no-user-details");
         }
         else if (broadcastName.toLowerCase().endsWith("bot")) {
             logger.debug(`[EDGE CASE] Bot message skipped - chatId: ${chatId}, broadcastName: ${broadcastName}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "sender-is-bot");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "sender-is-bot");
         }
         else if (Date.now() <= userDetails.limitTime) {
             logger.debug(`[EDGE CASE] User is limited- chatId: ${chatId}, limitTime: ${userDetails.limitTime}, now: ${Date.now()}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", `limited (${Math.ceil((userDetails.limitTime - Date.now()) / 60000)} min left)`);
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", `limited (${Math.ceil((userDetails.limitTime - Date.now()) / 60000)} min left)`);
         }
         else if (userDetails.canReply === 0) {
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
-            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "canReply=0");
+            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "canReply=0");
         }
         if ((0,_core_utils__WEBPACK_IMPORTED_MODULE_1__.canProceedWithService)(userDetails)) {
             if (userDetails.highestPayAmount < 250 || (userDetails.highestPayAmount >= 250 && userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000)) {
@@ -52647,7 +52695,7 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
                 const now = Date.now();
                 const blockedUntil = (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.momentAt)(chatId, 'callRequestBlockedUntil');
                 if (blockedUntil !== undefined && now < blockedUntil) {
-                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "ignored", "limited; call re-request throttled");
+                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "ignored", "limited; call re-request throttled");
                     return;
                 }
                 (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_FAILURE_RETRY_MS);
@@ -52655,16 +52703,16 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
                 try {
                     // In-house: their pending ladder/follow-up already exists, so scheduleLadder would no-op
                     // and "call me now" would wait for the timer. Ring now instead (once per throttle window).
-                    if (!(await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_29__.recallNowInHouse)(chatId)))
-                        await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_21__.scheduleLadder)(chatId, '1');
+                    if (!(await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_30__.recallNowInHouse)(chatId)))
+                        await (0,_modules_events_event_executor__WEBPACK_IMPORTED_MODULE_22__.scheduleLadder)(chatId, '1');
                     (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_THROTTLE_MS);
                     logger.log("Another call schedule requested via in-process scheduler");
-                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_26__.markInbound)(event, "handled", "limited; call re-requested");
+                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_27__.markInbound)(event, "handled", "limited; call re-requested");
                 }
                 catch (error) {
                     (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_FAILURE_RETRY_MS);
                     logger.error(`[ERROR] Error requesting another call for chatId ${chatId}:`, error);
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, "Cannot request Another call");
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, "Cannot request Another call");
                 }
             }
         }
@@ -57872,7 +57920,7 @@ function paymentEvidenceCard(v) {
         title: "Payment screenshot",
         fields: [
             { label: "User", value: v.broadcastName || "-", code: false },
-            { label: "Chat", value: v.chatId },
+            { label: "Chat", value: v.chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(v.chatId) },
             { label: "Amount", value: v.amount, code: false },
             ...(v.amount !== v.readAmount ? [{ label: "Amount read", value: v.readAmount, code: false }] : []),
             { label: "Paid before", value: v.payAmount ?? 0, code: false },
@@ -57881,20 +57929,20 @@ function paymentEvidenceCard(v) {
         ],
         quote: ocrText(v.text) || undefined,
         quoteLabel: "Screenshot text",
-        buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(v.chatId) }],
+        quoteCollapsed: true,
     };
 }
 function fakeEvidenceCard(chatId, imageDetails) {
     return {
         title: "Fake screenshot",
         fields: [
-            { label: "Chat", value: chatId },
+            { label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) },
             { label: "Amount read", value: Number(imageDetails.amount) || 0, code: false },
             { label: "Flags", value: (imageDetails.proofReasons ?? []).join(", ") || "proof blocked", code: false },
         ],
         quote: ocrText(imageDetails.text) || undefined,
         quoteLabel: "Screenshot text",
-        buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
+        quoteCollapsed: true,
     };
 }
 /** Ops notice: image analysis down. */
@@ -58052,13 +58100,13 @@ async function processImage(event) {
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
                     fields: [
                         { label: "User", value: broadcastName || "-", code: false },
-                        { label: "Chat", value: chatId },
+                        { label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) },
                         { label: "Paid before", value: userDetails.payAmount ?? 0, code: false },
                         { label: "Demo given", value: yesNo(userDetails.demoGiven), code: false },
                     ],
                     quote: String(imageDetails.description ?? "").trim() || undefined,
                     quoteLabel: "Image description",
-                    buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
+                    quoteCollapsed: true,
                 });
                 // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
                 // must not vanish silently — otherwise a user is banned with no operator-visible record.
@@ -66735,8 +66783,12 @@ const commonPatterns = [
                 'dont disturb', "don't disturb", 'do not disturb',
                 'block me', 'no need', 'no interest', 'not interested', 'not intres',
                 'no intres', 'nai chahiye', 'nahi chahiye', 'nhi chahiye',
-                'chal nikal', 'nikal', 'nikaal', 'niklo', 'door ja',
+                'door ja',
             ];
+            // "nikal" = get out, but "pani nikal gaya" = finished: not an exit when any pani spelling is there.
+            const NIKAL_EXIT = ['chal nikal', 'nikal', 'nikaal', 'niklo'];
+            const PANI = ['pani', 'paani', 'panni', 'panee', 'paanee'];
+            const nikalExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NIKAL_EXIT) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PANI);
             const KEEP_CONTACT = [
                 'dont stop', "don't stop", 'do not stop', 'dont want to stop',
                 "don't want to stop", 'do not want to stop', 'keep messaging', 'keep texting'
@@ -66747,7 +66799,7 @@ const commonPatterns = [
             const respectStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['behave']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['proper', 'properly'])) ||
                 ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['human', 'humans']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['animal', 'animals']));
             const hardExitOrAbuse = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ABUSE) ||
-                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HARD_EXIT) || messageStop || safetyStop || respectStop) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, KEEP_CONTACT));
+                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HARD_EXIT) || nikalExit || messageStop || safetyStop || respectStop) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, KEEP_CONTACT));
             const negativeWords = ['no', 'not', 'nahi', 'nhi', 'mat', 'band', 'stop', 'cancel'];
             const moneyWords = ['money', 'paisa', 'paise', 'payment', 'rs', 'rupees', 'pay'];
             const moneyExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, negativeWords) &&
@@ -68559,8 +68611,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _helpers_promoHelper__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../helpers/promoHelper */ "./src/helpers/promoHelper.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _modules_calls_call_me__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../modules/calls/call-me */ "./src/modules/calls/call-me.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
  * Paid User Specific Pattern Handlers
  * These patterns only apply to users who have paid (payAmount >= 25)
@@ -68583,7 +68636,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__.Logger("tg-aut:paid-patterns");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("tg-aut:paid-patterns");
 /**
  * Duration response messages
  */
@@ -68627,9 +68681,9 @@ function getDurationMessageByUserState(userDetails) {
         return DURATION_MESSAGES.DEFAULT;
     }
 }
-async function notifyPaidPatternWarning(notification, context) {
+async function notifyPaidPatternWarning(html, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.USER_WARNINGS, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.USER_WARNINGS, html);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(new Error("Paid pattern warning notification returned false"), context, false);
         }
@@ -69084,18 +69138,8 @@ const paidPatterns = [
                 const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_10__.UserDataDtoCrud.getInstance();
                 const userChatState = stateManager.getUserState(context.chatId);
                 const lastCheatTime = userChatState.demoPicsSentTimestamp || 0; // Reuse timestamp field for cheat cooldown
-                await notifyPaidPatternWarning({
-                    title: "Paid user fraud warning",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
-                    summary: `${context.broadcastName} reported: ${event.message.text}`,
-                    fields: [
-                        { label: "Chat", value: event.chatId.toString() },
-                        { label: "Pay Amount", value: userDetails.payAmount },
-                        { label: "Current Cheat Count", value: userDetails.cheatCount || 0 },
-                    ],
-                    details: `https://tgchats.netlify.app?client=${process.env.clientId || "unknown"}&chatId=${event.chatId.toString()}`,
-                    tags: ["paid", "fraud-warning", "cheat"],
-                }, "PaidPatterns.cheatWarningNotification");
+                // Owner, 2026-10-18: the original one-liner, "<CLIENT>: <linked name> (paid ₹N): <what they said>".
+                await notifyPaidPatternWarning(`\n<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__.escapeTelegramHtml)(`https://tgchats.netlify.app?client=${process.env.clientId || "unknown"}&chatId=${event.chatId.toString()}`)}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__.escapeTelegramHtml)(context.broadcastName || event.chatId.toString())}</a> (paid ₹${userDetails.payAmount ?? 0}): ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__.escapeTelegramHtml)(event.message.text ?? "")}`, "PaidPatterns.cheatWarningNotification");
                 // Cooldown: Only process if 40+ seconds since last cheat message
                 if (lastCheatTime < Date.now() - 40000) {
                     userChatState.demoPicsSentTimestamp = Date.now(); // Update cooldown
@@ -69111,7 +69155,7 @@ const paidPatterns = [
                             "Its me only baby😚😚",
                             "No Dear, Please understand"
                         ], 1)[0];
-                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
+                        await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_16__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
                         await sleep(2000);
                     }
                     catch (error) {
@@ -69150,7 +69194,7 @@ const paidPatterns = [
                     }
                     else if (userDetails.payAmount >= 25) {
                         if (userDetails.payAmount >= 30) {
-                            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_15__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
+                            await (0,_modules_calls_call_me__WEBPACK_IMPORTED_MODULE_16__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_core_inhandlerUpdated__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
                         }
                         else if ((userDetails.payAmount < 30 && cheatCount > 2) ||
                             cheatCount > 3) {
@@ -75272,8 +75316,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+
 
 
 
@@ -75293,7 +75339,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const randomNumber = Math.floor(Math.random() * 10);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger(`promotion-engine-${randomNumber}`);
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.BasePromotionEngine {
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || "defaultClient", options.instanceId || process.env.mobile || "defaultMobile");
         this.channelIndex = 0;
@@ -75385,9 +75431,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateCustomMessage)(_messages_messageUtils__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.generateCustomMessage)(_messages_messageUtils__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.generateFollowupMsg)(),
         };
     }
     adapterShouldContinue() {
@@ -75598,7 +75644,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
         }
     }
     strategyForMessageIndex(messageIndex) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.messageIndexToStrategy)(messageIndex) || (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.messageIndexToStrategy)(messageIndex) || (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
     }
     extractLogFields(message) {
         const fields = {};
@@ -75720,7 +75766,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
     }
     async shouldContinueHelperPromotion() {
         const paidUserStats = await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().getTodayPaidUsers();
-        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.isPaidUserLimitReached)(paidUserStats)) {
+        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.isPaidUserLimitReached)(paidUserStats)) {
             logger.log("💰 Paid user limits reached, stopping promotions");
             await _core_dbservice__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().deactivatePromotions();
             this.promotionActive = false;
@@ -75785,7 +75831,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
             if (this.isPromotionPreflightError(fallbackError)) {
                 throw fallbackError;
             }
-            const fallbackParsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(fallbackError, channelInfo.channelId);
+            const fallbackParsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_16__.parseTelegramError)(fallbackError, channelInfo.channelId);
             if (fallbackParsed.type === 'PEER_FLOOD') {
                 logger.warn(`[LIMIT] PEER_FLOOD in private channel fallback ${fallbackUsername}; skipping channel only`);
             }
@@ -75851,7 +75897,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
                 // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
                 // remaining consumer) — this used to stamp a message cursor on activeChannels that
                 // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-                if (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.isPoolMessageIndex)(messageIndex)) {
+                if (_core_utils__WEBPACK_IMPORTED_MODULE_2__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.isPoolMessageIndex)(messageIndex)) {
                     await _core_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore.addToAvailableMsgs(messageItem.channelId, messageIndex);
                 }
                 logger.debug([
@@ -76029,7 +76075,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
             const survivalStr = survivalMs > 3600000
                 ? `${Math.floor(survivalMs / 3600000)}h ${Math.floor((survivalMs % 3600000) / 60000)}m`
                 : `${Math.floor(survivalMs / 60000)}m`;
-            this.notifyPromotionChannel('🗑️', channelInfo.username || null, channelId, channelInfo.title || channelId, messageId, messageIndex, `survived: ${survivalStr}`);
+            this.notifyPromotionChannel('🗑️', channelInfo.username || null, channelId, channelInfo.title || channelId, messageId, messageIndex, survivalStr);
             const deletionPolicy = this.resolveDeletionPolicy(messageIndex, availableMsgs.length, providedDeletionPolicy);
             if (deletionPolicy.actions.includes('ban_no_available_messages')) {
                 try {
@@ -76106,27 +76152,18 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
             ? `https://t.me/${username.replace('@', '')}/${messageId}`
             : `https://t.me/c/${channelId}/${messageId}`;
         const isDeletion = emoji.includes('🗑');
-        const notification = {
-            severity: isDeletion ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.SUCCESS,
-            // No summary: it just restated the title + the Channel field below.
-            title: isDeletion ? "Promotion message deleted" : "Promotion message sent",
-            // Each value once: the channel id only when there is no @username to show, the text as a quote,
-            // the link as the one action button.
-            fields: this.promotionBaseFields([
-                { label: "Channel", value: displayName, code: false },
-                ...(username ? [] : [{ label: "ChannelId", value: channelId }]),
-                { label: "Message", value: `#${messageId}` },
-                { label: "Template", value: messageIndex },
-                ...(extra ? [{ label: "Context", value: extra, code: false }] : []),
-            ]),
-            quote: messageText ? messageText.slice(0, 1000) : undefined,
-            buttons: [{ text: "View message", url: link }],
-            tags: ["promotion", isDeletion ? "message-deleted" : "message-sent"],
-        };
-        void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(category, notification, {
-            disableWebPagePreview: true,
-            disableNotification: true,
-        }).then((sent) => {
+        const button = { text: "View message", url: link };
+        // Owner, 2026-10-18: a sent promo is plain text ("<CLIENT>:" / channel / quoted message / link
+        // button); a deletion is a small card whose survival time is a table row.
+        const send = isDeletion
+            ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(category, {
+                title: `🗑 ${displayName} deleted`,
+                houseStyle: true,
+                ...(extra ? { fields: [{ label: "Survived", value: extra, code: false }], fieldLayout: 'table' } : {}),
+                buttons: [button],
+            }, { disableNotification: true })
+            : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendHtml(category, `\n${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__.escapeTelegramHtml)(displayName)}${messageText ? `\n<blockquote>${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__.escapeTelegramHtml)(messageText.slice(0, 1000))}</blockquote>` : ''}`, { disableNotification: true, replyMarkup: { inline_keyboard: [[button]] } });
+        void send.then((sent) => {
             if (sent === false) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(new Error("Promotion channel notification returned false"), `[${this.mobile}] Failed to notify promotion channel for ${channelId} message ${messageId}`, false);
             }
@@ -76236,7 +76273,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
                 includeRestricted: true,
             });
             const observedChannels = [...dialogs.channels];
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.persistObservedChannels)(_core_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.persistObservedChannels)(_core_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
             const sendableCount = observedChannels.filter((channel) => channel.canSendMsgs === true).length;
             channelData = observedChannels;
             logger.info(`[${this.mobile}] Observed ${observedChannels.length} channels; ${sendableCount} currently sendable (DialogManager has ${this.dialogManager.getAllDialogs().length} total dialogs)`);
