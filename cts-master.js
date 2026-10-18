@@ -1287,6 +1287,10 @@ const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-
 const components_1 = __webpack_require__(/*! ./components */ "./src/components/index.ts");
 const utils_1 = __webpack_require__(/*! ./utils */ "./src/utils/index.ts");
 const bot_notice_1 = __webpack_require__(/*! ./utils/bot-notice */ "./src/utils/bot-notice.ts");
+const notice_batch_1 = __webpack_require__(/*! ./utils/notice-batch */ "./src/utils/notice-batch.ts");
+const channel_cycle_1 = __webpack_require__(/*! ./utils/channel-cycle */ "./src/utils/channel-cycle.ts");
+const notice_digest_1 = __webpack_require__(/*! ./utils/notice-digest */ "./src/utils/notice-digest.ts");
+const redisClient_1 = __webpack_require__(/*! ./utils/redisClient */ "./src/utils/redisClient.ts");
 const rich_message_1 = __webpack_require__(/*! ./utils/rich-message */ "./src/utils/rich-message.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
 const account_maintenance_service_1 = __webpack_require__(/*! ./control-plane/maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
@@ -1312,12 +1316,17 @@ let AppService = AppService_1 = class AppService {
         this.userAccessData = new Map();
         this.joinChannelMap = new Map();
         this.joinChannelQueueRunning = false;
+        this.joinClientIds = new Map();
+        this.digestTimers = [];
         this.scheduledJobs = [];
         this.refresTime = 0;
         console.log('App Module Constructor initiated !!');
     }
     onModuleInit() {
         console.log('App Module initiated !!');
+        if (this.runtimeConfig.enabled('UMS_SCHEDULER')) {
+            this.startDigestFlusher();
+        }
         if (this.runtimeConfig.enabled('UMS_SCHEDULER')) {
             this.logger.log('Starting UMS access-data cleanup interval (every 15 minutes)');
             this.cleanupInterval = setInterval(() => this.cleanupOldAccessData(), 15 * 60 * 1000);
@@ -1327,17 +1336,16 @@ let AppService = AppService_1 = class AppService {
                 const channelJoinJob = schedule.scheduleJob('ums-channel-join-cycle', '25 2,9,16 * * * ', 'Asia/Kolkata', async () => {
                     this.logger.log('Starting UMS primary-client channel join/leave cycle');
                     try {
-                        await (0, bot_notice_1.sendBotNotice)('pppl', {
-                            title: 'Channel join cycle started',
-                            fields: [{ label: 'Service', value: process.env.clientId }],
-                        });
-                    }
-                    catch (error) {
-                        (0, utils_1.parseError)(error, 'UMS scheduled join notification failed');
-                    }
-                    try {
                         if (new Date().getUTCDate() % 3 === 1) {
                             this.logger.log('UMS channel cycle branch=leave-all');
+                            try {
+                                await (0, bot_notice_1.sendBotNotice)('pppl', {
+                                    title: 'Channel leave cycle started',
+                                });
+                            }
+                            catch (error) {
+                                (0, utils_1.parseError)(error, 'UMS scheduled leave notification failed');
+                            }
                             await this.leaveChannelsAll();
                         }
                         else {
@@ -1443,7 +1451,7 @@ let AppService = AppService_1 = class AppService {
         return resp;
     }
     async leaveChannelsAll() {
-        void this.sendToAll('leavechannels').catch((error) => {
+        void this.sendToAll('leavechannels?batchNotice=1').catch((error) => {
             (0, utils_1.parseError)(error, 'leaveChannelsAll dispatch failed');
         });
     }
@@ -1611,6 +1619,7 @@ let AppService = AppService_1 = class AppService {
         };
         const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
         const twentyDays = Date.now() - 20 * 24 * 60 * 60 * 1000;
+        const resets = [];
         try {
             const query1 = {
                 chatId,
@@ -1645,15 +1654,11 @@ let AppService = AppService_1 = class AppService {
                     }
                     else {
                         if (doc.lastMsgTimeStamp < twentyDays) {
-                            await (0, bot_notice_1.sendBotNotice)('pppl', {
-                                severity: 'warning',
-                                title: 'Resetting UserData',
-                                fields: [
-                                    { label: 'Profile', value: doc.profile },
-                                    { label: 'Chat', value: doc.chatId },
-                                    { label: 'Last message', value: getReadableTimeDifference(doc.lastMsgTimeStamp, Date.now()), code: false },
-                                ],
-                            });
+                            resets.push([
+                                doc.profile,
+                                doc.chatId,
+                                getReadableTimeDifference(doc.lastMsgTimeStamp, Date.now()),
+                            ]);
                             await this.userDataService.update(doc.profile, doc.chatId, {
                                 payAmount: 0,
                                 demoGiven: false,
@@ -1668,6 +1673,18 @@ let AppService = AppService_1 = class AppService {
         }
         catch (error) {
             (0, utils_1.parseError)(error);
+        }
+        if (resets.length) {
+            try {
+                await (0, bot_notice_1.sendBotNotice)('pppl', {
+                    severity: 'warning',
+                    title: 'Resetting UserData',
+                    tables: [{ columns: [`Profile (${resets.length})`, 'Chat', 'Last message'], rows: resets }],
+                });
+            }
+            catch (error) {
+                (0, utils_1.parseError)(error, 'Resetting UserData notification failed', false);
+            }
         }
         console.log(resp);
         return resp;
@@ -1721,37 +1738,54 @@ let AppService = AppService_1 = class AppService {
         console.log('Joining Channel Started');
         await (0, Helpers_1.sleep)(2000);
         const clients = await this.clientService.findAll();
-        await Promise.all(clients.map(async (document) => {
-            try {
-                const resp = await (0, utils_1.fetchWithTimeout)(`${document.repl}/channelinfo`, { timeout: 200000 }, 1);
-                await (0, bot_notice_1.sendBotNotice)('pppl', {
-                    title: 'Channel SendTrue',
-                    fields: [
-                        { label: 'Client ID', value: document.clientId },
-                        { label: 'Can send', value: resp.data.canSendTrueCount },
-                    ],
-                });
-                if (resp?.data?.canSendTrueCount &&
-                    resp?.data?.canSendTrueCount < 350) {
-                    const excludedIds = this.getJoinedChannelIdsFromInfo(resp.data);
-                    const result = await this.activeChannelsService.getActiveChannels(25, 0, excludedIds);
-                    await (0, bot_notice_1.sendBotNotice)('pppl', {
-                        title: 'Started joining channels',
-                        fields: [
-                            { label: 'Client ID', value: document.clientId },
-                            { label: 'Channels', value: result.length },
-                        ],
-                    });
-                    this.joinChannelMap.set(document.repl, result);
+        const rows = clients.map((c) => [c.clientId, '-', '-', 'pending']);
+        try {
+            await Promise.all(clients.map(async (document, index) => {
+                const row = rows[index];
+                try {
+                    const resp = await (0, utils_1.fetchWithTimeout)(`${document.repl}/channelinfo`, { timeout: 200000 }, 1);
+                    row[1] = resp.data.canSendTrueCount ?? '-';
+                    row[3] = 'ok';
+                    if (resp?.data?.canSendTrueCount &&
+                        resp?.data?.canSendTrueCount < 350) {
+                        const excludedIds = this.getJoinedChannelIdsFromInfo(resp.data);
+                        const result = await this.activeChannelsService.getActiveChannels(25, 0, excludedIds);
+                        row[2] = result.length;
+                        row[3] = 'joining';
+                        this.joinChannelMap.set(document.repl, result);
+                        this.joinClientIds.set(document.repl, document.clientId);
+                    }
                 }
-            }
-            catch (error) {
-                (0, utils_1.parseError)(error);
-            }
-        }));
-        this.joinChannelQueue();
-        console.log('Joining Channel Triggered Succesfully for ', clients.length);
+                catch (error) {
+                    row[3] = `error: ${String((0, utils_1.parseError)(error, `joinchannelForClients ${document.clientId}`, false)?.message ?? 'unknown').slice(0, 80)}`;
+                }
+            }));
+            this.joinChannelQueue();
+            console.log('Joining Channel Triggered Succesfully for ', clients.length);
+        }
+        finally {
+            if (rows.length)
+                await this.sendJoinCycleSummary(rows);
+        }
         return 'Initiated Joining channels';
+    }
+    async sendJoinCycleSummary(rows) {
+        try {
+            const joining = rows.filter((r) => r[3] === 'joining');
+            const failed = rows.filter((r) => String(r[3]).startsWith('error'));
+            await (0, notice_batch_1.sendNoticeBatched)((input) => (0, bot_notice_1.sendBotNotice)('pppl', input), {
+                severity: failed.length ? 'warning' : 'info',
+                title: 'Channel join cycle',
+                tables: [{
+                        columns: [`Client (${rows.length})`, 'Can send', `Channels (${joining.reduce((n, r) => n + (Number(r[2]) || 0), 0)})`, 'Status'],
+                        rows,
+                        numeric: [1, 2],
+                    }],
+            });
+        }
+        catch (error) {
+            (0, utils_1.parseError)(error, 'UMS channel join summary failed', false);
+        }
     }
     async joinChannelQueue() {
         if (this.joinChannelIntervalId)
@@ -1764,6 +1798,7 @@ let AppService = AppService_1 = class AppService {
                 const keys = Array.from(this.joinChannelMap.keys());
                 if (keys.length > 0) {
                     console.log('In JOIN CHANNEL interval: ', new Date().toISOString());
+                    const tickRows = [];
                     const promises = keys.map(async (url) => {
                         const channels = this.joinChannelMap.get(url);
                         if (channels && channels.length > 0) {
@@ -1776,7 +1811,15 @@ let AppService = AppService_1 = class AppService {
                                 return;
                             }
                             try {
-                                await (0, utils_1.fetchWithTimeout)(joinUrl);
+                                const batchUrl = new URL(joinUrl);
+                                batchUrl.searchParams.set('batchNotice', '1');
+                                const response = await (0, utils_1.fetchWithTimeout)(batchUrl.toString(), {
+                                    notificationConfig: { enabled: false },
+                                });
+                                tickRows.push({
+                                    clientId: this.joinClientIds.get(url) ?? url,
+                                    row: (0, channel_cycle_1.joinRowFromResponse)(this.describeJoinableChannel(channel), response),
+                                });
                                 console.log(url, ' Trying to join :', this.describeJoinableChannel(channel));
                             }
                             catch (error) {
@@ -1788,6 +1831,7 @@ let AppService = AppService_1 = class AppService {
                         }
                     });
                     await Promise.all(promises);
+                    await this.digestJoinRows(tickRows);
                 }
                 else {
                     this.clearJoinChannelInterval();
@@ -1797,6 +1841,36 @@ let AppService = AppService_1 = class AppService {
                 this.joinChannelQueueRunning = false;
             }
         }, 3 * 60 * 1000);
+    }
+    async digestJoinRows(rows) {
+        if (rows.length === 0)
+            return;
+        const queued = await (0, notice_digest_1.pushDigestEntries)(redisClient_1.RedisClient.getClient(), 'CHANNEL_NOTIFICATIONS', 'join-results', rows.map(({ clientId, row }) => ({ clientId, title: 'Channel join results', row, merge: 'sum' })));
+        if (queued)
+            return;
+        try {
+            const merged = (0, notice_digest_1.mergeByClient)(rows.map(({ clientId, row }) => ({ clientId, at: Date.now(), title: '', row, merge: 'sum' })));
+            await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(components_1.ChannelCategory.CHANNEL_NOTIFICATIONS, input, undefined, false), {
+                title: 'Channel join results',
+                tables: [{
+                        columns: [`Client (${merged.length})`, 'Joined', 'Failed', 'Flood wait', 'No response', 'Old build', 'Last error'],
+                        rows: merged.map(({ clientId, row }) => [clientId, row.Joined, row.Failed, row['Flood wait'], row['No response'], row['Old build'], row['Last error']]),
+                        numeric: [1, 2, 3, 4, 5],
+                    }],
+            });
+        }
+        catch (error) {
+            (0, utils_1.parseError)(error, 'UMS channel join results notification failed', false);
+        }
+    }
+    startDigestFlusher() {
+        this.digestFlusher = new notice_digest_1.NoticeDigestFlusher(() => redisClient_1.RedisClient.getClient(), (category, input) => this.botsService.sendMessageByCategory(category, input, undefined, false), (category) => Object.values(components_1.ChannelCategory).includes(category), this.logger);
+        const run = () => void this.digestFlusher?.runOnce().catch(() => undefined);
+        const first = setTimeout(run, 15_000);
+        const every = setInterval(run, 5 * 60 * 1000);
+        first.unref?.();
+        every.unref?.();
+        this.digestTimers.push(first, every);
     }
     getJoinedChannelIdsFromInfo(channels) {
         return [...new Set([...(channels?.ids ?? []), ...(channels?.canSendFalseChats ?? [])].map(String).filter(Boolean))];
@@ -2149,6 +2223,8 @@ let AppService = AppService_1 = class AppService {
         if (this.joinChannelIntervalId) {
             clearInterval(this.joinChannelIntervalId);
         }
+        for (const timer of this.digestTimers)
+            clearTimeout(timer);
         for (const job of this.scheduledJobs)
             job.cancel();
     }
@@ -22555,6 +22631,7 @@ const promote_client_service_1 = __webpack_require__(/*! ../promote-clients/prom
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const check_summary_notification_1 = __webpack_require__(/*! ../shared/check-summary-notification */ "./src/components/shared/check-summary-notification.ts");
 const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
+const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
 const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
@@ -22912,7 +22989,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return this.bufferClientModel.create({ ...createData });
         });
         this.logger.log(`Buffer Client Created:\n\nMobile: ${canonicalMobile}`);
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+        await this.sendAccountNotice({
             severity: 'success',
             title: 'Buffer Client Created',
             fields: [
@@ -23533,7 +23610,14 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
         this.isWarmupCheckProcessing = true;
         try {
-            await this._checkBufferClientsInternal();
+            await (0, notice_batch_1.runWithNoticeBatch)(async (batch) => {
+                try {
+                    await this._checkBufferClientsInternal();
+                }
+                finally {
+                    await this.flushLeftoverNoticeBatch(batch, 'Buffer warmup run (summary not reached)');
+                }
+            });
         }
         catch (error) {
             const errMsg = (0, parseError_1.parseError)(error, 'checkBufferClients').message;
@@ -23916,7 +24000,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             if (!enrolled)
                 return false;
             this.logger.log(`Created BufferClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            await this.sendAccountNotice({
                 severity: 'success',
                 title: 'Buffer Client Enrolled',
                 fields: [
@@ -24120,7 +24204,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
     async sendBufferCheckSummaryNotification(totalUpdates, createdCount, attemptedCount, updatedEntries, createdEntries) {
         const distribution = await this.getBufferClientDistribution();
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, (0, check_summary_notification_1.buildCheckSummaryNotification)({
+        const summary = (0, check_summary_notification_1.buildCheckSummaryNotification)({
             kind: 'Buffer',
             active: distribution.activeBufferClients,
             inactive: distribution.inactiveBufferClients,
@@ -24134,7 +24218,11 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             updatedEntries,
             createdEntries,
             perClientLimit: 10,
-        }));
+        });
+        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
+        if (eventsTable)
+            (summary.tables ??= []).push(eventsTable);
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), summary);
     }
 };
 exports.BufferClientService = BufferClientService;
@@ -35951,6 +36039,7 @@ const buffer_client_service_1 = __webpack_require__(/*! ../buffer-clients/buffer
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const check_summary_notification_1 = __webpack_require__(/*! ../shared/check-summary-notification */ "./src/components/shared/check-summary-notification.ts");
 const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
+const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
 const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
@@ -36250,7 +36339,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
         });
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+        await this.sendAccountNotice({
             severity: 'success',
             title: 'Promote Client Created',
             fields: [
@@ -36731,7 +36820,14 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
         this.isWarmupCheckProcessing = true;
         try {
-            await this._checkPromoteClientsInternal();
+            await (0, notice_batch_1.runWithNoticeBatch)(async (batch) => {
+                try {
+                    await this._checkPromoteClientsInternal();
+                }
+                finally {
+                    await this.flushLeftoverNoticeBatch(batch, 'Promote warmup run (summary not reached)');
+                }
+            });
         }
         catch (error) {
             const errMsg = (0, parseError_1.parseError)(error, 'checkPromoteClients').message;
@@ -36988,7 +37084,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             if (!enrolled)
                 return false;
             this.logger.log(`Created PromoteClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            await this.sendAccountNotice({
                 severity: 'success',
                 title: 'Promote Client Enrolled',
                 fields: [
@@ -37166,7 +37262,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     }
     async sendPromoteCheckSummaryNotification(totalUpdates, createdCount, attemptedCount, updatedEntries, createdEntries) {
         const distribution = await this.getPromoteClientDistribution();
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, (0, check_summary_notification_1.buildCheckSummaryNotification)({
+        const summary = (0, check_summary_notification_1.buildCheckSummaryNotification)({
             kind: 'Promote',
             active: distribution.activePromoteClients,
             inactive: distribution.inactivePromoteClients,
@@ -37179,7 +37275,11 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             perClient: distribution.distributionPerClient,
             updatedEntries,
             createdEntries,
-        }));
+        });
+        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
+        if (eventsTable)
+            (summary.tables ??= []).push(eventsTable);
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), summary);
     }
     removeFromPromoteMap(key) { this.removeFromJoinMap(key); }
     clearPromoteMap() { this.clearJoinMap(); }
@@ -40293,6 +40393,7 @@ const isDeadChannelError_1 = __importDefault(__webpack_require__(/*! ../../utils
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/components/Telegram/manager/helpers.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
+const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ./client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const organic_activity_1 = __webpack_require__(/*! ./organic-activity */ "./src/components/shared/organic-activity.ts");
 Object.defineProperty(exports, "performOrganicActivity", { enumerable: true, get: function () { return organic_activity_1.performOrganicActivity; } });
@@ -41022,7 +41123,7 @@ class BaseClientService {
                 else if (verificationStatus === 'foreign') {
                     this.logger.error(`${doc.mobile} has FOREIGN 2FA password — cannot control this account safely`);
                     const deactivated = await this.deactivateClient(doc.mobile, 'Foreign 2FA password — account unrecoverable if session dies', { permanent: true });
-                    this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Foreign 2FA password', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
+                    this.sendAccountNotice(this.warmupNotice('critical', 'Foreign 2FA password', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
                     return 0;
                 }
                 throw new Error('2FA password verification was inconclusive; will retry with normal warmup backoff');
@@ -41085,7 +41186,7 @@ class BaseClientService {
                 this.logger.error(`Session permanently lost for ${doc.mobile} during removeOtherAuths — marking inactive`);
                 const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Session lost', doc.mobile, [{ label: 'Cause', value: 'revoked during auth cleanup', code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorMsg?.substring(0, 120)));
+                this.sendAccountNotice(this.warmupNotice('critical', 'Session lost', doc.mobile, [{ label: 'Cause', value: 'revoked during auth cleanup', code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorMsg?.substring(0, 120)));
             }
             return 0;
         }
@@ -41102,6 +41203,20 @@ class BaseClientService {
             details,
             detailsTitle: 'Error message',
         };
+    }
+    sendAccountNotice(input) {
+        const batch = (0, notice_batch_1.currentNoticeBatch)();
+        if (batch && input.severity !== 'critical') {
+            batch.add(input);
+            return Promise.resolve(true);
+        }
+        return this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input);
+    }
+    async flushLeftoverNoticeBatch(batch, title) {
+        const table = (0, notice_batch_1.eventsToTable)(batch.drain(), 'Events');
+        if (!table)
+            return;
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), { severity: 'warning', title: `${this.clientType} · ${title}`, tables: [table] });
     }
     async processReadyRotationSweep(readyClients, clientMap, shouldSkip = () => false) {
         let attempted = 0;
@@ -41163,7 +41278,7 @@ class BaseClientService {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
             const rotated = await this.rotateSession(doc.mobile);
             if (rotated) {
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
+                this.sendAccountNotice(this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                 return { updateCount: 1, updateSummary: 'rotate_session' };
             }
             await this.update(doc.mobile, {
@@ -41171,7 +41286,7 @@ class BaseClientService {
                 failedUpdateAttempts: failedAttempts + 1,
                 lastUpdateFailure: new Date(),
             });
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
+            this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
             return { updateCount: 0, updateSummary: 'ready_rotation_attempt_failed' };
         }
         catch (error) {
@@ -41186,7 +41301,7 @@ class BaseClientService {
                 const reason = await this.buildPermanentAccountReason(errorDetails.message);
                 await this.deactivateClient(doc.mobile, reason, { permanent: true });
             }
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails.message?.substring(0, 120) || 'unknown'));
+            this.sendAccountNotice(this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails.message?.substring(0, 120) || 'unknown'));
             return { updateCount: 0, updateSummary: 'ready_rotation_attempt_failed' };
         }
         finally {
@@ -41255,7 +41370,7 @@ class BaseClientService {
         if (warmupAction.action === 'advance_to_ready') {
             await this.update(doc.mobile, { warmupPhase: warmup_phases_1.WarmupPhase.READY });
             this.logger.log(`Client ${doc.mobile} advanced to READY`);
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup ready', doc.mobile, [{ label: 'Channels', value: doc.channels || 0, code: false }], 'Eligible for rotation'));
+            this.sendAccountNotice(this.warmupNotice('success', 'Warmup ready', doc.mobile, [{ label: 'Channels', value: doc.channels || 0, code: false }], 'Eligible for rotation'));
             return { updateCount: 0, updateSummary: 'advance_to_ready' };
         }
         try {
@@ -41290,7 +41405,7 @@ class BaseClientService {
                 case 'set_2fa':
                     updateCount = await this.set2fa(doc, failedAttempts);
                     if (updateCount === 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'set_2fa', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
+                        this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'set_2fa', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'set_2fa' : null };
                 case 'remove_other_auths':
@@ -41302,14 +41417,14 @@ class BaseClientService {
                     });
                     updateCount = await this.removeOtherAuths(doc, failedAttempts);
                     if (updateCount === 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'remove_other_auths', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
+                        this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'remove_other_auths', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
                     this.logger.log(`Finished remove_other_auths for ${doc.mobile}: updateCount=${updateCount}`);
                     return { updateCount, updateSummary: updateCount > 0 ? 'remove_other_auths' : null };
                 case 'rotate_session':
                     updateCount = (await this.rotateSession(doc.mobile)) ? 1 : 0;
                     if (updateCount > 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
+                        this.sendAccountNotice(this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                     }
                     else {
                         await this.update(doc.mobile, {
@@ -41317,7 +41432,7 @@ class BaseClientService {
                             failedUpdateAttempts: (doc.failedUpdateAttempts || 0) + 1,
                             lastUpdateFailure: new Date(),
                         });
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: (doc.failedUpdateAttempts || 0) + 1, code: false }]));
+                        this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: (doc.failedUpdateAttempts || 0) + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'rotate_session' : null };
                 default:
@@ -41341,10 +41456,10 @@ class BaseClientService {
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 const reason = await this.buildPermanentAccountReason(errorDetails.message);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Warmup permanent error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorDetails.message?.substring(0, 120)));
+                this.sendAccountNotice(this.warmupNotice('critical', 'Warmup permanent error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorDetails.message?.substring(0, 120)));
             }
             else {
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails?.message?.substring(0, 120) || 'unknown'));
+                this.sendAccountNotice(this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails?.message?.substring(0, 120) || 'unknown'));
             }
             return { updateCount: 0 };
         }
@@ -52155,6 +52270,40 @@ function tryGetBotsServiceInstance() {
 
 /***/ },
 
+/***/ "./src/utils/channel-cycle.ts"
+/*!************************************!*\
+  !*** ./src/utils/channel-cycle.ts ***!
+  \************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.joinRowFromResponse = joinRowFromResponse;
+const clip = (text, max = 70) => {
+    const value = String(text ?? '').replace(/\s+/g, ' ').trim();
+    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+};
+function joinRowFromResponse(channel, response) {
+    const row = { Joined: 0, Failed: 0, 'Flood wait': 0, 'No response': 0, 'Old build': 0, 'Last error': '' };
+    if (!response)
+        row['No response'] = 1;
+    else {
+        const result = response.data?.result;
+        if (!result || typeof result !== 'object')
+            row['Old build'] = 1;
+        else if (result.ok === true)
+            row.Joined = 1;
+        else {
+            row[result.floodWait ? 'Flood wait' : 'Failed'] = 1;
+            row['Last error'] = clip(`${channel}: ${result.error ?? ''}`);
+        }
+    }
+    return row;
+}
+
+
+/***/ },
+
 /***/ "./src/utils/common.ts"
 /*!*****************************!*\
   !*** ./src/utils/common.ts ***!
@@ -53159,6 +53308,376 @@ class Logger extends common_1.Logger {
 }
 exports.Logger = Logger;
 const logger = new Logger();
+
+
+/***/ },
+
+/***/ "./src/utils/notice-batch.ts"
+/*!***********************************!*\
+  !*** ./src/utils/notice-batch.ts ***!
+  \***********************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.NoticeBatch = exports.BATCH_TABLE_MAX_ROWS = void 0;
+exports.splitNoticeTables = splitNoticeTables;
+exports.sendNoticeBatched = sendNoticeBatched;
+exports.currentNoticeBatch = currentNoticeBatch;
+exports.runWithNoticeBatch = runWithNoticeBatch;
+exports.eventsToTable = eventsToTable;
+const async_hooks_1 = __webpack_require__(/*! async_hooks */ "async_hooks");
+const rich_message_1 = __webpack_require__(/*! ./rich-message */ "./src/utils/rich-message.ts");
+exports.BATCH_TABLE_MAX_ROWS = 100;
+const MESSAGE_SOFT_LIMIT = rich_message_1.RICH_MESSAGE_MAX_CHARS - 2000;
+function splitNoticeTables(base) {
+    const chunks = [];
+    for (const table of base.tables ?? []) {
+        if (table.rows.length <= exports.BATCH_TABLE_MAX_ROWS) {
+            chunks.push(table);
+            continue;
+        }
+        const parts = Math.ceil(table.rows.length / exports.BATCH_TABLE_MAX_ROWS);
+        for (let i = 0; i < parts; i++) {
+            chunks.push({
+                ...table,
+                title: `${table.title ?? 'Rows'} (${i + 1}/${parts})`,
+                rows: table.rows.slice(i * exports.BATCH_TABLE_MAX_ROWS, (i + 1) * exports.BATCH_TABLE_MAX_ROWS),
+            });
+        }
+    }
+    const messages = [];
+    let current = [];
+    const fits = (tables) => (0, rich_message_1.formatRichMessageHtml)({ ...base, tables }).length <= MESSAGE_SOFT_LIMIT;
+    for (const chunk of chunks) {
+        if (current.length && !fits([...current, chunk])) {
+            messages.push({ ...base, tables: current });
+            current = [];
+        }
+        current.push(chunk);
+    }
+    if (current.length || !messages.length)
+        messages.push({ ...base, tables: current.length ? current : base.tables });
+    if (messages.length === 1)
+        return messages;
+    return messages.map((m, i) => ({
+        ...m,
+        title: `${base.title ?? 'Notification'} (${i + 1}/${messages.length})`,
+        ...(i === 0 ? {} : { fields: undefined, summary: undefined }),
+    }));
+}
+async function sendNoticeBatched(send, base) {
+    const messages = splitNoticeTables(base);
+    let sent = 0;
+    for (const message of messages) {
+        try {
+            await send(message);
+            sent++;
+        }
+        catch (error) {
+            console.error('Batched notice failed:', error instanceof Error ? error.message : String(error));
+        }
+    }
+    return sent;
+}
+const SEVERITY_LABEL = {
+    success: 'OK',
+    info: 'Info',
+    warning: 'Warning',
+    error: 'Error',
+    critical: 'Critical',
+};
+function fieldText(field) {
+    return `${field.label}: ${String(field.value ?? '')}`;
+}
+class NoticeBatch {
+    constructor() {
+        this.events = [];
+    }
+    add(input) {
+        this.events.push(input);
+    }
+    get size() {
+        return this.events.length;
+    }
+    drain() {
+        const out = this.events;
+        this.events = [];
+        return out;
+    }
+}
+exports.NoticeBatch = NoticeBatch;
+const storage = new async_hooks_1.AsyncLocalStorage();
+function currentNoticeBatch() {
+    return storage.getStore();
+}
+function runWithNoticeBatch(fn) {
+    const batch = new NoticeBatch();
+    return storage.run(batch, () => fn(batch));
+}
+function eventsToTable(events, title = 'Account events') {
+    if (!events.length)
+        return null;
+    const rows = events.map((event) => {
+        const fields = event.fields ?? [];
+        const pick = (...labels) => fields.find((f) => labels.includes(f.label.toLowerCase()))?.value;
+        const rest = fields.filter((f) => !['mobile', 'client id'].includes(f.label.toLowerCase()));
+        const detail = [event.summary, ...rest.map(fieldText), event.details && String(event.details)]
+            .filter((x) => typeof x === 'string' && x.length > 0)
+            .join('; ')
+            .slice(0, 160);
+        return [
+            String(pick('client id') ?? '-'),
+            String(pick('mobile') ?? '-'),
+            event.title ?? '-',
+            SEVERITY_LABEL[event.severity ?? 'info'] ?? 'Info',
+            detail || '-',
+        ];
+    });
+    return { title: `${title} (${rows.length})`, columns: ['Client', 'Mobile', 'Event', 'Status', 'Detail'], rows };
+}
+
+
+/***/ },
+
+/***/ "./src/utils/notice-digest.ts"
+/*!************************************!*\
+  !*** ./src/utils/notice-digest.ts ***!
+  \************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.NoticeDigestFlusher = exports.DIGEST_MAX_AGE_MS = exports.DIGEST_QUIET_MS = exports.FLUSHING_MARK = exports.DIGEST_LOCK_TTL_S = exports.DIGEST_LOCK_PREFIX = exports.DIGEST_TTL_S = exports.DIGEST_ENTRY_MAX_BYTES = exports.DIGEST_LIST_CAP = exports.DIGEST_ALIVE_TTL_S = exports.DIGEST_ALIVE_KEY = exports.DIGEST_PREFIX = void 0;
+exports.pushDigestEntries = pushDigestEntries;
+exports.mergeByClient = mergeByClient;
+exports.buildDigestNotice = buildDigestNotice;
+const notice_batch_1 = __webpack_require__(/*! ./notice-batch */ "./src/utils/notice-batch.ts");
+exports.DIGEST_PREFIX = 'notice-digest::';
+exports.DIGEST_ALIVE_KEY = 'notice-digest::flusher-alive';
+exports.DIGEST_ALIVE_TTL_S = 900;
+exports.DIGEST_LIST_CAP = 2000;
+exports.DIGEST_ENTRY_MAX_BYTES = 4096;
+exports.DIGEST_TTL_S = 24 * 60 * 60;
+exports.DIGEST_LOCK_PREFIX = 'notice-digest-lock::';
+exports.DIGEST_LOCK_TTL_S = 120;
+exports.FLUSHING_MARK = '::flushing::';
+const MAX_KEYS_PER_RUN = 200;
+const MAX_COLUMNS = 20;
+const SCAN_COUNT = 100;
+exports.DIGEST_QUIET_MS = 4 * 60 * 1000;
+exports.DIGEST_MAX_AGE_MS = 60 * 60 * 1000;
+const MAX_REQUEUES = 1;
+const KEY_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+async function pushDigestEntries(redis, category, key, entries) {
+    try {
+        if (!KEY_PATTERN.test(category) || !KEY_PATTERN.test(key) || entries.length === 0)
+            return false;
+        const listKey = `${exports.DIGEST_PREFIX}${category}::${key}`;
+        const tx = redis.multi();
+        for (const entry of entries) {
+            const json = JSON.stringify({ ...entry, at: entry.at ?? Date.now() });
+            if (Buffer.byteLength(json) > exports.DIGEST_ENTRY_MAX_BYTES)
+                return false;
+            tx.rpush(listKey, json);
+        }
+        tx.ltrim(listKey, -exports.DIGEST_LIST_CAP, -1);
+        tx.expire(listKey, exports.DIGEST_TTL_S);
+        const results = await tx.exec();
+        return !!results && !results.some(([error]) => error);
+    }
+    catch {
+        return false;
+    }
+}
+function parseEntries(raw) {
+    const out = [];
+    for (const line of raw) {
+        try {
+            const e = JSON.parse(line);
+            if (e && typeof e === 'object' && typeof e.clientId === 'string' && e.row && typeof e.row === 'object') {
+                out.push({ ...e, at: Number(e.at) || 0 });
+            }
+        }
+        catch {
+        }
+    }
+    return out;
+}
+function mergeByClient(entries) {
+    const byClient = new Map();
+    for (const e of [...entries].sort((a, b) => a.at - b.at)) {
+        const prev = byClient.get(e.clientId);
+        if (!prev || e.merge !== 'sum') {
+            byClient.set(e.clientId, { ...e, row: { ...e.row } });
+            continue;
+        }
+        const row = { ...prev.row };
+        for (const [k, v] of Object.entries(e.row)) {
+            if (typeof v === 'number' && typeof row[k] === 'number')
+                row[k] = row[k] + v;
+            else if (typeof v === 'number' && row[k] === undefined)
+                row[k] = v;
+            else if (v !== '' && v !== undefined)
+                row[k] = v;
+        }
+        byClient.set(e.clientId, { ...e, row });
+    }
+    return [...byClient.values()];
+}
+function buildDigestNotice(all) {
+    const entries = mergeByClient(all);
+    const first = all[0];
+    const columns = [];
+    for (const e of entries) {
+        for (const k of Object.keys(e.row)) {
+            if (!columns.includes(k) && columns.length < MAX_COLUMNS - 1)
+                columns.push(k);
+        }
+    }
+    const isNumeric = (c) => entries.every((e) => e.row[c] === undefined || typeof e.row[c] === 'number');
+    const requested = [...all].reverse().find((e) => e.sortBy)?.sortBy;
+    const sortCol = requested && columns.includes(requested) && isNumeric(requested) ? requested : columns.find(isNumeric);
+    const num = (e) => (sortCol ? Number(e.row[sortCol] ?? -Infinity) : 0);
+    const sorted = [...entries].sort((a, b) => num(b) - num(a) || a.clientId.localeCompare(b.clientId));
+    const rows = sorted.map((e) => [e.clientId, ...columns.map((c) => e.row[c] ?? '')]);
+    const numeric = columns.map((c, i) => ({ c, i: i + 1 })).filter(({ c }) => isNumeric(c)).map(({ i }) => i);
+    const clients = new Set(entries.map((e) => e.clientId)).size;
+    return {
+        severity: 'info',
+        title: first.title,
+        tables: [{ columns: [`Client (${clients})`, ...columns], rows, numeric }],
+    };
+}
+class NoticeDigestFlusher {
+    constructor(getRedis, send, isKnownCategory, log = console) {
+        this.getRedis = getRedis;
+        this.send = send;
+        this.isKnownCategory = isKnownCategory;
+        this.log = log;
+    }
+    async runOnce(now = Date.now()) {
+        let sent = 0;
+        let redis;
+        try {
+            redis = this.getRedis();
+            await redis.set(exports.DIGEST_ALIVE_KEY, String(now), 'EX', exports.DIGEST_ALIVE_TTL_S);
+        }
+        catch (error) {
+            this.log.warn(`notice digest: Redis unavailable: ${error instanceof Error ? error.message : String(error)}`);
+            return 0;
+        }
+        let keys = [];
+        try {
+            let cursor = '0';
+            do {
+                const [next, batch] = await redis.scan(cursor, 'MATCH', `${exports.DIGEST_PREFIX}*`, 'COUNT', SCAN_COUNT);
+                cursor = next;
+                keys.push(...batch);
+            } while (cursor !== '0' && keys.length < MAX_KEYS_PER_RUN);
+        }
+        catch (error) {
+            this.log.warn(`notice digest: scan failed: ${error instanceof Error ? error.message : String(error)}`);
+            return 0;
+        }
+        keys = [...new Set(keys)].filter((k) => k !== exports.DIGEST_ALIVE_KEY).slice(0, MAX_KEYS_PER_RUN);
+        for (const key of keys) {
+            try {
+                sent += await this.flushKey(redis, key, now);
+            }
+            catch (error) {
+                this.log.error(`notice digest: flushing ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        return sent;
+    }
+    async flushKey(redis, key, now) {
+        const markAt = key.indexOf(exports.FLUSHING_MARK);
+        const orphan = markAt >= 0;
+        const baseKey = orphan ? key.slice(0, markAt) : key;
+        if (orphan) {
+            const stamp = Number(key.slice(markAt + exports.FLUSHING_MARK.length));
+            if (!Number.isFinite(stamp) || now - stamp < exports.DIGEST_LOCK_TTL_S * 1000)
+                return 0;
+        }
+        else if (!(await this.isDue(redis, key, now))) {
+            return 0;
+        }
+        const lockKey = `${exports.DIGEST_LOCK_PREFIX}${baseKey}`;
+        if ((await redis.set(lockKey, String(now), 'EX', exports.DIGEST_LOCK_TTL_S, 'NX')) !== 'OK')
+            return 0;
+        try {
+            let workKey = key;
+            if (!orphan) {
+                workKey = `${key}${exports.FLUSHING_MARK}${now}`;
+                try {
+                    await redis.rename(key, workKey);
+                }
+                catch {
+                    return 0;
+                }
+            }
+            const entries = parseEntries(await redis.lrange(workKey, 0, -1));
+            const sent = entries.length ? await this.post(redis, baseKey, entries) : 0;
+            await redis.del(workKey);
+            return sent;
+        }
+        finally {
+            await redis.del(lockKey).catch(() => undefined);
+        }
+    }
+    async isDue(redis, key, now) {
+        const [firstRaw, lastRaw] = [await redis.lindex(key, 0), await redis.lindex(key, -1)];
+        const at = (raw) => {
+            try {
+                return Number(JSON.parse(raw ?? '{}').at) || 0;
+            }
+            catch {
+                return 0;
+            }
+        };
+        if (!firstRaw)
+            return false;
+        let quiet = exports.DIGEST_QUIET_MS;
+        try {
+            quiet = Number(JSON.parse(lastRaw ?? '{}').quietMs) || exports.DIGEST_QUIET_MS;
+        }
+        catch { }
+        return now - at(lastRaw) >= Math.min(quiet, exports.DIGEST_MAX_AGE_MS) || now - at(firstRaw) >= exports.DIGEST_MAX_AGE_MS;
+    }
+    async post(redis, baseKey, entries) {
+        const category = baseKey.slice(exports.DIGEST_PREFIX.length).split('::')[0];
+        let ok = false;
+        if (!this.isKnownCategory(category)) {
+            this.log.error(`notice digest: unknown category "${category}" for ${baseKey}`);
+        }
+        else {
+            const input = buildDigestNotice(entries);
+            let delivered = 0;
+            const messages = await (0, notice_batch_1.sendNoticeBatched)(async (m) => {
+                const result = await this.send(category, m);
+                if (result === false)
+                    throw new Error('send returned false');
+                delivered++;
+            }, input);
+            ok = messages > 0 && delivered > 0;
+            if (ok)
+                return messages;
+        }
+        const keep = entries.filter((e) => (e.retry ?? 0) < MAX_REQUEUES).map((e) => ({ ...e, retry: (e.retry ?? 0) + 1 }));
+        if (keep.length < entries.length)
+            this.log.error(`notice digest: dropped ${entries.length - keep.length} entries of ${baseKey} after repeated failure`);
+        if (keep.length) {
+            const tx = redis.multi();
+            tx.rpush(baseKey, ...keep.map((e) => JSON.stringify(e)));
+            tx.ltrim(baseKey, -exports.DIGEST_LIST_CAP, -1);
+            tx.expire(baseKey, exports.DIGEST_TTL_S);
+            await tx.exec();
+        }
+        return 0;
+    }
+}
+exports.NoticeDigestFlusher = NoticeDigestFlusher;
 
 
 /***/ },
@@ -55263,6 +55782,16 @@ module.exports = require("telegram/sessions");
 (module) {
 
 module.exports = require("telegram/tl");
+
+/***/ },
+
+/***/ "async_hooks"
+/*!******************************!*\
+  !*** external "async_hooks" ***!
+  \******************************/
+(module) {
+
+module.exports = require("async_hooks");
 
 /***/ },
 
