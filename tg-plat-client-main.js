@@ -90033,6 +90033,10 @@ async function deleteChat(chatId) {
         return false;
     }
 }
+/** GramJS cannot address a bare user id this session has never seen. */
+function isUnknownPeer(error) {
+    return /Could not find the input entity/i.test(String(error?.message ?? error));
+}
 async function blockUser(chatId) {
     try {
         const db = _core_dbservice__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
@@ -90045,6 +90049,12 @@ async function blockUser(chatId) {
         return true;
     }
     catch (error) {
+        if (isUnknownPeer(error)) {
+            // This account never talked to the user (e.g. their chat was with the account before a swap):
+            // replies are already off and there is no dialog to block.
+            logger.log(`User ${chatId} is unknown to this account: replies disabled, nothing to block.`);
+            return true;
+        }
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to block user");
         await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:blockUser');
         return false;
@@ -90060,6 +90070,10 @@ async function unblockUser(chatId) {
         return true;
     }
     catch (error) {
+        if (isUnknownPeer(error)) {
+            logger.log(`User ${chatId} is unknown to this account: nothing to unblock.`);
+            return true;
+        }
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to unblock user");
         await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:unblockUser');
         return false;
