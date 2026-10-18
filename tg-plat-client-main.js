@@ -20339,6 +20339,14 @@ class RedisClient {
             : JSON.stringify(value);
         return client.hset(key, field, val);
     }
+    /** One MULTI: RPUSH, keep only the newest `cap` entries, refresh the TTL. Throws unless all three applied. */
+    static async digestPush(key, value, cap, ttlSeconds) {
+        const client = await RedisClient.getReadyClient();
+        const results = await client.multi().rpush(key, value).ltrim(key, -cap, -1).expire(key, ttlSeconds).exec();
+        if (!results || results.some(([error]) => error)) {
+            throw new Error("digest push failed");
+        }
+    }
     static async hget(key, field) {
         const client = await RedisClient.getReadyClient();
         return client.hget(key, field);
@@ -20480,19 +20488,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)
 /* harmony export */ });
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! axios */ "axios");
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! form-data */ "form-data");
-/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+/* harmony import */ var _notice_digest__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notice-digest */ "../../packages/tg-core/src/utils/notice-digest.ts");
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! axios */ "axios");
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! form-data */ "form-data");
+/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
 
 
 
@@ -20500,7 +20509,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-core:telegram-bots-config');
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-core:telegram-bots-config');
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -20638,7 +20648,7 @@ class BotConfig {
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to initialize BotConfig', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to initialize BotConfig', false);
         }
         finally {
             this.initialized = true;
@@ -20667,7 +20677,7 @@ class BotConfig {
             this.carryBotState(this.categoryMap, next);
             this.categoryMap = next;
         })()
-            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
+            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
     /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
@@ -20804,7 +20814,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
             return null;
         }
     }
@@ -20852,7 +20862,7 @@ class BotConfig {
             return '';
         }
         try {
-            const res = await axios__WEBPACK_IMPORTED_MODULE_0___default().get(`https://api.telegram.org/bot${token}/getMe`, {
+            const res = await axios__WEBPACK_IMPORTED_MODULE_1___default().get(`https://api.telegram.org/bot${token}/getMe`, {
                 timeout: 5000 // 5 second timeout
             });
             return res.data?.ok ? res.data.result.username : '';
@@ -20865,7 +20875,7 @@ class BotConfig {
                 logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
                 return '';
             }
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error fetching bot username:', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
     }
@@ -20934,7 +20944,7 @@ class BotConfig {
         return error;
     }
     botSendFailureDetails(error) {
-        if (axios__WEBPACK_IMPORTED_MODULE_0___default().isAxiosError(error)) {
+        if (axios__WEBPACK_IMPORTED_MODULE_1___default().isAxiosError(error)) {
             return {
                 status: error.response?.status ?? 'no-status',
                 description: String(error.response?.data?.description || error.message),
@@ -20968,7 +20978,7 @@ class BotConfig {
         entry.lastUsed = new Date();
         this.pendingUsage.set(key, entry);
         if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_4__.scheduleUnrefTimeout)(() => {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_5__.scheduleUnrefTimeout)(() => {
                 this.usageFlushTimer = null;
                 void this.flushBotUsage();
             }, this.USAGE_FLUSH_MS);
@@ -21011,7 +21021,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
         }
     }
     /**
@@ -21052,7 +21062,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = (process.env.clientId ?? 'unknown').toUpperCase();
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
     }
     prefixMessage(message, parseMode) {
         return `${this.clientPrefix(parseMode)}: ${message}`;
@@ -21070,20 +21080,20 @@ class BotConfig {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
     /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
     richMessageHtml(message, options, category) {
         const input = { ...message };
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
-        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.buttonsFromReplyMarkup)(options.replyMarkup);
+        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.buttonsFromReplyMarkup)(options.replyMarkup);
         if (markupButtons.length)
             input.buttons = [...(input.buttons ?? []), ...markupButtons];
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
     isBotOrChannelFailure(error) {
@@ -21101,6 +21111,13 @@ class BotConfig {
     }
     /** Send a structured notice as a Bot API rich message (classic sendMessage only as the 400/404 fallback). */
     async sendMessage(category, message, options = {}) {
+        // Opt-in digest (message.digest): queued in Redis for the UMS flusher, which posts one table.
+        // Anything that cannot be queued falls through to the immediate send below.
+        if (message.digest && !options.replyToMessageId && (await (0,_notice_digest__WEBPACK_IMPORTED_MODULE_0__.tryDigest)(category, message)))
+            return true;
+        return this.sendMessageNow(category, message, options);
+    }
+    async sendMessageNow(category, message, options = {}) {
         const richHtml = this.richMessageHtml(message, options, category);
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
@@ -21122,7 +21139,7 @@ class BotConfig {
             body.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: options.allowSendingWithoutReply === true };
         }
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, body, { timeout: 10000 });
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, body, { timeout: 10000 });
             if (response.data?.ok === true) {
                 this.recordSuccessfulBotSend(category, token, channelId);
                 const messageId = response.data?.result?.message_id;
@@ -21142,7 +21159,7 @@ class BotConfig {
             if (this.isBotOrChannelFailure(error)) {
                 if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                     data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
-                    return this.sendMessage(category, message, options);
+                    return this.sendMessageNow(category, message, options);
                 }
                 return false;
             }
@@ -21210,7 +21227,7 @@ class BotConfig {
         const url = `https://api.telegram.org/bot${token}/sendMessage`;
         // Try to send the message
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, params, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, params, {
                 timeout: 10000 // 10 second timeout
             });
             if (response.data?.ok === true) {
@@ -21261,8 +21278,8 @@ class BotConfig {
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
         const input = { ...card, ...(category === ChannelCategory.CLIENT_UPDATES ? { houseStyle: true } : {}) };
-        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
-        const form = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
+        const form = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         form.append('chat_id', channelId);
         form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
         form.append('shotfile', photo, 'photo.jpg');
@@ -21271,7 +21288,7 @@ class BotConfig {
         if (options.replyToMessageId)
             form.append('reply_parameters', JSON.stringify({ message_id: options.replyToMessageId, allow_sending_without_reply: true }));
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
                 timeout: 30000,
                 headers: { ...form.getHeaders() },
             });
@@ -21433,7 +21450,7 @@ class BotConfig {
             return false;
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
-        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
         const mediaArray = [];
         for (let i = 0; i < mediaContent.length; i++) {
@@ -21467,7 +21484,7 @@ class BotConfig {
         formData.append('media', JSON.stringify(mediaArray));
         const url = `https://api.telegram.org/bot${token}/sendMediaGroup`;
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, formData, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
                 timeout: 30000,
                 headers: {
                     ...formData.getHeaders(),
@@ -21505,7 +21522,7 @@ class BotConfig {
             return false;
         const token = data.botTokens[botIndex];
         const channelId = String(options.targetChannelId || data.channelId);
-        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
         // Determine media field name based on method
         const mediaField = method === 'sendVideoNote'
@@ -21655,7 +21672,7 @@ class BotConfig {
         }
         const url = `https://api.telegram.org/bot${token}/${method}`;
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, formData, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
                 timeout: 30000, // 30 second timeout for media uploads
                 headers: {
                     ...formData.getHeaders(),
@@ -21668,7 +21685,7 @@ class BotConfig {
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
             if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
@@ -24076,6 +24093,108 @@ function naturalizeText(text, options = {}) {
     // 12. Clean up excessive whitespace
     result = preserveParagraphBreaks(result);
     return result.trim();
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/notice-digest.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/notice-digest.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DIGEST_ALIVE_CACHE_MS: () => (/* binding */ DIGEST_ALIVE_CACHE_MS),
+/* harmony export */   DIGEST_ENTRY_MAX_BYTES: () => (/* binding */ DIGEST_ENTRY_MAX_BYTES),
+/* harmony export */   DIGEST_FLUSHER_ALIVE_KEY: () => (/* binding */ DIGEST_FLUSHER_ALIVE_KEY),
+/* harmony export */   DIGEST_LIST_CAP: () => (/* binding */ DIGEST_LIST_CAP),
+/* harmony export */   DIGEST_TTL_SECONDS: () => (/* binding */ DIGEST_TTL_SECONDS),
+/* harmony export */   resetNoticeDigestCache: () => (/* binding */ resetNoticeDigestCache),
+/* harmony export */   tryDigest: () => (/* binding */ tryDigest)
+/* harmony export */ });
+/* harmony import */ var _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+
+/**
+ * Opt-in digest of routine per-client notices (see RichNotificationInput.digest). A client queues
+ * the notice in Redis; the flusher in the UMS process posts one table per (category, key).
+ *
+ * Bounds: list capped at DIGEST_LIST_CAP entries, each at most DIGEST_ENTRY_MAX_BYTES, key TTL 24 h.
+ * Never loses a notice: any problem (no digest key, severe notice, flusher not alive, Redis error)
+ * returns false and the caller sends it directly.
+ */
+const DIGEST_LIST_CAP = 2000;
+const DIGEST_ENTRY_MAX_BYTES = 4096;
+const DIGEST_TTL_SECONDS = 24 * 60 * 60;
+const DIGEST_FLUSHER_ALIVE_KEY = "notice-digest::flusher-alive";
+const DIGEST_ALIVE_CACHE_MS = 60000;
+const KEY_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+let aliveCache = { checkedAt: 0, alive: false };
+function resetNoticeDigestCache() {
+    aliveCache = { checkedAt: 0, alive: false };
+}
+/** True when the flusher has touched its heartbeat key recently (checked at most once a minute). */
+async function flusherAlive() {
+    const now = Date.now();
+    if (now - aliveCache.checkedAt < DIGEST_ALIVE_CACHE_MS)
+        return aliveCache.alive;
+    let alive = false;
+    try {
+        alive = await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.exists(DIGEST_FLUSHER_ALIVE_KEY);
+    }
+    catch {
+        alive = false;
+    }
+    aliveCache = { checkedAt: now, alive };
+    return alive;
+}
+function rowFrom(notice) {
+    if (notice.digest?.row)
+        return notice.digest.row;
+    const row = {};
+    for (const field of notice.fields ?? [])
+        row[field.label] = String(field.value ?? "");
+    return row;
+}
+function buildEntry(notice, maxCell, withSummary) {
+    const row = {};
+    for (const [k, v] of Object.entries(rowFrom(notice))) {
+        row[k.slice(0, 40)] = typeof v === "number" ? v : String(v).slice(0, maxCell);
+    }
+    return JSON.stringify({
+        clientId: process.env.clientId || "unknown",
+        at: Date.now(),
+        title: String(notice.title ?? "Notification").slice(0, 120),
+        row,
+        ...(notice.digest?.merge ? { merge: notice.digest.merge } : {}),
+        ...(notice.digest?.quietMs ? { quietMs: notice.digest.quietMs } : {}),
+        ...(notice.digest?.sortBy ? { sortBy: String(notice.digest.sortBy).slice(0, 40) } : {}),
+        ...(withSummary && notice.summary ? { summary: String(notice.summary).slice(0, 300) } : {}),
+    });
+}
+/** Queue `notice` for the digest. Returns true only when it was queued; false means "send it directly". */
+async function tryDigest(category, notice) {
+    try {
+        const key = notice.digest?.key;
+        if (!key || !KEY_PATTERN.test(key) || !KEY_PATTERN.test(category))
+            return false;
+        if (notice.severity === "error" || notice.severity === "critical")
+            return false;
+        if (!(await flusherAlive()))
+            return false;
+        let entry = buildEntry(notice, 300, true);
+        if (Buffer.byteLength(entry) > DIGEST_ENTRY_MAX_BYTES)
+            entry = buildEntry(notice, 80, false);
+        if (Buffer.byteLength(entry) > DIGEST_ENTRY_MAX_BYTES)
+            return false;
+        await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.digestPush(`notice-digest::${category}::${key}`, entry, DIGEST_LIST_CAP, DIGEST_TTL_SECONDS);
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
 
 
@@ -47273,6 +47392,56 @@ async function stopJobs() {
 
 /***/ },
 
+/***/ "./src/core/leave-cycle-notice.ts"
+/*!****************************************!*\
+  !*** ./src/core/leave-cycle-notice.ts ***!
+  \****************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LEAVE_CYCLE_DIGEST_KEY: () => (/* binding */ LEAVE_CYCLE_DIGEST_KEY),
+/* harmony export */   buildLeaveCycleNotice: () => (/* binding */ buildLeaveCycleNotice),
+/* harmony export */   reportLeaveCycle: () => (/* binding */ reportLeaveCycle)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+
+
+/** Digest key shared with the CMS flusher: one table, one row per client. */
+const LEAVE_CYCLE_DIGEST_KEY = "leave-cycle";
+function buildLeaveCycleNotice(results, error) {
+    const left = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok).length;
+    const lastError = String(error ?? [...results].reverse().find((r) => !r.ok && r.error)?.error ?? "").replace(/\s+/g, " ").slice(0, 70);
+    const status = error ? "error" : failed > 0 ? "some failed" : "done";
+    const row = { Left: left, Failed: failed, Status: status, "Last error": lastError };
+    return {
+        severity: error || failed > 0 ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
+        title: "Channel leave cycle",
+        fields: Object.entries(row).map(([label, value]) => ({ label, value, code: false })),
+        // Sweeps end hours apart: hold the list up to an hour so clients land in as few tables as possible.
+        digest: { key: LEAVE_CYCLE_DIGEST_KEY, row, quietMs: 60 * 60 * 1000 },
+    };
+}
+/**
+ * One notice per client per leave sweep (instead of one per channel). It joins the digest when the
+ * UMS flusher is alive (CMS then posts a single table for all clients); otherwise it is sent as is.
+ * Never throws.
+ */
+async function reportLeaveCycle(results, error) {
+    try {
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.CHANNEL_NOTIFICATIONS, buildLeaveCycleNotice(results, error));
+    }
+    catch (err) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(err, "LeaveCycle.notice", false);
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/core/permanent-failure/fingerprint.ts"
 /*!***************************************************!*\
   !*** ./src/core/permanent-failure/fingerprint.ts ***!
@@ -48708,7 +48877,11 @@ async function getChannelEntity(client, channelId) {
         return undefined;
     }
 }
-async function joinChannels(client, str, sendInChannel = true) {
+/**
+ * `collect`: when given, every attempt is pushed to it (the return value is unchanged). Pass
+ * `sendInChannel = false` together with `collect` to report through the caller instead of the bot.
+ */
+async function joinChannels(client, str, sendInChannel = true, collect) {
     const channels = str.split('|');
     for (let i = 0; i < channels.length; i++) {
         if (i !== 0) {
@@ -48721,6 +48894,7 @@ async function joinChannels(client, str, sendInChannel = true) {
             let joinResult = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.channels.JoinChannel({
                 channel: channel,
             }));
+            collect?.push({ operation: "join", channel, ok: true });
             if (sendInChannel) {
                 await sendJoinResultMessage("Successfully joined group: ", channel);
             }
@@ -48730,15 +48904,19 @@ async function joinChannels(client, str, sendInChannel = true) {
             logger.warn(`JOIN failed | target=${channel || "<empty>"} | position=${i + 1}/${channels.length} | ` +
                 `error=${errorDetails.message} | continuing=${i < channels.length - 1}`);
             if (errorDetails.error == 'FloodWaitError') {
+                collect?.push({ operation: "join", channel, ok: false, error: String(errorDetails.message), floodWait: true });
                 return 'stop';
             }
+            collect?.push({ operation: "join", channel, ok: false, error: String(errorDetails.message) });
             if (sendInChannel) {
                 await sendJoinResultMessage("Failed to joine group: ", `${channel} | ${errorDetails.message}`);
             }
         }
     }
 }
-async function leaveChannel(client, channel) {
+async function leaveChannel(client, channel, opts = {}) {
+    const notify = opts.notify !== false;
+    const label = String(channel?.username ? `@${channel.username}` : channel?.channelId ?? channel?.title ?? "");
     try {
         // Leaving is entity-type-specific and the two RPCs are NOT interchangeable:
         //   Api.Channel (broadcast channel OR supergroup) -> channels.LeaveChannel (needs InputChannel)
@@ -48766,23 +48944,31 @@ async function leaveChannel(client, channel) {
                 channel: (entity ?? target),
             }));
         }
-        await sendJoinResultMessage(`Successfully LEFT group: @${channel?.username}`, channel?.title);
+        if (notify)
+            await sendJoinResultMessage(`Successfully LEFT group: @${channel?.username}`, channel?.title);
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__.sleep)(120000);
+        return { operation: "leave", channel: label, ok: true };
     }
     catch (error) {
         const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, undefined, false);
-        await sendJoinResultMessage(`Failed to Leave group: @${channel?.username}`, `${channel?.title} | ${errorDetails.message}`);
+        if (notify)
+            await sendJoinResultMessage(`Failed to Leave group: @${channel?.username}`, `${channel?.title} | ${errorDetails.message}`);
+        return { operation: "leave", channel: label, ok: false, error: String(errorDetails.message) };
     }
 }
-async function leaveChannels(client) {
+async function leaveChannels(client, opts = {}) {
     const dialogManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_25__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
     const dialogs = await dialogManager.getChannelInfo();
+    const results = [];
     for (let channel of dialogs.channels) {
         if (channel && (channel.restricted || !channel.canSendMsgs)) {
             logger.log("Leaving Channel:", channel?.title);
-            await leaveChannel(client, channel);
+            const outcome = await leaveChannel(client, channel, opts);
+            if (outcome)
+                results.push(outcome);
         }
     }
+    return results;
 }
 async function setTyping(entityLike, sleepTime = 2000) {
     try {
@@ -50909,6 +51095,7 @@ function notifyStats(notification, context) {
                 tables: notification.tables,
                 details: notification.details,
                 tags: ["stats", "tg-aut"],
+                digest: notification.digest,
             });
             if (sent === false) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(new Error("Stats notification returned false"), context, false);
@@ -50972,6 +51159,18 @@ async function getUserStats(isTemp, silent = false) {
     if (!silent) {
         notifyStats({
             title: "User stats",
+            digest: {
+                key: "tg-aut-user-stats",
+                sortBy: "Users",
+                row: {
+                    Messages: totalCount,
+                    Users: total,
+                    "New users": totalNew,
+                    Paid: totalPaid,
+                    "Pending demos": totalpendingDemos,
+                    Conversion: `${stats.conversionRate}% (new ${stats.newUserConversionRate}%)`,
+                },
+            },
             fields: [
                 { label: "Messages", value: totalCount },
                 { label: "Conversion", value: `${stats.conversionRate}% (new ${stats.newUserConversionRate}%)`, code: false },
@@ -51038,6 +51237,15 @@ async function getDemoStats(isTemp, silent = false) {
     if (!silent) {
         notifyStats({
             title: "Demo stats",
+            digest: {
+                key: "tg-aut-demo-stats",
+                row: {
+                    "Paid users": totalPaid,
+                    "New users": totalNew,
+                    "Demos today": newPaidDemo + oldPaidDemo,
+                    "Pending demos": totalpendingDemos,
+                },
+            },
             fields: [
                 { label: "Paid users", value: totalPaid },
                 { label: "New users", value: totalNew },
@@ -79226,14 +79434,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../index */ "./src/index.ts");
 /* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
 /* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
-/* harmony import */ var _utils_channelChecker__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../utils/channelChecker */ "./src/utils/channelChecker.ts");
-/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _core_leave_cycle_notice__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../core/leave-cycle-notice */ "./src/core/leave-cycle-notice.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../middlewares/leader.middleware */ "./src/middlewares/leader.middleware.ts");
+/* harmony import */ var _utils_channelChecker__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../utils/channelChecker */ "./src/utils/channelChecker.ts");
+/* harmony import */ var _state_UserState__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../state/UserState */ "./src/state/UserState.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
 
 
 
@@ -79251,7 +79460,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-aut:admin-routes");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:admin-routes");
 const router = (0,express__WEBPACK_IMPORTED_MODULE_0__.Router)();
 function readQueryString(value) {
     const raw = Array.isArray(value) ? value[0] : value;
@@ -79289,28 +79499,28 @@ async function sendAdminNotification(context, notification) {
         if (sent === false) {
             delivery.sent = false;
             delivery.error = "Admin route notification returned false";
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(new Error(delivery.error), context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(new Error(delivery.error), context, false);
         }
     }
     catch (error) {
         delivery.sent = false;
         delivery.error = errorMessage(error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, context, false);
     }
     return delivery;
 }
 async function buildDatabaseHealthEvidence(requestId) {
-    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.buildRouteComponentEvidence)("database.mongo", requestId);
+    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.buildRouteComponentEvidence)("database.mongo", requestId);
 }
 async function buildReplierHealthEvidence(requestId) {
-    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.buildRouteComponentEvidence)("telegram.replier", requestId);
+    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.buildRouteComponentEvidence)("telegram.replier", requestId);
 }
 async function buildTelegramHealthEvidence(requestId) {
-    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.buildRouteComponentEvidence)("telegram.connection", requestId);
+    return (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.buildRouteComponentEvidence)("telegram.connection", requestId);
 }
 async function sendDatabaseUnavailable(req, res, operation, readOnly = false) {
     const evidence = await buildDatabaseHealthEvidence(req.requestId);
-    res.status(evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(evidence.check) : 503).json({
+    res.status(evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(evidence.check) : 503).json({
         operation,
         readOnly,
         success: false,
@@ -79322,7 +79532,7 @@ async function sendDatabaseUnavailable(req, res, operation, readOnly = false) {
     });
 }
 function sendDatabaseAdminFailure(req, res, operation, error, errorText, summary, readOnly = false) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -79335,7 +79545,7 @@ function sendDatabaseAdminFailure(req, res, operation, error, errorText, summary
         readOnly,
         success: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.routeHealthErrorMessage)(error),
         health: evidence.health,
         check: evidence.check,
         recoveryPlan: evidence.recoveryPlan,
@@ -79353,13 +79563,13 @@ async function sendStatsResponse(req, res, options) {
         res.json(stats);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, options.failureContext);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, options.failureContext);
         sendDatabaseAdminFailure(req, res, options.operation, error, options.failureText, options.summary, true);
     }
 }
 async function sendTelegramUnavailable(req, res, operation, readOnly = false) {
     const evidence = await buildTelegramHealthEvidence(req.requestId);
-    res.status(evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(evidence.check) : 503).json({
+    res.status(evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(evidence.check) : 503).json({
         operation,
         readOnly,
         success: false,
@@ -79371,7 +79581,7 @@ async function sendTelegramUnavailable(req, res, operation, readOnly = false) {
     });
 }
 function sendTelegramAdminFailure(req, res, operation, error, errorText, summary, readOnly = false) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "telegram.connection",
         owner: "telegram",
@@ -79384,7 +79594,7 @@ function sendTelegramAdminFailure(req, res, operation, error, errorText, summary
         readOnly,
         success: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.routeHealthErrorMessage)(error),
         health: evidence.health,
         check: evidence.check,
         recoveryPlan: evidence.recoveryPlan,
@@ -79400,7 +79610,7 @@ async function runDatabaseReset(req, res, operation, parseContext, failureSummar
         const beforeEvidence = await buildDatabaseHealthEvidence(req.requestId);
         const result = await reset();
         const afterEvidence = await buildDatabaseHealthEvidence(req.requestId);
-        const statusCode = afterEvidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(afterEvidence.check) : 503;
+        const statusCode = afterEvidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(afterEvidence.check) : 503;
         const success = statusCode === 200;
         res.status(statusCode).json({
             ...objectFields(result),
@@ -79418,7 +79628,7 @@ async function runDatabaseReset(req, res, operation, parseContext, failureSummar
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, parseContext);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, parseContext);
         sendDatabaseAdminFailure(req, res, operation, error, failureSummary, failureSummary);
     }
 }
@@ -79442,7 +79652,7 @@ async function runDatabaseReset(req, res, operation, parseContext, failureSummar
  *                 message:
  *                   type: string
  */
-router.get("/resetunpaid", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/resetunpaid", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await runDatabaseReset(req, res, "reset-unpaid-users", "Error in /resetunpaid endpoint", "Failed to reset unpaid users", () => _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().resetUnpaid());
 });
 /**
@@ -79465,7 +79675,7 @@ router.get("/resetunpaid", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
  *                 message:
  *                   type: string
  */
-router.get("/resetunppl", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/resetunppl", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await runDatabaseReset(req, res, "reset-ppl-users", "Error in /resetunppl endpoint", "Failed to reset PPL users", () => _core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().resetPpl());
 });
 /**
@@ -79485,13 +79695,13 @@ router.get("/resetunppl", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
  *             schema:
  *               type: string
  */
-router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.isInstanceExist()) {
             const evidence = await buildDatabaseHealthEvidence(req.requestId);
             const databaseCheck = evidence.check;
-            const replierCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(evidence.health, "telegram.replier");
-            res.status(databaseCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(databaseCheck) : 503).json({
+            const replierCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.findHealthCheck)(evidence.health, "telegram.replier");
+            res.status(databaseCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(databaseCheck) : 503).json({
                 operation: "replier-queue-diagnostics",
                 readOnly: true,
                 success: false,
@@ -79516,7 +79726,7 @@ router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4_
             category: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.CLIENT_UPDATES,
         });
         const evidence = await buildReplierHealthEvidence(req.requestId);
-        const statusCode = evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(evidence.check) : 503;
+        const statusCode = evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(evidence.check) : 503;
         const success = statusCode === 200;
         res.status(statusCode).json({
             operation: "replier-queue-diagnostics",
@@ -79534,8 +79744,8 @@ router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4_
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /getqueuelengths endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /getqueuelengths endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.replier",
             owner: "replier",
@@ -79548,7 +79758,7 @@ router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4_
             readOnly: true,
             success: false,
             error: "Failed to get queue diagnostics",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -79574,7 +79784,7 @@ router.get("/getqueuelengths", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4_
  *               type: string
  *               example: "responding!!"
  */
-router.get("/getuserstats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getuserstats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await sendStatsResponse(req, res, {
         operation: "user-stats",
         full: true,
@@ -79602,7 +79812,7 @@ router.get("/getuserstats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.s
  *               type: string
  *               example: "responding!!"
  */
-router.get("/getuserstats2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getuserstats2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await sendStatsResponse(req, res, {
         operation: "user-stats",
         full: false,
@@ -79630,7 +79840,7 @@ router.get("/getuserstats2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.
  *               type: string
  *               example: "responding!!"
  */
-router.get("/getdemostats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getdemostats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await sendStatsResponse(req, res, {
         operation: "demo-stats",
         full: true,
@@ -79658,7 +79868,7 @@ router.get("/getdemostats", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.s
  *               type: string
  *               example: "responding!!"
  */
-router.get("/getdemostat2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getdemostat2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.slowModelimit.middleware(), _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     await sendStatsResponse(req, res, {
         operation: "demo-stats",
         full: false,
@@ -79686,7 +79896,7 @@ router.get("/getdemostat2", _services_RateLimiter__WEBPACK_IMPORTED_MODULE_4__.s
  *               type: string
  *               example: "responding!!"
  */
-router.get("/getchannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/getchannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "get-channels", true);
@@ -79717,7 +79927,7 @@ router.get("/getchannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
         res.json({ clientId: process.env.clientId, total: channels.length, channels });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /getchannels endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /getchannels endpoint");
         sendTelegramAdminFailure(req, res, "get-channels", error, "Failed to get channels", "Get channels failed", true);
     }
 });
@@ -79744,7 +79954,7 @@ router.get("/getchannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/channelinfo", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/channelinfo", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "channel-info", true);
@@ -79755,7 +79965,7 @@ router.get("/channelinfo", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
         res.status(200).json(resp);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /channelInfo endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /channelInfo endpoint");
         sendTelegramAdminFailure(req, res, "channel-info", error, "An error occurred while processing the request.", "Channel info failed", true);
     }
 });
@@ -79789,7 +79999,7 @@ router.get("/channelinfo", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/channelsafety/:channelId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/channelsafety/:channelId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     const channelId = req.params.channelId;
     try {
         if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.isInstanceExist()) {
@@ -79803,12 +80013,12 @@ router.get("/channelsafety/:channelId", _middlewares_leader_middleware__WEBPACK_
         }
         // channelIntelligence is the display source; getChannelSafetyMetrics falls back to the legacy
         // activeChannels counters when no doc exists.
-        const ciDoc = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.ChannelIntelligenceService.getInstance().get(channelId).catch(() => null);
-        const result = await _utils_channelChecker__WEBPACK_IMPORTED_MODULE_13__.channelSafetyChecker.getChannelSafetyMetrics(channel, ciDoc);
+        const ciDoc = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.ChannelIntelligenceService.getInstance().get(channelId).catch(() => null);
+        const result = await _utils_channelChecker__WEBPACK_IMPORTED_MODULE_14__.channelSafetyChecker.getChannelSafetyMetrics(channel, ciDoc);
         res.status(200).json(result);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /channelSafety/:channelId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /channelSafety/:channelId endpoint");
         sendDatabaseAdminFailure(req, res, "channel-safety", error, "Failed to get channel safety metrics", "Channel safety metrics retrieval failed", true);
     }
 });
@@ -79851,7 +80061,7 @@ router.get("/channelsafety/:channelId", _middlewares_leader_middleware__WEBPACK_
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/analysechannelsafety", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/analysechannelsafety", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!_core_dbservice__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.isInstanceExist()) {
             await sendDatabaseUnavailable(req, res, "channel-safety-analysis", true);
@@ -79869,12 +80079,12 @@ router.get("/analysechannelsafety", _middlewares_leader_middleware__WEBPACK_IMPO
             });
         }
         const channels = ((await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.listActiveChannels()) ?? []);
-        const result = await _utils_channelChecker__WEBPACK_IMPORTED_MODULE_13__.channelSafetyChecker.checkMultipleChannels(channels);
+        const result = await _utils_channelChecker__WEBPACK_IMPORTED_MODULE_14__.channelSafetyChecker.checkMultipleChannels(channels);
         const mapAsObject = Object.fromEntries(result);
         res.status(200).json(mapAsObject);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /analyseChannelSafety endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /analyseChannelSafety endpoint");
         sendDatabaseAdminFailure(req, res, "channel-safety-analysis", error, "Failed to get channel safety metrics", "Channel safety analysis failed", true);
     }
 });
@@ -79900,11 +80110,11 @@ router.get("/analysechannelsafety", _middlewares_leader_middleware__WEBPACK_IMPO
  *                 success:
  *                   type: boolean
  */
-router.get("/replierstate", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/replierstate", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         const state = await (0,_handlers_respondToMsgs__WEBPACK_IMPORTED_MODULE_3__.getReplierState)();
         const evidence = await buildReplierHealthEvidence(req.requestId);
-        const statusCode = evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(evidence.check) : 503;
+        const statusCode = evidence.check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_10__.healthCheckHttpStatus)(evidence.check) : 503;
         const success = statusCode === 200;
         res.status(statusCode).json({
             operation: "replier-state",
@@ -79921,8 +80131,8 @@ router.get("/replierstate", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /replierState endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /replierState endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.replier",
             owner: "replier",
@@ -79935,7 +80145,7 @@ router.get("/replierstate", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             readOnly: true,
             success: false,
             error: "Failed to get replier state",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_16__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_17__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -79967,7 +80177,7 @@ router.get("/replierstate", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *             schema:
  *               type: string
  */
-router.get("/joinchannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/joinchannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     const username = parseChannelUsername(req.query.username);
     if (!username) {
         res.status(400).json({ error: "username is required" });
@@ -79978,11 +80188,28 @@ router.get("/joinchannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
             await sendTelegramUnavailable(req, res, "join-channel");
             return;
         }
+        // `batchNotice=1` (sent by CMS, which merges every client's result into one summary notice):
+        // report the outcome in the response instead of posting a bot message from here. Without it
+        // (older CMS, manual calls) behaviour and response are exactly as before.
+        if (req.query.batchNotice === "1") {
+            const results = [];
+            await (0,_core_utils__WEBPACK_IMPORTED_MODULE_8__.joinChannels)(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.getClient(), `@${username}`, false, results);
+            const outcome = results[0];
+            res.json({
+                success: true,
+                username,
+                channel: `@${username}`,
+                result: outcome
+                    ? { ok: outcome.ok, ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.floodWait ? { floodWait: true } : {}) }
+                    : { ok: false, error: "no result" },
+            });
+            return;
+        }
         await (0,_core_utils__WEBPACK_IMPORTED_MODULE_8__.joinChannels)(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.getClient(), `@${username}`, true);
         res.json({ success: true, username, channel: `@${username}` });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /joinchannel endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /joinchannel endpoint");
         sendTelegramAdminFailure(req, res, "join-channel", error, "Failed to join channel", "Join channel failed");
     }
 });
@@ -80010,7 +80237,7 @@ router.get("/joinchannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODU
  *             schema:
  *               type: string
  */
-router.get("/leavechannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/leavechannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     const username = parseChannelUsername(req.query.username);
     if (!username) {
         res.status(400).json({ error: "username is required" });
@@ -80030,7 +80257,7 @@ router.get("/leavechannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             channel = (await (0,_core_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.channels.findActiveChannelByUsername(String(username))) ?? null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error loading active channel for /leavechannel endpoint");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error loading active channel for /leavechannel endpoint");
             sendDatabaseAdminFailure(req, res, "leave-channel", error, "Failed to load channel for leave", "Leave channel database lookup failed");
             return;
         }
@@ -80042,7 +80269,7 @@ router.get("/leavechannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         res.json({ success: true, username, channel: { ...channel, canSendMsgs: false } });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /leaveChannel endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /leaveChannel endpoint");
         sendTelegramAdminFailure(req, res, "leave-channel", error, "Failed to leave channel", "Leave channel failed");
     }
 });
@@ -80064,21 +80291,36 @@ router.get("/leavechannel", _middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *               type: string
  *               example: "Leaving Channels"
  */
-router.get("/leavechannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.get("/leavechannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         if (!(await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.instanceExist())) {
             await sendTelegramUnavailable(req, res, "leave-channels");
             return;
         }
         const client = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_7__.TelegramManager.getClient();
+        // `batchNotice=1` (sent by UMS): no per-channel bot messages from here; when the sweep ends ONE
+        // digest row (Left / Failed / Status) is queued for the UMS flusher, which posts a single table
+        // for all clients. `batched: true` tells UMS this build understands the flag; an older build
+        // answers `{ success: true }` and keeps posting its own per-channel messages.
+        if (req.query.batchNotice === "1") {
+            res.json({ success: true, batched: true });
+            void (0,_core_utils__WEBPACK_IMPORTED_MODULE_8__.leaveChannels)(client, { notify: false })
+                .then((results) => (0,_core_leave_cycle_notice__WEBPACK_IMPORTED_MODULE_9__.reportLeaveCycle)(results ?? []))
+                .catch(async (error) => {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Async error in /leaveChannels endpoint");
+                logger.error("Async leave-channels failed", error);
+                await (0,_core_leave_cycle_notice__WEBPACK_IMPORTED_MODULE_9__.reportLeaveCycle)([], error instanceof Error ? error.message : String(error));
+            });
+            return;
+        }
         res.json({ success: true });
         void (0,_core_utils__WEBPACK_IMPORTED_MODULE_8__.leaveChannels)(client).catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Async error in /leaveChannels endpoint");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Async error in /leaveChannels endpoint");
             logger.error("Async leave-channels failed", error);
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /leaveChannels endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /leaveChannels endpoint");
         sendTelegramAdminFailure(req, res, "leave-channels", error, "Failed to leave channels", "Leave all channels failed");
     }
 });
@@ -80140,7 +80382,7 @@ router.get("/leavechannels", _middlewares_leader_middleware__WEBPACK_IMPORTED_MO
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post("/resetuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_12__.leaderOnlyMiddleware, async (req, res) => {
+router.post("/resetuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_13__.leaderOnlyMiddleware, async (req, res) => {
     try {
         const chatId = req.params.chatId;
         if (!chatId || chatId.trim() === "") {
@@ -80167,18 +80409,18 @@ router.post("/resetuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
             return;
         }
         // Get invalidPhotoCount before reset
-        const invalidPhotoCountBefore = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getInvalidPhotoCount(chatId);
+        const invalidPhotoCountBefore = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
         // Delete user from database (resets user details)
         await db.delete(chatId);
         // Reset invalidPhotoCount in user state
-        const userState = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getUserState(chatId);
+        const userState = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
         userState.invalidPhotoCount = 0;
         userState.invalidPhotoTimestamp = 0;
         // Manually sync to Redis cache to update the cache immediately.
         // Pass chatId so this directly-mutated state is marked dirty and actually
         // persisted — forceSyncToRedis() with no arg only flushes already-dirty users.
-        await _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.forceSyncToRedis(chatId);
-        const invalidPhotoCountAfter = _state_UserState__WEBPACK_IMPORTED_MODULE_14__.stateManager.getInvalidPhotoCount(chatId);
+        await _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.forceSyncToRedis(chatId);
+        const invalidPhotoCountAfter = _state_UserState__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
         logger.log(`[ResetUser] User ${chatId} reset - invalidPhotoCount: ${invalidPhotoCountBefore} -> ${invalidPhotoCountAfter} (cache synced)`);
         res.status(200).json({
             success: true,
@@ -80191,7 +80433,7 @@ router.post("/resetuser/:chatId", _middlewares_leader_middleware__WEBPACK_IMPORT
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, "Error in /resetuser/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, "Error in /resetuser/:chatId endpoint");
         sendDatabaseAdminFailure(req, res, "reset-user", error, "Failed to reset user", "Reset user failed");
     }
 });
