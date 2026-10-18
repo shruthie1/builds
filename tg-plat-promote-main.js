@@ -11747,13 +11747,10 @@ const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("checkTgHea
  */
 const SPAMBOT_PROBE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 function buildHealthFailureNotification(mobile, reason) {
-    const clientId = (process.env.clientId || 'UNKNOWN').toUpperCase();
     return {
         severity: _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR,
         title: 'Telegram health check failed',
-        summary: `@${clientId}: Failed To Check Health`,
         fields: [
-            { label: 'Client', value: clientId },
             { label: 'Mobile', value: mobile },
             { label: 'Reason', value: reason, code: false },
         ],
@@ -11763,7 +11760,7 @@ function buildHealthFailureNotification(mobile, reason) {
 }
 async function sendHealthFailureNotification(mobile, reason) {
     try {
-        const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, buildHealthFailureNotification(mobile, reason), { prefix: false });
+        const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, buildHealthFailureNotification(mobile, reason));
         if (!sent) {
             (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error('Telegram health notification was not sent'), `Telegram health notification failed for ${mobile}`, false);
         }
@@ -14238,7 +14235,7 @@ class BotConfig {
      * Send message to a channel using the configured bot
      */
     clientPrefix(parseMode) {
-        const clientId = (process.env.clientId ?? 'unknown').toUpperCase();
+        const clientId = process.env.clientId ?? 'unknown';
         return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
     }
     prefixMessage(message, parseMode) {
@@ -14270,7 +14267,7 @@ class BotConfig {
         if (markupButtons.length)
             input.buttons = [...(input.buttons ?? []), ...markupButtons];
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source || undefined });
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
     isBotOrChannelFailure(error) {
@@ -14462,7 +14459,7 @@ class BotConfig {
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
         const input = { ...card, ...(category === ChannelCategory.CLIENT_UPDATES ? { houseStyle: true } : {}) };
-        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
+        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: card.source ?? process.env.clientId ?? undefined, imageId: 'shot' });
         const form = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         form.append('chat_id', channelId);
         form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
@@ -17328,13 +17325,6 @@ const NotificationSeverity = Object.freeze({
     ERROR: 'error',
     CRITICAL: 'critical',
 });
-const SEVERITY_ICONS = {
-    info: 'ℹ️',
-    success: '✅',
-    warning: '⚠️',
-    error: '❌',
-    critical: '🚨',
-};
 function escapeTelegramHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -17415,12 +17405,12 @@ function plainQuoteBlocks(input) {
 function formatRichNotification(input) {
     if (input.houseStyle)
         return formatHouseStyle(input);
-    const severity = input.severity ?? NotificationSeverity.INFO;
     const title = input.title || input.summary || 'Notification';
     // Each entry is a "block" — a group of lines rendered together. Blocks are joined by a
     // blank line so the message reads with breathing room instead of packed together.
     const blocks = [];
-    blocks.push([`<b>${SEVERITY_ICONS[severity]} ${escapeTelegramHtml(title)}</b>`]);
+    // No icons (owner, 2026-10-18).
+    blocks.push([`<b>${escapeTelegramHtml(title)}</b>`]);
     if (input.summary && input.summary !== title) {
         blocks.push([escapeTelegramHtml(input.summary)]);
     }
@@ -18755,13 +18745,6 @@ __webpack_require__.r(__webpack_exports__);
  * Old Telegram clients (incl. GramJS 2.26) see a rich message as an unsupported media message with
  * empty text, so literal command messages (exit<client>) must keep using plain sendMessage.
  */
-const SEVERITY_ICONS = {
-    info: 'ℹ️',
-    success: '✅',
-    warning: '⚠️',
-    error: '❌',
-    critical: '🚨',
-};
 /** Rich messages allow 32768 characters; keep headroom for markup added after truncation. */
 const RICH_MESSAGE_MAX_CHARS = 30000;
 const MAX_BUTTONS = 6;
@@ -18802,9 +18785,13 @@ function visibleFields(input) {
 function notificationButtons(input) {
     return (input.buttons ?? []).filter((b) => b && b.text && (b.url || b.copy)).slice(0, MAX_BUTTONS);
 }
+/** No icons or emoji anywhere in a card (owner, 2026-10-18): titles and button labels are plain words. */
+function noEmoji(text) {
+    return String(text ?? '').replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim();
+}
 /** Button labels are plain words (owner, 2026-10-18): emoji are stripped. */
 function buttonLabel(text) {
-    return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(String(text).replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim() || 'Open');
+    return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(noEmoji(text) || 'Open');
 }
 function buttonTag(button, index) {
     const style = index === 0 && button.url ? ' style="primary"' : '';
@@ -18813,9 +18800,6 @@ function buttonTag(button, index) {
     return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
 }
 const LONG_QUOTE_CHARS = 800;
-/** Up to this many short fields render as one "Label value · Label value" line instead of a table. */
-const INLINE_FIELDS_MAX = 3;
-const INLINE_FIELD_CHARS = 40;
 /**
  * Message content as a label + quote (owner, 2026-10-18): never in a table cell or <code>. Line breaks and
  * runs of spaces are kept exactly; long text collapses.
@@ -18848,24 +18832,23 @@ function detailLines(input) {
     return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
 }
 /**
- * Rich HTML for sendRichMessage. `prefix` (the clientId) leads the heading because the sender no
- * longer prepends it to the text.
+ * Rich HTML for sendRichMessage. `prefix` (the clientId) is the first line on its own, then the title,
+ * then a field table (owner, 2026-10-18: multi-line, tables wherever there are fields).
  */
 function formatRichMessageHtml(input, opts = {}) {
-    const title = input.title || input.summary || 'Notification';
-    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? _notification_format__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO]} `;
-    const prefix = opts.prefix ? `${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)} · ` : '';
-    // A bold line, not <h3>: the big heading made every card tall (owner, 2026-10-18).
-    const parts = [`<p><b>${icon}${prefix}${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`];
+    const title = noEmoji(input.title || input.summary) || 'Notification';
+    // Bold lines, not <h3>: the big heading made every card tall (owner, 2026-10-18).
+    // title '' = no title line (e.g. a payment screenshot card: the photo says what it is).
+    const parts = [
+        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b></p>`] : []),
+        ...(input.title === '' && !input.summary ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
+    ];
     if (opts.imageId)
         parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
     if (input.summary && input.summary !== title)
         parts.push(`<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>`);
     const fields = visibleFields(input);
-    if (fields.length && input.fieldLayout !== 'table' && fields.length <= INLINE_FIELDS_MAX && fields.every((f) => String(f.value ?? '').length <= INLINE_FIELD_CHARS)) {
-        parts.push(`<p>${fields.map((f) => `${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)} ${cellValue(f)}`).join(' · ')}</p>`);
-    }
-    else if (fields.length) {
+    if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
         parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
     }
@@ -18898,7 +18881,8 @@ function formatRichMessageHtml(input, opts = {}) {
     for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
         parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
     }
-    return parts.join('\n');
+    // Plain lines, not paragraphs (owner, 2026-10-18): <p> spacing made cards tall.
+    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>');
 }
 /** URL buttons from a Bot API inline_keyboard (callback buttons are not used by our notices). */
 function buttonsFromReplyMarkup(markup) {
@@ -37933,7 +37917,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // followupMsgSuccessCount write-back is needed here.
             this.stats.deletedCount++;
             await this.sendPromotionLog({
-                title: `🗑 @${channelInfo.username} deleted`,
+                title: `@${channelInfo.username} deleted`,
                 houseStyle: true,
                 fields: [
                     { label: "Survived", value: this.formatDuration(Date.now() - messageItem.timestamp), code: false },
