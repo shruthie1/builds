@@ -23758,7 +23758,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const processResult = await this.processClient(bufferClient, client, warmupAction);
             if (processResult.updateCount > 0) {
                 totalUpdates += processResult.updateCount;
-                updatedEntries.push(`${client.clientId} | ${bufferClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
+                updatedEntries.push({ clientId: client.clientId, mobile: bufferClient.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
             }
         }
         const clientNeedingBufferClients = [];
@@ -24090,7 +24090,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 if (created) {
                     assignmentIndex++;
                     createdCount++;
-                    createdEntries.push(`${assignment.clientId} | ${document.mobile}`);
+                    createdEntries.push({ clientId: assignment.clientId, mobile: document.mobile });
                 }
                 attemptedCount++;
             }
@@ -24219,7 +24219,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
         if (eventsTable)
             (summary.tables ??= []).push(eventsTable);
-        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), summary);
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input, undefined, false), summary);
     }
 };
 exports.BufferClientService = BufferClientService;
@@ -36958,7 +36958,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const processResult = await this.processClient(promoteClient, client, warmupAction);
             if (processResult.updateCount > 0) {
                 totalUpdates += processResult.updateCount;
-                updatedEntries.push(`${client.clientId} | ${promoteClient.mobile} | ${processResult.updateSummary || 'updated'} | count=${processResult.updateCount}`);
+                updatedEntries.push({ clientId: client.clientId, mobile: promoteClient.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
             }
         }
         const clientNeedingPromoteClients = [];
@@ -37173,7 +37173,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 if (created) {
                     assignmentIndex++;
                     createdCount++;
-                    createdEntries.push(`${assignment.clientId} | ${document.mobile}`);
+                    createdEntries.push({ clientId: assignment.clientId, mobile: document.mobile });
                 }
                 attemptedCount++;
             }
@@ -37276,7 +37276,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
         if (eventsTable)
             (summary.tables ??= []).push(eventsTable);
-        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), summary);
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input, undefined, false), summary);
     }
     removeFromPromoteMap(key) { this.removeFromJoinMap(key); }
     clearPromoteMap() { this.clearJoinMap(); }
@@ -42542,34 +42542,42 @@ BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.buildCheckSummaryNotification = buildCheckSummaryNotification;
 const ENTRY_LIMIT = 10;
+const more = (title, total, shown) => (total > shown ? `${title} (+${total - shown} more)` : title);
 function buildCheckSummaryNotification(s) {
-    const sorted = [...s.perClient].sort((a, b) => a.clientId.localeCompare(b.clientId));
+    const sorted = [...s.perClient].sort((a, b) => b.needed - a.needed || a.clientId.localeCompare(b.clientId));
     const shown = s.perClientLimit ? sorted.slice(0, s.perClientLimit) : sorted;
-    const entries = (title, list) => ({
-        title: list.length > ENTRY_LIMIT ? `${title} (+${list.length - ENTRY_LIMIT} more)` : title,
-        columns: ['#', 'Entry'],
-        rows: list.slice(0, ENTRY_LIMIT).map((entry, i) => [i + 1, entry]),
-        numeric: [0],
-    });
-    const tables = [{
-            title: sorted.length > shown.length ? `Per client (+${sorted.length - shown.length} more)` : 'Per client',
-            columns: ['Client', 'Active', 'Assigned', 'Inactive', 'Needed', 'Never used', 'Used 24h'],
+    const tables = [
+        {
+            title: 'Pool',
+            columns: ['Active', 'Inactive', 'Unassigned', `Needed (${s.clientsNeedingMore} clients)`, 'Updated', 'Created', 'Tried'],
+            rows: [[s.active, s.inactive, s.unassigned, s.totalNeeded, s.totalUpdates, s.createdCount, s.attemptedCount]],
+            numeric: [0, 1, 2, 3, 4, 5, 6],
+        },
+        {
+            title: more('Per client', sorted.length, shown.length),
+            columns: [`Client (${sorted.length})`, 'Active', 'Assigned', 'Inactive', 'Needed', 'Never used', 'Used 24h'],
             rows: shown.map((i) => [i.clientId, i.activeCount, i.assignedCount, i.inactiveCount, i.needed, i.neverUsed, i.usedInLast24Hours]),
             numeric: [1, 2, 3, 4, 5, 6],
-        }];
-    if (s.updatedEntries.length)
-        tables.push(entries('Updated this run', s.updatedEntries));
-    if (s.createdEntries.length)
-        tables.push(entries('Created this run', s.createdEntries));
+        },
+    ];
+    if (s.updatedEntries.length) {
+        tables.push({
+            title: more(`Updated (${s.updatedEntries.length})`, s.updatedEntries.length, ENTRY_LIMIT),
+            columns: ['Client', 'Mobile', 'Change', 'Updates'],
+            rows: s.updatedEntries.slice(0, ENTRY_LIMIT).map((e) => [e.clientId, e.mobile, e.change || 'updated', e.count ?? 1]),
+            numeric: [3],
+        });
+    }
+    if (s.createdEntries.length) {
+        tables.push({
+            title: more(`Created (${s.createdEntries.length})`, s.createdEntries.length, ENTRY_LIMIT),
+            columns: ['Client', 'Mobile'],
+            rows: s.createdEntries.slice(0, ENTRY_LIMIT).map((e) => [e.clientId, e.mobile]),
+        });
+    }
     return {
         severity: 'info',
-        title: `${s.kind} Client Check Summary`,
-        summary: `${s.active} active, ${s.inactive} inactive, ${s.unassigned} unassigned; ${s.totalNeeded} needed across ${s.clientsNeedingMore} clients`,
-        fields: [
-            { label: 'Updates applied', value: s.totalUpdates, code: false },
-            { label: 'Created this run', value: s.createdCount, code: false },
-            { label: 'Attempted creates', value: s.attemptedCount, code: false },
-        ],
+        title: `${s.kind} pool check`,
         tables,
     };
 }
