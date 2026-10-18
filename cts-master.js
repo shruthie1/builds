@@ -1286,6 +1286,8 @@ const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers"
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
 const components_1 = __webpack_require__(/*! ./components */ "./src/components/index.ts");
 const utils_1 = __webpack_require__(/*! ./utils */ "./src/utils/index.ts");
+const bot_notice_1 = __webpack_require__(/*! ./utils/bot-notice */ "./src/utils/bot-notice.ts");
+const rich_message_1 = __webpack_require__(/*! ./utils/rich-message */ "./src/utils/rich-message.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
 const account_maintenance_service_1 = __webpack_require__(/*! ./control-plane/maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
 let AppService = AppService_1 = class AppService {
@@ -1325,7 +1327,10 @@ let AppService = AppService_1 = class AppService {
                 const channelJoinJob = schedule.scheduleJob('ums-channel-join-cycle', '25 2,9,16 * * * ', 'Asia/Kolkata', async () => {
                     this.logger.log('Starting UMS primary-client channel join/leave cycle');
                     try {
-                        await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=ExecutingjoinchannelForClients-${process.env.clientId}`);
+                        await (0, bot_notice_1.sendBotNotice)('pppl', {
+                            title: 'Channel join cycle started',
+                            fields: [{ label: 'Service', value: process.env.clientId }],
+                        });
                     }
                     catch (error) {
                         (0, utils_1.parseError)(error, 'UMS scheduled join notification failed');
@@ -1384,7 +1389,7 @@ let AppService = AppService_1 = class AppService {
     }
     async updateBufferClientInfo() {
         try {
-            await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Updating Buffer Clients Info`);
+            await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating Buffer Clients Info' });
         }
         catch (error) {
             this.logger.error('CMS buffer-info notification failed; continuing update', error);
@@ -1640,7 +1645,15 @@ let AppService = AppService_1 = class AppService {
                     }
                     else {
                         if (doc.lastMsgTimeStamp < twentyDays) {
-                            await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=${encodeURIComponent(`ReSetting UserData for Profile: ${doc.profile} | ChatId: ${doc.chatId}\n\n LastMsg: ${getReadableTimeDifference(doc.lastMsgTimeStamp, Date.now())} `)}`);
+                            await (0, bot_notice_1.sendBotNotice)('pppl', {
+                                severity: 'warning',
+                                title: 'Resetting UserData',
+                                fields: [
+                                    { label: 'Profile', value: doc.profile },
+                                    { label: 'Chat', value: doc.chatId },
+                                    { label: 'Last message', value: getReadableTimeDifference(doc.lastMsgTimeStamp, Date.now()), code: false },
+                                ],
+                            });
                             await this.userDataService.update(doc.profile, doc.chatId, {
                                 payAmount: 0,
                                 demoGiven: false,
@@ -1668,37 +1681,32 @@ let AppService = AppService_1 = class AppService {
                 return str;
             }
         }
-        function escapeMarkdownV2(text) {
-            text = text.replace(/([\\_*`\[\]()~>#+\-=|{}.!])/g, '\\$1');
-            return text;
-        }
         const decodedMessage = decodeIfEncoded(message);
         console.log('Message:', decodedMessage);
+        const notice = (0, rich_message_1.textToRichInput)(decodedMessage);
         const category = !token
             ? AppService_1.CHANNEL_CATEGORY_MAP[chatId]
             : undefined;
         if (category) {
             try {
-                const sent = await this.botsService.sendMessageByCategory(category, decodedMessage);
+                const sent = await this.botsService.sendMessageByCategory(category, notice);
                 if (sent)
                     return { ok: true };
-                console.warn(`sendToChannel: category ${category} send returned falsy; falling back to ppplbot`);
+                console.warn(`sendToChannel: category ${category} send returned falsy; falling back to the raw-token sender`);
             }
             catch (error) {
                 (0, utils_1.parseError)(error, `sendToChannel category ${category}`, false);
             }
         }
-        const escapedMessage = escapeMarkdownV2(decodedMessage);
-        const encodedMessage = encodeURIComponent(escapedMessage).replace(/%5Cn/g, '%0A');
-        const url = `${(0, utils_1.ppplbot)(chatId, token)}&parse_mode=MarkdownV2&text=${encodedMessage}`;
-        return (await (0, utils_1.fetchWithTimeout)(url, {}, 0))?.data;
+        const rich = await (0, bot_notice_1.sendBotNotice)('pppl', notice, { chatId, token: token || undefined });
+        return rich.data;
     }
     async sendPaymentTelemetry(message) {
         const normalized = String(message ?? '').trim();
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, bounded, { parseMode: 'HTML' });
+        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.textToRichInput)(bounded, { html: true }));
         return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
@@ -1716,12 +1724,24 @@ let AppService = AppService_1 = class AppService {
         await Promise.all(clients.map(async (document) => {
             try {
                 const resp = await (0, utils_1.fetchWithTimeout)(`${document.repl}/channelinfo`, { timeout: 200000 }, 1);
-                await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Channel SendTrue :: ${document.clientId}: ${resp.data.canSendTrueCount}`);
+                await (0, bot_notice_1.sendBotNotice)('pppl', {
+                    title: 'Channel SendTrue',
+                    fields: [
+                        { label: 'Client ID', value: document.clientId },
+                        { label: 'Can send', value: resp.data.canSendTrueCount },
+                    ],
+                });
                 if (resp?.data?.canSendTrueCount &&
                     resp?.data?.canSendTrueCount < 350) {
                     const excludedIds = this.getJoinedChannelIdsFromInfo(resp.data);
                     const result = await this.activeChannelsService.getActiveChannels(25, 0, excludedIds);
-                    await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Started Joining Channels for ${document.clientId}: ${result.length}`);
+                    await (0, bot_notice_1.sendBotNotice)('pppl', {
+                        title: 'Started joining channels',
+                        fields: [
+                            { label: 'Client ID', value: document.clientId },
+                            { label: 'Channels', value: result.length },
+                        ],
+                    });
                     this.joinChannelMap.set(document.repl, result);
                 }
             }
@@ -2438,8 +2458,7 @@ const init_service_1 = __webpack_require__(/*! ./init.service */ "./src/componen
 const configuration_schema_1 = __webpack_require__(/*! ./configuration.schema */ "./src/components/ConfigurationInit/configuration.schema.ts");
 const init_controller_1 = __webpack_require__(/*! ./init.controller */ "./src/components/ConfigurationInit/init.controller.ts");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const path_1 = __importDefault(__webpack_require__(/*! path */ "path"));
 let InitModule = InitModule_1 = class InitModule {
     constructor(connection, configService) {
@@ -2461,7 +2480,7 @@ let InitModule = InitModule_1 = class InitModule {
             InitModule_1.initializationStatus.isInitializing = false;
             console.log(`Started :: ${process.env.clientId}`);
             if (!process.env.LOCAL_SERVER) {
-                await this.sendNotification(`Service Started\n\nClient: ${process.env.clientId}`);
+                await this.sendNotification({ severity: 'success', title: 'Service Started', fields: [{ label: 'Client ID', value: process.env.clientId }] });
             }
         }
         catch (error) {
@@ -2529,12 +2548,7 @@ let InitModule = InitModule_1 = class InitModule {
     }
     async sendNotification(message) {
         try {
-            const url = `${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(message)}`;
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(url, {
-                timeout: 5000,
-                retryConfig: { maxRetries: 0 },
-                notificationConfig: { enabled: false },
-            });
+            await (0, bot_notice_1.sendBotNotice)('notif', message, { timeout: 5000 });
         }
         catch (error) {
             console.warn('Failed to send notification:', error);
@@ -2552,7 +2566,7 @@ let InitModule = InitModule_1 = class InitModule {
             console.log('Init Module destroying...');
             this.stopHealthCheck();
             if (!process.env.LOCAL_SERVER) {
-                await this.sendNotification(`Service Stopped\n\nClient: ${process.env.clientId}`);
+                await this.sendNotification({ severity: 'warning', title: 'Service Stopped', fields: [{ label: 'Client ID', value: process.env.clientId }] });
             }
             if (this.connection && this.connection.readyState !== 0) {
                 console.log('Closing MongoDB connection...');
@@ -2658,8 +2672,7 @@ exports.ConfigurationService = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const config_1 = __webpack_require__(/*! @nestjs/config */ "@nestjs/config");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 let ConfigurationService = ConfigurationService_1 = class ConfigurationService {
@@ -2686,17 +2699,21 @@ let ConfigurationService = ConfigurationService_1 = class ConfigurationService {
         await this.notifyStart();
     }
     async notifyStart() {
-        if (process.env.LOCAL_SERVER) {
-            this.logger.log('Skipping configuration startup notification in local mode');
-            return;
-        }
         try {
             const clientId = process.env.clientId || this.configService.get('clientId');
             if (!clientId) {
                 this.logger.warn('No clientId found in environment or configuration');
                 return;
             }
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Service started: ${clientId}`)}`, { retryConfig: { maxRetries: 0 }, notificationConfig: { enabled: false } });
+            if (process.env.LOCAL_SERVER) {
+                this.logger.log('Skipping configuration startup notification in local mode');
+                return;
+            }
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                severity: 'success',
+                title: 'Service started',
+                fields: [{ label: 'Client ID', value: clientId }],
+            });
         }
         catch (error) {
             this.logger.warn('Failed to send start notification', error);
@@ -5257,7 +5274,7 @@ const telegram_logger_1 = __webpack_require__(/*! ./utils/telegram-logger */ "./
 const fs = __importStar(__webpack_require__(/*! fs */ "fs"));
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
@@ -5755,13 +5772,26 @@ let TelegramService = TelegramService_1 = class TelegramService {
         try {
             await telegramClient.removeOtherAuths();
             this.logger.info(mobile, 'Removed other authorizations');
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Remove Other Auths Success\n\nMobile: ${mobile}\nStatus: Non-protected sessions removed`)}`, { timeout: 5000 });
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                severity: 'success',
+                title: 'Remove Other Auths',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'Status', value: 'Non-protected sessions removed', code: false },
+                ],
+            }, { timeout: 5000 });
             return "Removed other authorizations";
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error(mobile, 'Failed to remove other authorizations', error);
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Remove Other Auths Failed\n\nMobile: ${mobile}\nError: ${message.substring(0, 500)}`)}`, { timeout: 5000 });
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                severity: 'error',
+                title: 'Remove Other Auths failed',
+                fields: [{ label: 'Mobile', value: mobile }],
+                details: message.substring(0, 500),
+                detailsTitle: 'Error message',
+            }, { timeout: 5000 });
             throw error;
         }
     }
@@ -8990,8 +9020,7 @@ const sessions_1 = __webpack_require__(/*! telegram/sessions */ "telegram/sessio
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const big_integer_1 = __importDefault(__webpack_require__(/*! big-integer */ "big-integer"));
 const parseError_1 = __webpack_require__(/*! ../../../utils/parseError */ "./src/utils/parseError.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const tg_config_1 = __webpack_require__(/*! ../utils/tg-config */ "./src/components/Telegram/utils/tg-config.ts");
 const IMap_1 = __webpack_require__(/*! ../../../IMap/IMap */ "./src/IMap/IMap.ts");
@@ -9021,7 +9050,17 @@ async function removeOtherAuths(ctx) {
             continue;
         }
         ctx.logger.info(ctx.phoneNumber, `Revoking auth: ${auth.appName} | ${auth.deviceModel} | ${auth.country}`);
-        await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Removing Auth\n\nMobile: ${ctx.phoneNumber}\nApp: ${auth.appName || 'unknown'}\nDevice: ${auth.deviceModel || 'unknown'}\nCountry: ${auth.country || 'unknown'}\nAPI ID: ${auth.apiId || 'unknown'}`)}`);
+        await (0, bot_notice_1.sendBotNotice)('notif', {
+            severity: 'warning',
+            title: 'Removing Auth',
+            fields: [
+                { label: 'Mobile', value: ctx.phoneNumber },
+                { label: 'App', value: auth.appName || 'unknown', code: false },
+                { label: 'Device', value: auth.deviceModel || 'unknown', code: false },
+                { label: 'Country', value: auth.country || 'unknown', code: false },
+                { label: 'API ID', value: auth.apiId || 'unknown' },
+            ],
+        });
         const revoked = await resetAuthorization(ctx, auth);
         if (revoked) {
             revokedCount++;
@@ -11044,8 +11083,7 @@ const Logger_1 = __webpack_require__(/*! telegram/extensions/Logger */ "telegram
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 const parseError_1 = __webpack_require__(/*! ../../../utils/parseError */ "./src/utils/parseError.ts");
 const common_1 = __webpack_require__(/*! ../../../utils/common */ "./src/utils/common.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const withTimeout_1 = __webpack_require__(/*! ../../../utils/withTimeout */ "./src/utils/withTimeout.ts");
 const connection_manager_1 = __webpack_require__(/*! ../utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
@@ -11164,7 +11202,15 @@ async function handleIncomingEvent(ctx, event) {
             ctx.logger.info(ctx.phoneNumber, event.message.text.toLowerCase());
             ctx.logger.info(ctx.phoneNumber, `Login Code received for - ${ctx.phoneNumber}\nActiveClientSetup - TelegramManager.activeClientSetup`);
             ctx.logger.info(ctx.phoneNumber, 'Date :', new Date(event.message.date * 1000));
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Login Code Received\n\nClient: ${process.env.clientId || 'unknown'}\nMobile: ${ctx.phoneNumber}\nMessage: ${event.message.text?.substring(0, 100)}`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                title: 'Login Code Received',
+                fields: [
+                    { label: 'Client ID', value: process.env.clientId || 'unknown' },
+                    { label: 'Mobile', value: ctx.phoneNumber },
+                ],
+                quote: event.message.text?.substring(0, 100),
+                quoteLabel: 'Message',
+            });
         }
     }
 }
@@ -14045,8 +14091,15 @@ class ConnectionManager {
         try {
             const botsService = (0, utils_1.getBotsServiceInstance)();
             if (botsService) {
-                const botMessage = `<b>Client Connection Error</b>\n\n<b>Mobile:</b> ${mobile}\n<b>Error:</b> ${errorDetails.message?.substring(0, 200)}\n<b>Marked Expired:</b> ${markedAsExpired}`;
-                await botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_LOGIN_FAILURES, botMessage, { parseMode: 'HTML' });
+                await botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
+                    severity: 'error',
+                    title: 'Client Connection Error',
+                    fields: [
+                        { label: 'Mobile', value: mobile },
+                        { label: 'Marked expired', value: String(markedAsExpired), code: false },
+                        { label: 'Error', value: errorDetails.message?.substring(0, 200), code: false },
+                    ],
+                });
             }
         }
         catch (notificationError) {
@@ -16896,8 +16949,7 @@ const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const active_channel_schema_1 = __webpack_require__(/*! ./schemas/active-channel.schema */ "./src/components/active-channels/schemas/active-channel.schema.ts");
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
@@ -17120,7 +17172,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             }
             const botsService = (0, utils_1.getBotsServiceInstance)();
             if (botsService) {
-                await botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, `Removing Active Channel: ${channelId}`);
+                await botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing Active Channel', fields: [{ label: 'Channel', value: channelId }] });
             }
             await this.activeChannelModel.findOneAndDelete({ channelId: this.channelKey(channelId) }).exec();
         }
@@ -17430,7 +17482,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async resetMessageDeletionCounters() {
         try {
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: reset message deletion counters`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Reset message deletion counters' });
             await this.activeChannelModel.updateMany({ banned: false }, { $set: { updatedAt: new Date() } });
         }
         catch (error) {
@@ -17439,7 +17491,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async resetAvailableMsgs() {
         try {
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: reset available messages`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Reset available messages' });
             const availableMsgs = await this.getAvailableMessages();
             await this.activeChannelModel.updateMany({
                 $expr: {
@@ -17458,7 +17510,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async updateBannedChannels() {
         try {
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Channel maint: update banned channels`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Update banned channels' });
             await this.activeChannelModel.updateMany({ $or: [{ banned: true }, { private: true }] }, {
                 $set: {
                     updatedAt: new Date(),
@@ -18313,6 +18365,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BotsController = void 0;
+const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const bots_service_1 = __webpack_require__(/*! ./bots.service */ "./src/components/bots/bots.service.ts");
@@ -18378,9 +18431,9 @@ let BotsController = class BotsController {
             if (bot.category !== category) {
                 throw new Error(`Bot ${botId} does not belong to category ${category}`);
             }
-            return this.botsService.sendMessageByBotId(botId, data.message, data.options);
+            return this.botsService.sendMessageByBotId(botId, this.toNotice(data), data.options);
         }
-        return this.botsService.sendMessageByCategory(category, data.message, data.options);
+        return this.botsService.sendMessageByCategory(category, this.toNotice(data), data.options);
     }
     async sendPhotoByCategory(category, botId, data) {
         if (botId) {
@@ -18456,6 +18509,9 @@ let BotsController = class BotsController {
     }
     async getBotStats(category) {
         return this.botsService.getBotStatsByCategory(category);
+    }
+    toNotice(data) {
+        return (0, rich_message_1.textToRichInput)(data.message, { html: data.options?.parseMode === 'HTML' });
     }
 };
 exports.BotsController = BotsController;
@@ -18983,6 +19039,7 @@ const bot_schema_1 = __webpack_require__(/*! ./schemas/bot.schema */ "./src/comp
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src/components/users/users.service.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
+const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
 let BotsService = BotsService_1 = class BotsService {
     constructor(botModel, moduleRef) {
         this.botModel = botModel;
@@ -19421,7 +19478,12 @@ let BotsService = BotsService_1 = class BotsService {
         this.cache.set(key, true, 60 * 60);
         console.error(JSON.stringify({ event: 'bot_category_unhealthy', category, requiredLifecycle: 'active_verified' }));
         if (category !== channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS) {
-            await this.notify(`<b>Bot category unhealthy</b>\nCategory: ${category}\nNo verified active bot is eligible to send. Repair is required.`);
+            await this.notify({
+                severity: 'error',
+                title: 'Bot category unhealthy',
+                summary: 'No verified active bot is eligible to send. Repair is required.',
+                fields: [{ label: 'Category', value: category }],
+            });
         }
     }
     async sendMessageByCategory(category, message, options, allowServiceName = true) {
@@ -19523,23 +19585,58 @@ let BotsService = BotsService_1 = class BotsService {
         }
         return success;
     }
+    richMessageHtml(message, allowServiceName) {
+        const source = message.source ?? (allowServiceName ? process.env.clientId ?? '' : '');
+        return (0, rich_message_1.formatRichMessageHtml)(message, { prefix: source.toUpperCase() || undefined });
+    }
+    classicMessageBody(bot, message, options, allowServiceName) {
+        const buttons = (message.buttons ?? []).filter(b => b.url);
+        return {
+            chat_id: bot.channelId,
+            text: (0, rich_message_1.formatClassicNotificationHtml)(message, allowServiceName ? process.env.clientId?.toUpperCase() : undefined),
+            parse_mode: 'HTML',
+            disable_notification: options?.disableNotification,
+            reply_to_message_id: options?.replyToMessageId,
+            allow_sending_without_reply: options?.allowSendingWithoutReply,
+            protect_content: options?.protectContent,
+            reply_markup: buttons.length ? { inline_keyboard: [buttons.map(b => ({ text: b.text, url: b.url }))] } : undefined,
+        };
+    }
     async executeSendMessage(bot, text, options, allowServiceName = true) {
         if (!this.isSelectable(bot)) {
             console.warn(`[BotHealth] refused direct send through non-verified bot @${bot.username}`);
             return false;
         }
+        const body = {
+            chat_id: bot.channelId,
+            rich_message: { html: this.richMessageHtml(text, allowServiceName) },
+        };
+        if (options?.disableNotification)
+            body.disable_notification = true;
+        if (options?.protectContent)
+            body.protect_content = true;
+        if (options?.replyToMessageId) {
+            body.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: options.allowSendingWithoutReply === true };
+        }
         try {
-            const response = await axios_1.default.post(`https://api.telegram.org/bot${bot.token}/sendMessage`, {
-                chat_id: bot.channelId,
-                text: `${allowServiceName ? `${process.env.clientId?.toUpperCase()}\n\n${text}` : text}`,
-                parse_mode: options?.parseMode,
-                disable_web_page_preview: options?.disableWebPagePreview,
-                disable_notification: options?.disableNotification,
-                reply_to_message_id: options?.replyToMessageId,
-                allow_sending_without_reply: options?.allowSendingWithoutReply,
-                protect_content: options?.protectContent,
-                link_preview_options: options?.linkPreviewOptions,
-            }, { timeout: 15000 });
+            const response = await axios_1.default.post(`https://api.telegram.org/bot${bot.token}/sendRichMessage`, body, { timeout: 15000 });
+            if (response.data?.ok !== true) {
+                console.error(`Telegram API error for sendRichMessage with bot ${bot.username}:`, response.data?.description);
+            }
+            return response.data?.ok === true;
+        }
+        catch (error) {
+            if (this.noteUnreachableSend(bot, error))
+                return false;
+            const status = Number(error?.response?.status);
+            if (status !== 400 && status !== 404) {
+                (0, utils_1.parseError)(error, `Failed to execute sendRichMessage for bot ${bot.username}`);
+                return false;
+            }
+            console.warn(`[BotRich] sendRichMessage refused for bot ${bot.username} (${status}); falling back to sendMessage`);
+        }
+        try {
+            const response = await axios_1.default.post(`https://api.telegram.org/bot${bot.token}/sendMessage`, this.classicMessageBody(bot, text, options, allowServiceName), { timeout: 15000 });
             if (!response.data?.ok) {
                 console.error(`Telegram API error for sendMessage with bot ${bot.username}:`, response.data.description);
             }
@@ -20175,7 +20272,17 @@ let BotsService = BotsService_1 = class BotsService {
             (0, utils_1.parseError)(err, `[BotHealth] created @${username} but failed to add/verify in channel ${channelId} — left INACTIVE`, false);
             await this.botModel.updateOne({ _id: saved._id, lifecycle: 'pending_admin' }, { $set: { repairAttempts: 1, lifecycleReason: `admin setup failed: ${(err?.message || String(err)).slice(0, 180)}`, lifecycleUpdatedAt: new Date(), nextRepairAt: this.nextRepairDate(1), status: 'inactive' } }).exec();
             await this.refreshBotCache();
-            await this.notify(`<b>Bot created but NOT usable (left inactive)</b>\nCategory: ${category}\nNew bot: @${username}\nChannel: ${channelId}\nAction: add it as admin manually, then it self-activates on next health check.\nReason: ${(err?.message || String(err)).substring(0, 120)}`);
+            await this.notify({
+                severity: 'warning',
+                title: 'Bot created but NOT usable',
+                summary: 'Left inactive. Add it as admin manually, then it self-activates on the next health check.',
+                fields: [
+                    { label: 'Category', value: category },
+                    { label: 'New bot', value: `@${username}` },
+                    { label: 'Channel', value: channelId },
+                    { label: 'Reason', value: (err?.message || String(err)).substring(0, 120), code: false },
+                ],
+            });
             console.log(`[BotHealth] provisioned @${username} (${category}) — created but NOT yet admin (inactive)`);
             return { saved, username, active: false };
         }
@@ -20298,7 +20405,16 @@ let BotsService = BotsService_1 = class BotsService {
                 if (!adminMobile) {
                     const msg = `${category}: channel ${channelId} has NO controllable admin — NOT creating bots (would be abandoned). ${liveCount}/${this.minHealthyBotsPerCategory} live; ${reuse.reused} reused. Fix: make a manager account admin of the channel, or re-point the category to a controllable channel.`;
                     topUpFailures.push(msg);
-                    await this.notify(`<b>Bot top-up BLOCKED — uncontrollable channel</b>\nCategory: ${category}\nChannel: ${channelId}\nHealthy: ${liveCount}/${this.minHealthyBotsPerCategory}\nCreation skipped to avoid orphan bots. Add a manager as channel admin, then bots self-heal.`);
+                    await this.notify({
+                        severity: 'warning',
+                        title: 'Bot top-up BLOCKED: uncontrollable channel',
+                        summary: 'Creation skipped to avoid orphan bots. Add a manager as channel admin, then bots self-heal.',
+                        fields: [
+                            { label: 'Category', value: category },
+                            { label: 'Channel', value: channelId },
+                            { label: 'Healthy', value: `${liveCount}/${this.minHealthyBotsPerCategory}`, code: false },
+                        ],
+                    });
                     console.warn(`[BotHealth] ${msg}`);
                     continue;
                 }
@@ -20788,32 +20904,39 @@ let BotsService = BotsService_1 = class BotsService {
         }
         return ordered;
     }
-    async notify(html) {
+    async notify(message) {
         try {
-            await this.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, html, { parseMode: 'HTML' });
+            await this.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, message);
         }
         catch (err) {
             console.error('[BotHealth] failed to send notification:', err);
         }
     }
     async sendHealthSummary(s) {
-        const lines = [
-            '<b>Bot Health Check</b>',
-            `Checked: ${s.checked} | Alive: ${s.alive} | Dead: ${s.dead} | Unknown: ${s.unknown}`,
-            `Replaced: ${s.replaced} | Topped up: ${s.toppedUp} | Dead remaining: ${s.deadRemaining}`,
-        ];
-        if (s.managerCoverage)
-            lines.push(s.managerCoverage);
-        if (s.singleAdmin?.length) {
-            lines.push(`Only one of our accounts can add bots in: ${s.singleAdmin.join(', ')}`);
-        }
+        const input = {
+            severity: s.failures.length || s.dead > 0 ? 'warning' : 'info',
+            title: 'Bot Health Check',
+            summary: `${s.checked} checked, ${s.alive} alive, ${s.dead} dead`,
+            tables: [{
+                    columns: ['Checked', 'Alive', 'Dead', 'Unknown', 'Replaced', 'Topped up', 'Dead remaining'],
+                    rows: [[s.checked, s.alive, s.dead, s.unknown, s.replaced, s.toppedUp, s.deadRemaining]],
+                    numeric: [0, 1, 2, 3, 4, 5, 6],
+                }],
+            fields: [
+                ...(s.managerCoverage ? [{ label: 'Manager coverage', value: s.managerCoverage, code: false }] : []),
+                ...(s.singleAdmin?.length ? [{ label: 'Single admin in', value: s.singleAdmin.join(', '), code: false }] : []),
+            ],
+        };
         if (s.failures.length) {
-            const shown = s.failures.slice(0, 10).map(f => `• ${f}`);
-            if (s.failures.length > 10)
-                shown.push(`(+${s.failures.length - 10} more)`);
-            lines.push(`<b>Failures:</b>\n${shown.join('\n')}`);
+            const shown = s.failures.slice(0, 10);
+            input.tables.push({
+                title: s.failures.length > 10 ? `Failures (+${s.failures.length - 10} more)` : 'Failures',
+                columns: ['#', 'Failure'],
+                rows: shown.map((f, i) => [i + 1, f]),
+                numeric: [0],
+            });
         }
-        await this.notify(lines.join('\n'));
+        await this.notify(input);
     }
 };
 exports.BotsService = BotsService;
@@ -22430,8 +22553,8 @@ const active_channels_service_1 = __webpack_require__(/*! ../active-channels/act
 const client_service_1 = __webpack_require__(/*! ../clients/client.service */ "./src/components/clients/client.service.ts");
 const promote_client_service_1 = __webpack_require__(/*! ../promote-clients/promote-client.service */ "./src/components/promote-clients/promote-client.service.ts");
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const check_summary_notification_1 = __webpack_require__(/*! ../shared/check-summary-notification */ "./src/components/shared/check-summary-notification.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
 const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
@@ -22789,16 +22912,18 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return this.bufferClientModel.create({ ...createData });
         });
         this.logger.log(`Buffer Client Created:\n\nMobile: ${canonicalMobile}`);
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-            '<b>Buffer Client Created</b>',
-            '',
-            `<b>Mobile:</b> ${canonicalMobile}`,
-            `<b>Client ID:</b> ${bufferClient.clientId || '-'}`,
-            `<b>Status:</b> ${result.status}`,
-            `<b>Available Date:</b> ${bufferClient.availableDate || '-'}`,
-            `<b>Channels:</b> ${bufferClient.channels ?? '-'}`,
-            `<b>Message:</b> ${bufferClient.message || '-'}`,
-        ].join('\n'), { parseMode: 'HTML' });
+        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            severity: 'success',
+            title: 'Buffer Client Created',
+            fields: [
+                { label: 'Mobile', value: canonicalMobile },
+                { label: 'Client ID', value: bufferClient.clientId || '-' },
+                { label: 'Status', value: result.status, code: false },
+                { label: 'Available date', value: bufferClient.availableDate || '-', code: false },
+                { label: 'Channels', value: bufferClient.channels ?? '-', code: false },
+                { label: 'Note', value: bufferClient.message || '-', code: false },
+            ],
+        });
         return result;
     }
     async findAll(status) {
@@ -22871,7 +22996,14 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 throw new common_1.NotFoundException(`BufferClient with mobile ${mobile} not found`);
             }
             this.logger.log(`Removing BufferClient with mobile: ${canonicalMobile}`);
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Deleting Buffer Client\n\nMobile: ${canonicalMobile}\nReason: ${message || 'manual removal'}`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                severity: 'warning',
+                title: 'Deleting Buffer Client',
+                fields: [
+                    { label: 'Mobile', value: canonicalMobile },
+                    { label: 'Reason', value: message || 'manual removal', code: false },
+                ],
+            });
             await this.bufferClientModel.deleteOne({ mobile: canonicalMobile }).exec();
         }
         catch (error) {
@@ -22925,13 +23057,29 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         try {
             const updated = await this.update(mobile, updateData);
             this.logger.log(`Buffer client ${mobile} status updated to ${status}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>Buffer Client Status Update</b>\n\n<b>Mobile:</b> ${mobile}\n<b>New Status:</b> ${status}\n<b>Reason:</b> ${message || '-'}`, { parseMode: 'HTML' }).catch((error) => this.logger.error(`Failed to send buffer status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
+            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                title: 'Buffer Client Status Update',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'New status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                ],
+            }).catch((error) => this.logger.error(`Failed to send buffer status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
             return updated;
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to update buffer client ${mobile} status to ${status}: ${errorMessage}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>Buffer Client Status Update Failed</b>\n\n<b>Mobile:</b> ${mobile}\n<b>Attempted Status:</b> ${status}\n<b>Reason:</b> ${message || '-'}\n<b>Error:</b> ${errorMessage.substring(0, 120)}`, { parseMode: 'HTML' }).catch((notifyError) => this.logger.error(`Failed to send buffer status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
+            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity: 'error',
+                title: 'Buffer Client Status Update Failed',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'Attempted status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                    { label: 'Error', value: errorMessage.substring(0, 120), code: false },
+                ],
+            }).catch((notifyError) => this.logger.error(`Failed to send buffer status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
             throw error;
         }
     }
@@ -22960,13 +23108,15 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 revokedCount: revoked.modifiedCount,
             });
             if (!session)
-                await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-                    '<b>Buffer Primary Reassigned</b>',
-                    '',
-                    `<b>Client ID:</b> ${clientId}`,
-                    `<b>Primary Mobile:</b> ${mobile}`,
-                    `<b>Revoked In-Use:</b> ${revoked.modifiedCount}`,
-                ].join('\n'), { parseMode: 'HTML' });
+                await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                    severity: 'warning',
+                    title: 'Buffer Primary Reassigned',
+                    fields: [
+                        { label: 'Client ID', value: clientId },
+                        { label: 'Primary mobile', value: mobile },
+                        { label: 'Revoked in-use', value: revoked.modifiedCount, code: false },
+                    ],
+                });
         }
         const updatedBufferClient = await this.bufferClientModel
             .findOneAndUpdate({ mobile, clientId }, {
@@ -23389,7 +23539,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const errMsg = (0, parseError_1.parseError)(error, 'checkBufferClients').message;
             this.logger.error(`checkBufferClients crashed: ${errMsg}`);
             try {
-                await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ checkBufferClients CRASHED\n\n${errMsg}`)}`);
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'checkBufferClients crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
         }
@@ -23435,7 +23585,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const errMsg = (0, parseError_1.parseError)(error, 'rotateReadyBufferClients').message;
             this.logger.error(`Ready buffer rotation sweep crashed: ${errMsg}`);
             try {
-                await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ READY Buffer Rotation CRASHED\n\n${errMsg}`)}`);
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'READY Buffer Rotation crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
             return false;
@@ -23577,7 +23727,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoBufferClientsDynamic').message;
                 this.logger.error(`Dynamic buffer enrollment failed: ${errMsg}`);
                 try {
-                    await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ Buffer Enrollment Failed\n\n${errMsg}`)}`);
+                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Buffer Enrollment failed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
                 }
                 catch { }
             }
@@ -23766,16 +23916,18 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             if (!enrolled)
                 return false;
             this.logger.log(`Created BufferClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-                '<b>Buffer Client Enrolled</b>',
-                '',
-                `<b>Client ID:</b> ${targetClientId}`,
-                `<b>Mobile:</b> ${document.mobile}`,
-                `<b>Available Date:</b> ${targetAvailableDate}`,
-                `<b>Channels:</b> ${channels.ids.length}`,
-                `<b>Warmup Phase:</b> ${base_client_service_1.WarmupPhase.ENROLLED}`,
-                `<b>Source TG ID:</b> ${document.tgId}`,
-            ].join('\n'), { parseMode: 'HTML' });
+            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity: 'success',
+                title: 'Buffer Client Enrolled',
+                fields: [
+                    { label: 'Client ID', value: targetClientId },
+                    { label: 'Mobile', value: document.mobile },
+                    { label: 'Available date', value: targetAvailableDate, code: false },
+                    { label: 'Channels', value: channels.ids.length, code: false },
+                    { label: 'Warmup phase', value: base_client_service_1.WarmupPhase.ENROLLED, code: false },
+                    { label: 'Source TG ID', value: document.tgId },
+                ],
+            });
             return true;
         }
         catch (error) {
@@ -23968,38 +24120,21 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
     async sendBufferCheckSummaryNotification(totalUpdates, createdCount, attemptedCount, updatedEntries, createdEntries) {
         const distribution = await this.getBufferClientDistribution();
-        const capLines = (entries) => {
-            const capped = entries.slice(0, 10);
-            if (entries.length > 10)
-                capped.push(`(+${entries.length - 10} more)`);
-            return capped;
-        };
-        const lines = capLines(distribution.distributionPerClient
-            .sort((a, b) => a.clientId.localeCompare(b.clientId))
-            .map((item) => `${item.clientId}: active=${item.activeCount}, assigned=${item.assignedCount}, inactive=${item.inactiveCount}, needed=${item.needed}, neverUsed=${item.neverUsed}, used24h=${item.usedInLast24Hours}`));
-        const updatedLines = updatedEntries.length > 0
-            ? ['UpdatedThisRun:', ...capLines(updatedEntries.map((entry) => `- ${entry}`)), '']
-            : ['UpdatedThisRun: none', ''];
-        const createdLines = createdEntries.length > 0
-            ? ['CreatedThisRunDetails:', ...capLines(createdEntries.map((entry) => `- ${entry}`)), '']
-            : ['CreatedThisRunDetails: none', ''];
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-            '<b>Buffer Client Check Summary</b>',
-            '',
-            `<b>Active:</b> ${distribution.activeBufferClients}`,
-            `<b>Inactive:</b> ${distribution.inactiveBufferClients}`,
-            `<b>Unassigned:</b> ${distribution.unassignedBufferClients}`,
-            `<b>Updates Applied:</b> ${totalUpdates}`,
-            `<b>Created This Run:</b> ${createdCount}`,
-            `<b>Attempted Creates:</b> ${attemptedCount}`,
-            `<b>Total Needed:</b> ${distribution.summary.totalBufferClientsNeeded}`,
-            `<b>Clients Needing More:</b> ${distribution.summary.clientsNeedingBufferClients}`,
-            '',
-            ...updatedLines,
-            ...createdLines,
-            '<b>Per Client Summary:</b>',
-            ...lines,
-        ].join('\n'), { parseMode: 'HTML' });
+        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, (0, check_summary_notification_1.buildCheckSummaryNotification)({
+            kind: 'Buffer',
+            active: distribution.activeBufferClients,
+            inactive: distribution.inactiveBufferClients,
+            unassigned: distribution.unassignedBufferClients,
+            totalUpdates,
+            createdCount,
+            attemptedCount,
+            totalNeeded: distribution.summary.totalBufferClientsNeeded,
+            clientsNeedingMore: distribution.summary.clientsNeedingBufferClients,
+            perClient: distribution.distributionPerClient,
+            updatedEntries,
+            createdEntries,
+            perClientLimit: 10,
+        }));
     }
 };
 exports.BufferClientService = BufferClientService;
@@ -25240,7 +25375,7 @@ let ChannelsService = class ChannelsService {
     async remove(channelId) {
         const botsService = (0, utils_1.getBotsServiceInstance)();
         if (botsService) {
-            botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, `Removing channel ${channelId}`, { parseMode: 'HTML' });
+            botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing Channel', fields: [{ label: 'Channel', value: channelId }] });
         }
         const result = await this.ChannelModel.findOneAndDelete({ channelId: this.channelKey(channelId) }).exec();
     }
@@ -26176,7 +26311,7 @@ const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const path_1 = __importDefault(__webpack_require__(/*! path */ "path"));
 const fs = __importStar(__webpack_require__(/*! fs */ "fs"));
@@ -26462,13 +26597,11 @@ let ClientService = ClientService_1 = class ClientService {
         }
     }
     async notifyClientUpdate(clientId) {
-        await this.notify(`Updating client ${clientId}`);
+        await this.notify({ title: 'Updating client', fields: [{ label: 'Client ID', value: clientId }] });
     }
     async notify(message) {
         try {
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(message)}`, {
-                timeout: 5000,
-            });
+            await (0, bot_notice_1.sendBotNotice)('notif', message, { timeout: 5000 });
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -26654,7 +26787,13 @@ let ClientService = ClientService_1 = class ClientService {
             const pendingNote = moreCandidatesPending
                 ? ' (SpamBot probe budget exhausted; more unprobed candidates remain, retry to check them)'
                 : '';
-            await this.notify(`Buffer not available ${clientId}: no safe buffer clients for swap${pendingNote}${this.formatProbeSkips(probeBudget, fallbackBudget)}`);
+            await this.notify({
+                severity: 'warning',
+                title: 'Buffer not available',
+                summary: `No safe buffer clients for swap${pendingNote}`,
+                fields: [{ label: 'Client ID', value: clientId }],
+                tables: this.probeSkipTables(probeBudget, fallbackBudget),
+            });
             this.logger.log('Buffer Clients not safely available');
             return {
                 status: 'no_candidate',
@@ -26673,7 +26812,16 @@ let ClientService = ClientService_1 = class ClientService {
                 newMobile: newBufferClient.mobile,
                 usedFutureAvailableFallback,
             });
-            await this.notify(`Swap started ${clientId}: ${existingClient.mobile} (@${existingClient.username}) → ${newBufferClient.mobile}${this.formatProbeSkips(probeBudget, fallbackBudget)}`);
+            await this.notify({
+                title: 'Swap started',
+                fields: [
+                    { label: 'Client ID', value: clientId },
+                    { label: 'Old mobile', value: existingClient.mobile },
+                    { label: 'Old username', value: existingClient.username ? `@${existingClient.username}` : undefined },
+                    { label: 'New mobile', value: newBufferClient.mobile },
+                ],
+                tables: this.probeSkipTables(probeBudget, fallbackBudget),
+            });
             this.telegramService.setActiveClientSetup({
                 ...setupClientQueryDto,
                 clientId,
@@ -26702,7 +26850,18 @@ let ClientService = ClientService_1 = class ClientService {
             const errorMessage = error instanceof Error ? error.message : String(error);
             const errorDetails = (0, parseError_1.parseError)(error, `setupClient failed for ${newBufferClient.mobile}`);
             const permanent = (0, isPermanentError_1.default)(errorDetails);
-            await this.notify(`Swap FAILED ${clientId}: ${existingClient.mobile} → ${newBufferClient.mobile}\n${errorMessage.substring(0, 120)}${permanent ? ' — buffer inactivated (permanent error)' : ''}`);
+            await this.notify({
+                severity: 'error',
+                title: 'Swap failed',
+                summary: permanent ? 'Buffer inactivated (permanent error)' : undefined,
+                fields: [
+                    { label: 'Client ID', value: clientId },
+                    { label: 'Old mobile', value: existingClient.mobile },
+                    { label: 'New mobile', value: newBufferClient.mobile },
+                ],
+                details: errorMessage.substring(0, 500),
+                detailsTitle: 'Error message',
+            });
             if (permanent) {
                 await this.usersService.expireAccount(newBufferClient.mobile, `Setup failed permanently: ${errorDetails.message}`);
             }
@@ -26771,7 +26930,7 @@ let ClientService = ClientService_1 = class ClientService {
             });
             const updatedUsername = bufferDoc?.username || me.username;
             this.logger.info(`[${clientId}] Using pre-set buffer username: @${updatedUsername} (current TG: @${me.username})`);
-            await this.notify(`Cutover username ${clientId}: ${newMobile} @${updatedUsername}`);
+            await this.notify({ title: 'Cutover username', fields: [{ label: 'Client ID', value: clientId }, { label: 'New mobile', value: newMobile }, { label: 'Username', value: updatedUsername ? `@${updatedUsername}` : undefined }] });
             if (!newSession?.trim()) {
                 throw new common_1.BadRequestException(`Invalid replacement session for ${newMobile}`);
             }
@@ -26801,7 +26960,7 @@ let ClientService = ClientService_1 = class ClientService {
             catch (deployError) {
                 const deployMessage = deployError instanceof Error ? deployError.message : String(deployError);
                 (0, parseError_1.parseError)(deployError, `[${clientId}] deployKey restart failed after cutover`);
-                await this.notify(`Deploy restart FAILED ${clientId}: ${newMobile} (cutover done)\n${deployMessage?.substring(0, 120)}`);
+                await this.notify({ severity: 'error', title: 'Deploy restart failed', summary: 'Cutover is done', fields: [{ label: 'Client ID', value: clientId }, { label: 'New mobile', value: newMobile }], details: deployMessage?.substring(0, 500), detailsTitle: 'Error message' });
             }
             this.logger.info(`[${clientId}] Starting replaced-client pool-return handling`, {
                 existingMobile,
@@ -26811,7 +26970,7 @@ let ClientService = ClientService_1 = class ClientService {
             });
             await this.handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason);
             this.logger.info(`[${clientId}] Client session cutover finished`, { existingMobile, newMobile });
-            await this.notify(`Swap complete ${clientId}: ${existingMobile} → ${newMobile}`);
+            await this.notify({ severity: 'success', title: 'Swap complete', fields: [{ label: 'Client ID', value: clientId }, { label: 'Old mobile', value: existingMobile }, { label: 'New mobile', value: newMobile }] });
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `[New: ${newMobile}] Error in updating client session`, true);
@@ -26872,7 +27031,7 @@ let ClientService = ClientService_1 = class ClientService {
                 const reasonMessage = `Pool return failed: user document missing for replaced mobile ${existingMobile}`;
                 this.logger.warn(reasonMessage);
                 await this.retireReplacedMobile(existingMobile, reasonMessage);
-                await this.notify(`Pool return ${existingMobile}: user doc missing — buffer inactivated`);
+                await this.notify({ severity: 'warning', title: 'Pool return', summary: 'User doc missing, buffer inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
                 return;
             }
             if (formalities) {
@@ -26892,7 +27051,7 @@ let ClientService = ClientService_1 = class ClientService {
                     message: reason || 'Deactivated during client swap (pool return skipped)',
                 });
                 this.logger.log('Replaced-client pool return skipped');
-                await this.notify(`Pool return skipped ${existingMobile}: inactivated`);
+                await this.notify({ title: 'Pool return skipped', summary: 'Account is inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
             }
         }
         catch (e) {
@@ -26901,7 +27060,7 @@ let ClientService = ClientService_1 = class ClientService {
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 await this.retireReplacedMobile(existingMobile, errorMessage);
             }
-            await this.notify(`Pool return FAILED ${existingMobile}\n${errorMessage?.substring(0, 120)}`);
+            await this.notify({ severity: 'error', title: 'Pool return failed', fields: [{ label: 'Mobile', value: existingMobile }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
         }
     }
     isPermanentReplacementReason(reason) {
@@ -26911,19 +27070,19 @@ let ClientService = ClientService_1 = class ClientService {
         try {
             await this.usersService.expireAccount(mobile, reason);
             this.logger.warn(`Replaced account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
-            await this.notify(`Buffer inactivated ${mobile}: ${reason.substring(0, 120)}`);
+            await this.notify({ severity: 'warning', title: 'Buffer inactivated', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 120), code: false }] });
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Failed to retire replaced account: ${mobile}`, false);
             this.logger.error(`Failed to retire replaced account ${mobile}: ${errorDetails.message}`);
-            await this.notify(`Buffer inactivate FAILED ${mobile}: ${reason.substring(0, 100)}\n${errorDetails.message.substring(0, 120)}`);
+            await this.notify({ severity: 'error', title: 'Buffer inactivate failed', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 100), code: false }], details: errorDetails.message.substring(0, 500), detailsTitle: 'Error message' });
         }
     }
     async handleFormalities(mobile) {
         try {
             await this.telegramService.updatePrivacyforDeletedAccount(mobile);
             this.logger.log('Formalities finished');
-            await this.notify(`Formalities complete ${mobile}: privacy updated`);
+            await this.notify({ severity: 'success', title: 'Formalities complete', summary: 'Privacy updated', fields: [{ label: 'Mobile', value: mobile }] });
         }
         finally {
             await connection_manager_1.connectionManager.unregisterClient(mobile);
@@ -26960,11 +27119,11 @@ let ClientService = ClientService_1 = class ClientService {
             };
             const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
             this.logger.log('Client returned to buffer pool:', updatedBufferClient);
-            await this.notify(`Returned ${existingMobile} → buffer pool, available ${availableDate}`);
+            await this.notify({ title: 'Returned to buffer pool', fields: [{ label: 'Mobile', value: existingMobile }, { label: 'Available date', value: availableDate, code: false }] });
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Error returning old client to buffer pool: ${existingMobile}`, true);
-            await this.notify(`Pool return error ${existingMobile}\n${errorDetails.message?.substring(0, 120)}`);
+            await this.notify({ severity: 'error', title: 'Pool return error', fields: [{ label: 'Mobile', value: existingMobile }], details: errorDetails.message?.substring(0, 500), detailsTitle: 'Error message' });
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 this.logger.log('Marking replaced buffer inactive:', existingMobile);
                 await this.retireReplacedMobile(existingMobile, errorDetails.message);
@@ -27008,9 +27167,12 @@ let ClientService = ClientService_1 = class ClientService {
         }
         return null;
     }
-    formatProbeSkips(...budgets) {
-        const skipped = budgets.flatMap((b) => b?.skipped ?? []);
-        return skipped.length ? `\nSkipped (SpamBot): ${skipped.join('; ')}` : '';
+    probeSkipTables(...budgets) {
+        const rows = budgets.flatMap((b) => b?.skipped ?? []).map((entry) => {
+            const i = entry.indexOf(' ');
+            return i < 0 ? [entry, ''] : [entry.slice(0, i), entry.slice(i + 1)];
+        });
+        return rows.length ? [{ title: 'Skipped (SpamBot)', columns: ['Mobile', 'Reason'], rows }] : [];
     }
     async isSpamSafeForSwap(candidate, budget) {
         const checkedAt = candidate.spamCheckedAt ? new Date(candidate.spamCheckedAt).getTime() : 0;
@@ -27142,7 +27304,7 @@ let ClientService = ClientService_1 = class ClientService {
                 ...(privacyReady ? { privacyUpdatedAt: new Date() } : {}),
                 ...(photosReady ? { profilePicsUpdatedAt: new Date() } : {}),
             });
-            await this.notify(`Client updated ${clientId}: ${client.mobile} — ${message}`);
+            await this.notify({ severity: 'success', title: 'Client updated', fields: [{ label: 'Client ID', value: clientId }, { label: 'Mobile', value: client.mobile }, { label: 'Reason', value: message, code: false }] });
             if (!skipDeploy && client.deployKey)
                 await (0, fetchWithTimeout_1.fetchWithTimeout)(client.deployKey);
             return true;
@@ -27151,7 +27313,7 @@ let ClientService = ClientService_1 = class ClientService {
             this.lastUpdateMap.delete(clientId);
             const errorDetails = (0, parseError_1.parseError)(error, `[${clientId}] [${client.mobile}] updateClient failed`);
             const errorMessage = error instanceof Error ? error.message : String(error);
-            await this.notify(`Client update FAILED ${clientId}: ${client.mobile} — ${message}\n${errorMessage?.substring(0, 120)}`);
+            await this.notify({ severity: 'error', title: 'Client update failed', fields: [{ label: 'Client ID', value: clientId }, { label: 'Mobile', value: client.mobile }, { label: 'Reason', value: message, code: false }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 this.logger.warn(`Permanent error while updating active client ${clientId}; manual review required for ${client.mobile}`);
             }
@@ -35787,8 +35949,8 @@ const active_channels_service_1 = __webpack_require__(/*! ../active-channels/act
 const client_service_1 = __webpack_require__(/*! ../clients/client.service */ "./src/components/clients/client.service.ts");
 const buffer_client_service_1 = __webpack_require__(/*! ../buffer-clients/buffer-client.service */ "./src/components/buffer-clients/buffer-client.service.ts");
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const check_summary_notification_1 = __webpack_require__(/*! ../shared/check-summary-notification */ "./src/components/shared/check-summary-notification.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
 const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
@@ -36088,16 +36250,18 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
         });
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-            '<b>Promote Client Created</b>',
-            '',
-            `<b>Mobile:</b> ${canonicalMobile}`,
-            `<b>Client ID:</b> ${promoteClient.clientId || '-'}`,
-            `<b>Status:</b> ${result.status}`,
-            `<b>Available Date:</b> ${promoteClient.availableDate || '-'}`,
-            `<b>Channels:</b> ${promoteClient.channels ?? '-'}`,
-            `<b>Message:</b> ${promoteClient.message || '-'}`,
-        ].join('\n'), { parseMode: 'HTML' });
+        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            severity: 'success',
+            title: 'Promote Client Created',
+            fields: [
+                { label: 'Mobile', value: canonicalMobile },
+                { label: 'Client ID', value: promoteClient.clientId || '-' },
+                { label: 'Status', value: result.status, code: false },
+                { label: 'Available date', value: promoteClient.availableDate || '-', code: false },
+                { label: 'Channels', value: promoteClient.channels ?? '-', code: false },
+                { label: 'Note', value: promoteClient.message || '-', code: false },
+            ],
+        });
         return result;
     }
     async findAll(statusFilter) {
@@ -36154,13 +36318,29 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         try {
             const updated = await this.update(mobile, updateData);
             this.logger.log(`Promote client ${mobile} status updated to ${status}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>Promote Client Status Update</b>\n\n<b>Mobile:</b> ${mobile}\n<b>New Status:</b> ${status}\n<b>Reason:</b> ${message || '-'}`, { parseMode: 'HTML' }).catch((error) => this.logger.error(`Failed to send promote status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
+            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                title: 'Promote Client Status Update',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'New status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                ],
+            }).catch((error) => this.logger.error(`Failed to send promote status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
             return updated;
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to update promote client ${mobile} status to ${status}: ${errorMessage}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>Promote Client Status Update Failed</b>\n\n<b>Mobile:</b> ${mobile}\n<b>Attempted Status:</b> ${status}\n<b>Reason:</b> ${message || '-'}\n<b>Error:</b> ${errorMessage.substring(0, 120)}`, { parseMode: 'HTML' }).catch((notifyError) => this.logger.error(`Failed to send promote status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
+            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity: 'error',
+                title: 'Promote Client Status Update Failed',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'Attempted status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                    { label: 'Error', value: errorMessage.substring(0, 120), code: false },
+                ],
+            }).catch((notifyError) => this.logger.error(`Failed to send promote status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
             throw error;
         }
     }
@@ -36305,7 +36485,15 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             if (deleteResult.deletedCount === 0) {
                 throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
             }
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`Deleting Promote Client\n\nService: ${process.env.serviceName || process.env.clientId || 'unknown'}\nMobile: ${mobile}\nReason: ${message || 'manual removal'}`)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                severity: 'warning',
+                title: 'Deleting Promote Client',
+                fields: [
+                    { label: 'Service', value: process.env.serviceName || process.env.clientId || 'unknown' },
+                    { label: 'Mobile', value: mobile },
+                    { label: 'Reason', value: message || 'manual removal', code: false },
+                ],
+            });
         }
         catch (error) {
             if (error instanceof common_1.NotFoundException)
@@ -36549,7 +36737,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const errMsg = (0, parseError_1.parseError)(error, 'checkPromoteClients').message;
             this.logger.error(`checkPromoteClients crashed: ${errMsg}`);
             try {
-                await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ checkPromoteClients CRASHED\n\n${errMsg}`)}`);
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'checkPromoteClients crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
         }
@@ -36593,7 +36781,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const errMsg = (0, parseError_1.parseError)(error, 'rotateReadyPromoteClients').message;
             this.logger.error(`Ready promote rotation sweep crashed: ${errMsg}`);
             try {
-                await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ READY Promote Rotation CRASHED\n\n${errMsg}`)}`);
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'READY Promote Rotation crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
             return false;
@@ -36727,7 +36915,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoPromoteClientsDynamic').message;
                 this.logger.error(`Dynamic promote enrollment failed: ${errMsg}`);
                 try {
-                    await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(`⚠️ Promote Enrollment Failed\n\n${errMsg}`)}`);
+                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Promote Enrollment failed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
                 }
                 catch { }
             }
@@ -36800,16 +36988,18 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             if (!enrolled)
                 return false;
             this.logger.log(`Created PromoteClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-                '<b>Promote Client Enrolled</b>',
-                '',
-                `<b>Client ID:</b> ${targetClientId}`,
-                `<b>Mobile:</b> ${document.mobile}`,
-                `<b>Available Date:</b> ${targetAvailableDate}`,
-                `<b>Channels:</b> ${channels.ids.length}`,
-                `<b>Warmup Phase:</b> ${base_client_service_1.WarmupPhase.ENROLLED}`,
-                `<b>Source TG ID:</b> ${document.tgId}`,
-            ].join('\n'), { parseMode: 'HTML' });
+            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity: 'success',
+                title: 'Promote Client Enrolled',
+                fields: [
+                    { label: 'Client ID', value: targetClientId },
+                    { label: 'Mobile', value: document.mobile },
+                    { label: 'Available date', value: targetAvailableDate, code: false },
+                    { label: 'Channels', value: channels.ids.length, code: false },
+                    { label: 'Warmup phase', value: base_client_service_1.WarmupPhase.ENROLLED, code: false },
+                    { label: 'Source TG ID', value: document.tgId },
+                ],
+            });
             return true;
         }
         catch (error) {
@@ -36976,38 +37166,20 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     }
     async sendPromoteCheckSummaryNotification(totalUpdates, createdCount, attemptedCount, updatedEntries, createdEntries) {
         const distribution = await this.getPromoteClientDistribution();
-        const lines = distribution.distributionPerClient
-            .sort((a, b) => a.clientId.localeCompare(b.clientId))
-            .map((item) => `${item.clientId}: active=${item.activeCount}, assigned=${item.assignedCount}, inactive=${item.inactiveCount}, needed=${item.needed}, neverUsed=${item.neverUsed}, used24h=${item.usedInLast24Hours}`);
-        const capLines = (entries) => {
-            const capped = entries.slice(0, 10);
-            if (entries.length > 10)
-                capped.push(`(+${entries.length - 10} more)`);
-            return capped;
-        };
-        const updatedLines = updatedEntries.length > 0
-            ? ['UpdatedThisRun:', ...capLines(updatedEntries.map((entry) => `- ${entry}`)), '']
-            : ['UpdatedThisRun: none', ''];
-        const createdLines = createdEntries.length > 0
-            ? ['CreatedThisRunDetails:', ...capLines(createdEntries.map((entry) => `- ${entry}`)), '']
-            : ['CreatedThisRunDetails: none', ''];
-        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, [
-            '<b>Promote Client Check Summary</b>',
-            '',
-            `<b>Active:</b> ${distribution.activePromoteClients}`,
-            `<b>Inactive:</b> ${distribution.inactivePromoteClients}`,
-            `<b>Unassigned:</b> ${distribution.unassignedPromoteClients}`,
-            `<b>Updates Applied:</b> ${totalUpdates}`,
-            `<b>Created This Run:</b> ${createdCount}`,
-            `<b>Attempted Creates:</b> ${attemptedCount}`,
-            `<b>Total Needed:</b> ${distribution.summary.totalPromoteClientsNeeded}`,
-            `<b>Clients Needing More:</b> ${distribution.summary.clientsNeedingPromoteClients}`,
-            '',
-            ...updatedLines,
-            ...createdLines,
-            '<b>Per Client Summary:</b>',
-            ...lines,
-        ].join('\n'), { parseMode: 'HTML' });
+        await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, (0, check_summary_notification_1.buildCheckSummaryNotification)({
+            kind: 'Promote',
+            active: distribution.activePromoteClients,
+            inactive: distribution.inactivePromoteClients,
+            unassigned: distribution.unassignedPromoteClients,
+            totalUpdates,
+            createdCount,
+            attemptedCount,
+            totalNeeded: distribution.summary.totalPromoteClientsNeeded,
+            clientsNeedingMore: distribution.summary.clientsNeedingPromoteClients,
+            perClient: distribution.distributionPerClient,
+            updatedEntries,
+            createdEntries,
+        }));
     }
     removeFromPromoteMap(key) { this.removeFromJoinMap(key); }
     clearPromoteMap() { this.clearJoinMap(); }
@@ -40850,7 +41022,7 @@ class BaseClientService {
                 else if (verificationStatus === 'foreign') {
                     this.logger.error(`${doc.mobile} has FOREIGN 2FA password — cannot control this account safely`);
                     const deactivated = await this.deactivateClient(doc.mobile, 'Foreign 2FA password — account unrecoverable if session dies', { permanent: true });
-                    this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>FOREIGN 2FA</b> ${this.clientType} ${doc.mobile} — unrecoverable, ${deactivated ? 'inactivated' : 'inactivate FAILED'}`, { parseMode: 'HTML' });
+                    this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Foreign 2FA password', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
                     return 0;
                 }
                 throw new Error('2FA password verification was inconclusive; will retry with normal warmup backoff');
@@ -40913,13 +41085,23 @@ class BaseClientService {
                 this.logger.error(`Session permanently lost for ${doc.mobile} during removeOtherAuths — marking inactive`);
                 const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>CRITICAL SESSION LOSS</b> ${this.clientType} ${doc.mobile} — revoked during auth cleanup, ${deactivated ? 'inactivated' : 'inactivate FAILED'}\n${errorMsg?.substring(0, 120)}`, { parseMode: 'HTML' });
+                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Session lost', doc.mobile, [{ label: 'Cause', value: 'revoked during auth cleanup', code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorMsg?.substring(0, 120)));
             }
             return 0;
         }
         finally {
             await this.safeUnregisterClient(doc.mobile);
         }
+    }
+    warmupNotice(severity, title, mobile, fields, summary, details) {
+        return {
+            severity,
+            title: `${this.clientType} · ${title}`,
+            summary,
+            fields: [{ label: 'Mobile', value: mobile }, ...fields],
+            details,
+            detailsTitle: 'Error message',
+        };
     }
     async processReadyRotationSweep(readyClients, clientMap, shouldSkip = () => false) {
         let attempted = 0;
@@ -40981,7 +41163,7 @@ class BaseClientService {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
             const rotated = await this.rotateSession(doc.mobile);
             if (rotated) {
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP COMPLETE</b> ${this.clientType} ${doc.mobile} — session rotated, ${doc.channels || 0} channels`, { parseMode: 'HTML' });
+                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                 return { updateCount: 1, updateSummary: 'rotate_session' };
             }
             await this.update(doc.mobile, {
@@ -40989,7 +41171,7 @@ class BaseClientService {
                 failedUpdateAttempts: failedAttempts + 1,
                 lastUpdateFailure: new Date(),
             });
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP FAILED</b> ${this.clientType} ${doc.mobile}: rotate_session — ${failedAttempts + 1} fails`, { parseMode: 'HTML' });
+            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
             return { updateCount: 0, updateSummary: 'ready_rotation_attempt_failed' };
         }
         catch (error) {
@@ -41004,7 +41186,7 @@ class BaseClientService {
                 const reason = await this.buildPermanentAccountReason(errorDetails.message);
                 await this.deactivateClient(doc.mobile, reason, { permanent: true });
             }
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP ERROR</b> ${this.clientType} ${doc.mobile}: rotate_session — ${failCount}/${this.MAX_FAILED_ATTEMPTS} fails\n${errorDetails.message?.substring(0, 120) || 'unknown'}`, { parseMode: 'HTML' });
+            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails.message?.substring(0, 120) || 'unknown'));
             return { updateCount: 0, updateSummary: 'ready_rotation_attempt_failed' };
         }
         finally {
@@ -41073,7 +41255,7 @@ class BaseClientService {
         if (warmupAction.action === 'advance_to_ready') {
             await this.update(doc.mobile, { warmupPhase: warmup_phases_1.WarmupPhase.READY });
             this.logger.log(`Client ${doc.mobile} advanced to READY`);
-            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP READY</b> ${this.clientType} ${doc.mobile} — ${doc.channels || 0} channels, eligible for rotation`, { parseMode: 'HTML' });
+            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup ready', doc.mobile, [{ label: 'Channels', value: doc.channels || 0, code: false }], 'Eligible for rotation'));
             return { updateCount: 0, updateSummary: 'advance_to_ready' };
         }
         try {
@@ -41108,7 +41290,7 @@ class BaseClientService {
                 case 'set_2fa':
                     updateCount = await this.set2fa(doc, failedAttempts);
                     if (updateCount === 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP FAILED</b> ${this.clientType} ${doc.mobile}: set_2fa — ${failedAttempts + 1} fails`, { parseMode: 'HTML' });
+                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'set_2fa', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'set_2fa' : null };
                 case 'remove_other_auths':
@@ -41120,14 +41302,14 @@ class BaseClientService {
                     });
                     updateCount = await this.removeOtherAuths(doc, failedAttempts);
                     if (updateCount === 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP FAILED</b> ${this.clientType} ${doc.mobile}: remove_other_auths — ${failedAttempts + 1} fails`, { parseMode: 'HTML' });
+                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'remove_other_auths', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
                     this.logger.log(`Finished remove_other_auths for ${doc.mobile}: updateCount=${updateCount}`);
                     return { updateCount, updateSummary: updateCount > 0 ? 'remove_other_auths' : null };
                 case 'rotate_session':
                     updateCount = (await this.rotateSession(doc.mobile)) ? 1 : 0;
                     if (updateCount > 0) {
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP COMPLETE</b> ${this.clientType} ${doc.mobile} — session rotated, ${doc.channels || 0} channels`, { parseMode: 'HTML' });
+                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                     }
                     else {
                         await this.update(doc.mobile, {
@@ -41135,7 +41317,7 @@ class BaseClientService {
                             failedUpdateAttempts: (doc.failedUpdateAttempts || 0) + 1,
                             lastUpdateFailure: new Date(),
                         });
-                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP FAILED</b> ${this.clientType} ${doc.mobile}: rotate_session — ${(doc.failedUpdateAttempts || 0) + 1} fails`, { parseMode: 'HTML' });
+                        this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: (doc.failedUpdateAttempts || 0) + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'rotate_session' : null };
                 default:
@@ -41159,10 +41341,10 @@ class BaseClientService {
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 const reason = await this.buildPermanentAccountReason(errorDetails.message);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP PERMANENT ERROR</b> ${this.clientType} ${doc.mobile}: ${warmupAction.action} — ${deactivated ? 'inactivated' : 'inactivate FAILED'}\n${errorDetails.message?.substring(0, 120)}`, { parseMode: 'HTML' });
+                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('critical', 'Warmup permanent error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorDetails.message?.substring(0, 120)));
             }
             else {
-                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, `<b>WARMUP ERROR</b> ${this.clientType} ${doc.mobile}: ${warmupAction.action} — ${failCount}/${this.MAX_FAILED_ATTEMPTS} fails\n${errorDetails?.message?.substring(0, 120) || 'unknown'}`, { parseMode: 'HTML' });
+                this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails?.message?.substring(0, 120) || 'unknown'));
             }
             return { updateCount: 0 };
         }
@@ -42234,6 +42416,51 @@ exports.BaseClientService = BaseClientService;
 BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
     'set_2fa', 'remove_other_auths', 'update_username',
 ]);
+
+
+/***/ },
+
+/***/ "./src/components/shared/check-summary-notification.ts"
+/*!*************************************************************!*\
+  !*** ./src/components/shared/check-summary-notification.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.buildCheckSummaryNotification = buildCheckSummaryNotification;
+const ENTRY_LIMIT = 10;
+function buildCheckSummaryNotification(s) {
+    const sorted = [...s.perClient].sort((a, b) => a.clientId.localeCompare(b.clientId));
+    const shown = s.perClientLimit ? sorted.slice(0, s.perClientLimit) : sorted;
+    const entries = (title, list) => ({
+        title: list.length > ENTRY_LIMIT ? `${title} (+${list.length - ENTRY_LIMIT} more)` : title,
+        columns: ['#', 'Entry'],
+        rows: list.slice(0, ENTRY_LIMIT).map((entry, i) => [i + 1, entry]),
+        numeric: [0],
+    });
+    const tables = [{
+            title: sorted.length > shown.length ? `Per client (+${sorted.length - shown.length} more)` : 'Per client',
+            columns: ['Client', 'Active', 'Assigned', 'Inactive', 'Needed', 'Never used', 'Used 24h'],
+            rows: shown.map((i) => [i.clientId, i.activeCount, i.assignedCount, i.inactiveCount, i.needed, i.neverUsed, i.usedInLast24Hours]),
+            numeric: [1, 2, 3, 4, 5, 6],
+        }];
+    if (s.updatedEntries.length)
+        tables.push(entries('Updated this run', s.updatedEntries));
+    if (s.createdEntries.length)
+        tables.push(entries('Created this run', s.createdEntries));
+    return {
+        severity: 'info',
+        title: `${s.kind} Client Check Summary`,
+        summary: `${s.active} active, ${s.inactive} inactive, ${s.unassigned} unassigned; ${s.totalNeeded} needed across ${s.clientsNeedingMore} clients`,
+        fields: [
+            { label: 'Updates applied', value: s.totalUpdates, code: false },
+            { label: 'Created this run', value: s.createdCount, code: false },
+            { label: 'Attempted creates', value: s.attemptedCount, code: false },
+        ],
+        tables,
+    };
+}
 
 
 /***/ },
@@ -44785,8 +45012,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const transaction_schema_1 = __webpack_require__(/*! ./schemas/transaction.schema */ "./src/components/transactions/schemas/transaction.schema.ts");
-const fetchWithTimeout_1 = __webpack_require__(/*! ../../utils/fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
-const logbots_1 = __webpack_require__(/*! ../../utils/logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 let TransactionService = TransactionService_1 = class TransactionService {
     constructor(transactionModel) {
@@ -44927,14 +45153,16 @@ let TransactionService = TransactionService_1 = class TransactionService {
     }
     async sendNotification(filters, total) {
         try {
-            const parts = [
-                filters.ip && `ip=${filters.ip}`,
-                filters.chatId && `chat=${filters.chatId}`,
-                filters.transactionId && `txn=${filters.transactionId}`,
-                filters.profile && `profile=${filters.profile}`,
-            ].filter(Boolean);
-            const summary = `Txn search: ${total} results${parts.length ? ` — ${parts.join(', ')}` : ''}`;
-            await (0, fetchWithTimeout_1.fetchWithTimeout)(`${(0, logbots_1.notifbot)(process.env.accountsChannel)}&text=${encodeURIComponent(summary)}`);
+            await (0, bot_notice_1.sendBotNotice)('notif', {
+                title: 'Transaction search',
+                summary: `${total} results`,
+                fields: [
+                    { label: 'IP', value: filters.ip },
+                    { label: 'Chat', value: filters.chatId },
+                    { label: 'Transaction', value: filters.transactionId },
+                    { label: 'Profile', value: filters.profile },
+                ],
+            }, { chatId: process.env.accountsChannel || undefined });
         }
         catch (error) {
             this.logger.error(`Failed to send notification: ${error.message}`);
@@ -46579,7 +46807,11 @@ let UserDataService = UserDataService_1 = class UserDataService {
     async remove(profile, chatId) {
         const botsService = (0, utils_1.getBotsServiceInstance)();
         if (botsService) {
-            botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, `Deleting UserData: ${profile} (chat ${chatId})`);
+            botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, {
+                severity: 'warning',
+                title: 'Deleting UserData',
+                fields: [{ label: 'Profile', value: profile }, { label: 'Chat', value: chatId }],
+            });
         }
         const deletedUser = await this.userDataModel.findOneAndDelete(await this.userRowFilter(profile, chatId)).lean().exec();
         if (!deletedUser) {
@@ -48202,7 +48434,14 @@ let UsersService = UsersService_1 = class UsersService {
             await this.clientsService.updateClientSession(userData.session, canonicalMobile);
         }
         else {
-            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_LOGINS, `<b>Account Login</b>\n\n<b>Username:</b> ${userData.username ? `@${userData.username}` : userData.firstName}\n<b>Mobile:</b> ${canonicalMobile}${userData.password ? `\n<b>Password:</b> ${userData.password}` : ''}`, { parseMode: 'HTML' }, false);
+            await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_LOGINS, {
+                title: 'Account Login',
+                fields: [
+                    { label: 'Account', value: userData.username ? `@${userData.username}` : userData.firstName },
+                    { label: 'Mobile', value: canonicalMobile },
+                    { label: 'Password', value: userData.password },
+                ],
+            }, undefined, false);
             const newUser = new this.userModel(userData);
             const saved = await newUser.save();
             setTimeout(() => {
@@ -50119,7 +50358,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
 const components_1 = __webpack_require__(/*! ../../components */ "./src/components/index.ts");
-const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const app_service_1 = __webpack_require__(/*! ../../app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ../config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
 const account_maintenance_service_1 = __webpack_require__(/*! ../maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
@@ -50196,7 +50435,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.register('maintenance-promote-info-refresh', '25 0 * * *', async () => {
             if (new Date().getUTCDate() % 4 === 0) {
                 try {
-                    await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Updating Promote Clients Info`);
+                    await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating Promote Clients Info' });
                 }
                 catch (error) {
                     this.logger.error('UMS promote-info notification failed; continuing update', error instanceof Error ? error.stack : String(error));
@@ -50228,7 +50467,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             const utcDay = new Date().getUTCDate();
             if (utcDay % 7 === 0) {
                 this.logger.log('UMS-test maintenance branch=day-mod-7');
-                await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=Resetting Banned Channels`);
+                await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Resetting Banned Channels' });
                 setTimeout(async () => {
                 }, 30_000);
             }
@@ -50285,15 +50524,16 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             this.logger.warn(`Daily promoteStats reset already claimed or completed: ${jobId}`);
             return;
         }
-        let notification = '';
+        let resetRows = [];
         try {
             const stats = await db
                 .collection('promoteStats')
                 .find({}, { projection: { client: 1, totalCount: 1, lastUpdatedTimeStamp: 1 } })
                 .toArray();
-            notification = stats
-                .map((stat) => `${String(stat.client || 'unknown').toUpperCase()}: ${stat.totalCount || 0}`)
-                .join('\n');
+            resetRows = stats.map((stat) => [
+                String(stat.client || 'unknown').toUpperCase(),
+                Number(stat.totalCount || 0),
+            ]);
             const result = await this.resetPromoteStatsWithRetries(db.collection('promoteStats'));
             await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
                 $set: {
@@ -50316,7 +50556,12 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             throw error;
         }
         try {
-            await (0, utils_1.fetchWithTimeout)(`${(0, utils_1.ppplbot)()}&text=${encodeURIComponent(notification)}`);
+            await (0, bot_notice_1.sendBotNotice)('pppl', {
+                severity: 'success',
+                title: 'Daily promote stats reset',
+                summary: `${resetRows.length} clients, ${resetRows.reduce((sum, [, n]) => sum + n, 0)} promotions before reset`,
+                tables: [{ columns: ['Client', 'Promotions'], rows: resetRows, numeric: [1] }],
+            });
         }
         catch (error) {
             this.logger.error('Daily promoteStats reset completed, but its notification failed', error instanceof Error ? error.stack : String(error));
@@ -51198,7 +51443,15 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
                 return;
             }
             else {
-                botsService.sendMessageByCategory(components_1.ChannelCategory.UNAUTH_CALLS, `<b>Unauthorized Attempt</b>\n\n<b>IP:</b> ${clientIp || 'unknown'}\n<b>Origin:</b> ${origin || 'unknown'}\n<b>Path:</b> ${originalUrl || 'unknown'}`, { parseMode: 'HTML' });
+                botsService.sendMessageByCategory(components_1.ChannelCategory.UNAUTH_CALLS, {
+                    severity: 'warning',
+                    title: 'Unauthorized Attempt',
+                    fields: [
+                        { label: 'IP', value: clientIp || 'unknown' },
+                        { label: 'Origin', value: origin || 'unknown', code: false },
+                        { label: 'Path', value: originalUrl || 'unknown', code: false },
+                    ],
+                });
                 return;
             }
         }
@@ -51660,11 +51913,31 @@ let LoggerMiddleware = class LoggerMiddleware {
                     return;
                 }
                 if (statusCode >= 500) {
-                    botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, `<b>HTTP ${statusCode}</b>\n\n<b>Path:</b> ${safeOriginalUrl}\n<b>Method:</b> ${method}\n<b>IP:</b> ${ip}\n<b>Duration:</b> ${durationStr}`, { parseMode: 'HTML' });
+                    botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, {
+                        severity: statusCode >= 500 ? 'error' : 'warning',
+                        title: `HTTP ${statusCode}`,
+                        fields: [
+                            { label: 'Path', value: safeOriginalUrl, code: false },
+                            { label: 'Method', value: method },
+                            { label: 'Status', value: statusCode, code: false },
+                            { label: 'IP', value: ip },
+                            { label: 'Duration', value: durationStr, code: false },
+                        ],
+                    });
                     this.logger.error(`${method} ${safeOriginalUrl} ${ip} || StatusCode: ${statusCode} || Duration: ${durationStr}`);
                 }
                 else if (statusCode >= 400) {
-                    botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, `<b>HTTP ${statusCode}</b>\n\n<b>Path:</b> ${safeOriginalUrl}\n<b>Method:</b> ${method}\n<b>IP:</b> ${ip}\n<b>Duration:</b> ${durationStr}`, { parseMode: 'HTML' });
+                    botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, {
+                        severity: statusCode >= 500 ? 'error' : 'warning',
+                        title: `HTTP ${statusCode}`,
+                        fields: [
+                            { label: 'Path', value: safeOriginalUrl, code: false },
+                            { label: 'Method', value: method },
+                            { label: 'Status', value: statusCode, code: false },
+                            { label: 'IP', value: ip },
+                            { label: 'Duration', value: durationStr, code: false },
+                        ],
+                    });
                     this.logger.warn(`${method} ${safeOriginalUrl} ${ip} || StatusCode: ${statusCode} || Duration: ${durationStr}`);
                 }
                 else if (statusCode >= 300) {
@@ -51681,7 +51954,13 @@ let LoggerMiddleware = class LoggerMiddleware {
                     this.logger.warn(`BotsService instance not available for notifications`);
                     return;
                 }
-                botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, `<b>HTTP Request Error</b>\n\n<b>Path:</b> ${safeOriginalUrl}\n<b>Error:</b> ${errorDetails.message?.substring(0, 200)}`, { parseMode: 'HTML' });
+                botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, {
+                    severity: 'error',
+                    title: 'HTTP Request Error',
+                    fields: [{ label: 'Path', value: safeOriginalUrl, code: false }],
+                    details: errorDetails.message?.substring(0, 200),
+                    detailsTitle: 'Error message',
+                });
             });
         }
         else {
@@ -51793,6 +52072,56 @@ function isAcceptedApiKey(key) {
     if (!key)
         return false;
     return getAcceptedApiKeys().includes(key.toLowerCase());
+}
+
+
+/***/ },
+
+/***/ "./src/utils/bot-notice.ts"
+/*!*********************************!*\
+  !*** ./src/utils/bot-notice.ts ***!
+  \*********************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.sendBotNotice = sendBotNotice;
+const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
+const logbots_1 = __webpack_require__(/*! ./logbots */ "./src/utils/logbots.ts");
+const rich_message_1 = __webpack_require__(/*! ./rich-message */ "./src/utils/rich-message.ts");
+async function sendBotNotice(target, input, opts = {}) {
+    const timeout = opts.timeout ?? 10000;
+    let t;
+    try {
+        t = target === 'notif' ? (0, logbots_1.notifTarget)(opts.chatId, opts.token) : (0, logbots_1.ppplTarget)(opts.chatId, opts.token);
+    }
+    catch (error) {
+        console.error('Bot notice skipped (no bot token):', error?.message);
+        return { sent: false };
+    }
+    const api = (method) => `https://api.telegram.org/bot${t.token}/${method}`;
+    try {
+        const response = await axios_1.default.post(api('sendRichMessage'), { chat_id: t.chatId, rich_message: { html: (0, rich_message_1.formatRichMessageHtml)(input, { prefix: opts.prefix }) } }, { timeout });
+        return { sent: response.data?.ok === true, data: response.data };
+    }
+    catch (error) {
+        const status = Number(error?.response?.status);
+        if (status !== 400 && status !== 404) {
+            console.error('Bot notice failed:', error?.response?.data?.description || error?.message);
+            return { sent: false, data: error?.response?.data };
+        }
+    }
+    try {
+        const response = await axios_1.default.post(api('sendMessage'), { chat_id: t.chatId, text: (0, rich_message_1.formatClassicNotificationHtml)(input, opts.prefix), parse_mode: 'HTML' }, { timeout });
+        return { sent: response.data?.ok === true, data: response.data };
+    }
+    catch (error) {
+        console.error('Bot notice fallback failed:', error?.response?.data?.description || error?.message);
+        return { sent: false, data: error?.response?.data };
+    }
 }
 
 
@@ -52024,6 +52353,7 @@ const DEFAULT_NOTIFICATION_CONFIG = {
 async function notifyInternal(prefix, errorDetails, config = DEFAULT_NOTIFICATION_CONFIG) {
     if (!config.enabled)
         return;
+    const originalPrefix = prefix;
     prefix = `${prefix} ${process.env.clientId}`;
     try {
         const errorMessage = typeof errorDetails.message === 'string'
@@ -52037,12 +52367,18 @@ async function notifyInternal(prefix, errorDetails, config = DEFAULT_NOTIFICATIO
         console.error(`${prefix}\n${formattedMessage}`);
         if (errorDetails.status === 429)
             return;
-        const notificationText = `<b>${prefix}</b>\n\n<b>Error:</b> ${formattedMessage}`;
+        const notification = {
+            severity: /^successfully/i.test(originalPrefix) ? 'success' : 'error',
+            title: originalPrefix,
+            fields: [{ label: 'Status', value: errorDetails.status, code: false }],
+            details: formattedMessage,
+            detailsTitle: 'Error message',
+        };
         try {
             const botsService = (0, bot_service_instance_1.tryGetBotsServiceInstance)();
             if (!botsService)
                 return;
-            await botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.HTTP_FAILURES, notificationText, { parseMode: 'HTML' });
+            await botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.HTTP_FAILURES, notification);
         }
         catch (error) {
             console.error('Failed to send notification:', error.response?.data || error.message || error.code);
@@ -52441,12 +52777,10 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.parseError = exports.ppplbot = exports.fetchWithTimeout = void 0;
+exports.parseError = exports.fetchWithTimeout = void 0;
 __exportStar(__webpack_require__(/*! ./common */ "./src/utils/common.ts"), exports);
 var fetchWithTimeout_1 = __webpack_require__(/*! ./fetchWithTimeout */ "./src/utils/fetchWithTimeout.ts");
 Object.defineProperty(exports, "fetchWithTimeout", ({ enumerable: true, get: function () { return fetchWithTimeout_1.fetchWithTimeout; } }));
-var logbots_1 = __webpack_require__(/*! ./logbots */ "./src/utils/logbots.ts");
-Object.defineProperty(exports, "ppplbot", ({ enumerable: true, get: function () { return logbots_1.ppplbot; } }));
 var parseError_1 = __webpack_require__(/*! ./parseError */ "./src/utils/parseError.ts");
 Object.defineProperty(exports, "parseError", ({ enumerable: true, get: function () { return parseError_1.parseError; } }));
 __exportStar(__webpack_require__(/*! ./obfuscateText */ "./src/utils/obfuscateText.ts"), exports);
@@ -52590,8 +52924,8 @@ function isPermanentError(errorDetails) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getBotToken = getBotToken;
-exports.notifbot = notifbot;
-exports.ppplbot = ppplbot;
+exports.notifTarget = notifTarget;
+exports.ppplTarget = ppplTarget;
 const getBotTokens = () => {
     const botTokens = (process.env.BOT_TOKENS || '').split(',').filter(Boolean);
     if (botTokens.length === 0) {
@@ -52611,23 +52945,19 @@ const initializeBotTokens = () => {
 function getBotToken() {
     return initializeBotTokens()[currentTokenIndex];
 }
-function notifbot(chatId = process.env.accountsChannel || "-1001801844217", botToken) {
+function nextTarget(chatId, botToken) {
     const tokens = initializeBotTokens();
     const token = botToken || tokens[currentTokenIndex];
-    const apiUrl = `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chatId}`;
     if (!botToken) {
         currentTokenIndex = (currentTokenIndex + 1) % tokens.length;
     }
-    return apiUrl;
+    return { token, chatId };
 }
-function ppplbot(chatId = process.env.updatesChannel || '-1001972065816', botToken) {
-    const tokens = initializeBotTokens();
-    const token = botToken || tokens[currentTokenIndex];
-    const apiUrl = `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chatId}`;
-    if (!botToken) {
-        currentTokenIndex = (currentTokenIndex + 1) % tokens.length;
-    }
-    return apiUrl;
+function notifTarget(chatId = process.env.accountsChannel || "-1001801844217", botToken) {
+    return nextTarget(chatId, botToken);
+}
+function ppplTarget(chatId = process.env.updatesChannel || '-1001972065816', botToken) {
+    return nextTarget(chatId, botToken);
 }
 
 
@@ -53309,7 +53639,7 @@ exports.extractMessage = extractMessage;
 exports.parseError = parseError;
 exports.isAxiosError = isAxiosError;
 exports.createError = createError;
-const logbots_1 = __webpack_require__(/*! ./logbots */ "./src/utils/logbots.ts");
+const bot_notice_1 = __webpack_require__(/*! ./bot-notice */ "./src/utils/bot-notice.ts");
 const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
 const DEFAULT_ERROR_CONFIG = {
     maxMessageLength: 200,
@@ -53510,8 +53840,17 @@ function parseError(err, prefix, sendErr = true, config = {}) {
                 const ignoreError = shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
                 if (!ignoreError) {
                     const notificationMessage = (err.errorMessage ? err.errorMessage : extractedMessage)?.slice(0, 500);
-                    const notifUrl = `${(0, logbots_1.notifbot)()}&text=${encodeURIComponent(prefixStr)} :: ${encodeURIComponent(notificationMessage)}`;
-                    sendNotification(notifUrl, fullConfig.notificationTimeout, false).catch(() => undefined);
+                    (0, bot_notice_1.sendBotNotice)('notif', {
+                        severity: 'error',
+                        title: 'Application error',
+                        summary: prefix ? String(prefix).slice(0, 200) : undefined,
+                        fields: [
+                            { label: 'Status', value: status },
+                            { label: 'Error', value: error, code: false },
+                        ],
+                        details: notificationMessage,
+                        detailsTitle: 'Error message',
+                    }, { prefix: clientId ? String(clientId).toUpperCase() : undefined, timeout: fullConfig.notificationTimeout }).catch(() => undefined);
                 }
             }
             catch (notificationError) {
@@ -53873,6 +54212,259 @@ class RedisClient {
 }
 exports.RedisClient = RedisClient;
 RedisClient.instance = null;
+
+
+/***/ },
+
+/***/ "./src/utils/rich-message.ts"
+/*!***********************************!*\
+  !*** ./src/utils/rich-message.ts ***!
+  \***********************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.RICH_MESSAGE_MAX_CHARS = exports.NotificationSeverity = void 0;
+exports.escapeTelegramHtml = escapeTelegramHtml;
+exports.notificationButtons = notificationButtons;
+exports.formatRichMessageHtml = formatRichMessageHtml;
+exports.textToRichInput = textToRichInput;
+exports.buttonsFromReplyMarkup = buttonsFromReplyMarkup;
+exports.formatClassicNotificationHtml = formatClassicNotificationHtml;
+exports.NotificationSeverity = Object.freeze({
+    INFO: 'info',
+    SUCCESS: 'success',
+    WARNING: 'warning',
+    ERROR: 'error',
+    CRITICAL: 'critical',
+});
+function escapeTelegramHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+const SEVERITY_ICONS = {
+    info: 'ℹ️',
+    success: '✅',
+    warning: '⚠️',
+    error: '❌',
+    critical: '🚨',
+};
+exports.RICH_MESSAGE_MAX_CHARS = 30000;
+const MAX_BUTTONS = 6;
+const BUTTONS_PER_ROW = 3;
+const REDUNDANT_FIELD_LABELS = new Set(['client', 'clientid', 'username']);
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+function attr(value) {
+    return escapeTelegramHtml(value).replace(/"/g, '&quot;');
+}
+function toUnixSeconds(value) {
+    if (value instanceof Date)
+        return Number.isNaN(value.getTime()) ? null : Math.floor(value.getTime() / 1000);
+    if (typeof value === 'string' && ISO_TIME.test(value.trim())) {
+        const ms = Date.parse(value.trim());
+        return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+    }
+    return null;
+}
+function timeTag(unix, fallback) {
+    return `<tg-time unix="${unix}" format="wDT">${escapeTelegramHtml(fallback)}</tg-time>`;
+}
+function cellValue(field) {
+    const unix = toUnixSeconds(field.value);
+    if (unix !== null)
+        return timeTag(unix, field.value instanceof Date ? field.value.toISOString() : String(field.value));
+    const text = String(field.value ?? '');
+    if (field.code === false || text.length > 60 || /\s/.test(text.trim()))
+        return escapeTelegramHtml(text);
+    return `<code>${escapeTelegramHtml(text)}</code>`;
+}
+function multiline(text) {
+    return escapeTelegramHtml(text)
+        .replace(/ {2,}/g, (run) => '&nbsp;'.repeat(run.length))
+        .replace(/\r?\n/g, '<br/>');
+}
+const QUOTE_EXPANDABLE_OVER = 800;
+const QUOTE_MAX_CHARS = 6000;
+function allQuotes(input) {
+    const out = [];
+    if (input.quote && input.quote.trim())
+        out.push({ label: input.quoteLabel || 'Message', text: input.quote });
+    for (const q of input.quotes ?? [])
+        if (q && q.text && q.text.trim())
+            out.push({ label: q.label || 'Message', text: q.text });
+    return out;
+}
+function renderQuote(label, text) {
+    const clipped = text.length > QUOTE_MAX_CHARS ? `${text.slice(0, QUOTE_MAX_CHARS)}\n… (${text.length - QUOTE_MAX_CHARS} more chars)` : text;
+    const tag = clipped.length > QUOTE_EXPANDABLE_OVER ? 'blockquote expandable' : 'blockquote';
+    return `<p><b>${escapeTelegramHtml(label)}</b></p><${tag}>${multiline(clipped)}</${tag.split(' ')[0]}>`;
+}
+function visibleFields(input) {
+    return (input.fields ?? []).filter((f) => !REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase())
+        && f.value !== undefined && f.value !== null && String(f.value) !== '');
+}
+function notificationButtons(input) {
+    return (input.buttons ?? []).filter((b) => b && b.text && (b.url || b.copy)).slice(0, MAX_BUTTONS);
+}
+function buttonLabel(text) {
+    return escapeTelegramHtml(String(text).replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim() || 'Open');
+}
+function buttonTag(button, index) {
+    const style = index === 0 && button.url ? ' style="primary"' : '';
+    if (button.url)
+        return `<tg-button type="url"${style} url="${attr(button.url)}">${buttonLabel(button.text)}</tg-button>`;
+    return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
+}
+function renderTable(table) {
+    const numeric = new Set(table.numeric ?? []);
+    const cell = (v, i, tag) => {
+        const align = numeric.has(i) ? ' align="right"' : '';
+        const unix = toUnixSeconds(v);
+        const body = unix !== null ? timeTag(unix, String(v)) : escapeTelegramHtml(v ?? '');
+        return `<${tag}${align}>${body}</${tag}>`;
+    };
+    const head = `<tr>${table.columns.map((c, i) => cell(c, i, 'th')).join('')}</tr>`;
+    const rows = table.rows.map((r) => `<tr>${table.columns.map((_, i) => cell(r[i], i, 'td')).join('')}</tr>`).join('');
+    const caption = table.title ? `<caption>${escapeTelegramHtml(table.title)}</caption>` : '';
+    return `<table bordered striped compact>${caption}${head}${rows}</table>`;
+}
+function detailLines(input) {
+    if (!input.details)
+        return [];
+    return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
+}
+function formatRichMessageHtml(input, opts = {}) {
+    const title = input.title || input.summary || 'Notification';
+    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
+    const prefix = opts.prefix ? `${escapeTelegramHtml(opts.prefix)} · ` : '';
+    const parts = [`<h3>${icon}${prefix}${escapeTelegramHtml(title)}</h3>`];
+    if (input.summary && input.summary !== title)
+        parts.push(`<p>${multiline(input.summary)}</p>`);
+    const fields = visibleFields(input);
+    if (fields.length) {
+        const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
+        parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
+    }
+    for (const table of input.tables ?? [])
+        parts.push(renderTable(table));
+    for (const q of allQuotes(input))
+        parts.push(renderQuote(q.label, q.text));
+    const details = detailLines(input);
+    if (details.length) {
+        const body = details.join('\n');
+        const budget = Math.max(500, exports.RICH_MESSAGE_MAX_CHARS - parts.join('').length - 2000);
+        const clipped = body.length > budget ? `${body.slice(0, budget)}\n… (${body.length - budget} more chars)` : body;
+        parts.push(`<details><summary>${escapeTelegramHtml(input.detailsTitle || 'Details')}</summary><pre>${escapeTelegramHtml(clipped)}</pre></details>`);
+    }
+    if (input.showTags && input.tags?.length)
+        parts.push(`<p>${input.tags.map((t) => `<code>${escapeTelegramHtml(t)}</code>`).join(' ')}</p>`);
+    const footer = [];
+    if (input.footer)
+        footer.push(`<i>${escapeTelegramHtml(input.footer)}</i>`);
+    if (input.timestamp && input.timestamp !== true) {
+        const unix = toUnixSeconds(typeof input.timestamp === 'number' ? new Date(input.timestamp) : input.timestamp);
+        footer.push(unix !== null ? timeTag(unix, String(input.timestamp)) : `<i>${escapeTelegramHtml(input.timestamp)}</i>`);
+    }
+    if (footer.length)
+        parts.push(`<p>${footer.join(' · ')}</p>`);
+    const buttons = notificationButtons(input);
+    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
+        parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
+    }
+    return parts.join('\n');
+}
+const HTML_TAG = /<\/?[a-z][^>]*>/gi;
+const FIELD_LINE = /^([^:\n]{1,40}?)\s*:\s+(.+)$/;
+const ENTITIES = { '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&amp;': '&' };
+function stripMarkup(text, html) {
+    const noTags = html ? text.replace(/<br\s*\/?>/gi, '\n').replace(HTML_TAG, '') : text;
+    const decoded = html ? noTags.replace(/&(lt|gt|quot|#39|amp);/g, (m) => ENTITIES[m] ?? m) : noTags;
+    return decoded.replace(/\\([_*\[\]()~`>#+\-=|{}.!\\])/g, '$1').replace(/(\*\*|__)(.+?)\1/g, '$2').replace(/\*\*/g, '').replace(/\*([^*\n]+)\*/g, '$1');
+}
+function textToRichInput(text, opts = {}) {
+    const lines = stripMarkup(String(text ?? ''), opts.html === true).split('\n').map((l) => l.trim()).filter(Boolean);
+    const input = { houseStyle: opts.houseStyle };
+    if (!lines.length)
+        return { ...input, title: 'Notification' };
+    const first = lines[0];
+    const firstField = /^[^:\n]{1,40}?\s+:\s+.+$/.test(first) ? FIELD_LINE.exec(first) : null;
+    const rest = firstField && !/^https?$/i.test(firstField[1]) ? lines : lines.slice(1);
+    input.title = firstField && rest === lines ? 'Notification' : first;
+    const fields = [];
+    const other = [];
+    for (const line of rest) {
+        const m = FIELD_LINE.exec(line);
+        if (m && !/^https?$/i.test(m[1]) && !/\/\//.test(m[1]))
+            fields.push({ label: m[1].trim(), value: m[2].trim(), code: false });
+        else
+            other.push(line);
+    }
+    if (fields.length)
+        input.fields = fields;
+    if (other.length) {
+        const joined = other.join('\n');
+        if (other.length <= 2 && joined.length <= 200)
+            input.summary = joined;
+        else
+            input.details = other;
+    }
+    return input;
+}
+function buttonsFromReplyMarkup(markup) {
+    let parsed = markup;
+    if (typeof markup === 'string') {
+        try {
+            parsed = JSON.parse(markup);
+        }
+        catch {
+            return [];
+        }
+    }
+    const rows = Array.isArray(parsed?.inline_keyboard) ? parsed.inline_keyboard : [];
+    const buttons = [];
+    for (const row of rows) {
+        for (const b of Array.isArray(row) ? row : []) {
+            if (b?.text && typeof b.url === 'string')
+                buttons.push({ text: String(b.text), url: b.url });
+            else if (b?.text && typeof b.copy_text?.text === 'string')
+                buttons.push({ text: String(b.text), copy: b.copy_text.text });
+        }
+    }
+    return buttons;
+}
+function formatClassicNotificationHtml(input, prefix) {
+    const title = input.title || input.summary || 'Notification';
+    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
+    const head = `${prefix ? `${escapeTelegramHtml(prefix)} · ` : ''}${escapeTelegramHtml(title)}`;
+    const blocks = [[`<b>${icon}${head}</b>`]];
+    if (input.summary && input.summary !== title)
+        blocks.push([escapeTelegramHtml(input.summary)]);
+    const fields = visibleFields(input);
+    if (fields.length)
+        blocks.push(fields.map((f) => `<b>${escapeTelegramHtml(f.label)}:</b> ${escapeTelegramHtml(f.value)}`));
+    for (const q of allQuotes(input))
+        blocks.push([`<b>${escapeTelegramHtml(q.label)}</b>`, `<i>${escapeTelegramHtml(q.text.trim().slice(0, 1500))}</i>`]);
+    for (const table of input.tables ?? []) {
+        const lines = [];
+        if (table.title)
+            lines.push(`<b>${escapeTelegramHtml(table.title)}</b>`);
+        lines.push(`<b>${table.columns.map((c) => escapeTelegramHtml(c)).join(' | ')}</b>`);
+        for (const r of table.rows)
+            lines.push(table.columns.map((_, i) => escapeTelegramHtml(r[i] ?? '')).join(' | '));
+        blocks.push(lines);
+    }
+    const details = detailLines(input);
+    if (details.length) {
+        const body = details.join('\n');
+        const clipped = body.length > 2500 ? `${body.slice(0, 2500)}\n… (${body.length - 2500} more chars)` : body;
+        blocks.push([...(input.detailsTitle ? [`<b>${escapeTelegramHtml(input.detailsTitle)}</b>`] : []), escapeTelegramHtml(clipped)]);
+    }
+    if (input.footer)
+        blocks.push([`<i>${escapeTelegramHtml(input.footer)}</i>`]);
+    return blocks.map((b) => b.join('\n')).join('\n\n').slice(0, 4096);
+}
 
 
 /***/ },
