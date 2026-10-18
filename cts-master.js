@@ -1723,7 +1723,7 @@ let AppService = AppService_1 = class AppService {
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.textToRichInput)(bounded, { html: true }));
+        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToRichInput)(bounded), undefined, false);
         return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
@@ -54753,6 +54753,7 @@ exports.escapeTelegramHtml = escapeTelegramHtml;
 exports.notificationButtons = notificationButtons;
 exports.formatRichMessageHtml = formatRichMessageHtml;
 exports.textToRichInput = textToRichInput;
+exports.telemetryToRichInput = telemetryToRichInput;
 exports.buttonsFromReplyMarkup = buttonsFromReplyMarkup;
 exports.formatClassicNotificationHtml = formatClassicNotificationHtml;
 exports.NotificationSeverity = Object.freeze({
@@ -54811,6 +54812,10 @@ function multiline(text) {
 }
 const QUOTE_EXPANDABLE_OVER = 800;
 const QUOTE_MAX_CHARS = 6000;
+function preBlock(code, max) {
+    const body = escapeTelegramHtml(code.text.slice(0, max));
+    return code.language && /^[a-z0-9+-]{1,20}$/i.test(code.language) ? `<pre><code class="language-${code.language}">${body}</code></pre>` : `<pre>${body}</pre>`;
+}
 function allQuotes(input) {
     const out = [];
     if (input.quote && input.quote.trim())
@@ -54820,10 +54825,13 @@ function allQuotes(input) {
             out.push({ label: q.label || 'Message', text: q.text });
     return out;
 }
-function renderQuote(label, text) {
+function spoilerTag(value) {
+    return value ? ` · <tg-spoiler><code>${escapeTelegramHtml(value)}</code></tg-spoiler>` : '';
+}
+function renderQuote(label, text, spoiler) {
     const clipped = text.length > QUOTE_MAX_CHARS ? `${text.slice(0, QUOTE_MAX_CHARS)}\n… (${text.length - QUOTE_MAX_CHARS} more chars)` : text;
     const tag = clipped.length > QUOTE_EXPANDABLE_OVER ? 'blockquote expandable' : 'blockquote';
-    return `<p><b>${escapeTelegramHtml(label)}</b></p><${tag}>${multiline(clipped)}</${tag.split(' ')[0]}>`;
+    return `<p><b>${escapeTelegramHtml(label)}</b>${spoilerTag(spoiler)}</p><${tag}>${multiline(clipped)}</${tag.split(' ')[0]}>`;
 }
 function visibleFields(input) {
     return (input.fields ?? []).filter((f) => !REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase())
@@ -54863,9 +54871,12 @@ function formatRichMessageHtml(input, opts = {}) {
     const title = input.title || input.summary || 'Notification';
     const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
     const prefix = opts.prefix ? `${escapeTelegramHtml(opts.prefix)} · ` : '';
-    const parts = [`<h3>${icon}${prefix}${escapeTelegramHtml(title)}</h3>`];
-    if (input.summary && input.summary !== title)
-        parts.push(`<p>${multiline(input.summary)}</p>`);
+    const quotes = allQuotes(input);
+    const hasSummary = Boolean(input.summary && input.summary !== title);
+    const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
+    const parts = [`<h3>${icon}${prefix}${escapeTelegramHtml(title)}${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</h3>`];
+    if (hasSummary)
+        parts.push(`<p>${multiline(input.summary)}${spoilerAt === 'summary' ? spoilerTag(input.spoiler) : ''}</p>`);
     const fields = visibleFields(input);
     if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
@@ -54873,8 +54884,12 @@ function formatRichMessageHtml(input, opts = {}) {
     }
     for (const table of input.tables ?? [])
         parts.push(renderTable(table));
-    for (const q of allQuotes(input))
-        parts.push(renderQuote(q.label, q.text));
+    quotes.forEach((q, i) => parts.push(renderQuote(q.label, q.text, i === 0 && spoilerAt === 'quote' ? input.spoiler : undefined)));
+    if (input.code?.text) {
+        if (input.code.label)
+            parts.push(`<p><b>${escapeTelegramHtml(input.code.label)}</b></p>`);
+        parts.push(preBlock(input.code, QUOTE_MAX_CHARS));
+    }
     const details = detailLines(input);
     if (details.length) {
         const body = details.join('\n');
@@ -54936,6 +54951,32 @@ function textToRichInput(text, opts = {}) {
     }
     return input;
 }
+const TELEMETRY_LABEL = /^([^:\n]{1,40}?)\s*:\s+([\s\S]+)$/;
+function telemetryToRichInput(text) {
+    const plain = String(text ?? '').replace(/<br\s*\/?>/gi, '\n').replace(HTML_TAG, '').replace(/&(lt|gt|quot|#39|amp);/g, (m) => ENTITIES[m] ?? m);
+    const lines = plain.split('\n');
+    const first = lines.findIndex((l) => l.trim());
+    if (first < 0)
+        return { title: 'Telemetry' };
+    const [user, ...rest] = lines[first].trim().split(' · ');
+    const ip = rest.join(' · ').trim();
+    const head = { title: user.trim() || 'Telemetry', ...(ip ? { spoiler: ip } : {}) };
+    const body = lines.slice(first + 1).join('\n').trim();
+    if (!body)
+        return head;
+    try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object')
+            return { ...head, code: { text: JSON.stringify(parsed, null, 2), language: 'json' } };
+    }
+    catch { }
+    const m = TELEMETRY_LABEL.exec(body);
+    if (m && !/^https?$/i.test(m[1]) && !/\/\//.test(m[1]))
+        return { ...head, quoteLabel: m[1].trim(), quote: m[2].trim() };
+    if (!body.includes('\n') && body.length <= 60)
+        return { ...head, summary: body };
+    return { ...head, quote: body };
+}
 function buttonsFromReplyMarkup(markup) {
     let parsed = markup;
     if (typeof markup === 'string') {
@@ -54961,7 +55002,7 @@ function buttonsFromReplyMarkup(markup) {
 function formatClassicNotificationHtml(input, prefix) {
     const title = input.title || input.summary || 'Notification';
     const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
-    const head = `${prefix ? `${escapeTelegramHtml(prefix)} · ` : ''}${escapeTelegramHtml(title)}`;
+    const head = `${prefix ? `${escapeTelegramHtml(prefix)} · ` : ''}${escapeTelegramHtml(title)}${spoilerTag(input.spoiler)}`;
     const blocks = [[`<b>${icon}${head}</b>`]];
     if (input.summary && input.summary !== title)
         blocks.push([escapeTelegramHtml(input.summary)]);
@@ -54970,6 +55011,8 @@ function formatClassicNotificationHtml(input, prefix) {
         blocks.push(fields.map((f) => `<b>${escapeTelegramHtml(f.label)}:</b> ${escapeTelegramHtml(f.value)}`));
     for (const q of allQuotes(input))
         blocks.push([`<b>${escapeTelegramHtml(q.label)}</b>`, `<i>${escapeTelegramHtml(q.text.trim().slice(0, 1500))}</i>`]);
+    if (input.code?.text)
+        blocks.push([...(input.code.label ? [`<b>${escapeTelegramHtml(input.code.label)}</b>`] : []), preBlock(input.code, 2500)]);
     for (const table of input.tables ?? []) {
         const lines = [];
         if (table.title)
