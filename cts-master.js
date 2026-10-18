@@ -2555,9 +2555,6 @@ let InitModule = InitModule_1 = class InitModule {
             InitModule_1.initializationStatus.isInitialized = true;
             InitModule_1.initializationStatus.isInitializing = false;
             console.log(`Started :: ${process.env.clientId}`);
-            if (!process.env.LOCAL_SERVER) {
-                await this.sendNotification({ severity: 'success', title: 'Service Started', fields: [{ label: 'Client ID', value: process.env.clientId }] });
-            }
         }
         catch (error) {
             InitModule_1.initializationStatus.isInitializing = false;
