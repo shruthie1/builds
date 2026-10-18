@@ -13500,6 +13500,14 @@ class RedisClient {
             : JSON.stringify(value);
         return client.hset(key, field, val);
     }
+    /** One MULTI: RPUSH, keep only the newest `cap` entries, refresh the TTL. Throws unless all three applied. */
+    static async digestPush(key, value, cap, ttlSeconds) {
+        const client = await RedisClient.getReadyClient();
+        const results = await client.multi().rpush(key, value).ltrim(key, -cap, -1).expire(key, ttlSeconds).exec();
+        if (!results || results.some(([error]) => error)) {
+            throw new Error("digest push failed");
+        }
+    }
     static async hget(key, field) {
         const client = await RedisClient.getReadyClient();
         return client.hget(key, field);
@@ -13640,19 +13648,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)
 /* harmony export */ });
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! axios */ "axios");
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! form-data */ "form-data");
-/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+/* harmony import */ var _notice_digest__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notice-digest */ "../../packages/tg-core/src/utils/notice-digest.ts");
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! axios */ "axios");
+/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! form-data */ "form-data");
+/* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
 
 
 
@@ -13660,7 +13669,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _logger__WEBPACK_IMPORTED_MODULE_3__.Logger('tg-core:telegram-bots-config');
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-core:telegram-bots-config');
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -13798,7 +13808,7 @@ class BotConfig {
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to initialize BotConfig', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to initialize BotConfig', false);
         }
         finally {
             this.initialized = true;
@@ -13827,7 +13837,7 @@ class BotConfig {
             this.carryBotState(this.categoryMap, next);
             this.categoryMap = next;
         })()
-            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
+            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
     /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
@@ -13964,7 +13974,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
             return null;
         }
     }
@@ -14012,7 +14022,7 @@ class BotConfig {
             return '';
         }
         try {
-            const res = await axios__WEBPACK_IMPORTED_MODULE_0___default().get(`https://api.telegram.org/bot${token}/getMe`, {
+            const res = await axios__WEBPACK_IMPORTED_MODULE_1___default().get(`https://api.telegram.org/bot${token}/getMe`, {
                 timeout: 5000 // 5 second timeout
             });
             return res.data?.ok ? res.data.result.username : '';
@@ -14025,7 +14035,7 @@ class BotConfig {
                 logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
                 return '';
             }
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Error fetching bot username:', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
     }
@@ -14094,7 +14104,7 @@ class BotConfig {
         return error;
     }
     botSendFailureDetails(error) {
-        if (axios__WEBPACK_IMPORTED_MODULE_0___default().isAxiosError(error)) {
+        if (axios__WEBPACK_IMPORTED_MODULE_1___default().isAxiosError(error)) {
             return {
                 status: error.response?.status ?? 'no-status',
                 description: String(error.response?.data?.description || error.message),
@@ -14128,7 +14138,7 @@ class BotConfig {
         entry.lastUsed = new Date();
         this.pendingUsage.set(key, entry);
         if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_4__.scheduleUnrefTimeout)(() => {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_5__.scheduleUnrefTimeout)(() => {
                 this.usageFlushTimer = null;
                 void this.flushBotUsage();
             }, this.USAGE_FLUSH_MS);
@@ -14171,7 +14181,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
         }
     }
     /**
@@ -14212,7 +14222,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = (process.env.clientId ?? 'unknown').toUpperCase();
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
     }
     prefixMessage(message, parseMode) {
         return `${this.clientPrefix(parseMode)}: ${message}`;
@@ -14230,20 +14240,20 @@ class BotConfig {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
     /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
     richMessageHtml(message, options, category) {
         const input = { ...message };
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
-        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.buttonsFromReplyMarkup)(options.replyMarkup);
+        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.buttonsFromReplyMarkup)(options.replyMarkup);
         if (markupButtons.length)
             input.buttons = [...(input.buttons ?? []), ...markupButtons];
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
     isBotOrChannelFailure(error) {
@@ -14261,6 +14271,13 @@ class BotConfig {
     }
     /** Send a structured notice as a Bot API rich message (classic sendMessage only as the 400/404 fallback). */
     async sendMessage(category, message, options = {}) {
+        // Opt-in digest (message.digest): queued in Redis for the UMS flusher, which posts one table.
+        // Anything that cannot be queued falls through to the immediate send below.
+        if (message.digest && !options.replyToMessageId && (await (0,_notice_digest__WEBPACK_IMPORTED_MODULE_0__.tryDigest)(category, message)))
+            return true;
+        return this.sendMessageNow(category, message, options);
+    }
+    async sendMessageNow(category, message, options = {}) {
         const richHtml = this.richMessageHtml(message, options, category);
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
@@ -14282,7 +14299,7 @@ class BotConfig {
             body.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: options.allowSendingWithoutReply === true };
         }
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, body, { timeout: 10000 });
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, body, { timeout: 10000 });
             if (response.data?.ok === true) {
                 this.recordSuccessfulBotSend(category, token, channelId);
                 const messageId = response.data?.result?.message_id;
@@ -14302,7 +14319,7 @@ class BotConfig {
             if (this.isBotOrChannelFailure(error)) {
                 if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                     data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
-                    return this.sendMessage(category, message, options);
+                    return this.sendMessageNow(category, message, options);
                 }
                 return false;
             }
@@ -14370,7 +14387,7 @@ class BotConfig {
         const url = `https://api.telegram.org/bot${token}/sendMessage`;
         // Try to send the message
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, params, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, params, {
                 timeout: 10000 // 10 second timeout
             });
             if (response.data?.ok === true) {
@@ -14421,8 +14438,8 @@ class BotConfig {
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
         const input = { ...card, ...(category === ChannelCategory.CLIENT_UPDATES ? { houseStyle: true } : {}) };
-        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
-        const form = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
+        const form = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         form.append('chat_id', channelId);
         form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
         form.append('shotfile', photo, 'photo.jpg');
@@ -14431,7 +14448,7 @@ class BotConfig {
         if (options.replyToMessageId)
             form.append('reply_parameters', JSON.stringify({ message_id: options.replyToMessageId, allow_sending_without_reply: true }));
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
                 timeout: 30000,
                 headers: { ...form.getHeaders() },
             });
@@ -14593,7 +14610,7 @@ class BotConfig {
             return false;
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
-        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
         const mediaArray = [];
         for (let i = 0; i < mediaContent.length; i++) {
@@ -14627,7 +14644,7 @@ class BotConfig {
         formData.append('media', JSON.stringify(mediaArray));
         const url = `https://api.telegram.org/bot${token}/sendMediaGroup`;
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, formData, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
                 timeout: 30000,
                 headers: {
                     ...formData.getHeaders(),
@@ -14665,7 +14682,7 @@ class BotConfig {
             return false;
         const token = data.botTokens[botIndex];
         const channelId = String(options.targetChannelId || data.channelId);
-        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
         // Determine media field name based on method
         const mediaField = method === 'sendVideoNote'
@@ -14815,7 +14832,7 @@ class BotConfig {
         }
         const url = `https://api.telegram.org/bot${token}/${method}`;
         try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(url, formData, {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
                 timeout: 30000, // 30 second timeout for media uploads
                 headers: {
                     ...formData.getHeaders(),
@@ -14828,7 +14845,7 @@ class BotConfig {
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
             if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
@@ -17162,6 +17179,107 @@ function naturalizeText(text, options = {}) {
     // 12. Clean up excessive whitespace
     result = preserveParagraphBreaks(result);
     return result.trim();
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/notice-digest.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/notice-digest.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DIGEST_ALIVE_CACHE_MS: () => (/* binding */ DIGEST_ALIVE_CACHE_MS),
+/* harmony export */   DIGEST_ENTRY_MAX_BYTES: () => (/* binding */ DIGEST_ENTRY_MAX_BYTES),
+/* harmony export */   DIGEST_FLUSHER_ALIVE_KEY: () => (/* binding */ DIGEST_FLUSHER_ALIVE_KEY),
+/* harmony export */   DIGEST_LIST_CAP: () => (/* binding */ DIGEST_LIST_CAP),
+/* harmony export */   DIGEST_TTL_SECONDS: () => (/* binding */ DIGEST_TTL_SECONDS),
+/* harmony export */   resetNoticeDigestCache: () => (/* binding */ resetNoticeDigestCache),
+/* harmony export */   tryDigest: () => (/* binding */ tryDigest)
+/* harmony export */ });
+/* harmony import */ var _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+
+/**
+ * Opt-in digest of routine per-client notices (see RichNotificationInput.digest). A client queues
+ * the notice in Redis; the flusher in the UMS process posts one table per (category, key).
+ *
+ * Bounds: list capped at DIGEST_LIST_CAP entries, each at most DIGEST_ENTRY_MAX_BYTES, key TTL 24 h.
+ * Never loses a notice: any problem (no digest key, severe notice, flusher not alive, Redis error)
+ * returns false and the caller sends it directly.
+ */
+const DIGEST_LIST_CAP = 2000;
+const DIGEST_ENTRY_MAX_BYTES = 4096;
+const DIGEST_TTL_SECONDS = 24 * 60 * 60;
+const DIGEST_FLUSHER_ALIVE_KEY = "notice-digest::flusher-alive";
+const DIGEST_ALIVE_CACHE_MS = 60000;
+const KEY_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+let aliveCache = { checkedAt: 0, alive: false };
+function resetNoticeDigestCache() {
+    aliveCache = { checkedAt: 0, alive: false };
+}
+/** True when the flusher has touched its heartbeat key recently (checked at most once a minute). */
+async function flusherAlive() {
+    const now = Date.now();
+    if (now - aliveCache.checkedAt < DIGEST_ALIVE_CACHE_MS)
+        return aliveCache.alive;
+    let alive = false;
+    try {
+        alive = await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.exists(DIGEST_FLUSHER_ALIVE_KEY);
+    }
+    catch {
+        alive = false;
+    }
+    aliveCache = { checkedAt: now, alive };
+    return alive;
+}
+function rowFrom(notice) {
+    if (notice.digest?.row)
+        return notice.digest.row;
+    const row = {};
+    for (const field of notice.fields ?? [])
+        row[field.label] = String(field.value ?? "");
+    return row;
+}
+function buildEntry(notice, maxCell, withSummary) {
+    const row = {};
+    for (const [k, v] of Object.entries(rowFrom(notice))) {
+        row[k.slice(0, 40)] = typeof v === "number" ? v : String(v).slice(0, maxCell);
+    }
+    return JSON.stringify({
+        clientId: process.env.clientId || "unknown",
+        at: Date.now(),
+        title: String(notice.title ?? "Notification").slice(0, 120),
+        row,
+        ...(notice.digest?.merge ? { merge: notice.digest.merge } : {}),
+        ...(notice.digest?.quietMs ? { quietMs: notice.digest.quietMs } : {}),
+        ...(notice.digest?.sortBy ? { sortBy: String(notice.digest.sortBy).slice(0, 40) } : {}),
+        ...(withSummary && notice.summary ? { summary: String(notice.summary).slice(0, 300) } : {}),
+    });
+}
+/** Queue `notice` for the digest. Returns true only when it was queued; false means "send it directly". */
+async function tryDigest(category, notice) {
+    try {
+        const key = notice.digest?.key;
+        if (!key || !KEY_PATTERN.test(key) || !KEY_PATTERN.test(category))
+            return false;
+        if (notice.severity === "error" || notice.severity === "critical")
+            return false;
+        if (!(await flusherAlive()))
+            return false;
+        let entry = buildEntry(notice, 300, true);
+        if (Buffer.byteLength(entry) > DIGEST_ENTRY_MAX_BYTES)
+            entry = buildEntry(notice, 80, false);
+        if (Buffer.byteLength(entry) > DIGEST_ENTRY_MAX_BYTES)
+            return false;
+        await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.digestPush(`notice-digest::${category}::${key}`, entry, DIGEST_LIST_CAP, DIGEST_TTL_SECONDS);
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
 
 
@@ -39955,6 +40073,7 @@ __webpack_require__.r(__webpack_exports__);
 function clientId() {
     return process.env.clientId || 'UNKNOWN';
 }
+const numOrUnknown = (v) => (typeof v === 'number' ? v : String(v ?? 'unknown'));
 function buildDailyStatsNotification(stats, source) {
     // Proper tables (owner 2026-10-18): client totals as a field table, one row per mobile below.
     const mobiles = (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.tableFromRecordMap)(stats.mobileStats, 'Mobile', 'Per mobile');
@@ -39978,6 +40097,15 @@ function buildDetailedStatsNotification(detailedStats, enhancedMemoryStats, sour
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
         title: 'Detailed promote stats',
         footer: `Source: ${source}`,
+        // Routine per-client health: batched into one table across clients by the UMS digest flusher.
+        digest: {
+            key: 'promote-detailed-stats',
+            row: {
+                'Active clients': numOrUnknown(detailedStats.activeClients),
+                Heap: summary.heapUsage,
+                Orphaned: numOrUnknown(detailedStats.resources?.orphanedManagers),
+            },
+        },
         // Compact fields only — no redundant JSON re-dump of the same values in details.
         fields: [
             { label: 'Active Clients', value: detailedStats.activeClients ?? 'unknown' },
