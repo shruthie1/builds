@@ -12483,6 +12483,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* binding */ SPAM_BOT_USERNAME),
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
+/* harmony export */   describeSpamBotReply: () => (/* binding */ describeSpamBotReply),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
 /* harmony export */   parseSpamBotReleaseDate: () => (/* binding */ parseSpamBotReleaseDate),
 /* harmony export */   readLatestSpamBotReply: () => (/* binding */ readLatestSpamBotReply),
@@ -12612,6 +12613,23 @@ function parseSpamBotReleaseDate(raw, now = new Date()) {
         return null;
     return result;
 }
+/** Reads a SpamBot reply into a status line for notices; the raw text stays in the notice details. */
+function describeSpamBotReply(text, now = new Date()) {
+    const kind = classifySpamBotMessage(text);
+    if (kind === "healthy")
+        return { label: "No limits", limitedUntil: null, healthy: true };
+    if (kind === "harsh-warning")
+        return { label: "Harsh-limit warning", limitedUntil: null, healthy: false };
+    const raw = extractSpamBotReleaseDate(text);
+    const until = raw ? parseSpamBotReleaseDate(raw, now) : null;
+    if (until)
+        return { label: "Limited", limitedUntil: until.toISOString(), healthy: false };
+    if (kind === "released")
+        return { label: "Limited (end date unreadable)", limitedUntil: null, healthy: false };
+    if (/\b(limited|restricted)\b/i.test(text))
+        return { label: "Limited (no end date)", limitedUntil: null, healthy: false };
+    return { label: "Unrecognised reply", limitedUntil: null, healthy: false };
+}
 /**
  * Claims a concrete SpamBot reply for notification. The manual endpoint and
  * the inbound event handler run in the same process; this prevents them from
@@ -12655,16 +12673,15 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         return { latestReply, replyIsFresh };
     }
     try {
+        const status = describeSpamBotReply(latestReply.text);
         const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            severity: _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
-            title: "Manual SpamBot health check",
-            summary: replyIsFresh
-                ? "SpamBot replied to the manual health probe."
-                : "Manual probe was sent; this is the latest SpamBot reply currently available.",
+            severity: status.healthy ? _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.SUCCESS : _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
+            title: `SpamBot check: ${status.label}`,
             fields: [
                 { label: "Mobile", value: mobile },
-                { label: "Reply time", value: latestReply.receivedAt ?? "unknown" },
-                { label: "Reply fresh", value: replyIsFresh },
+                ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : []),
+                { label: "Replied", value: latestReply.receivedAt ?? "unknown" },
+                ...(replyIsFresh ? [] : [{ label: "Note", value: "No new reply yet; this is the last one", code: false }]),
             ],
             details: latestReply.text,
             tags: ["spambot", "manual-health-check"],
@@ -31683,6 +31700,15 @@ class TelegramManager {
                                             { label: "Days Left", value: this.promoterInstance.daysLeft },
                                         ],
                                         details: event.message.text?.slice(0, 500),
+                                        // Routine: one table across the fleet; limited/harsh stay individual. A promote
+                                        // process runs several mobiles under one clientId, so count them (sum) rather than
+                                        // keep one row per mobile; probes are staggered, so wait up to an hour.
+                                        digest: {
+                                            key: "promote-spambot-healthy",
+                                            merge: "sum",
+                                            quietMs: 60 * 60 * 1000,
+                                            row: { Healthy: 1, "Last mobile": String(this.clientDetails.mobile ?? "") },
+                                        },
                                         tags: ["promote", "spambot", "healthy"],
                                     }, `TelegramManager.goodNewsNotification.${this.clientDetails.mobile}`);
                             }
@@ -31770,12 +31796,13 @@ class TelegramManager {
         }
     }
     async notifySpamBotMessage(text) {
+        const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.describeSpamBotReply)(text);
         await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            title: 'SpamBot message',
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
-            summary: 'SpamBot sent an account-status message.',
+            title: `SpamBot: ${status.label}`,
+            severity: status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Mobile', value: this.clientDetails.mobile },
+                ...(status.limitedUntil ? [{ label: 'Limited until', value: status.limitedUntil }] : []),
             ],
             details: text.slice(0, 500),
             tags: ['promote', 'spambot'],
@@ -32575,6 +32602,7 @@ class ConnectionService {
                 title: 'Promote startup',
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO,
                 summary: 'Promote connection initialization is starting.',
+                digest: { key: 'promote-startup', quietMs: 60 * 60 * 1000, row: { Event: 'starting' } },
                 tags: ['promote', 'startup'],
             }, 'Startup notification failed');
             if (notified) {
@@ -34554,12 +34582,6 @@ class InactiveMobileScraper {
                 logger.info("✅ No inactive mobiles found");
                 return;
             }
-            await notifyInactiveScraper({
-                title: "Inactive mobile scrape started",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.INFO,
-                summary: `Found ${inactiveMobiles.length} inactive mobiles for scraping.`,
-                tags: ["promote", "inactive-scraper", "start"],
-            }, "InactiveMobileScraper.notification.start");
             const results = [];
             for (let i = 0; i < inactiveMobiles.length; i++) {
                 const inactiveMobile = inactiveMobiles[i];
@@ -34587,14 +34609,25 @@ class InactiveMobileScraper {
                 }
             }
             logger.info(`📊 Inactive mobile processing completed, total processed: ${results.length}`);
+            const okReplies = results.flat().filter((result) => result.success).length;
+            const failedReplies = results.flat().filter((result) => !result.success).length;
+            // One completion notice per run (no "started"), batched across clients by the UMS digest.
             await notifyInactiveScraper({
-                title: "Inactive mobile scrape completed",
+                title: "Inactive mobile scrape",
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.SUCCESS,
-                summary: `Processed ${results.length} inactive mobiles.`,
                 fields: [
-                    { label: "Successful Replies", value: results.flat().filter((result) => result.success).length },
-                    { label: "Failed Replies", value: results.flat().filter((result) => !result.success).length },
+                    { label: "Mobiles", value: results.length },
+                    { label: "Successful Replies", value: okReplies },
+                    { label: "Failed Replies", value: failedReplies },
                 ],
+                digest: {
+                    key: "promote-inactive-scrape",
+                    merge: "sum",
+                    // Hourly per process but offset by boot time: collect an hour's runs into one table.
+                    quietMs: 60 * 60 * 1000,
+                    sortBy: "Mobiles",
+                    row: { Mobiles: results.length, "OK replies": okReplies, "Failed replies": failedReplies },
+                },
                 tags: ["promote", "inactive-scraper", "completed"],
             }, "InactiveMobileScraper.notification.completed");
             this.logResults(results);
@@ -40074,10 +40107,31 @@ function clientId() {
     return process.env.clientId || 'UNKNOWN';
 }
 const numOrUnknown = (v) => (typeof v === 'number' ? v : String(v ?? 'unknown'));
+function digestColumn(key) {
+    const base = key.replace(/^total/, '').replace(/Count$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+    return base ? base.charAt(0).toUpperCase() + base.slice(1) : key;
+}
+function dailyDigestRow(stats) {
+    const row = {};
+    if (stats.mobileStats && typeof stats.mobileStats === 'object')
+        row.Mobiles = Object.keys(stats.mobileStats).length;
+    if (stats.totalStat && typeof stats.totalStat === 'object') {
+        // getDailyStats stringifies counters as `total<name>Count: "12"`; show them as numbers named "<Name>".
+        for (const [k, v] of Object.entries(stats.totalStat)) {
+            const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+            if (Number.isFinite(n))
+                row[digestColumn(k)] = n;
+        }
+    }
+    return row;
+}
 function buildDailyStatsNotification(stats, source) {
     // Proper tables (owner 2026-10-18): client totals as a field table, one row per mobile below.
     const mobiles = (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.tableFromRecordMap)(stats.mobileStats, 'Mobile', 'Per mobile');
+    // The nightly cron run is batched across clients by the UMS digest; an on-demand /getstats stays direct.
+    const digest = source === 'scheduler' ? { key: 'promote-daily-stats', row: dailyDigestRow(stats) } : undefined;
     return {
+        ...(digest ? { digest } : {}),
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
         title: 'Daily promote stats',
         fields: (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.fieldsFromObject)(stats.totalStat),
