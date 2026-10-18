@@ -44208,8 +44208,7 @@ class TelegramManager {
                         { label: "Mobile", value: this.mobile },
                         ...(connectedPhone ? [{ label: "Phone", value: connectedPhone }] : []),
                     ],
-                    // Deploy waves and the randomized 24-30 h maintenance restarts: one table per hour via the UMS digest.
-                    digest: { key: "tg-aut-connected", quietMs: 60 * 60 * 1000, row: { Mobile: String(this.mobile ?? ""), ...(connectedPhone ? { Phone: String(connectedPhone) } : {}) } },
+                    // Sent on its own, not via the hourly digest: ops reads each connect as the restart signal.
                     tags: ["tg-aut", "telegram-manager", "connected"],
                 }, `${this.mobile}: Failed to send connected notification`);
                 // Register handlers exactly once
