@@ -57950,8 +57950,7 @@ function analysisUnavailableNotice(chatId, note) {
     return {
         title: "Image analysis unavailable",
         summary: note,
-        fields: [{ label: "Chat", value: chatId }],
-        buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
+        fields: [{ label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
     };
 }
 function paymentFlowFor(event, chatId, db, imageDetails) {
@@ -58154,12 +58153,11 @@ async function processImage(event) {
                     title: "Unwanted image",
                     fields: [
                         { label: "User", value: broadcastName || "-", code: false },
-                        { label: "Chat", value: chatId },
+                        { label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) },
                         { label: "Invalid pics", value: invalidPhotoCount, code: false },
                     ],
                     details: msg.split("\n").slice(4).filter((l) => l.trim()),
                     detailsTitle: "Image analysis",
-                    buttons: [{ text: "Chat", url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
                 });
                 if (!unwantedSent) {
                     logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
@@ -58670,7 +58668,7 @@ async function processImage(event) {
                                                 file: await _telegram_utils_FileSender__WEBPACK_IMPORTED_MODULE_15__.fileSender.getFileHandle("./QR.jpg"),
                                             });
                                         }, 20000, `processImage.paymentValidationQr.${chatId}`);
-                                        await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'Told user', summary: isPaymentProperlyMine.msg, told: true });
+                                        await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'Told: not my payment', told: isPaymentProperlyMine.msg });
                                     }
                                 }
                                 else {
@@ -64676,8 +64674,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
 /**
  * Ops notices about one chat (CLIENT_UPDATES): built as structured data at the call site, never as markup.
- * Every notice gets a "Chat" button to the tgchats viewer and, when the chat has a recent screenshot card,
- * is threaded under it.
+ * Every notice carries a "Chat" field (the chat id, linked to the tgchats viewer) and, when the chat has a
+ * recent screenshot card, is threaded under it.
  */
 
 
@@ -64699,17 +64697,27 @@ function evidenceCardFor(chatId) {
 function resetEvidenceCards() {
     evidenceCards.clear();
 }
+/** Whitespace- and markdown-insensitive form, to spot a summary that repeats the quote. */
+const sameText = (text) => text.replace(/\*\*|__/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 function chatNoticeInput(chatId, notice) {
-    const toldText = typeof notice.told === "string" ? notice.told : notice.told ? (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_2__.recentSentText)(chatId) : undefined;
+    const toldRaw = typeof notice.told === "string" ? notice.told : notice.told ? (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_2__.recentSentText)(chatId) : undefined;
+    // The user saw **bold** rendered; the literal markers are noise in the quote.
+    const toldText = toldRaw?.replace(/\*\*/g, "");
     const quote = toldText ?? notice.quote;
+    // The quote is enough: drop a summary that only repeats it, and the "Told user" label when the title says it.
+    const summary = quote && notice.summary && sameText(notice.summary) === sameText(quote) ? undefined : notice.summary;
+    const quoteLabel = toldText ? (/\btold\b/i.test(notice.title) ? "" : "Told user") : notice.quoteLabel;
     return {
         title: notice.title,
-        summary: notice.summary,
-        fields: notice.fields,
+        summary,
+        // The chat id itself links to the tgchats viewer: one row instead of a Chat button on every notice.
+        fields: [
+            { label: "Chat", value: chatId, url: chatUrl(chatId) },
+            ...(notice.fields ?? []).filter((field) => field.label !== "Chat"),
+        ],
         severity: notice.severity,
         tables: notice.tables,
-        ...(quote ? { quote, quoteLabel: toldText ? "Told user" : notice.quoteLabel } : {}),
-        buttons: [{ text: "Chat", url: chatUrl(chatId) }],
+        ...(quote ? { quote, quoteLabel } : {}),
     };
 }
 async function notifyChat(chatId, notice) {
