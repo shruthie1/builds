@@ -13652,6 +13652,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+
 
 
 
@@ -14221,18 +14223,100 @@ class BotConfig {
     formatNotificationMessage(message, options, category) {
         // CLIENT_UPDATES ops notices use the plain house style (no severity icons); other channels are unchanged.
         const houseStyle = category === ChannelCategory.CLIENT_UPDATES;
-        if (typeof message !== 'string') {
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
-        }
-        if (options.rich) {
+        if (typeof message === 'string') {
+            // A string is a literal command (sendLiteral) or a media caption: sent as given, or structured around `rich`.
+            if (!options.rich)
+                return { text: message, parseMode: options.parseMode };
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
             return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: message, parseMode: options.parseMode };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_5__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
+    /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
+    richMessageHtml(message, options, category) {
+        const input = { ...message };
+        if (category === ChannelCategory.CLIENT_UPDATES)
+            input.houseStyle = true;
+        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.buttonsFromReplyMarkup)(options.replyMarkup);
+        if (markupButtons.length)
+            input.buttons = [...(input.buttons ?? []), ...markupButtons];
+        const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: source.toUpperCase() || undefined });
+    }
+    /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
+    isBotOrChannelFailure(error) {
+        const { status, description } = this.botSendFailureDetails(error);
+        return Number(status) === 429 || Number(status) === 403
+            || /too many requests|retry after|chat not found|not a member|kicked|not enough rights|CHAT_WRITE_FORBIDDEN|bot was blocked/i.test(String(description));
+    }
+    /**
+     * Literal text command sent as a classic sendMessage, byte for byte: no client prefix, no parse mode, no
+     * rich formatting. Only for messages that accounts match exactly (the exit<client> broadcast; GramJS sees
+     * rich messages as empty-text unsupported media). Everything else is a structured notice via sendMessage.
+     */
+    async sendLiteral(category, text, options = {}) {
+        return this.sendPlainMessage(category, text, { prefix: false, onSent: options.onSent });
+    }
+    /** Send a structured notice as a Bot API rich message (classic sendMessage only as the 400/404 fallback). */
     async sendMessage(category, message, options = {}) {
+        const richHtml = this.richMessageHtml(message, options, category);
+        await this.ensureInitialized();
+        const data = this.categoryMap.get(category);
+        if (!data || data.botTokens.length === 0) {
+            logger.error(`No valid bots configured for ${category}`);
+            return false;
+        }
+        const botIndex = this.getNextAvailableBotIndex(data, category);
+        if (botIndex == null)
+            return false;
+        const token = data.botTokens[botIndex];
+        const channelId = data.channelId;
+        const body = { chat_id: channelId, rich_message: { html: richHtml } };
+        if (options.disableNotification)
+            body.disable_notification = true;
+        if (options.protectContent)
+            body.protect_content = true;
+        if (options.replyToMessageId) {
+            body.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: options.allowSendingWithoutReply === true };
+        }
+        try {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, body, { timeout: 10000 });
+            if (response.data?.ok === true) {
+                this.recordSuccessfulBotSend(category, token, channelId);
+                const messageId = response.data?.result?.message_id;
+                if (typeof messageId === 'number') {
+                    try {
+                        options.onSent?.(messageId);
+                    }
+                    catch { /* a caller hook never fails the send */ }
+                }
+                return true;
+            }
+            throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendRichMessage');
+        }
+        catch (error) {
+            const { status, description } = this.botSendFailureDetails(error);
+            logger.warn(`BOT rich-send-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
+            if (this.isBotOrChannelFailure(error)) {
+                if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+                    data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
+                    return this.sendMessage(category, message, options);
+                }
+                return false;
+            }
+            // Telegram refused the rich payload itself (parse error, unsupported tag): never lose the notice,
+            // send it the classic way with the same bot. Network errors stay single-attempt, as before.
+            if (Number(status) === 400 || Number(status) === 404) {
+                data.lastUsedIndex = (botIndex - 1 + data.botTokens.length) % data.botTokens.length;
+                return this.sendPlainMessage(category, message, options);
+            }
+            return false;
+        }
+    }
+    /** Classic sendMessage (HTML / plain), used for literal commands and as the rich-message fallback. */
+    async sendPlainMessage(category, message, options = {}) {
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
         if (!data || data.botTokens.length === 0) {
@@ -14262,8 +14346,12 @@ class BotConfig {
             params.append('allow_sending_without_reply', 'true');
         if (options.protectContent)
             params.append('protect_content', 'true');
-        if (options.replyMarkup) {
-            params.append('reply_markup', typeof options.replyMarkup === 'string' ? options.replyMarkup : JSON.stringify(options.replyMarkup));
+        // A structured notice's URL buttons survive the classic fallback as an inline keyboard.
+        const fallbackButtons = typeof message !== 'string' ? (message.buttons ?? []).filter((b) => b.url) : [];
+        const replyMarkup = options.replyMarkup
+            ?? (fallbackButtons.length ? { inline_keyboard: [fallbackButtons.map((b) => ({ text: b.text, url: b.url }))] } : undefined);
+        if (replyMarkup) {
+            params.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
         }
         // Handle link preview options
         if (options.linkPreviewOptions) {
@@ -14304,7 +14392,7 @@ class BotConfig {
             if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
-                return this.sendMessage(category, message, options);
+                return this.sendPlainMessage(category, message, options);
             }
             return false;
         }
@@ -14314,6 +14402,73 @@ class BotConfig {
      */
     async sendPhoto(category, photo, options = {}) {
         return this.sendMedia(category, 'sendPhoto', photo, options);
+    }
+    /**
+     * One rich card with the photo embedded (heading, photo, table, quotes, buttons). `onSent` gets the
+     * card's message id (a later verdict can reply to it). Falls back to a classic photo + HTML caption when
+     * Telegram refuses the rich payload.
+     */
+    async sendPhotoCard(category, photo, card, options = {}) {
+        await this.ensureInitialized();
+        const data = this.categoryMap.get(category);
+        if (!data || data.botTokens.length === 0) {
+            logger.error(`No valid bots configured for ${category}`);
+            return false;
+        }
+        const botIndex = this.getNextAvailableBotIndex(data, category);
+        if (botIndex == null)
+            return false;
+        const token = data.botTokens[botIndex];
+        const channelId = data.channelId;
+        const input = { ...card, ...(category === ChannelCategory.CLIENT_UPDATES ? { houseStyle: true } : {}) };
+        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_6__.formatRichMessageHtml)(input, { prefix: (card.source ?? process.env.clientId ?? '').toUpperCase() || undefined, imageId: 'shot' });
+        const form = new (form_data__WEBPACK_IMPORTED_MODULE_1___default())();
+        form.append('chat_id', channelId);
+        form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
+        form.append('shotfile', photo, 'photo.jpg');
+        if (options.disableNotification)
+            form.append('disable_notification', 'true');
+        if (options.replyToMessageId)
+            form.append('reply_parameters', JSON.stringify({ message_id: options.replyToMessageId, allow_sending_without_reply: true }));
+        try {
+            const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
+                timeout: 30000,
+                headers: { ...form.getHeaders() },
+            });
+            if (response.data?.ok === true) {
+                this.recordSuccessfulBotSend(category, token, channelId);
+                const messageId = response.data?.result?.message_id;
+                if (typeof messageId === 'number') {
+                    try {
+                        options.onSent?.(messageId);
+                    }
+                    catch { /* a caller hook never fails the send */ }
+                }
+                return true;
+            }
+            throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendRichMessage (photo card)');
+        }
+        catch (error) {
+            const { status, description } = this.botSendFailureDetails(error);
+            logger.warn(`BOT rich-photo-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
+            if (this.isBotOrChannelFailure(error)) {
+                if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+                    data.lastUsedIndex = botIndex;
+                    return this.sendPhotoCard(category, photo, card, options);
+                }
+                return false;
+            }
+            if (Number(status) === 400 || Number(status) === 404) {
+                data.lastUsedIndex = (botIndex - 1 + data.botTokens.length) % data.botTokens.length;
+                const caption = this.formatNotificationMessage(card, {}, category).text;
+                return this.sendMedia(category, 'sendPhoto', photo, {
+                    caption: caption.length > 950 ? `${caption.slice(0, caption.lastIndexOf('\n', 950) > 0 ? caption.lastIndexOf('\n', 950) : 950)}` : caption,
+                    parseMode: 'HTML',
+                    disableNotification: options.disableNotification,
+                });
+            }
+            return false;
+        }
     }
     /**
      * Send video to a channel
@@ -14934,6 +15089,7 @@ const DEFAULT_NOTIFICATION_CONFIG = {
 async function notifyInternal(prefix, errorDetails, config = DEFAULT_NOTIFICATION_CONFIG) {
     if (!config.enabled)
         return;
+    const request = prefix;
     prefix = `${prefix} ${process.env.clientId}`;
     try {
         const errorMessage = typeof errorDetails.message === "string"
@@ -14947,9 +15103,17 @@ async function notifyInternal(prefix, errorDetails, config = DEFAULT_NOTIFICATIO
         logger.error(`${prefix}\n${formattedMessage}`);
         if (errorDetails.status === 429)
             return;
-        const notificationText = `\n${formattedMessage}`;
         try {
-            const sent = await _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.HTTP_FAILURES, notificationText);
+            // Which request failed is the useful part; the sender already names the client.
+            const sent = await _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.HTTP_FAILURES, {
+                title: "Outbound request failed",
+                severity: (errorDetails.status ?? 500) >= 500 ? _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.ERROR : _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
+                summary: String(formattedMessage),
+                fields: [
+                    { label: "Request", value: request, code: false },
+                    ...(errorDetails.status ? [{ label: "Status", value: errorDetails.status }] : []),
+                ],
+            });
             if (sent === false) {
                 logger.error("Failed to send notification:", "BotConfig returned false");
             }
@@ -17991,14 +18155,14 @@ function parseError(err, prefix, sendErr = true, config = {}) {
                     const notification = {
                         severity: status >= 500 ? _notification_format__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.ERROR : _notification_format__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.WARNING,
                         title: 'Application error',
-                        summary: prefixStr,
+                        source: clientId,
+                        summary: prefix || undefined,
                         fields: [
-                            { label: 'Client', value: clientId },
-                            ...(prefix ? [{ label: 'Context', value: prefix, code: false }] : []),
                             { label: 'Status', value: status },
                             { label: 'Error', value: error },
                         ],
                         details: String(notificationMessage).slice(0, fullConfig.maxMessageLength),
+                        detailsTitle: 'Error message',
                         tags: ['parse-error'],
                         timestamp: true,
                     };
@@ -18405,6 +18569,237 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/rich-message.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/rich-message.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RICH_MESSAGE_MAX_CHARS: () => (/* binding */ RICH_MESSAGE_MAX_CHARS),
+/* harmony export */   buttonsFromReplyMarkup: () => (/* binding */ buttonsFromReplyMarkup),
+/* harmony export */   fieldsFromObject: () => (/* binding */ fieldsFromObject),
+/* harmony export */   formatRichMessageHtml: () => (/* binding */ formatRichMessageHtml),
+/* harmony export */   humanizeKey: () => (/* binding */ humanizeKey),
+/* harmony export */   notificationButtons: () => (/* binding */ notificationButtons),
+/* harmony export */   tableFromRecordMap: () => (/* binding */ tableFromRecordMap)
+/* harmony export */ });
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+
+/**
+ * Bot API rich messages (sendRichMessage, Bot API 10.1+): every ops notification renders as a
+ * heading, a table of fields, a collapsible details block and a row of URL / copy buttons.
+ * Old Telegram clients (incl. GramJS 2.26) see a rich message as an unsupported media message with
+ * empty text, so literal command messages (exit<client>) must keep using plain sendMessage.
+ */
+const SEVERITY_ICONS = {
+    info: 'ℹ️',
+    success: '✅',
+    warning: '⚠️',
+    error: '❌',
+    critical: '🚨',
+};
+/** Rich messages allow 32768 characters; keep headroom for markup added after truncation. */
+const RICH_MESSAGE_MAX_CHARS = 30000;
+const MAX_BUTTONS = 6;
+const BUTTONS_PER_ROW = 3;
+const REDUNDANT_FIELD_LABELS = new Set(['client', 'clientid', 'username']);
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+function attr(value) {
+    return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(value).replace(/"/g, '&quot;');
+}
+function toUnixSeconds(value) {
+    if (value instanceof Date)
+        return Number.isNaN(value.getTime()) ? null : Math.floor(value.getTime() / 1000);
+    if (typeof value === 'string' && ISO_TIME.test(value.trim())) {
+        const ms = Date.parse(value.trim());
+        return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+    }
+    return null;
+}
+function timeTag(unix, fallback) {
+    return `<tg-time unix="${unix}" format="wDT">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(fallback)}</tg-time>`;
+}
+function cellValue(field) {
+    const unix = toUnixSeconds(field.value);
+    if (unix !== null)
+        return timeTag(unix, field.value instanceof Date ? field.value.toISOString() : String(field.value));
+    const text = String(field.value ?? '');
+    if (field.code === false || text.length > 60 || /\s/.test(text.trim()))
+        return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(text);
+    return `<code>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(text)}</code>`;
+}
+function visibleFields(input) {
+    return (input.fields ?? []).filter((f) => !REDUNDANT_FIELD_LABELS.has(String(f.label ?? '').trim().toLowerCase())
+        && f.value !== undefined && f.value !== null && String(f.value) !== '');
+}
+/** Only explicit actions: ids are already in the table (tap-to-copy), so no automatic copy buttons. */
+function notificationButtons(input) {
+    return (input.buttons ?? []).filter((b) => b && b.text && (b.url || b.copy)).slice(0, MAX_BUTTONS);
+}
+/** Button labels are plain words (owner, 2026-10-18): emoji are stripped. */
+function buttonLabel(text) {
+    return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(String(text).replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim() || 'Open');
+}
+function buttonTag(button, index) {
+    const style = index === 0 && button.url ? ' style="primary"' : '';
+    if (button.url)
+        return `<tg-button type="url"${style} url="${attr(button.url)}">${buttonLabel(button.text)}</tg-button>`;
+    return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
+}
+const LONG_QUOTE_CHARS = 800;
+/**
+ * Message content as a label + quote (owner, 2026-10-18): never in a table cell or <code>. Line breaks and
+ * runs of spaces are kept exactly; long text collapses.
+ */
+function quoteBlock(label, text) {
+    const clipped = text.length > 3000 ? `${text.slice(0, 3000)}…` : text;
+    const body = (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(clipped.replace(/\r\n?/g, '\n').replace(/^\n+|\s+$/g, ''))
+        .replace(/ {2,}/g, (m) => '&nbsp;'.repeat(m.length))
+        .replace(/\n/g, '<br/>');
+    const tag = clipped.length > LONG_QUOTE_CHARS ? 'blockquote expandable' : 'blockquote';
+    return `<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label)}</b></p><blockquote${tag === 'blockquote' ? '' : ' expandable'}>${body}</blockquote>`;
+}
+function renderTable(table) {
+    const numeric = new Set(table.numeric ?? []);
+    const cell = (v, i, tag) => {
+        const align = numeric.has(i) ? ' align="right"' : '';
+        const unix = toUnixSeconds(v);
+        const body = unix !== null ? timeTag(unix, String(v)) : (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(v ?? '');
+        return `<${tag}${align}>${body}</${tag}>`;
+    };
+    const head = `<tr>${table.columns.map((c, i) => cell(c, i, 'th')).join('')}</tr>`;
+    const rows = table.rows.map((r) => `<tr>${table.columns.map((_, i) => cell(r[i], i, 'td')).join('')}</tr>`).join('');
+    const caption = table.title ? `<caption>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(table.title)}</caption>` : '';
+    return `<table bordered striped compact>${caption}${head}${rows}</table>`;
+}
+function detailLines(input) {
+    if (!input.details)
+        return [];
+    return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
+}
+/**
+ * Rich HTML for sendRichMessage. `prefix` (the clientId) leads the heading because the sender no
+ * longer prepends it to the text.
+ */
+function formatRichMessageHtml(input, opts = {}) {
+    const title = input.title || input.summary || 'Notification';
+    const icon = input.houseStyle ? '' : `${SEVERITY_ICONS[input.severity ?? _notification_format__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO]} `;
+    const prefix = opts.prefix ? `${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)} · ` : '';
+    const parts = [`<h3>${icon}${prefix}${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</h3>`];
+    if (opts.imageId)
+        parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
+    if (input.summary && input.summary !== title)
+        parts.push(`<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>`);
+    const fields = visibleFields(input);
+    if (fields.length) {
+        const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
+        parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
+    }
+    const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel || 'Message', text: input.quote }] : []), ...(input.quotes ?? [])];
+    for (const q of quotes) {
+        if (q.text && q.text.trim())
+            parts.push(quoteBlock(q.label, q.text));
+    }
+    for (const table of input.tables ?? [])
+        parts.push(renderTable(table));
+    const details = detailLines(input);
+    if (details.length) {
+        const body = details.join('\n');
+        const budget = Math.max(500, RICH_MESSAGE_MAX_CHARS - parts.join('').length - 2000);
+        const clipped = body.length > budget ? `${body.slice(0, budget)}\n… (${body.length - budget} more chars)` : body;
+        parts.push(`<details><summary>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.detailsTitle || 'Details')}</summary><pre>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(clipped)}</pre></details>`);
+    }
+    if (input.showTags && input.tags?.length)
+        parts.push(`<p>${input.tags.map((t) => `<code>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(t)}</code>`).join(' ')}</p>`);
+    const footer = [];
+    if (input.footer)
+        footer.push(`<i>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.footer)}</i>`);
+    if (input.timestamp && input.timestamp !== true) {
+        const unix = toUnixSeconds(typeof input.timestamp === 'number' ? new Date(input.timestamp) : input.timestamp);
+        footer.push(unix !== null ? timeTag(unix, String(input.timestamp)) : `<i>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.timestamp)}</i>`);
+    }
+    if (footer.length)
+        parts.push(`<p>${footer.join(' · ')}</p>`);
+    const buttons = notificationButtons(input);
+    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
+        parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
+    }
+    return parts.join('\n');
+}
+/** URL buttons from a Bot API inline_keyboard (callback buttons are not used by our notices). */
+function buttonsFromReplyMarkup(markup) {
+    let parsed = markup;
+    if (typeof markup === 'string') {
+        try {
+            parsed = JSON.parse(markup);
+        }
+        catch {
+            return [];
+        }
+    }
+    const rows = Array.isArray(parsed?.inline_keyboard) ? parsed.inline_keyboard : [];
+    const buttons = [];
+    for (const row of rows) {
+        for (const b of Array.isArray(row) ? row : []) {
+            if (b?.text && typeof b.url === 'string')
+                buttons.push({ text: String(b.text), url: b.url });
+            else if (b?.text && typeof b.copy_text?.text === 'string')
+                buttons.push({ text: String(b.text), copy: b.copy_text.text });
+        }
+    }
+    return buttons;
+}
+/** "totalSentCount" -> "Total sent count". */
+function humanizeKey(key) {
+    const words = String(key).replace(/[_-]+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim().toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+}
+function scalar(value) {
+    if (value === null || value === undefined)
+        return null;
+    if (typeof value === 'number' || typeof value === 'string')
+        return value;
+    if (typeof value === 'boolean')
+        return value ? 'yes' : 'no';
+    if (value instanceof Date)
+        return value.toISOString();
+    if (Array.isArray(value))
+        return value.length;
+    return null;
+}
+/** Scalar entries of a stats object as table fields (nested objects skipped, arrays counted). */
+function fieldsFromObject(obj) {
+    if (!obj || typeof obj !== 'object')
+        return [];
+    return Object.entries(obj)
+        .map(([k, v]) => [k, scalar(v)])
+        .filter(([, v]) => v !== null)
+        .map(([k, v]) => ({ label: humanizeKey(k), value: v, code: false }));
+}
+/** { rowKey: { metric: value } } -> one row per key, one column per metric (numbers right-aligned). */
+function tableFromRecordMap(map, keyColumn, title) {
+    if (!map || typeof map !== 'object')
+        return null;
+    const entries = Object.entries(map).filter(([, v]) => v && typeof v === 'object');
+    if (!entries.length)
+        return null;
+    const metrics = [];
+    for (const [, row] of entries) {
+        for (const [k, v] of Object.entries(row)) {
+            if (scalar(v) !== null && !metrics.includes(k))
+                metrics.push(k);
+        }
+    }
+    const rows = entries.map(([key, row]) => [key, ...metrics.map((m) => scalar(row[m]) ?? '')]);
+    const numeric = metrics.map((_, i) => i + 1).filter((i) => rows.every((r) => r[i] === '' || typeof r[i] === 'number'));
+    return { title, columns: [keyColumn, ...metrics.map(humanizeKey)], rows, numeric };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/runtime-config.ts"
 /*!**********************************************************!*\
   !*** ../../packages/tg-core/src/utils/runtime-config.ts ***!
@@ -18414,10 +18809,11 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   applyRuntimeConfig: () => (/* binding */ applyRuntimeConfig),
-/* harmony export */   describeRuntimeConfigBoot: () => (/* binding */ describeRuntimeConfigBoot),
 /* harmony export */   loadRuntimeConfig: () => (/* binding */ loadRuntimeConfig),
 /* harmony export */   runtimeConfigBases: () => (/* binding */ runtimeConfigBases),
+/* harmony export */   runtimeConfigBootNotices: () => (/* binding */ runtimeConfigBootNotices),
 /* harmony export */   runtimeConfigCacheDir: () => (/* binding */ runtimeConfigCacheDir),
+/* harmony export */   runtimeConfigRefreshedNotice: () => (/* binding */ runtimeConfigRefreshedNotice),
 /* harmony export */   startRuntimeConfigRefresh: () => (/* binding */ startRuntimeConfigRefresh)
 /* harmony export */ });
 /* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
@@ -18426,6 +18822,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! node:path */ "node:path");
 /* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+
 
 
 
@@ -18704,25 +19102,57 @@ function applyRuntimeConfig(config, env = process.env) {
     for (const [key, value] of Object.entries(config))
         env[key] = value;
 }
-/** Operator alert text for a boot that is not a plain live fetch, or null when there is nothing to say. */
-function describeRuntimeConfigBoot(result, service, clientId, now = Date.now()) {
+/** Structured operator alerts for a boot that is not a plain live fetch; empty when there is nothing to say. */
+function runtimeConfigBootNotices(result, service, now = Date.now()) {
     const minutes = (ms) => Math.max(1, Math.round(ms / MINUTE));
     const notices = [];
     if (result.mongoFailure) {
-        notices.push(`⚠️ ${service} ${clientId}: Mongo boot source failed (${result.mongoFailure}); `
-            + `${result.source === 'cache' ? 'booted on cached config' : `booted via HTTP ${result.base ?? ''}`.trim()}. `
-            + `Check /root/.tg-bootstrap.env and Atlas access for the tg-boot user.`);
+        notices.push({
+            title: 'Mongo boot source failed',
+            severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
+            fields: [
+                { label: 'Service', value: service, code: false },
+                { label: 'Error', value: result.mongoFailure, code: false },
+                { label: 'Booted', value: result.source === 'cache' ? 'on cached config' : `via HTTP ${result.base ?? ''}`.trim(), code: false },
+            ],
+            summary: 'Check /root/.tg-bootstrap.env and Atlas access for the tg-boot user.',
+        });
     }
     if (result.source === 'cache') {
-        notices.push(`⚠️ ${service} ${clientId}: config service unreachable after ${result.attempts} attempts — booted on cached config `
-            + `from ${minutes(now - (result.cacheSavedAt ?? now))} min ago. Retrying live config in the background.`);
+        notices.push({
+            title: 'Config service unreachable: booted on cached config',
+            severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
+            fields: [
+                { label: 'Service', value: service, code: false },
+                { label: 'Attempts', value: result.attempts, code: false },
+                { label: 'Cache age', value: `${minutes(now - (result.cacheSavedAt ?? now))} min`, code: false },
+            ],
+            summary: 'Retrying live config in the background.',
+        });
     }
     else if (result.recoveredOutage) {
         const outage = result.recoveredOutage;
-        notices.push(`✅ ${service} ${clientId}: config service reachable again after ~${minutes(now - outage.firstFailureAt)} min `
-            + `(${outage.failedBoots} failed boot${outage.failedBoots === 1 ? '' : 's'}; last error: ${outage.lastError}).`);
+        notices.push({
+            title: 'Config service reachable again',
+            severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS,
+            fields: [
+                { label: 'Service', value: service, code: false },
+                { label: 'Outage', value: `~${minutes(now - outage.firstFailureAt)} min`, code: false },
+                { label: 'Failed boots', value: outage.failedBoots, code: false },
+                { label: 'Last error', value: outage.lastError, code: false },
+            ],
+        });
     }
-    return notices.length ? notices.join('\n') : null;
+    return notices;
+}
+/** Sent when the background refresh after a cache boot reaches the live service. */
+function runtimeConfigRefreshedNotice(service) {
+    return {
+        title: 'Config service reachable again',
+        severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS,
+        fields: [{ label: 'Service', value: service, code: false }],
+        summary: 'Cached config refreshed.',
+    };
 }
 /**
  * After a cache boot, keep trying the live service so the cache is refreshed and operators learn
@@ -39518,26 +39948,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+
 
 
 function clientId() {
     return process.env.clientId || 'UNKNOWN';
 }
-function jsonBlock(value) {
-    return JSON.stringify(value ?? {}, null, 2);
-}
 function buildDailyStatsNotification(stats, source) {
-    const totalStats = jsonBlock(stats.totalStat);
-    const mobileStats = jsonBlock(stats.mobileStats);
+    // Proper tables (owner 2026-10-18): client totals as a field table, one row per mobile below.
+    const mobiles = (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.tableFromRecordMap)(stats.mobileStats, 'Mobile', 'Per mobile');
     return {
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
         title: 'Daily promote stats',
-        summary: `Source: ${source}`,
-        // JSON blocks live ONCE in details (were previously duplicated as fields too).
-        details: [
-            `Total stats\n${totalStats}`,
-            `Mobile stats\n${mobileStats}`,
-        ],
+        fields: (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.fieldsFromObject)(stats.totalStat),
+        tables: mobiles ? [mobiles] : undefined,
+        footer: `Source: ${source}`,
         tags: ['promote', 'stats', 'daily', source],
     };
 }
@@ -39551,7 +39977,7 @@ function buildDetailedStatsNotification(detailedStats, enhancedMemoryStats, sour
     return {
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
         title: 'Detailed promote stats',
-        summary: `Source: ${source}`,
+        footer: `Source: ${source}`,
         // Compact fields only — no redundant JSON re-dump of the same values in details.
         fields: [
             { label: 'Active Clients', value: detailedStats.activeClients ?? 'unknown' },
@@ -41132,9 +41558,9 @@ function runtimeConfigOptions() {
         log: (message) => logger.warn(`[runtime-config] ${message}`),
     };
 }
-async function alertOperators(text) {
+async function alertOperators(notice) {
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.CLIENT_UPDATES, text);
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.CLIENT_UPDATES, notice);
     }
     catch (error) {
         logger.error('Failed to send runtime-config alert:', error);
@@ -41151,12 +41577,11 @@ async function setEnv() {
     (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.applyRuntimeConfig)(result.config);
     logger.info(`Runtime config applied from ${result.source}${result.base ? ` (${result.base})` : ''}; ${Object.keys(result.config).length} keys`);
     logger.info("Env Mobile : ", process.env.mobile);
-    const notice = (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.describeRuntimeConfigBoot)(result, SERVICE_NAME, String(options.clientId));
-    if (notice)
+    for (const notice of (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigBootNotices)(result, SERVICE_NAME))
         void alertOperators(notice);
     if (result.source === 'cache') {
         (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.startRuntimeConfigRefresh)(options, () => {
-            void alertOperators(`✅ ${SERVICE_NAME} ${options.clientId}: config service reachable again; cached config refreshed.`);
+            void alertOperators((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigRefreshedNotice)(SERVICE_NAME));
         });
     }
     await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./express */ "./src/express.ts"));
