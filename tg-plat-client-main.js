@@ -38040,6 +38040,9 @@ async function runChain(image, opts) {
     // fewer than SKIP_AFTER_JUDGED models have found no amount. After a no-text pre-check only the primary runs.
     let judgedImage = 0;
     let next = 0;
+    // set when a no-text image reached the fallbacks only because the primary gave no verdict: the fallbacks may win with
+    // a payment read, but their "not a payment" / "no amount" is not a verdict on it -> outage (hold + primary re-check)
+    let primaryNeverJudgedNoText = false;
     if (imageModels.length > 0) {
         const panel = imageModels.slice(0, hedging && !primaryOnly ? HEDGE_GROUP_SIZE : 1);
         const { win, judged } = await runGroup(panel);
@@ -38056,6 +38059,7 @@ async function runChain(image, opts) {
             if (last && !last.ok && last.errorClass !== null && _outcome__WEBPACK_IMPORTED_MODULE_2__.OPERATIONAL_CLASSES.has(last.errorClass)) {
                 logger.log(`[vision] ${primaryName} failed ${last.errorClass} on a no-text image: running the fallback chain`);
                 primaryOnly = false;
+                primaryNeverJudgedNoText = true;
             }
         }
     }
@@ -38076,7 +38080,9 @@ async function runChain(image, opts) {
             return succeed(win);
     }
     // 5. chain exhausted (R15 / R16)
-    const exhausted = (0,_outcome__WEBPACK_IMPORTED_MODULE_2__.classifyExhausted)(attempts, ocrText);
+    // review 2026-10-19: Gemini timeout + Groq not_payment + NVIDIA timeout on a no-text image asked the payer for a clear
+    // screenshot; nobody's verdict was final there, so it is held and re-checked by the primary instead
+    const exhausted = primaryNeverJudgedNoText ? 'all_providers_failed' : (0,_outcome__WEBPACK_IMPORTED_MODULE_2__.classifyExhausted)(attempts, ocrText);
     // a read judged a payment but no amount was verifiable -> payment; nobody could judge it -> unclear
     const category = paymentJudged ? 'payment' : 'unclear';
     if (exhausted === 'no_verifiable_amount') {
@@ -47454,7 +47460,7 @@ class JobManager {
                     return;
                 }
                 const reason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}`;
-                const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_spam_state__WEBPACK_IMPORTED_MODULE_23__.swapDaysForCurrentSpamState)()}&formalities=true&reason=${encodeURIComponent(reason)}`;
+                const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_spam_state__WEBPACK_IMPORTED_MODULE_23__.clampSwapRestDays)((0,_spam_state__WEBPACK_IMPORTED_MODULE_23__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(reason)}`;
                 const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_22__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_24__.fetchWithTimeout, process.env.clientId);
                 // Alert only when a rotation request actually went out: while backed off this ran every 10 min.
                 if (!setupResult.suppressedLocally)
@@ -48383,7 +48389,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEFAULT_SWAP_DAYS: () => (/* binding */ DEFAULT_SWAP_DAYS),
 /* harmony export */   HARSH_SWAP_DAYS: () => (/* binding */ HARSH_SWAP_DAYS),
+/* harmony export */   MAX_SWAP_REST_DAYS: () => (/* binding */ MAX_SWAP_REST_DAYS),
 /* harmony export */   MIN_LIMIT_DAYS_FOR_SWAP: () => (/* binding */ MIN_LIMIT_DAYS_FOR_SWAP),
+/* harmony export */   clampSwapRestDays: () => (/* binding */ clampSwapRestDays),
 /* harmony export */   daysUntil: () => (/* binding */ daysUntil),
 /* harmony export */   resetSpamState: () => (/* binding */ resetSpamState),
 /* harmony export */   setSpamState: () => (/* binding */ setSpamState),
@@ -48399,6 +48407,12 @@ const DEFAULT_SWAP_DAYS = 10;
 const HARSH_SWAP_DAYS = 30;
 /** Dated limits shorter than this are waited out rather than swapped. */
 const MIN_LIMIT_DAYS_FOR_SWAP = 3;
+/**
+ * Largest days= CMS accepts on GET /setupClient/:clientId. CommonTgService
+ * src/components/clients/dto/setup-client.dto.ts validates days as an integer with @Min(0) @Max(35),
+ * and the global ValidationPipe answers 400 for anything outside that, so the swap never happens.
+ */
+const MAX_SWAP_REST_DAYS = 35;
 const DAY_MS = 24 * 60 * 60 * 1000;
 let current = null;
 function setSpamState(status, limitedUntil) {
@@ -48407,22 +48421,31 @@ function setSpamState(status, limitedUntil) {
 function resetSpamState() {
     current = null;
 }
+/**
+ * The one place a setupClient days= value is made valid for CMS: integer (fractions round up, matching
+ * daysUntil), min 0, max MAX_SWAP_REST_DAYS. A non-finite value falls back to DEFAULT_SWAP_DAYS.
+ */
+function clampSwapRestDays(days) {
+    if (typeof days !== 'number' || !Number.isFinite(days))
+        return DEFAULT_SWAP_DAYS;
+    return Math.min(MAX_SWAP_REST_DAYS, Math.max(0, Math.ceil(days)));
+}
 /** Whole days until `limitedUntil`, rounded up. */
 function daysUntil(limitedUntil, now = Date.now()) {
     return Math.ceil((limitedUntil.getTime() - now) / DAY_MS);
 }
 /** Rest days to request from CMS so the old account is rested until it is actually free. */
 function swapDaysForLimitedUntil(limitedUntil, now = Date.now()) {
-    return daysUntil(limitedUntil, now) + 1;
+    return clampSwapRestDays(daysUntil(limitedUntil, now) + 1);
 }
 /** days= for a swap requested outside a SpamBot handler, from the last known spam state. */
 function swapDaysForCurrentSpamState(now = Date.now()) {
     if (current?.status === 'harsh')
-        return HARSH_SWAP_DAYS;
+        return clampSwapRestDays(HARSH_SWAP_DAYS);
     if (current?.status === 'limited' && current.limitedUntil && current.limitedUntil.getTime() > now) {
         return swapDaysForLimitedUntil(current.limitedUntil, now);
     }
-    return DEFAULT_SWAP_DAYS;
+    return clampSwapRestDays(DEFAULT_SWAP_DAYS);
 }
 
 
@@ -51876,7 +51899,7 @@ async function requestSpamSwap(reason, days) {
             logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
             return;
         }
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${days}&formalities=true&reason=${encodeURIComponent(reason)}`;
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_core_spam_state__WEBPACK_IMPORTED_MODULE_13__.clampSwapRestDays)(days)}&formalities=true&reason=${encodeURIComponent(reason)}`;
         const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_12__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_14__.fetchWithTimeout, process.env.clientId);
         if (!setupResult.swapped) {
             logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
@@ -58263,6 +58286,12 @@ async function holdForLaterAnalysis(event, chatId) {
             const current = pendingHolds.get(chatId);
             if (!current || current.token !== token) {
                 logger.warn(`[ProcessImage] held re-run dropped for ${chatId} msg ${msgId}: superseded by a newer held image`);
+                // This image is never re-checked. Unless the chat was credited since its hold, ops hear about it: it may have
+                // been the real payment (review 2026-10-19; the newer image's own chain still notifies on its last failure).
+                if ((creditedSeq.get(chatId) ?? 0) <= takenSeq) {
+                    const newer = current ? ` (newer held msg ${current.msgId})` : "";
+                    void sendAnalysisUnavailableNotice(chatId, "superseded by a newer held image; not re-checked, please verify manually", [fact("Superseded", `msg ${msgId} not re-checked${newer}`)]);
+                }
                 return;
             }
             if ((creditedSeq.get(chatId) ?? 0) > takenSeq) {
@@ -58281,8 +58310,11 @@ async function holdForLaterAnalysis(event, chatId) {
     // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
     if (delay !== undefined)
         return;
+    await sendAnalysisUnavailableNotice(chatId, note);
+}
+async function sendAnalysisUnavailableNotice(chatId, note, extra = []) {
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note));
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note, extra));
     }
     catch (error) {
         logger.error('[ProcessImage] analysis-unavailable notice failed', error);
@@ -58347,11 +58379,11 @@ function fakeEvidenceCard(chatId, imageDetails) {
     };
 }
 /** Ops notice: image analysis down. */
-function analysisUnavailableNotice(chatId, note) {
+function analysisUnavailableNotice(chatId, note, extra = []) {
     return {
         title: "Analysis down",
         summary: note,
-        fields: [{ label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }],
+        fields: [{ label: "Chat", value: chatId, url: (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.chatUrl)(chatId) }, ...extra],
     };
 }
 function paymentFlowFor(event, chatId, db, imageDetails) {
