@@ -37732,6 +37732,7 @@ async function runChain(image, opts) {
     let ocrText = '';
     // OCR found (almost) no text. OCR is not trusted to reject (a blurry genuine receipt reads as no text), so the
     // PRIMARY image model still looks once and its verdict decides; nothing else runs (cost stays one call per image).
+    // Exception: when the primary fails operationally (no verdict at all), the normal fallback chain runs (stage 1).
     let primaryOnly = false;
     if (doPrecheck) {
         // The prober must not depend on VISION_PROVIDERS: if 'ocr-space' is left out of the chain the registry's OCR-Space
@@ -38046,6 +38047,17 @@ async function runChain(image, opts) {
             return succeed(win);
         judgedImage += judged;
         next = panel.length;
+        // No-text pre-check, but the primary never answered (timeout, 5xx, network, rate/quota, config): nobody has looked
+        // at the image yet, so the normal fallback chain runs instead of an outage after one call (2026-10-19: one slow
+        // Gemini call held no-text screenshots and fired "Analysis down"). A primary that answered keeps primary-only.
+        if (primaryOnly) {
+            const primaryName = providers[imageModels[0]].name;
+            const last = [...attempts].reverse().find((a) => a.provider === primaryName);
+            if (last && !last.ok && last.errorClass !== null && _outcome__WEBPACK_IMPORTED_MODULE_2__.OPERATIONAL_CLASSES.has(last.errorClass)) {
+                logger.log(`[vision] ${primaryName} failed ${last.errorClass} on a no-text image: running the fallback chain`);
+                primaryOnly = false;
+            }
+        }
     }
     for (; !primaryOnly && next < imageModels.length; next++) {
         if (next >= HEDGE_GROUP_SIZE && judgedImage >= SKIP_AFTER_JUDGED) {
@@ -58206,8 +58218,9 @@ allowAmountMismatch = false) {
 /**
  * Re-checks of a screenshot whose analysis was unavailable: after 3, then 10 more minutes. The chain lives in process
  * memory only (timers + the maps below): a restart drops it silently. That is safe, never a reject: the held screenshot
- * was not deleted, not counted invalid and not answered; ops got the "Analysis down" notice for it, and the user can
- * resend. Nothing re-runs it after a restart.
+ * was not deleted, not counted invalid and not answered, and the user can resend (ops get the "Analysis down" notice
+ * only when the last re-check fails, so a restart mid-chain means no notice; the warn log lines remain). Nothing
+ * re-runs it after a restart.
  */
 const ANALYSIS_HOLD_DELAYS_MS = [3 * 60000, 10 * 60000];
 const HOLD_MAP_CAP = 2000;
@@ -58264,6 +58277,10 @@ async function holdForLaterAnalysis(event, chatId) {
             });
         }, delay);
     }
+    // Ops hear about it only when the last re-check also failed (2026-10-19: one slow call fired "Analysis down" for a
+    // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
+    if (delay !== undefined)
+        return;
     try {
         await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note));
     }
