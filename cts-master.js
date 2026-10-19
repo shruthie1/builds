@@ -19692,7 +19692,6 @@ let BotsService = BotsService_1 = class BotsService {
         return (0, rich_message_1.formatRichMessageHtml)(message, { prefix: source || undefined });
     }
     classicMessageBody(bot, message, options, allowServiceName) {
-        const buttons = (message.buttons ?? []).filter(b => b.url);
         return {
             chat_id: bot.channelId,
             text: (0, rich_message_1.formatClassicNotificationHtml)(message, allowServiceName ? process.env.clientId : undefined),
@@ -19701,7 +19700,7 @@ let BotsService = BotsService_1 = class BotsService {
             reply_to_message_id: options?.replyToMessageId,
             allow_sending_without_reply: options?.allowSendingWithoutReply,
             protect_content: options?.protectContent,
-            reply_markup: buttons.length ? { inline_keyboard: [buttons.map(b => ({ text: b.text, url: b.url }))] } : undefined,
+            reply_markup: (0, rich_message_1.notificationKeyboard)(message),
         };
     }
     async executeSendMessage(bot, text, options, allowServiceName = true) {
@@ -19713,6 +19712,9 @@ let BotsService = BotsService_1 = class BotsService {
             chat_id: bot.channelId,
             rich_message: { html: this.richMessageHtml(text, allowServiceName) },
         };
+        const keyboard = (0, rich_message_1.notificationKeyboard)(text);
+        if (keyboard)
+            body.reply_markup = keyboard;
         if (options?.disableNotification)
             body.disable_notification = true;
         if (options?.protectContent)
@@ -19766,7 +19768,7 @@ let BotsService = BotsService_1 = class BotsService {
             formData.append(mediaField, media);
         }
         if (options.caption) {
-            formData.append('caption', `${process.env.clientId}:\n\n${options.caption}`);
+            formData.append('caption', `${process.env.clientId}\n${options.caption}`);
         }
         if (options.parseMode)
             formData.append('parse_mode', options.parseMode);
@@ -19808,7 +19810,7 @@ let BotsService = BotsService_1 = class BotsService {
                 media: Buffer.isBuffer(item.media) ? `attach://file${i}` : item.media,
             };
             if (item.caption)
-                mediaObj.caption = `${process.env.clientId}:\n\n${item.caption}`;
+                mediaObj.caption = `${process.env.clientId}\n${item.caption}`;
             if (item.parseMode)
                 mediaObj.parse_mode = item.parseMode;
             if (item.hasSpoiler)
@@ -52259,7 +52261,7 @@ async function sendBotNotice(target, input, opts = {}) {
     }
     const api = (method) => `https://api.telegram.org/bot${t.token}/${method}`;
     try {
-        const response = await axios_1.default.post(api('sendRichMessage'), { chat_id: t.chatId, rich_message: { html: (0, rich_message_1.formatRichMessageHtml)(input, { prefix: opts.prefix }) } }, { timeout });
+        const response = await axios_1.default.post(api('sendRichMessage'), { chat_id: t.chatId, rich_message: { html: (0, rich_message_1.formatRichMessageHtml)(input, { prefix: opts.prefix }) }, reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
         return { sent: response.data?.ok === true, data: response.data };
     }
     catch (error) {
@@ -52270,7 +52272,7 @@ async function sendBotNotice(target, input, opts = {}) {
         }
     }
     try {
-        const response = await axios_1.default.post(api('sendMessage'), { chat_id: t.chatId, text: (0, rich_message_1.formatClassicNotificationHtml)(input, opts.prefix), parse_mode: 'HTML' }, { timeout });
+        const response = await axios_1.default.post(api('sendMessage'), { chat_id: t.chatId, text: (0, rich_message_1.formatClassicNotificationHtml)(input, opts.prefix), parse_mode: 'HTML', reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
         return { sent: response.data?.ok === true, data: response.data };
     }
     catch (error) {
@@ -54786,10 +54788,10 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.RICH_MESSAGE_MAX_CHARS = exports.NotificationSeverity = void 0;
 exports.escapeTelegramHtml = escapeTelegramHtml;
 exports.notificationButtons = notificationButtons;
+exports.notificationKeyboard = notificationKeyboard;
 exports.formatRichMessageHtml = formatRichMessageHtml;
 exports.textToRichInput = textToRichInput;
 exports.telemetryToRich = telemetryToRich;
-exports.buttonsFromReplyMarkup = buttonsFromReplyMarkup;
 exports.formatClassicNotificationHtml = formatClassicNotificationHtml;
 exports.NotificationSeverity = Object.freeze({
     INFO: 'info',
@@ -54875,13 +54877,18 @@ function noEmoji(text) {
     return String(text ?? '').replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim();
 }
 function buttonLabel(text) {
-    return escapeTelegramHtml(noEmoji(text) || 'Open');
+    return noEmoji(text) || 'Open';
 }
-function buttonTag(button, index) {
-    const style = index === 0 && button.url ? ' style="primary"' : '';
-    if (button.url)
-        return `<tg-button type="url"${style} url="${attr(button.url)}">${buttonLabel(button.text)}</tg-button>`;
-    return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
+function notificationKeyboard(input) {
+    const buttons = notificationButtons(input).map((b) => (b.url
+        ? { text: buttonLabel(b.text), url: b.url }
+        : { text: buttonLabel(b.text), copy_text: { text: b.copy } }));
+    if (!buttons.length)
+        return undefined;
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW)
+        rows.push(buttons.slice(i, i + BUTTONS_PER_ROW));
+    return { inline_keyboard: rows };
 }
 function renderTable(table) {
     const numeric = new Set(table.numeric ?? []);
@@ -54944,11 +54951,7 @@ function formatRichMessageHtml(input, opts = {}) {
     }
     if (footer.length)
         parts.push(`<p>${footer.join(' · ')}</p>`);
-    const buttons = notificationButtons(input);
-    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
-        parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
-    }
-    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>');
+    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>').replace(/<br\/>\n?(?=<(?:table|blockquote|details|img)\b)/g, '\n');
 }
 const HTML_TAG = /<\/?[a-z][^>]*>/gi;
 const FIELD_LINE = /^([^:\n]{1,40}?)\s*:\s+(.+)$/;
@@ -55048,32 +55051,10 @@ function telemetryToRich(text) {
         return { ...base, title: `Payment site · ${body}` };
     return { ...base, title: '', quote: body.slice(0, 3000), quoteLabel: '' };
 }
-function buttonsFromReplyMarkup(markup) {
-    let parsed = markup;
-    if (typeof markup === 'string') {
-        try {
-            parsed = JSON.parse(markup);
-        }
-        catch {
-            return [];
-        }
-    }
-    const rows = Array.isArray(parsed?.inline_keyboard) ? parsed.inline_keyboard : [];
-    const buttons = [];
-    for (const row of rows) {
-        for (const b of Array.isArray(row) ? row : []) {
-            if (b?.text && typeof b.url === 'string')
-                buttons.push({ text: String(b.text), url: b.url });
-            else if (b?.text && typeof b.copy_text?.text === 'string')
-                buttons.push({ text: String(b.text), copy: b.copy_text.text });
-        }
-    }
-    return buttons;
-}
 function formatClassicNotificationHtml(input, prefix) {
     const title = input.title || input.summary || 'Notification';
-    const head = `${prefix ? `${escapeTelegramHtml(prefix)} · ` : ''}${escapeTelegramHtml(title)}${spoilerTag(input.spoiler)}`;
-    const blocks = [[`<b>${head}</b>`]];
+    const head = `<b>${escapeTelegramHtml(title)}</b>${spoilerTag(input.spoiler)}`;
+    const blocks = [[...(prefix ? [`<b>${escapeTelegramHtml(prefix)}</b>`] : []), head]];
     if (input.summary && input.summary !== title)
         blocks.push([escapeTelegramHtml(input.summary)]);
     const fields = visibleFields(input);
