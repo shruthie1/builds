@@ -1340,7 +1340,7 @@ let AppService = AppService_1 = class AppService {
                             this.logger.log('UMS channel cycle branch=leave-all');
                             try {
                                 await (0, bot_notice_1.sendBotNotice)('pppl', {
-                                    title: 'Channel leave cycle started',
+                                    title: 'Leave cycle',
                                 });
                             }
                             catch (error) {
@@ -1397,7 +1397,7 @@ let AppService = AppService_1 = class AppService {
     }
     async updateBufferClientInfo() {
         try {
-            await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating Buffer Clients Info' });
+            await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating buffers' });
         }
         catch (error) {
             this.logger.error('CMS buffer-info notification failed; continuing update', error);
@@ -1678,7 +1678,7 @@ let AppService = AppService_1 = class AppService {
             try {
                 await (0, bot_notice_1.sendBotNotice)('pppl', {
                     severity: 'warning',
-                    title: 'Resetting UserData',
+                    title: 'Reset userData',
                     tables: [{ columns: [`Profile (${resets.length})`, 'Chat', 'Last message'], rows: resets }],
                 });
             }
@@ -1775,7 +1775,7 @@ let AppService = AppService_1 = class AppService {
             const failed = rows.filter((r) => String(r[3]).startsWith('error'));
             await (0, notice_batch_1.sendNoticeBatched)((input) => (0, bot_notice_1.sendBotNotice)('pppl', input), {
                 severity: failed.length ? 'warning' : 'info',
-                title: 'Channel join cycle',
+                title: 'Join cycle',
                 tables: [{
                         columns: [`Client (${rows.length})`, 'Can send', `Channels (${joining.reduce((n, r) => n + (Number(r[2]) || 0), 0)})`, 'Status'],
                         rows,
@@ -1845,13 +1845,13 @@ let AppService = AppService_1 = class AppService {
     async digestJoinRows(rows) {
         if (rows.length === 0)
             return;
-        const queued = await (0, notice_digest_1.pushDigestEntries)(redisClient_1.RedisClient.getClient(), 'CHANNEL_NOTIFICATIONS', 'join-results', rows.map(({ clientId, row }) => ({ clientId, title: 'Channel join results', row, merge: 'sum' })));
+        const queued = await (0, notice_digest_1.pushDigestEntries)(redisClient_1.RedisClient.getClient(), 'CHANNEL_NOTIFICATIONS', 'join-results', rows.map(({ clientId, row }) => ({ clientId, title: 'Join results', row, merge: 'sum' })));
         if (queued)
             return;
         try {
             const merged = (0, notice_digest_1.mergeByClient)(rows.map(({ clientId, row }) => ({ clientId, at: Date.now(), title: '', row, merge: 'sum' })));
             await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(components_1.ChannelCategory.CHANNEL_NOTIFICATIONS, input, undefined, false), {
-                title: 'Channel join results',
+                title: 'Join results',
                 tables: [{
                         columns: [`Client (${merged.length})`, 'Joined', 'Failed', 'Flood wait', 'No response', 'Old build', 'Last error'],
                         rows: merged.map(({ clientId, row }) => [clientId, row.Joined, row.Failed, row['Flood wait'], row['No response'], row['Old build'], row['Last error']]),
@@ -5847,7 +5847,7 @@ let TelegramService = TelegramService_1 = class TelegramService {
             this.logger.info(mobile, 'Removed other authorizations');
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'success',
-                title: 'Remove Other Auths',
+                title: 'Remove auths',
                 fields: [
                     { label: 'Mobile', value: mobile },
                     { label: 'Status', value: 'Non-protected sessions removed', code: false },
@@ -5860,7 +5860,7 @@ let TelegramService = TelegramService_1 = class TelegramService {
             this.logger.error(mobile, 'Failed to remove other authorizations', error);
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'error',
-                title: 'Remove Other Auths failed',
+                title: 'Remove failed',
                 fields: [{ label: 'Mobile', value: mobile }],
                 details: message.substring(0, 500),
                 detailsTitle: 'Error message',
@@ -11276,7 +11276,8 @@ async function handleIncomingEvent(ctx, event) {
             ctx.logger.info(ctx.phoneNumber, `Login Code received for - ${ctx.phoneNumber}\nActiveClientSetup - TelegramManager.activeClientSetup`);
             ctx.logger.info(ctx.phoneNumber, 'Date :', new Date(event.message.date * 1000));
             await (0, bot_notice_1.sendBotNotice)('notif', {
-                title: `Login code · ${ctx.phoneNumber}`,
+                title: 'Login code',
+                fields: [{ label: 'Phone', value: ctx.phoneNumber, code: false }],
                 houseStyle: true,
                 quote: event.message.text?.substring(0, 100),
                 quoteLabel: '',
@@ -14163,7 +14164,7 @@ class ConnectionManager {
             if (botsService) {
                 await botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
                     severity: 'error',
-                    title: 'Client Connection Error',
+                    title: 'Connection error',
                     fields: [
                         { label: 'Mobile', value: mobile },
                         { label: 'Marked expired', value: String(markedAsExpired), code: false },
@@ -17242,7 +17243,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             }
             const botsService = (0, utils_1.getBotsServiceInstance)();
             if (botsService) {
-                await botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing Active Channel', fields: [{ label: 'Channel', value: channelId }] });
+                await botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing channel', fields: [{ label: 'Channel', value: channelId }] });
             }
             await this.activeChannelModel.findOneAndDelete({ channelId: this.channelKey(channelId) }).exec();
         }
@@ -17552,7 +17553,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async resetMessageDeletionCounters() {
         try {
-            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Reset message deletion counters' });
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Maintenance', summary: 'Reset message deletion counters' });
             await this.activeChannelModel.updateMany({ banned: false }, { $set: { updatedAt: new Date() } });
         }
         catch (error) {
@@ -17561,7 +17562,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async resetAvailableMsgs() {
         try {
-            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Reset available messages' });
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Maintenance', summary: 'Reset available messages' });
             const availableMsgs = await this.getAvailableMessages();
             await this.activeChannelModel.updateMany({
                 $expr: {
@@ -17580,7 +17581,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async updateBannedChannels() {
         try {
-            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Channel maintenance', summary: 'Update banned channels' });
+            await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Maintenance', summary: 'Update banned channels' });
             await this.activeChannelModel.updateMany({ $or: [{ banned: true }, { private: true }] }, {
                 $set: {
                     updatedAt: new Date(),
@@ -19550,7 +19551,7 @@ let BotsService = BotsService_1 = class BotsService {
         if (category !== channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS) {
             await this.notify({
                 severity: 'error',
-                title: 'Bot category unhealthy',
+                title: 'Bots unhealthy',
                 summary: 'No verified active bot is eligible to send. Repair is required.',
                 fields: [{ label: 'Category', value: category }],
             });
@@ -20378,7 +20379,7 @@ let BotsService = BotsService_1 = class BotsService {
             await this.refreshBotCache();
             await this.notify({
                 severity: 'warning',
-                title: 'Bot created but NOT usable',
+                title: 'Bot unusable',
                 summary: 'Left inactive. Add it as admin manually, then it self-activates on the next health check.',
                 fields: [
                     { label: 'Category', value: category },
@@ -20511,7 +20512,7 @@ let BotsService = BotsService_1 = class BotsService {
                     topUpFailures.push(msg);
                     await this.notify({
                         severity: 'warning',
-                        title: 'Bot top-up BLOCKED: uncontrollable channel',
+                        title: 'Top-up blocked',
                         summary: 'Creation skipped to avoid orphan bots. Add a manager as channel admin, then bots self-heal.',
                         fields: [
                             { label: 'Category', value: category },
@@ -21019,7 +21020,7 @@ let BotsService = BotsService_1 = class BotsService {
     async sendHealthSummary(s) {
         const input = {
             severity: s.failures.length || s.dead > 0 ? 'warning' : 'info',
-            title: 'Bot Health Check',
+            title: 'Bot health',
             summary: `${s.checked} checked, ${s.alive} alive, ${s.dead} dead`,
             tables: [{
                     columns: ['Checked', 'Alive', 'Dead', 'Unknown', 'Replaced', 'Topped up', 'Dead remaining'],
@@ -23019,7 +23020,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         this.logger.log(`Buffer Client Created:\n\nMobile: ${canonicalMobile}`);
         await this.sendAccountNotice({
             severity: 'success',
-            title: 'Buffer Client Created',
+            title: 'Buffer created',
             fields: [
                 { label: 'Mobile', value: canonicalMobile },
                 { label: 'Client ID', value: bufferClient.clientId || '-' },
@@ -23103,7 +23104,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.log(`Removing BufferClient with mobile: ${canonicalMobile}`);
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'warning',
-                title: 'Deleting Buffer Client',
+                title: 'Deleting buffer',
                 fields: [
                     { label: 'Mobile', value: canonicalMobile },
                     { label: 'Reason', value: message || 'manual removal', code: false },
@@ -23163,7 +23164,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const updated = await this.update(mobile, updateData);
             this.logger.log(`Buffer client ${mobile} status updated to ${status}`);
             this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                title: 'Buffer Client Status Update',
+                title: 'Buffer status',
                 fields: [
                     { label: 'Mobile', value: mobile },
                     { label: 'New status', value: status, code: false },
@@ -23177,7 +23178,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.error(`Failed to update buffer client ${mobile} status to ${status}: ${errorMessage}`);
             this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 severity: 'error',
-                title: 'Buffer Client Status Update Failed',
+                title: 'Status failed',
                 fields: [
                     { label: 'Mobile', value: mobile },
                     { label: 'Attempted status', value: status, code: false },
@@ -23215,7 +23216,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             if (!session)
                 await this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                     severity: 'warning',
-                    title: 'Buffer Primary Reassigned',
+                    title: 'Primary changed',
                     fields: [
                         { label: 'Client ID', value: clientId },
                         { label: 'Primary mobile', value: mobile },
@@ -23651,7 +23652,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const errMsg = (0, parseError_1.parseError)(error, 'checkBufferClients').message;
             this.logger.error(`checkBufferClients crashed: ${errMsg}`);
             try {
-                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'checkBufferClients crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'Check crashed', fields: [{ label: 'Pool', value: 'buffer', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
         }
@@ -23697,7 +23698,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const errMsg = (0, parseError_1.parseError)(error, 'rotateReadyBufferClients').message;
             this.logger.error(`Ready buffer rotation sweep crashed: ${errMsg}`);
             try {
-                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'READY Buffer Rotation crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'Rotation crashed', fields: [{ label: 'Pool', value: 'buffer', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
             return false;
@@ -23839,7 +23840,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoBufferClientsDynamic').message;
                 this.logger.error(`Dynamic buffer enrollment failed: ${errMsg}`);
                 try {
-                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Buffer Enrollment failed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Enroll failed', fields: [{ label: 'Pool', value: 'buffer', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
                 }
                 catch { }
             }
@@ -24030,7 +24031,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.log(`Created BufferClient for ${targetClientId} with availability ${targetAvailableDate}`);
             await this.sendAccountNotice({
                 severity: 'success',
-                title: 'Buffer Client Enrolled',
+                title: 'Buffer enrolled',
                 fields: [
                     { label: 'Client ID', value: targetClientId },
                     { label: 'Mobile', value: document.mobile },
@@ -24247,7 +24248,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             createdEntries,
             perClientLimit: 10,
         });
-        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
+        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Events');
         if (eventsTable)
             (summary.tables ??= []).push(eventsTable);
         await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input, undefined, false), summary);
@@ -26905,7 +26906,7 @@ let ClientService = ClientService_1 = class ClientService {
                 : '';
             await this.notify({
                 severity: 'warning',
-                title: 'Buffer not available',
+                title: 'No buffer',
                 summary: `No safe buffer clients for swap${pendingNote}`,
                 fields: [{ label: 'Client ID', value: clientId }],
                 tables: this.probeSkipTables(probeBudget, fallbackBudget),
@@ -27076,7 +27077,7 @@ let ClientService = ClientService_1 = class ClientService {
             catch (deployError) {
                 const deployMessage = deployError instanceof Error ? deployError.message : String(deployError);
                 (0, parseError_1.parseError)(deployError, `[${clientId}] deployKey restart failed after cutover`);
-                await this.notify({ severity: 'error', title: 'Deploy restart failed', summary: 'Cutover is done', fields: [{ label: 'Client ID', value: clientId }, { label: 'New mobile', value: newMobile }], details: deployMessage?.substring(0, 500), detailsTitle: 'Error message' });
+                await this.notify({ severity: 'error', title: 'Restart failed', summary: 'Cutover is done', fields: [{ label: 'Client ID', value: clientId }, { label: 'New mobile', value: newMobile }], details: deployMessage?.substring(0, 500), detailsTitle: 'Error message' });
             }
             this.logger.info(`[${clientId}] Starting replaced-client pool-return handling`, {
                 existingMobile,
@@ -27167,7 +27168,7 @@ let ClientService = ClientService_1 = class ClientService {
                     message: reason || 'Deactivated during client swap (pool return skipped)',
                 });
                 this.logger.log('Replaced-client pool return skipped');
-                await this.notify({ title: 'Pool return skipped', summary: 'Account is inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
+                await this.notify({ title: 'Return skipped', summary: 'Account is inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
             }
         }
         catch (e) {
@@ -27176,7 +27177,7 @@ let ClientService = ClientService_1 = class ClientService {
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 await this.retireReplacedMobile(existingMobile, errorMessage);
             }
-            await this.notify({ severity: 'error', title: 'Pool return failed', fields: [{ label: 'Mobile', value: existingMobile }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
+            await this.notify({ severity: 'error', title: 'Return failed', fields: [{ label: 'Mobile', value: existingMobile }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
         }
     }
     isPermanentReplacementReason(reason) {
@@ -27186,19 +27187,19 @@ let ClientService = ClientService_1 = class ClientService {
         try {
             await this.usersService.expireAccount(mobile, reason);
             this.logger.warn(`Replaced account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
-            await this.notify({ severity: 'warning', title: 'Buffer inactivated', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 120), code: false }] });
+            await this.notify({ severity: 'warning', title: 'Inactivated', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 120), code: false }] });
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Failed to retire replaced account: ${mobile}`, false);
             this.logger.error(`Failed to retire replaced account ${mobile}: ${errorDetails.message}`);
-            await this.notify({ severity: 'error', title: 'Buffer inactivate failed', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 100), code: false }], details: errorDetails.message.substring(0, 500), detailsTitle: 'Error message' });
+            await this.notify({ severity: 'error', title: 'Inactivate fail', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 100), code: false }], details: errorDetails.message.substring(0, 500), detailsTitle: 'Error message' });
         }
     }
     async handleFormalities(mobile) {
         try {
             await this.telegramService.updatePrivacyforDeletedAccount(mobile);
             this.logger.log('Formalities finished');
-            await this.notify({ severity: 'success', title: 'Formalities complete', summary: 'Privacy updated', fields: [{ label: 'Mobile', value: mobile }] });
+            await this.notify({ severity: 'success', title: 'Formalities done', summary: 'Privacy updated', fields: [{ label: 'Mobile', value: mobile }] });
         }
         finally {
             await connection_manager_1.connectionManager.unregisterClient(mobile);
@@ -27235,11 +27236,11 @@ let ClientService = ClientService_1 = class ClientService {
             };
             const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
             this.logger.log('Client returned to buffer pool:', updatedBufferClient);
-            await this.notify({ title: 'Returned to buffer pool', fields: [{ label: 'Mobile', value: existingMobile }, { label: 'Available date', value: availableDate, code: false }] });
+            await this.notify({ title: 'Returned to pool', fields: [{ label: 'Mobile', value: existingMobile }, { label: 'Available date', value: availableDate, code: false }] });
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Error returning old client to buffer pool: ${existingMobile}`, true);
-            await this.notify({ severity: 'error', title: 'Pool return error', fields: [{ label: 'Mobile', value: existingMobile }], details: errorDetails.message?.substring(0, 500), detailsTitle: 'Error message' });
+            await this.notify({ severity: 'error', title: 'Return error', fields: [{ label: 'Mobile', value: existingMobile }], details: errorDetails.message?.substring(0, 500), detailsTitle: 'Error message' });
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 this.logger.log('Marking replaced buffer inactive:', existingMobile);
                 await this.retireReplacedMobile(existingMobile, errorDetails.message);
@@ -27288,7 +27289,7 @@ let ClientService = ClientService_1 = class ClientService {
             const i = entry.indexOf(' ');
             return i < 0 ? [entry, ''] : [entry.slice(0, i), entry.slice(i + 1)];
         });
-        return rows.length ? [{ title: 'Skipped (SpamBot)', columns: ['Mobile', 'Reason'], rows }] : [];
+        return rows.length ? [{ title: 'Skipped: SpamBot', columns: ['Mobile', 'Reason'], rows }] : [];
     }
     async isSpamSafeForSwap(candidate, budget) {
         const checkedAt = candidate.spamCheckedAt ? new Date(candidate.spamCheckedAt).getTime() : 0;
@@ -27429,7 +27430,7 @@ let ClientService = ClientService_1 = class ClientService {
             this.lastUpdateMap.delete(clientId);
             const errorDetails = (0, parseError_1.parseError)(error, `[${clientId}] [${client.mobile}] updateClient failed`);
             const errorMessage = error instanceof Error ? error.message : String(error);
-            await this.notify({ severity: 'error', title: 'Client update failed', fields: [{ label: 'Client ID', value: clientId }, { label: 'Mobile', value: client.mobile }, { label: 'Reason', value: message, code: false }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
+            await this.notify({ severity: 'error', title: 'Update failed', fields: [{ label: 'Client ID', value: clientId }, { label: 'Mobile', value: client.mobile }, { label: 'Reason', value: message, code: false }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 this.logger.warn(`Permanent error while updating active client ${clientId}; manual review required for ${client.mobile}`);
             }
@@ -36369,7 +36370,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         });
         await this.sendAccountNotice({
             severity: 'success',
-            title: 'Promote Client Created',
+            title: 'Promote created',
             fields: [
                 { label: 'Mobile', value: canonicalMobile },
                 { label: 'Client ID', value: promoteClient.clientId || '-' },
@@ -36436,7 +36437,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const updated = await this.update(mobile, updateData);
             this.logger.log(`Promote client ${mobile} status updated to ${status}`);
             this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                title: 'Promote Client Status Update',
+                title: 'Promote status',
                 fields: [
                     { label: 'Mobile', value: mobile },
                     { label: 'New status', value: status, code: false },
@@ -36450,7 +36451,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.logger.error(`Failed to update promote client ${mobile} status to ${status}: ${errorMessage}`);
             this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 severity: 'error',
-                title: 'Promote Client Status Update Failed',
+                title: 'Status failed',
                 fields: [
                     { label: 'Mobile', value: mobile },
                     { label: 'Attempted status', value: status, code: false },
@@ -36604,7 +36605,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             }
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'warning',
-                title: 'Deleting Promote Client',
+                title: 'Deleting promote',
                 fields: [
                     { label: 'Service', value: process.env.serviceName || process.env.clientId || 'unknown' },
                     { label: 'Mobile', value: mobile },
@@ -36861,7 +36862,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const errMsg = (0, parseError_1.parseError)(error, 'checkPromoteClients').message;
             this.logger.error(`checkPromoteClients crashed: ${errMsg}`);
             try {
-                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'checkPromoteClients crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'Check crashed', fields: [{ label: 'Pool', value: 'promote', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
         }
@@ -36905,7 +36906,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const errMsg = (0, parseError_1.parseError)(error, 'rotateReadyPromoteClients').message;
             this.logger.error(`Ready promote rotation sweep crashed: ${errMsg}`);
             try {
-                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'READY Promote Rotation crashed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'error', title: 'Rotation crashed', fields: [{ label: 'Pool', value: 'promote', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
             }
             catch { }
             return false;
@@ -37039,7 +37040,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoPromoteClientsDynamic').message;
                 this.logger.error(`Dynamic promote enrollment failed: ${errMsg}`);
                 try {
-                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Promote Enrollment failed', summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
+                    await (0, bot_notice_1.sendBotNotice)('notif', { severity: 'warning', title: 'Enroll failed', fields: [{ label: 'Pool', value: 'promote', code: false }], summary: errMsg.slice(0, 200), details: errMsg.length > 200 ? errMsg : undefined, detailsTitle: 'Error message' });
                 }
                 catch { }
             }
@@ -37114,7 +37115,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.logger.log(`Created PromoteClient for ${targetClientId} with availability ${targetAvailableDate}`);
             await this.sendAccountNotice({
                 severity: 'success',
-                title: 'Promote Client Enrolled',
+                title: 'Promote enrolled',
                 fields: [
                     { label: 'Client ID', value: targetClientId },
                     { label: 'Mobile', value: document.mobile },
@@ -37304,7 +37305,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             updatedEntries,
             createdEntries,
         });
-        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Warmup / enrolment events');
+        const eventsTable = (0, notice_batch_1.eventsToTable)((0, notice_batch_1.currentNoticeBatch)()?.drain() ?? [], 'Events');
         if (eventsTable)
             (summary.tables ??= []).push(eventsTable);
         await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input, undefined, false), summary);
@@ -41151,7 +41152,7 @@ class BaseClientService {
                 else if (verificationStatus === 'foreign') {
                     this.logger.error(`${doc.mobile} has FOREIGN 2FA password — cannot control this account safely`);
                     const deactivated = await this.deactivateClient(doc.mobile, 'Foreign 2FA password — account unrecoverable if session dies', { permanent: true });
-                    this.sendAccountNotice(this.warmupNotice('critical', 'Foreign 2FA password', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
+                    this.sendAccountNotice(this.warmupNotice('critical', 'Foreign 2FA', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
                     return 0;
                 }
                 throw new Error('2FA password verification was inconclusive; will retry with normal warmup backoff');
@@ -41225,9 +41226,9 @@ class BaseClientService {
     warmupNotice(severity, title, mobile, fields, summary, details) {
         return {
             severity,
-            title: `${this.clientType} · ${title}`,
+            title,
             summary,
-            fields: [{ label: 'Mobile', value: mobile }, ...fields],
+            fields: [{ label: 'Mobile', value: mobile }, { label: 'Pool', value: this.clientType, code: false }, ...fields],
             details,
             detailsTitle: 'Error message',
         };
@@ -41244,7 +41245,7 @@ class BaseClientService {
         const table = (0, notice_batch_1.eventsToTable)(batch.drain(), 'Events');
         if (!table)
             return;
-        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), { severity: 'warning', title: `${this.clientType} · ${title}`, tables: [table] });
+        await (0, notice_batch_1.sendNoticeBatched)((input) => this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, input), { severity: 'warning', title, fields: [{ label: 'Pool', value: this.clientType, code: false }], tables: [table] });
     }
     async processReadyRotationSweep(readyClients, clientMap, shouldSkip = () => false) {
         let attempted = 0;
@@ -41484,7 +41485,7 @@ class BaseClientService {
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 const reason = await this.buildPermanentAccountReason(errorDetails.message);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.sendAccountNotice(this.warmupNotice('critical', 'Warmup permanent error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorDetails.message?.substring(0, 120)));
+                this.sendAccountNotice(this.warmupNotice('critical', 'Warmup fatal', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorDetails.message?.substring(0, 120)));
             }
             else {
                 this.sendAccountNotice(this.warmupNotice('error', 'Warmup error', doc.mobile, [{ label: 'Step', value: warmupAction.action, code: false }, { label: 'Fails', value: `${failCount}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, errorDetails?.message?.substring(0, 120) || 'unknown'));
@@ -42608,7 +42609,7 @@ function buildCheckSummaryNotification(s) {
     }
     return {
         severity: 'info',
-        title: `${s.kind} pool check`,
+        title: `${s.kind} check`,
         tables,
     };
 }
@@ -45305,7 +45306,7 @@ let TransactionService = TransactionService_1 = class TransactionService {
     async sendNotification(filters, total) {
         try {
             await (0, bot_notice_1.sendBotNotice)('notif', {
-                title: 'Transaction search',
+                title: 'Txn search',
                 summary: `${total} results`,
                 fields: [
                     { label: 'IP', value: filters.ip },
@@ -46960,7 +46961,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         if (botsService) {
             botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, {
                 severity: 'warning',
-                title: 'Deleting UserData',
+                title: 'Deleting data',
                 fields: [{ label: 'Profile', value: profile }, { label: 'Chat', value: chatId }],
             });
         }
@@ -50592,7 +50593,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.register('maintenance-promote-info-refresh', '25 0 * * *', async () => {
             if (new Date().getUTCDate() % 4 === 0) {
                 try {
-                    await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating Promote Clients Info' });
+                    await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Updating promote' });
                 }
                 catch (error) {
                     this.logger.error('UMS promote-info notification failed; continuing update', error instanceof Error ? error.stack : String(error));
@@ -50624,7 +50625,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             const utcDay = new Date().getUTCDate();
             if (utcDay % 7 === 0) {
                 this.logger.log('UMS-test maintenance branch=day-mod-7');
-                await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Resetting Banned Channels' });
+                await (0, bot_notice_1.sendBotNotice)('pppl', { title: 'Reset banned' });
                 setTimeout(async () => {
                 }, 30_000);
             }
@@ -50715,7 +50716,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         try {
             await (0, bot_notice_1.sendBotNotice)('pppl', {
                 severity: 'success',
-                title: 'Daily promote stats reset',
+                title: 'Daily reset',
                 summary: `${resetRows.length} clients, ${resetRows.reduce((sum, [, n]) => sum + n, 0)} promotions before reset`,
                 tables: [{ columns: ['Client', 'Promotions'], rows: resetRows, numeric: [1] }],
             });
@@ -51602,7 +51603,7 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
             else {
                 botsService.sendMessageByCategory(components_1.ChannelCategory.UNAUTH_CALLS, {
                     severity: 'warning',
-                    title: 'Unauthorized Attempt',
+                    title: 'Request blocked',
                     fields: [
                         { label: 'IP', value: clientIp || 'unknown' },
                         { label: 'Origin', value: origin || 'unknown', code: false },
@@ -52113,7 +52114,7 @@ let LoggerMiddleware = class LoggerMiddleware {
                 }
                 botsService.sendMessageByCategory(components_1.ChannelCategory.HTTP_FAILURES, {
                     severity: 'error',
-                    title: 'HTTP Request Error',
+                    title: 'HTTP error',
                     fields: [{ label: 'Path', value: safeOriginalUrl, code: false }],
                     details: errorDetails.message?.substring(0, 200),
                     detailsTitle: 'Error message',
@@ -54403,7 +54404,7 @@ function parseError(err, prefix, sendErr = true, config = {}) {
                     const notificationMessage = (err.errorMessage ? err.errorMessage : extractedMessage)?.slice(0, 500);
                     (0, bot_notice_1.sendBotNotice)('notif', {
                         severity: 'error',
-                        title: 'Application error',
+                        title: 'App error',
                         summary: prefix ? String(prefix).slice(0, 200) : undefined,
                         fields: [
                             { label: 'Status', value: status },
@@ -54890,7 +54891,7 @@ function notificationKeyboard(input) {
         rows.push(buttons.slice(i, i + BUTTONS_PER_ROW));
     return { inline_keyboard: rows };
 }
-function renderTable(table) {
+function renderTable(table, heading) {
     const numeric = new Set(table.numeric ?? []);
     const cell = (v, i, tag) => {
         const align = numeric.has(i) ? ' align="right"' : '';
@@ -54900,8 +54901,9 @@ function renderTable(table) {
     };
     const head = `<tr>${table.columns.map((c, i) => cell(c, i, 'th')).join('')}</tr>`;
     const rows = table.rows.map((r) => `<tr>${table.columns.map((_, i) => cell(r[i], i, 'td')).join('')}</tr>`).join('');
-    const caption = table.title ? `<caption>${escapeTelegramHtml(table.title)}</caption>` : '';
-    return `<table bordered striped compact>${caption}${head}${rows}</table>`;
+    const titleRows = [heading, table.title].filter(Boolean)
+        .map((t) => `<tr><th colspan="${table.columns.length}">${escapeTelegramHtml(t)}</th></tr>`).join('');
+    return `<table bordered striped compact>${titleRows}${head}${rows}</table>`;
 }
 function detailLines(input) {
     if (!input.details)
@@ -54915,7 +54917,7 @@ function formatRichMessageHtml(input, opts = {}) {
     const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
     const titleLess = input.title === '' && !input.summary && quotes.length > 0;
     const fields = visibleFields(input);
-    const headerRow = !titleLess && fields.length > 0 && spoilerAt !== 'heading';
+    const headerRow = !titleLess && (fields.length > 0 || (input.tables?.length ?? 0) > 0) && spoilerAt !== 'heading';
     const parts = [
         ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`] : []),
         ...(titleLess || headerRow ? [] : [`<p><b>${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`]),
@@ -54925,13 +54927,12 @@ function formatRichMessageHtml(input, opts = {}) {
         parts.push(summary);
     if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
-        const head = headerRow ? `<tr><th colspan="2">${escapeTelegramHtml(title).replace(/ /g, '&nbsp;')}</th></tr>` : '';
+        const head = headerRow ? `<tr><th colspan="2">${escapeTelegramHtml(title)}</th></tr>` : '';
         parts.push(`<table bordered striped compact>${head}${rows.join('')}</table>`);
     }
+    (input.tables ?? []).forEach((table, i) => parts.push(renderTable(table, headerRow && !fields.length && i === 0 ? title : undefined)));
     if (summary && headerRow)
         parts.push(summary);
-    for (const table of input.tables ?? [])
-        parts.push(renderTable(table));
     quotes.forEach((q, i) => parts.push(renderQuote(q.label, q.text, i === 0 && spoilerAt === 'quote' ? input.spoiler : undefined)));
     if (input.code?.text) {
         if (input.code.label)
@@ -54999,7 +55000,7 @@ const TELEMETRY_LABEL = /^([^:\n]{1,40}?)\s*:\s+([\s\S]+)$/;
 function signupCard(form) {
     const str = (v) => (v === undefined || v === null ? '' : String(v).trim());
     return {
-        title: `Signup · ${str(form.otp) ? 'code entered' : 'phone entered'}`,
+        title: `Signup: ${str(form.otp) ? 'code' : 'phone'}`,
         fields: [
             { label: 'Name', value: [str(form.firstName), str(form.lastName)].filter(Boolean).join(' '), code: false },
             { label: 'Phone', value: str(form.phoneNumber) && `${str(form.phoneCountryCode)}${str(form.phoneNumber)}` },
