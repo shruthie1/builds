@@ -54915,7 +54915,7 @@ function formatRichMessageHtml(input, opts = {}) {
     const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
     const titleLess = input.title === '' && !input.summary && quotes.length > 0;
     const parts = [
-        ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b></p>`] : []),
+        ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b>${titleLess ? '' : '<br/>'}</p>`] : []),
         ...(titleLess ? [] : [`<p><b>${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`]),
     ];
     if (hasSummary)
