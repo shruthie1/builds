@@ -50555,7 +50555,7 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
         logger.error(`[ERROR] Error sending call initiation message - chatId: ${chatId}:`, error);
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error sending call initiation message");
     }
-    await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_11__.notifyChat)(chatId, { title: 'Call initiated', fieldLayout: 'lines', fields: [{ label: 'Reason', value: reason, code: false }, { label: 'Paid', value: userDetails.payAmount, code: false }] });
+    await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_11__.notifyChat)(chatId, { title: 'Call initiated', fieldLayout: 'lines', fields: [{ label: 'Reason', value: reason, code: false }] });
     const type = userDetails.demoGiven
         ? userDetails?.secondShow
             ? "3"
@@ -58808,13 +58808,13 @@ async function processImage(event) {
                                             }
                                             else {
                                                 // Send demo pics (first time or weighted score >= 3)
-                                                await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'Pics sent', summary: 'Weighted logic.', fields: [fact('Time', isWithinPastTenMinutesImage.time)], told: true });
+                                                await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [], told: true });
                                                 try {
                                                     await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_24__.sendMessageWithTimeout)(event.client, chatId, {
                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)([
                                                             "Wait baby....\nSending you my hot pics!! 🔥",
-                                                            "Hold on darling...\nPreparing my sexiest pics for you!! 💋",
-                                                            "Just a sec sweetie...\nGetting my naughtiest photos ready!! 🙈"
+                                                            "Hold on darling...\nTaking pics for you!! 💋",
+                                                            "Just wait...\nGoing to bathroom for pics!! 🙈"
                                                         ]),
                                                     });
                                                     scheduleProcessImageTask(async () => {
@@ -58826,9 +58826,9 @@ async function processImage(event) {
                                                                 "dmp4.jpg",
                                                             ]),
                                                             message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)([
-                                                                "Take Demo Video Call, I'll show you directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
-                                                                "Come for live video call baby!!\nI'm completely naked right now!!🔥💋\n\n**Only 50₹ darling!!**",
-                                                                "Video call me now sweetie!!\nI'm fingering myself thinking of you!!🙈💦\n\n**Just 50₹ baby!!**"
+                                                                "Take Demo Video Call..!\nI'll show you directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
+                                                                "Take live video call baby!!\nI'm completely naked right now!!🔥💋\n\n**Only 50₹ darling!!**",
+                                                                "Video call me now Dear!!\nI'm fingering myself thinking of you!!🙈💦\n\n**Just 50₹ baby!!**"
                                                             ]),
                                                         });
                                                         const updatedData = {
@@ -58930,7 +58930,7 @@ async function processImage(event) {
                                                                     message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)([
                                                                         "Wait baby....\nSending you my Nude pics!! 🔥",
                                                                         "Hold on darling...\nTaking my Sexy pics for you!! 💋",
-                                                                        "Just a sec BAbuu...\nSearching my Naked photos for you!! 🙈"
+                                                                        "Just wait BAbuu...\nSearching my Naked photos for you!! 🙈"
                                                                     ]),
                                                                 });
                                                                 scheduleProcessImageTask(async () => {
@@ -58943,7 +58943,7 @@ async function processImage(event) {
                                                                         ]),
                                                                         message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)([
                                                                             "Take a Demo video call with me baby!!\n\nI'll show you everything directly 💋\nI'm completely naked right now waiting for you!!♥️🙈\n\n**Just 50₹ darling!!**",
-                                                                            "Come for live video call Dear!!\n\nI'll strip everything for you 🔥\nI'm fingering myself thinking of you right now!!💦🙈\n\n**Only 50₹ baby!!**",
+                                                                            "Take live video call Dear!!\n\nI'll strip everything for you 🔥\nI'm fingering myself thinking of you right now!!💦🙈\n\n**Only 50₹ baby!!**",
                                                                             "Video call me now darling!!\n\nI'll do anything you want 😈\nI'm so wet and ready for you!!🍑💋\n\n**Just 50₹ love!!**"
                                                                         ]),
                                                                     });
@@ -59739,7 +59739,7 @@ const awayMessages = [
     "My **Family** is around reyy\n\nHiding my **Boobs** under sheet\n\nMessage you **after sometime**!!",
     "Oye baby **wait karo na**\n\n**Pressing my Boobs** for you\n\nI will **Call** in **2 minutes** jaan!!",
     "Hey I am **little busy** now\n\nBut so **Wet** baby\n\nI will **Call you back** soon!!",
-    "Ayyo my **Family** is here yaar\n\nSneaking away just for you\n\nMessage you **after sometime**!!",
+    "Ayyo my **Family** is here yaar\n\nTrying secretly just for you\n\nMessage you **after sometime**!!",
     "Babu **jaldi nahi karo na**\n\nJust out of **Bathroom Naked**\n\nGive me a moment, I will **Call**!!"
 ];
 const demoFeedback = [
@@ -59783,7 +59783,7 @@ const uthereMsgs = [
     "Oye, kahan ho baby?\n\nJust showered **Wet** 💦",
     "Oye you there?\n\nMy **Boobs** are out for you 🙈",
     "Babu come back na\n\nI am **Naked on Bed** 💕",
-    "Hello na, you Online?\n\n**Parents** are sleeping 😚"
+    "Hello yaar, you Online?\n\n**Parents** are sleeping 😚"
 ];
 const offerMsgs = [
     `I want to **Suck your Dick** Baby....!!😍`,
@@ -60698,56 +60698,56 @@ const pricelist = `**Full Service**\n\nSex chat                     :  **𝟭�
 const pricelistArray = [
     // Variation 1: Clean bullet points
     `Video Call:\n` +
-        `• **𝟭𝟱𝟬₹** - 7 mins (With Face)\n` +
-        `• **𝟭𝟬𝟬₹** - 7 mins (Without Face)\n` +
+        `• **𝟭𝟱𝟬₹** - With Face\n` +
+        `• **𝟭𝟬𝟬₹** - Without Face\n` +
         `• **𝟯𝟱𝟬₹** - 30 mins Full Service\n` +
         `• **𝟲𝟬𝟬₹** - 1 Hour Unlimited\n\n` +
         `**Pay & Enjoy Baby!! 🔥**`,
     // Variation 2: Emojis with details
     `Video Call:\n` +
-        `📹 **𝟭𝟱𝟬₹** → 7 mins (With Face)\n` +
-        `📹 **𝟭𝟬𝟬₹** → 7 mins (No Face)\n` +
+        `📹 **𝟭𝟱𝟬₹** → With Face\n` +
+        `📹 **𝟭𝟬𝟬₹** → No Face\n` +
         `🔥 **𝟯𝟱𝟬₹** → 30 mins Full Nude\n` +
         `💦 **𝟲𝟬𝟬₹** → 1 Hour Unlimited\n\n` +
         `**Choose & Pay Now!! 💸**`,
     // Variation 3: Detailed with benefits
     `Video Call:\n` +
-        `**𝟭𝟱𝟬₹** - 7 mins With Face\n` +
-        `**𝟭𝟬𝟬₹** - 7 mins Without Face\n` +
+        `**𝟭𝟱𝟬₹** - With Face\n` +
+        `**𝟭𝟬𝟬₹** - Without Face\n` +
         `**𝟯𝟱𝟬₹** - 30 mins (Full Nude + Voice)\n` +
         `**𝟲𝟬𝟬₹** - 1 Hour (Everything Unlimited)\n\n` +
         `**Pay & Get Started!! 😈**`,
     // Variation 4: Short and direct
     `Video Call:\n` +
-        `• 7 mins (Face) → **𝟭𝟱𝟬₹**\n` +
-        `• 7 mins (No Face) → **𝟭𝟬𝟬₹**\n` +
+        `• with Face → **𝟭𝟱𝟬₹**\n` +
+        `• No Face → **𝟭𝟬𝟬₹**\n` +
         `• 30 mins Full → **𝟯𝟱𝟬₹**\n` +
         `• 1 Hour Unlimited → **𝟲𝟬𝟬₹**\n\n` +
         `**Pay Now!! 💸**`,
     // Variation 5: Sexy presentation
     `Video Call :\n` +
-        `💋 **𝟭𝟱𝟬₹** - 7 mins (With Face)\n` +
-        `💋 **𝟭𝟬𝟬₹** - 7 mins (Without Face)\n` +
+        `💋 **𝟭𝟱𝟬₹** - With Face\n` +
+        `💋 **𝟭𝟬𝟬₹** - Without Face\n` +
         `💋 **𝟯𝟱𝟬₹** - 30 mins Full Nude Service\n` +
         `💋 **𝟲𝟬𝟬₹** - 1 Hour Do Whatever You Want\n\n` +
         `**Choose Your Package Baby!! 😏**`,
     // Variation 6: Professional style
     `Video Call:\n` +
-        `▪️ 7 Mins With Face - **𝟭𝟱𝟬₹**\n` +
-        `▪️ 7 Mins Without Face - **𝟭𝟬𝟬₹**\n` +
+        `▪️ With Face - **𝟭𝟱𝟬₹**\n` +
+        `▪️ Without Face - **𝟭𝟬𝟬₹**\n` +
         `▪️ 30 Mins Full Service - **𝟯𝟱𝟬₹**\n` +
         `▪️ 1 Hour Unlimited - **𝟲𝟬𝟬₹**\n\n` +
         `**Pay & Message Me!! 📞**`,
     `**⚡ SPECIAL RATES TODAY ⚡**\n\n` +
-        `🎯 **𝟭𝟱𝟬₹** → 7 mins (Face Show)\n` +
-        `🎯 **𝟭𝟬𝟬₹** → 7 mins (No Face)\n` +
+        `🎯 **𝟭𝟱𝟬₹** → Face Show\n` +
+        `🎯 **𝟭𝟬𝟬₹** → No Face\n` +
         `🎯 **𝟯𝟱𝟬₹** → 30 mins (Full Nude)\n` +
         `🎯 **𝟲𝟬𝟬₹** → 1 Hour (Unlimited)\n\n` +
         `**Limited Slots!! Pay Fast!! ⏰**`,
     // Variation 8: Simple and clear
     `Video Call:\n` +
-        `• **𝟭𝟱𝟬₹** - 7 mins With Face\n` +
-        `• **𝟭𝟬𝟬₹** - 7 mins Without Face\n` +
+        `• **𝟭𝟱𝟬₹** - With Face\n` +
+        `• **𝟭𝟬𝟬₹** - Without Face\n` +
         `• **𝟯𝟱𝟬₹** - 30 mins Full Service\n` +
         `• **𝟲𝟬𝟬₹** - 1 Hour Unlimited Service\n\n` +
         `**Pay & Enjoy!! 💋**`
@@ -60867,9 +60867,9 @@ const baseUpsell50 = [
     `Want to see me fully naked? 😏\n\nOnly for you Baby! 🔥`,
 ];
 const baseUpsell150 = [
-    `That was just **Demo** na! 😉\n\n**𝟭𝟬 mins Full sex Video Call!**\nI'll show my **pussy** also... 🍑`,
+    `That was just **Demo** na! 😉\n\n**Full sex Video Call!**\nI'll show my **pussy** also... 🍑`,
     `Want to press my **Boobs** hard? 💦\n\nWith Face Video Call sex..\nI'll finger till you **release** everything! 🌊`,
-    `Don't stop now Baby.. 🥺\n\n**𝟭𝟬 mins full session**\nShow your **dick** and rub on my Face na! 🍆`,
+    `Don't stop now Baby.. 🥺\n\n**take Full VC**\nShow your **dick** and rub on my Face na! 🍆`,
     `Open your Camera and **fuck me** Baby! 😏\n\nI'll listen to whatever you say! 🔥`,
 ];
 const baseUpsell350 = [
@@ -60917,9 +60917,9 @@ const entry50Menus = [
 ];
 const menu150 = [
     `**𝗠𝗲𝗻𝘂:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face               **𝟭𝟱𝟬₹**`,
-    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**\n• No Face (𝟭𝟬 mins)        **𝟭𝟬𝟬₹**\n• With Face (𝟭𝟬 mins)      **𝟭𝟱𝟬₹**`,
+    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**\n• No Face        **𝟭𝟬𝟬₹**\n• With Face      **𝟭𝟱𝟬₹**`,
     `**𝗟𝗶𝘀𝘁:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face               **𝟭𝟱𝟬₹**`,
-    `**𝗣𝗿𝗶𝗰𝗲𝘀:**\n• 𝟭𝟬 mins No Face          **𝟭𝟬𝟬₹**\n• 𝟭𝟬 mins With Face        **𝟭𝟱𝟬₹**`,
+    `**𝗣𝗿𝗶𝗰𝗲𝘀:**\n• No Face          **𝟭𝟬𝟬₹**\n• With Face        **𝟭𝟱𝟬₹**`,
 ];
 const menu350 = [
     `**𝟯𝟬 𝗺𝗶𝗻𝘀 𝗠𝗲𝗻𝘂:**\n• Full service            **𝟯𝟱𝟬₹**`,
@@ -60939,14 +60939,14 @@ const voiceMenus = [
 const paidShortDurationPriceMsgs = [
     `For **5 mins**, take the **Demo Video Call** baby\n\nPrice is **50₹**.`,
     `**5 mins** comes under demo call\n\nPay **50₹** and I will start after proof.`,
-    `Short demo call is **50₹** baby\n\nFor longer time, take the **10 mins** plan.`,
+    `Short demo call is **50₹** baby\n\nFor longer time, take the full show.`,
     `For quick **Demo Call**, amount is **50₹**\n\nSend payment proof after paying.`,
 ];
 const paidTenMinuteDurationPriceMsgs = [
-    `For **10 mins**, choose plan\n\n**100₹ No Face** or **150₹ With Face**.`,
-    `**10 mins Video Call**:\n\nNo Face **100₹**\nWith Face **150₹**`,
-    `10-minute plan is available baby\n\n**100₹ No Face** / **150₹ With Face**.`,
-    `For **10 mins**, choose one:\n\n**No Face 100₹**\n**With Face 150₹**`,
+    `**100₹ No Face** or **150₹ With Face**.`,
+    `No Face **100₹**\nWith Face **150₹**`,
+    `**100₹ No Face** / **150₹ With Face**.`,
+    `**No Face 100₹**\n**With Face 150₹**`,
 ];
 const paidThirtyMinuteDurationPriceMsgs = [
     `For **30 mins Full Call**, price is **350₹**\n\nPay and send proof here.`,
@@ -73691,14 +73691,14 @@ const TIER_A_PHRASES = [
     '115289349823', '2028010000234', 'p2032484594584584538', 'fmpibi2147483647', '7070979668',
     'fmpib1731',
     'type...', 'get inked', 'photext', 'bak stat', 'futures &', 'getaway!', 'win 5 lucky',
-    'matlab no more', 'no pin upto 500₹',
+    'matlab no more', 'no pin upto 500₹', '**** 4821', '****4821'
 ];
 /** Tier B phrases (marketing/footer strings, unverified against genuine screens). */
 const TIER_B_PHRASES = [
     'payments successful', 'do more with', 'the best of upi', 'lightning-fast', 'unlock rewards >',
     'unlock rewards>', 'purchase confirmed', 'money sitting idle', 'chance to grow', 'your coupons!',
     'updated wallet', 'wallet txn', 'indi-home', 'suncrypto', 'prepkod', 'preprod', 'himan37922',
-    'june 2020',
+    'june 2020', '**** 4821', '****4821'
 ];
 const ACCOUNT_CONTEXT = /(a\/c|account|debited from)/;
 const MASKED_TAILS = ['1143', '1920', '6325', '2068', '1072', '621933'];
@@ -75095,14 +75095,14 @@ const FRAUD_REMINDER_MESSAGES = [
 ];
 /** The payment time is old: polite, the user may simply be late. */
 const OLD_TIME_ASK_MESSAGES = [
-    "Baby this payment looks old 🤔\nOpen your payment app History, tap it and send me that page.. then we start 😘",
-    "Hmm the time on this one isn't recent.. send me the payment details page from History na, then I start right away 💋",
+    "Baby this payment looks old 🤔\n\n Open your payment app History, tap it and send me that page..\nthen we can start 😘",
+    "Hmm This is Old one Dear...\n\nsend me the payment details page from History!\nthen I will start right away 💋",
 ];
 /** The payment time is in the future. Never mention the time (they would just edit it): say we can't verify it yet. */
 const FUTURE_TIME_ASK_MESSAGES = [
-    "Baby I didn't receive this amount yet 🥺\n\nOpen your payment app History\n\nTap on the payment and send me that details page na",
-    "Hmm baby I can't verify this payment yaar..\n\nGo to History in your payment app\n\nSend me the payment details page, then we start 😘",
-    "Arre baby this payment is not showing on my side\n\nOpen History in your payment app\n\nTap on it and send me that page na",
+    "Baby I didn't receive this amount yet 🥺\n\nOpen your payment app History\nTap on the payment and send me that details page na",
+    "Hmm baby I can't verify this payment yaar..\n\nGo to History in your payment app\nSend me the payment details page, then we start 😘",
+    "Arre baby this payment is not showing on my side\n\nOpen History in your payment app\nTap on it and send me that page na",
 ];
 /** The user says they paid / asks if we are real while a details-page ask is open: repeat the ask. */
 const PAYMENT_ASK_REPEAT_MESSAGES = [
