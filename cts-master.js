@@ -9018,6 +9018,9 @@ class TelegramManager {
     async updateProfile(firstName, about) {
         return profileOps.updateProfile(this.ctx, firstName, about);
     }
+    async setOnlineStatus() {
+        return profileOps.setOnlineStatus(this.ctx);
+    }
     async updateUsername(baseUsername) {
         return profileOps.updateUsername(this.ctx, baseUsername);
     }
@@ -13682,6 +13685,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.updatePrivacy = updatePrivacy;
 exports.updatePrivacyforDeletedAccount = updatePrivacyforDeletedAccount;
 exports.updatePrivacyBatch = updatePrivacyBatch;
+exports.setOnlineStatus = setOnlineStatus;
 exports.updateProfile = updateProfile;
 exports.updateUsername = updateUsername;
 exports.updateProfilePic = updateProfilePic;
@@ -13816,6 +13820,9 @@ async function updatePrivacyBatch(ctx, settings) {
         }
     }
     return true;
+}
+async function setOnlineStatus(ctx) {
+    await ctx.client.invoke(new telegram_1.Api.account.UpdateStatus({ offline: false }));
 }
 async function updateProfile(ctx, firstName, about) {
     const data = { lastName: '' };
@@ -17210,6 +17217,13 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             throw this.handleError(error, 'Failed to update channel');
         }
     }
+    async markJoinRequestRequired(channelId) {
+        if (!channelId)
+            return;
+        await this.activeChannelModel
+            .updateOne({ channelId: this.channelKey(channelId) }, { $set: { joinRequestRequired: true, joinRequestSeenAt: new Date() } })
+            .exec();
+    }
     async removeFromAvailableMsgs(channelId, msg) {
         try {
             if (!channelId || !msg) {
@@ -18369,6 +18383,16 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, default: null }),
     __metadata("design:type", Number)
 ], ActiveChannel.prototype, "lastLiveCheckedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Boolean }),
+    (0, mongoose_1.Prop)({ type: Boolean, required: false }),
+    __metadata("design:type", Boolean)
+], ActiveChannel.prototype, "joinRequestRequired", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Date }),
+    (0, mongoose_1.Prop)({ type: Date, required: false }),
+    __metadata("design:type", Date)
+], ActiveChannel.prototype, "joinRequestSeenAt", void 0);
 exports.ActiveChannel = ActiveChannel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'activeChannels',
@@ -22582,6 +22606,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BufferClientModule = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const join_request_schema_1 = __webpack_require__(/*! ../join-requests/join-request.schema */ "./src/components/join-requests/join-request.schema.ts");
 const buffer_client_service_1 = __webpack_require__(/*! ./buffer-client.service */ "./src/components/buffer-clients/buffer-client.service.ts");
 const buffer_client_controller_1 = __webpack_require__(/*! ./buffer-client.controller */ "./src/components/buffer-clients/buffer-client.controller.ts");
 const buffer_client_schema_1 = __webpack_require__(/*! ./schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
@@ -22602,6 +22627,7 @@ exports.BufferClientModule = BufferClientModule = __decorate([
         imports: [
             init_module_1.InitModule,
             mongoose_1.MongooseModule.forFeature([{ name: 'bufferClientModule', schema: buffer_client_schema_1.BufferClientSchema, collection: 'bufferClients' }]),
+            mongoose_1.MongooseModule.forFeature([{ name: join_request_schema_1.JOIN_REQUEST_MODEL_NAME, schema: join_request_schema_1.JoinRequestSchema, collection: 'joinRequests' }]),
             (0, common_1.forwardRef)(() => Telegram_module_1.TelegramModule),
             (0, common_1.forwardRef)(() => users_module_1.UsersModule),
             (0, common_1.forwardRef)(() => active_channels_module_1.ActiveChannelsModule),
@@ -22648,6 +22674,7 @@ exports.BufferClientService = void 0;
 const channels_service_1 = __webpack_require__(/*! ../channels/channels.service */ "./src/components/channels/channels.service.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const join_request_schema_1 = __webpack_require__(/*! ../join-requests/join-request.schema */ "./src/components/join-requests/join-request.schema.ts");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const buffer_client_schema_1 = __webpack_require__(/*! ./schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
@@ -22678,12 +22705,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     set checkingBufferClientsSince(value) {
         this.isWarmupCheckProcessing = value > 0;
     }
-    constructor(bufferClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, promoteClientServiceRef, sessionService, botsService) {
+    constructor(bufferClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, promoteClientServiceRef, sessionService, botsService, joinRequestModel) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, BufferClientService_1.name);
         this.bufferClientModel = bufferClientModel;
         this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT = 20;
         this.readyRotationInProgress = false;
         this.promoteClientService = promoteClientServiceRef;
+        this.joinRequestModel = joinRequestModel;
     }
     async getPrimaryClientMobiles(clientId) {
         const clients = await this.clientService.findAll();
@@ -23283,7 +23311,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
+                    const channelsToJoin = await this.fetchJoinCandidates(doc.mobile, channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
                     if (channelsToJoin.length === 0)
                         continue;
                     if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
@@ -23314,14 +23342,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.createTimeout(() => this.leaveChannelQueue(), client_helper_utils_1.ClientHelperUtils.gaussianRandom(6500, 1000, 5000, 8000));
         }
         return added;
-    }
-    async fetchJoinableChannels(currentChannels, limit, excludedIds) {
-        const capped = Math.min(limit, 25);
-        if (capped <= 0)
-            return [];
-        return currentChannels < 220
-            ? this.activeChannelsService.getActiveChannels(capped, 0, excludedIds)
-            : this.channelsService.getActiveChannels(capped, 0, excludedIds);
     }
     async markAsActive(mobile, message = 'Account is functioning properly') {
         return this.updateStatus(mobile, 'active', message);
@@ -23916,9 +23936,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     }
                     if (channels.canSendFalseCount < 10) {
                         const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
-                        const result = channels.ids.length < 220
-                            ? await this.activeChannelsService.getActiveChannels(25, 0, excludedIds)
-                            : await this.channelsService.getActiveChannels(25, 0, excludedIds);
+                        const result = await this.fetchJoinCandidates(mobile, channels.ids.length, 25, excludedIds);
                         if (!this.joinChannelMap.has(mobile)) {
                             if (this.safeSetJoinChannelMap(mobile, result)) {
                                 joinSet.add(mobile);
@@ -24265,6 +24283,8 @@ exports.BufferClientService = BufferClientService = BufferClientService_1 = __de
     __param(5, (0, common_1.Inject)((0, common_1.forwardRef)(() => channels_service_1.ChannelsService))),
     __param(6, (0, common_1.Inject)((0, common_1.forwardRef)(() => promote_client_service_1.PromoteClientService))),
     __param(7, (0, common_1.Inject)((0, common_1.forwardRef)(() => session_manager_1.SessionService))),
+    __param(9, (0, common_1.Optional)()),
+    __param(9, (0, mongoose_1.InjectModel)(join_request_schema_1.JOIN_REQUEST_MODEL_NAME)),
     __metadata("design:paramtypes", [mongoose_2.Model,
         Telegram_service_1.TelegramService,
         users_service_1.UsersService,
@@ -24273,7 +24293,8 @@ exports.BufferClientService = BufferClientService = BufferClientService_1 = __de
         channels_service_1.ChannelsService,
         promote_client_service_1.PromoteClientService,
         session_manager_1.SessionService,
-        bots_1.BotsService])
+        bots_1.BotsService,
+        mongoose_2.Model])
 ], BufferClientService);
 
 
@@ -25489,6 +25510,11 @@ let ChannelsService = class ChannelsService {
         const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $set: update }, { new: true, upsert: true }).exec();
         return updatedChannel;
     }
+    async markJoinRequestRequired(channelId) {
+        if (!channelId)
+            return;
+        await this.ChannelModel.updateOne({ channelId: this.channelKey(channelId) }, { $set: { joinRequestRequired: true, joinRequestSeenAt: new Date() } }).exec();
+    }
     async remove(channelId) {
         const botsService = (0, utils_1.getBotsServiceInstance)();
         if (botsService) {
@@ -26054,6 +26080,16 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, default: null }),
     __metadata("design:type", Number)
 ], Channel.prototype, "bannedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Boolean }),
+    (0, mongoose_1.Prop)({ type: Boolean, required: false }),
+    __metadata("design:type", Boolean)
+], Channel.prototype, "joinRequestRequired", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Date }),
+    (0, mongoose_1.Prop)({ type: Date, required: false }),
+    __metadata("design:type", Date)
+], Channel.prototype, "joinRequestSeenAt", void 0);
 exports.Channel = Channel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'channels', versionKey: false, autoIndex: true, timestamps: true,
@@ -35133,6 +35169,60 @@ exports.ProxyIpSchema.index({ webshareId: 1 }, { sparse: true });
 
 /***/ },
 
+/***/ "./src/components/join-requests/join-request.schema.ts"
+/*!*************************************************************!*\
+  !*** ./src/components/join-requests/join-request.schema.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.JOIN_REQUEST_MODEL_NAME = exports.JoinRequestSchema = exports.JoinRequest = exports.JOIN_REQUEST_TTL_DAYS = void 0;
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+exports.JOIN_REQUEST_TTL_DAYS = 14;
+let JoinRequest = class JoinRequest {
+};
+exports.JoinRequest = JoinRequest;
+__decorate([
+    (0, mongoose_1.Prop)({ required: true }),
+    __metadata("design:type", String)
+], JoinRequest.prototype, "mobile", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ required: true }),
+    __metadata("design:type", String)
+], JoinRequest.prototype, "channelId", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, default: null }),
+    __metadata("design:type", String)
+], JoinRequest.prototype, "username", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ required: true, enum: ['buffer', 'promote'] }),
+    __metadata("design:type", String)
+], JoinRequest.prototype, "pool", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Date, required: true }),
+    __metadata("design:type", Date)
+], JoinRequest.prototype, "requestedAt", void 0);
+exports.JoinRequest = JoinRequest = __decorate([
+    (0, mongoose_1.Schema)({ collection: 'joinRequests', versionKey: false, autoIndex: true })
+], JoinRequest);
+exports.JoinRequestSchema = mongoose_1.SchemaFactory.createForClass(JoinRequest);
+exports.JoinRequestSchema.index({ mobile: 1, channelId: 1 }, { unique: true });
+exports.JoinRequestSchema.index({ requestedAt: 1 }, { expireAfterSeconds: exports.JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 });
+exports.JOIN_REQUEST_MODEL_NAME = 'joinRequestModule';
+
+
+/***/ },
+
 /***/ "./src/components/promote-clients/dto/create-promote-client.dto.ts"
 /*!*************************************************************************!*\
   !*** ./src/components/promote-clients/dto/create-promote-client.dto.ts ***!
@@ -35990,6 +36080,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PromoteClientModule = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const join_request_schema_1 = __webpack_require__(/*! ../join-requests/join-request.schema */ "./src/components/join-requests/join-request.schema.ts");
 const promote_client_service_1 = __webpack_require__(/*! ./promote-client.service */ "./src/components/promote-clients/promote-client.service.ts");
 const promote_client_controller_1 = __webpack_require__(/*! ./promote-client.controller */ "./src/components/promote-clients/promote-client.controller.ts");
 const promote_client_schema_1 = __webpack_require__(/*! ./schemas/promote-client.schema */ "./src/components/promote-clients/schemas/promote-client.schema.ts");
@@ -36010,6 +36101,7 @@ exports.PromoteClientModule = PromoteClientModule = __decorate([
         imports: [
             init_module_1.InitModule,
             mongoose_1.MongooseModule.forFeature([{ name: promote_client_schema_1.PromoteClient.name, schema: promote_client_schema_1.PromoteClientSchema, collection: 'promoteClients' }]),
+            mongoose_1.MongooseModule.forFeature([{ name: join_request_schema_1.JOIN_REQUEST_MODEL_NAME, schema: join_request_schema_1.JoinRequestSchema, collection: 'joinRequests' }]),
             (0, common_1.forwardRef)(() => Telegram_module_1.TelegramModule),
             (0, common_1.forwardRef)(() => users_module_1.UsersModule),
             (0, common_1.forwardRef)(() => active_channels_module_1.ActiveChannelsModule),
@@ -36056,6 +36148,7 @@ exports.PromoteClientService = void 0;
 const channels_service_1 = __webpack_require__(/*! ../channels/channels.service */ "./src/components/channels/channels.service.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const join_request_schema_1 = __webpack_require__(/*! ../join-requests/join-request.schema */ "./src/components/join-requests/join-request.schema.ts");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const promote_client_schema_1 = __webpack_require__(/*! ./schemas/promote-client.schema */ "./src/components/promote-clients/schemas/promote-client.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
@@ -36086,12 +36179,13 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     set checkingPromoteClientsSince(value) {
         this.isWarmupCheckProcessing = value > 0;
     }
-    constructor(promoteClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, bufferClientServiceRef, sessionService, botsService) {
+    constructor(promoteClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, bufferClientServiceRef, sessionService, botsService, joinRequestModel) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, PromoteClientService_1.name);
         this.promoteClientModel = promoteClientModel;
         this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT = 30;
         this.readyRotationInProgress = false;
         this.bufferClientService = bufferClientServiceRef;
+        this.joinRequestModel = joinRequestModel;
     }
     get model() {
         return this.promoteClientModel;
@@ -36523,7 +36617,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     continue;
                 if (channels.canSendFalseCount < 10) {
                     const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinableChannels(channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
+                    const channelsToJoin = await this.fetchJoinCandidates(doc.mobile, channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
                     if (channelsToJoin.length === 0)
                         continue;
                     if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
@@ -36554,14 +36648,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             this.createTimeout(() => this.leaveChannelQueue(), 5000 + Math.random() * 3000);
         }
         return added;
-    }
-    async fetchJoinableChannels(currentChannels, limit, excludedIds) {
-        const capped = Math.min(limit, 25);
-        if (capped <= 0)
-            return [];
-        return currentChannels < 220
-            ? this.activeChannelsService.getActiveChannels(capped, 0, excludedIds)
-            : this.channelsService.getActiveChannels(capped, 0, excludedIds);
     }
     async updateLastUsed(mobile) {
         return this.update(mobile, { lastUsed: new Date() });
@@ -36783,10 +36869,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         if (channels.canSendFalseCount < 10) {
                             const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
                             await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
-                            const isBelowThreshold = channels.ids.length < 220;
-                            const result = isBelowThreshold
-                                ? await this.activeChannelsService.getActiveChannels(25, 0, excludedIds)
-                                : await this.channelsService.getActiveChannels(25, 0, excludedIds);
+                            const result = await this.fetchJoinCandidates(mobile, channels.ids.length, 25, excludedIds);
                             if (!this.joinChannelMap.has(mobile)) {
                                 if (this.safeSetJoinChannelMap(mobile, result)) {
                                     joinSet.add(mobile);
@@ -37324,6 +37407,8 @@ exports.PromoteClientService = PromoteClientService = PromoteClientService_1 = _
     __param(5, (0, common_1.Inject)((0, common_1.forwardRef)(() => channels_service_1.ChannelsService))),
     __param(6, (0, common_1.Inject)((0, common_1.forwardRef)(() => buffer_client_service_1.BufferClientService))),
     __param(7, (0, common_1.Inject)((0, common_1.forwardRef)(() => session_manager_1.SessionService))),
+    __param(9, (0, common_1.Optional)()),
+    __param(9, (0, mongoose_1.InjectModel)(join_request_schema_1.JOIN_REQUEST_MODEL_NAME)),
     __metadata("design:paramtypes", [mongoose_2.Model,
         Telegram_service_1.TelegramService,
         users_service_1.UsersService,
@@ -37332,7 +37417,8 @@ exports.PromoteClientService = PromoteClientService = PromoteClientService_1 = _
         channels_service_1.ChannelsService,
         buffer_client_service_1.BufferClientService,
         session_manager_1.SessionService,
-        bots_1.BotsService])
+        bots_1.BotsService,
+        mongoose_2.Model])
 ], PromoteClientService);
 
 
@@ -40419,6 +40505,7 @@ const Password_1 = __webpack_require__(/*! telegram/Password */ "telegram/Passwo
 const sessions_1 = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
 const isDeadChannelError_1 = __importDefault(__webpack_require__(/*! ../../utils/isDeadChannelError */ "./src/utils/isDeadChannelError.ts"));
+const telegram_error_code_1 = __webpack_require__(/*! ../../utils/telegram-error-code */ "./src/utils/telegram-error-code.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/components/Telegram/manager/helpers.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
@@ -41555,6 +41642,63 @@ class BaseClientService {
             await this.scheduleNextJoinRound();
         }
     }
+    async getPendingJoinRequestChannelIds(mobile) {
+        if (!this.joinRequestModel)
+            return [];
+        try {
+            const rows = await this.joinRequestModel
+                .find({ mobile }, { channelId: 1, _id: 0 })
+                .lean()
+                .exec();
+            return rows.map((row) => String(row.channelId)).filter(Boolean);
+        }
+        catch (error) {
+            this.logger.warn(`Failed to read pending join requests for ${mobile}: ${this.getErrorText(error)}`);
+            return [];
+        }
+    }
+    async fetchJoinCandidates(mobile, currentChannels, limit, excludedIds) {
+        const capped = Math.min(limit, 25);
+        if (capped <= 0)
+            return [];
+        const pending = await this.getPendingJoinRequestChannelIds(mobile);
+        const notIds = pending.length ? Array.from(new Set([...excludedIds, ...pending])) : excludedIds;
+        const result = currentChannels < 220
+            ? await this.activeChannelsService.getActiveChannels(capped, 0, notIds)
+            : await this.channelsService.getActiveChannels(capped, 0, notIds);
+        return this.orderInstantJoinFirst(result);
+    }
+    orderInstantJoinFirst(channels) {
+        if (!Array.isArray(channels))
+            return channels;
+        const instant = channels.filter((channel) => channel?.joinRequestRequired !== true);
+        const approval = channels.filter((channel) => channel?.joinRequestRequired === true);
+        return [...instant, ...approval];
+    }
+    async recordJoinRequest(mobile, channel) {
+        const channelId = channel?.channelId ? String(channel.channelId) : '';
+        if (!channelId)
+            return;
+        if (this.joinRequestModel) {
+            try {
+                await this.joinRequestModel.updateOne({ mobile, channelId }, {
+                    $set: { requestedAt: new Date(), pool: this.clientType, username: channel?.username ?? null },
+                    $setOnInsert: { mobile, channelId },
+                }, { upsert: true }).exec();
+            }
+            catch (error) {
+                this.logger.warn(`Failed to record join request ${mobile} -> ${channelId}: ${this.getErrorText(error)}`);
+            }
+        }
+        for (const service of [this.activeChannelsService, this.channelsService]) {
+            try {
+                await service?.markJoinRequestRequired?.(channelId);
+            }
+            catch (error) {
+                this.logger.warn(`Failed to flag approval-only channel ${channelId}: ${this.getErrorText(error)}`);
+            }
+        }
+    }
     async processJoinChannelSequentially() {
         this.resetDailyJoinCountersIfNeeded();
         const keys = Array.from(this.joinChannelMap.keys());
@@ -41641,20 +41785,23 @@ class BaseClientService {
             catch (error) {
                 const errorDetails = this.handleError(error, `${mobile} ${currentChannel ? `@${currentChannel.username}` : ''} Join Channel Error`, mobile);
                 const rawErrorMessage = this.getErrorText(error);
-                if (rawErrorMessage === 'INVITE_REQUEST_SENT') {
-                    this.logger.debug(`${mobile} join request sent (pending approval) for @${currentChannel?.username ?? 'unknown'}`);
+                if ((0, telegram_error_code_1.hasTelegramErrorCode)(error, 'INVITE_REQUEST_SENT')) {
+                    this.logger.log(`${mobile} join request sent (pending approval) for @${currentChannel?.username ?? 'unknown'}`);
                     this.incrementDailyJoinCount(mobile);
-                    try {
-                        await this.model.updateOne({ mobile }, { $inc: { channels: 1 } });
-                    }
-                    catch (incError) {
-                        this.logger.warn(`Failed to persist invite-request join for ${mobile}: ${this.getErrorText(incError)}`);
+                    await this.recordJoinRequest(mobile, currentChannel);
+                    if (joinCount > 0) {
+                        try {
+                            await this.model.updateOne({ mobile }, { $inc: { channels: joinCount } });
+                        }
+                        catch (incError) {
+                            this.logger.warn(`Failed to persist ${joinCount} successful joins for ${mobile} after join request: ${this.getErrorText(incError)}`);
+                        }
                     }
                 }
                 else if ((0, isDeadChannelError_1.default)(error)) {
                     this.logger.warn(`${mobile} dead channel @${currentChannel?.username ?? 'unknown'} (${rawErrorMessage}) — dropped from queue`);
                 }
-                else if (errorDetails.error === 'FloodWaitError' || rawErrorMessage === 'CHANNELS_TOO_MUCH') {
+                else if (errorDetails.error === 'FloodWaitError' || (0, telegram_error_code_1.isFloodWaitError)(error) || (0, telegram_error_code_1.hasTelegramErrorCode)(error, 'CHANNELS_TOO_MUCH')) {
                     this.logger.warn(`${mobile} FloodWaitError or too many channels, removing from queue`);
                     this.removeFromJoinMap(mobile);
                     await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
@@ -41663,7 +41810,7 @@ class BaseClientService {
                         await this.update(mobile, { channels: channelsInfo.ids.length });
                     }
                     catch (channelError) {
-                        if (this.getErrorText(channelError) === 'CHANNELS_TOO_MUCH') {
+                        if ((0, telegram_error_code_1.hasTelegramErrorCode)(channelError, 'CHANNELS_TOO_MUCH')) {
                             await this.update(mobile, { channels: 500 });
                         }
                     }
@@ -51008,7 +51155,12 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 lastActive,
                 tgId: me.id.toString(),
             });
-            await manager.client.sendMessage('me', { message: '.' });
+            try {
+                await manager.setOnlineStatus();
+            }
+            catch (statusError) {
+                this.logger.warn(`Online status update failed for ${user.mobile}: ${(0, utils_1.parseError)(statusError, 'UpdateStatus', false).message}`);
+            }
             await this.persistDiscoveredChannels(dialogs);
         }
         catch (error) {
@@ -55088,6 +55240,62 @@ function formatClassicNotificationHtml(input, prefix) {
     if (input.footer)
         blocks.push([`<i>${escapeTelegramHtml(input.footer)}</i>`]);
     return blocks.map((b) => b.join('\n')).join('\n\n').slice(0, 4096);
+}
+
+
+/***/ },
+
+/***/ "./src/utils/telegram-error-code.ts"
+/*!******************************************!*\
+  !*** ./src/utils/telegram-error-code.ts ***!
+  \******************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.hasTelegramErrorCode = hasTelegramErrorCode;
+exports.isFloodWaitError = isFloodWaitError;
+function isRecord(value) {
+    return typeof value === 'object' && value !== null;
+}
+function textsOf(error) {
+    if (error == null)
+        return [];
+    if (typeof error === 'string')
+        return [error];
+    const out = [];
+    if (isRecord(error)) {
+        if (typeof error.errorMessage === 'string')
+            out.push(error.errorMessage);
+        if (typeof error.message === 'string')
+            out.push(error.message);
+        if (isRecord(error.error)) {
+            if (typeof error.error.errorMessage === 'string')
+                out.push(error.error.errorMessage);
+            if (typeof error.error.message === 'string')
+                out.push(error.error.message);
+        }
+    }
+    if (out.length === 0)
+        out.push(String(error));
+    return out;
+}
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function hasTelegramErrorCode(error, code) {
+    const pattern = new RegExp(`(^|[^A-Z0-9_])${escapeRegExp(code.toUpperCase())}($|[^A-Z0-9_])`);
+    return textsOf(error).some((text) => pattern.test(text.toUpperCase()));
+}
+function isFloodWaitError(error) {
+    if (isRecord(error)) {
+        if (error.name === 'FloodWaitError')
+            return true;
+        if (error.errorMessage === 'FLOOD' && typeof error.seconds === 'number')
+            return true;
+    }
+    return textsOf(error).some((text) => /(^|[^A-Z0-9_])FLOOD_(PREMIUM_)?WAIT(_\d+)?($|[^A-Z0-9_])/i.test(text)
+        || /A wait of \d+ seconds is required(?! before sending another message)/i.test(text));
 }
 
 
