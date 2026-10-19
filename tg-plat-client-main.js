@@ -11857,6 +11857,11 @@ class BasePromotionEngine {
          * call; only meaningful immediately after a call that returned null.
          */
         this.lastEntityResolutionError = null;
+        /**
+         * channelId -> text of the promo just sent, for the success hook's promo-log quote (the runner result only
+         * carries the id and a normalised text). Taken on read; bounded in case a hook never fires.
+         */
+        this.sentPromoTexts = new Map();
         this.stats = {
             successCount: 0,
             totalFailed: 0,
@@ -12380,7 +12385,7 @@ class BasePromotionEngine {
             shouldContinue: () => this.adapterShouldContinue(),
             sendPromotion: (request) => this.sendPromotionFromRunner(request),
             checkMessage: (message) => this.checkMessageFromRunner(message),
-            onSendSuccess: (channel, result, isFollowUp) => this.handleSuccessfulMessage(channel, { id: result.messageId }, result.messageIndex, isFollowUp),
+            onSendSuccess: (channel, result, isFollowUp) => this.handleSuccessfulMessage(channel, { id: result.messageId, message: this.takeSentPromoText(channel.channelId) }, result.messageIndex, isFollowUp),
             onDurabilityFailure: (error) => {
                 // A Telegram send was accepted but cannot be tracked for the
                 // mandatory verification lifecycle. Do not let the supervisor
@@ -12427,6 +12432,11 @@ class BasePromotionEngine {
     // =================================================================
     //  SEND / CHECK
     // =================================================================
+    takeSentPromoText(channelId) {
+        const text = this.sentPromoTexts.get(channelId) ?? '';
+        this.sentPromoTexts.delete(channelId);
+        return text;
+    }
     async sendPromotionFromRunner(request) {
         let materialized = null;
         try {
@@ -12448,6 +12458,12 @@ class BasePromotionEngine {
                 message: materialized.messageContent,
                 ...(materialized.aiMsg ? { maintainFormatting: true, skipObfuscation: true } : {}),
             });
+            if (sendResult.message) {
+                this.sentPromoTexts.delete(request.channel.channelId);
+                this.sentPromoTexts.set(request.channel.channelId, sendResult.message.message || materialized.messageContent || '');
+                if (this.sentPromoTexts.size > 200)
+                    this.sentPromoTexts.delete(this.sentPromoTexts.keys().next().value);
+            }
             if (!sendResult.message) {
                 this.onSendEmptyResult(request, materialized.randomIndex, sendResult.checkableByChannelId);
             }
@@ -21079,8 +21095,10 @@ class BotConfig {
         const clientId = process.env.clientId ?? 'unknown';
         return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
     }
+    /** Client id alone on the first line (owner, 2026-10-19), as in rich cards. */
     prefixMessage(message, parseMode) {
-        return `${this.clientPrefix(parseMode)}: ${message}`;
+        const prefix = parseMode === 'HTML' ? `<b>${this.clientPrefix(parseMode)}</b>` : this.clientPrefix(parseMode);
+        return `${prefix}\n${message.replace(/^\s*\n/, '')}`;
     }
     outboundMessage(message, parseMode, prefix = true) {
         return prefix === false ? message : this.prefixMessage(message, parseMode);
@@ -21104,11 +21122,22 @@ class BotConfig {
         const input = { ...message };
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
-        const markupButtons = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.buttonsFromReplyMarkup)(options.replyMarkup);
-        if (markupButtons.length)
-            input.buttons = [...(input.buttons ?? []), ...markupButtons];
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
         return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source || undefined });
+    }
+    /** The notice's buttons, then any caller reply_markup rows, as one classic inline keyboard under the bubble. */
+    richKeyboard(message, replyMarkup) {
+        let markup = replyMarkup;
+        if (typeof markup === 'string') {
+            try {
+                markup = JSON.parse(markup);
+            }
+            catch {
+                markup = undefined;
+            }
+        }
+        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
+        return rows.length ? { inline_keyboard: rows } : undefined;
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
     isBotOrChannelFailure(error) {
@@ -21153,6 +21182,9 @@ class BotConfig {
         const token = data.botTokens[botIndex];
         const channelId = data.channelId;
         const body = { chat_id: channelId, rich_message: { html: richHtml } };
+        const keyboard = this.richKeyboard(message, options.replyMarkup);
+        if (keyboard)
+            body.reply_markup = keyboard;
         if (options.disableNotification)
             body.disable_notification = true;
         if (options.protectContent)
@@ -21305,6 +21337,9 @@ class BotConfig {
         form.append('chat_id', channelId);
         form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
         form.append('shotfile', photo, 'photo.jpg');
+        const keyboard = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(input);
+        if (keyboard)
+            form.append('reply_markup', JSON.stringify(keyboard));
         if (options.disableNotification)
             form.append('disable_notification', 'true');
         if (options.replyToMessageId)
@@ -21492,14 +21527,14 @@ class BotConfig {
                 mediaArray.push({
                     type: content.type,
                     media: `attach://${attachmentName}`,
-                    caption: i === 0 && content.caption ? `${this.clientPrefix()}:\n\n${content.caption}` : undefined
+                    caption: i === 0 && content.caption ? `${this.clientPrefix()}\n${content.caption}` : undefined
                 });
             }
             else {
                 mediaArray.push({
                     type: content.type,
                     media: content.media,
-                    caption: i === 0 && content.caption ? `${this.clientPrefix()}:\n\n${content.caption}` : undefined
+                    caption: i === 0 && content.caption ? `${this.clientPrefix()}\n${content.caption}` : undefined
                 });
             }
         }
@@ -25655,18 +25690,18 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   RICH_MESSAGE_MAX_CHARS: () => (/* binding */ RICH_MESSAGE_MAX_CHARS),
-/* harmony export */   buttonsFromReplyMarkup: () => (/* binding */ buttonsFromReplyMarkup),
 /* harmony export */   fieldsFromObject: () => (/* binding */ fieldsFromObject),
 /* harmony export */   formatRichMessageHtml: () => (/* binding */ formatRichMessageHtml),
 /* harmony export */   humanizeKey: () => (/* binding */ humanizeKey),
 /* harmony export */   notificationButtons: () => (/* binding */ notificationButtons),
+/* harmony export */   notificationKeyboard: () => (/* binding */ notificationKeyboard),
 /* harmony export */   tableFromRecordMap: () => (/* binding */ tableFromRecordMap)
 /* harmony export */ });
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 
 /**
  * Bot API rich messages (sendRichMessage, Bot API 10.1+): every ops notification renders as a
- * heading, a table of fields, a collapsible details block and a row of URL / copy buttons.
+ * heading, a table of fields, a collapsible details block; buttons go in a classic inline keyboard (notificationKeyboard).
  * Old Telegram clients (incl. GramJS 2.26) see a rich message as an unsupported media message with
  * empty text, so literal command messages (exit<client>) must keep using plain sendMessage.
  */
@@ -25716,13 +25751,22 @@ function noEmoji(text) {
 }
 /** Button labels are plain words (owner, 2026-10-18): emoji are stripped. */
 function buttonLabel(text) {
-    return (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(noEmoji(text) || 'Open');
+    return noEmoji(text) || 'Open';
 }
-function buttonTag(button, index) {
-    const style = index === 0 && button.url ? ' style="primary"' : '';
-    if (button.url)
-        return `<tg-button type="url"${style} url="${attr(button.url)}">${buttonLabel(button.text)}</tg-button>`;
-    return `<tg-button type="copy_text" text="${attr(button.copy)}">${buttonLabel(button.text)}</tg-button>`;
+/**
+ * Buttons as a classic inline keyboard under the bubble (owner, 2026-10-19: the in-card HTML buttons were
+ * rejected). sendRichMessage accepts reply_markup like sendMessage does.
+ */
+function notificationKeyboard(input) {
+    const buttons = notificationButtons(input).map((b) => (b.url
+        ? { text: buttonLabel(b.text), url: b.url }
+        : { text: buttonLabel(b.text), copy_text: { text: b.copy } }));
+    if (!buttons.length)
+        return undefined;
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW)
+        rows.push(buttons.slice(i, i + BUTTONS_PER_ROW));
+    return { inline_keyboard: rows };
 }
 const LONG_QUOTE_CHARS = 800;
 /**
@@ -25734,9 +25778,11 @@ function quoteBlock(label, text, collapsed = false) {
     const body = (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(clipped.replace(/\r\n?/g, '\n').replace(/^\n+|\s+$/g, ''))
         .replace(/ {2,}/g, (m) => '&nbsp;'.repeat(m.length))
         .replace(/\n/g, '<br/>');
-    const tag = collapsed || clipped.length > LONG_QUOTE_CHARS ? 'blockquote expandable' : 'blockquote';
+    // Collapsed = fully closed behind its label (owner, 2026-10-19), not a half-open expandable quote.
+    if (collapsed)
+        return `<details><summary>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label || 'Details')}</summary><blockquote>${body}</blockquote></details>`;
     const heading = label ? `<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label)}</b></p>` : '';
-    return `${heading}<blockquote${tag === 'blockquote' ? '' : ' expandable'}>${body}</blockquote>`;
+    return `${heading}<blockquote${clipped.length > LONG_QUOTE_CHARS ? ' expandable' : ''}>${body}</blockquote>`;
 }
 function renderTable(table) {
     const numeric = new Set(table.numeric ?? []);
@@ -25802,35 +25848,11 @@ function formatRichMessageHtml(input, opts = {}) {
     }
     if (footer.length)
         parts.push(`<p>${footer.join(' · ')}</p>`);
-    const buttons = notificationButtons(input);
-    for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) {
-        parts.push(`<tg-button-row>${buttons.slice(i, i + BUTTONS_PER_ROW).map((b, j) => buttonTag(b, i + j)).join('')}</tg-button-row>`);
-    }
+    // Buttons are not in the HTML: senders attach notificationKeyboard(input) as reply_markup.
     // Plain lines, not paragraphs (owner, 2026-10-18): <p> spacing made cards tall.
-    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>');
-}
-/** URL buttons from a Bot API inline_keyboard (callback buttons are not used by our notices). */
-function buttonsFromReplyMarkup(markup) {
-    let parsed = markup;
-    if (typeof markup === 'string') {
-        try {
-            parsed = JSON.parse(markup);
-        }
-        catch {
-            return [];
-        }
-    }
-    const rows = Array.isArray(parsed?.inline_keyboard) ? parsed.inline_keyboard : [];
-    const buttons = [];
-    for (const row of rows) {
-        for (const b of Array.isArray(row) ? row : []) {
-            if (b?.text && typeof b.url === 'string')
-                buttons.push({ text: String(b.text), url: b.url });
-            else if (b?.text && typeof b.copy_text?.text === 'string')
-                buttons.push({ text: String(b.text), copy: b.copy_text.text });
-        }
-    }
-    return buttons;
+    // A block (table, quote, details, photo) already starts on its own line: a <br/> before it left a blank
+    // gap under the title (owner, 2026-10-19).
+    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>').replace(/<br\/>\n?(?=<(?:table|blockquote|details|img)\b)/g, '\n');
 }
 /** "totalSentCount" -> "Total sent count". */
 function humanizeKey(key) {
