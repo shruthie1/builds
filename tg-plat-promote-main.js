@@ -11734,6 +11734,824 @@ function toIso(value) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/jobs/redis-jobs.ts"
+/*!*****************************************************!*\
+  !*** ../../packages/tg-core/src/jobs/redis-jobs.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_LEASE_MS: () => (/* binding */ DEFAULT_LEASE_MS),
+/* harmony export */   DEFAULT_MAX_ATTEMPTS: () => (/* binding */ DEFAULT_MAX_ATTEMPTS),
+/* harmony export */   DEFAULT_MAX_LATE_MS: () => (/* binding */ DEFAULT_MAX_LATE_MS),
+/* harmony export */   JOB_DONE_TTL_SECONDS: () => (/* binding */ JOB_DONE_TTL_SECONDS),
+/* harmony export */   JOB_PAYLOAD_GRACE_MS: () => (/* binding */ JOB_PAYLOAD_GRACE_MS),
+/* harmony export */   MAX_ATTEMPTS_HARD_CAP: () => (/* binding */ MAX_ATTEMPTS_HARD_CAP),
+/* harmony export */   POP_SCRIPT: () => (/* binding */ POP_SCRIPT),
+/* harmony export */   RETRY_BASE_MS: () => (/* binding */ RETRY_BASE_MS),
+/* harmony export */   RETRY_MAX_MS: () => (/* binding */ RETRY_MAX_MS),
+/* harmony export */   RedisJobScheduler: () => (/* binding */ RedisJobScheduler),
+/* harmony export */   SCHEDULE_SCRIPT: () => (/* binding */ SCHEDULE_SCRIPT),
+/* harmony export */   STOP_WAIT_MS: () => (/* binding */ STOP_WAIT_MS),
+/* harmony export */   UNKNOWN_TYPE_REQUEUE_MS: () => (/* binding */ UNKNOWN_TYPE_REQUEUE_MS),
+/* harmony export */   __resetJobsForTests: () => (/* binding */ __resetJobsForTests),
+/* harmony export */   cancelJob: () => (/* binding */ cancelJob),
+/* harmony export */   createRegistryJobScheduler: () => (/* binding */ createRegistryJobScheduler),
+/* harmony export */   jobKeys: () => (/* binding */ jobKeys),
+/* harmony export */   registerJobHandler: () => (/* binding */ registerJobHandler),
+/* harmony export */   registeredJobTypes: () => (/* binding */ registeredJobTypes),
+/* harmony export */   scheduleJob: () => (/* binding */ scheduleJob),
+/* harmony export */   startJobPoller: () => (/* binding */ startJobPoller),
+/* harmony export */   stopJobPoller: () => (/* binding */ stopJobPoller)
+/* harmony export */ });
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/exponential-backoff */ "../../packages/tg-core/src/utils/exponential-backoff.ts");
+/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/**
+ * Durable delayed jobs on Redis (restart-safe replacement for "setTimeout then send").
+ *
+ * Keys (all with TTLs):
+ *   tgjobs::due::{clientId}::{mobile}       ZSET  jobId -> dueAt ms
+ *   tgjobs::inflight::{clientId}::{mobile}  ZSET  jobId -> lease expiry ms (popped, not yet finished)
+ *   tgjobs::job::{clientId}::{mobile}::{jobId}   JSON  payload, TTL = (dueAt-now)+maxLateMs+1h
+ *   tgjobs::done::{clientId}::{mobile}::{jobId}  "1"   claim / completion marker, SET NX EX 86400
+ * Job ids are natural keys (e.g. `delfinal::{chatId}::{messageId}`) that repeat across accounts (one user DMs
+ * several personas; message ids are per account), so payload/done keys are scoped to the account too.
+ *
+ * Flow: scheduleJob (Lua: skip if done/pending, ZADD NX, SET payload) -> poller tick every tickMs (Lua: requeue
+ * expired leases, pop due ids into inflight atomically) -> drop if wrong mobile or later than maxLateMs ->
+ * at-most-once claims `done` BEFORE running; at-least-once marks `done` AFTER success and retries a throw with
+ * exponential backoff up to a hard cap -> payload deleted.
+ *
+ * Pending jobs survive a restart: the next poller for the same clientId/mobile simply picks them up. If Redis
+ * is unavailable when a job is scheduled, it runs from an in-process setTimeout instead (logged "non-durable").
+ */
+
+
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-jobs");
+const JOB_DONE_TTL_SECONDS = 86400;
+const JOB_PAYLOAD_GRACE_MS = 60 * 60000;
+const DEFAULT_MAX_LATE_MS = 10 * 60000;
+const DEFAULT_LEASE_MS = 10 * 60000;
+const DEFAULT_MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS_HARD_CAP = 5;
+const RETRY_BASE_MS = 5000;
+const RETRY_MAX_MS = 5 * 60000;
+/** A job whose type has no handler in this process is put back this far ahead (bounded by maxLateMs). */
+const UNKNOWN_TYPE_REQUEUE_MS = 30000;
+const STOP_WAIT_MS = 5000;
+/** Lua: skip when done/pending/in flight; otherwise ZADD NX + payload + keep the ZSET TTL >= this job's TTL. */
+const SCHEDULE_SCRIPT = [
+    "--@tgjobs:schedule",
+    "if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end",
+    "if redis.call('ZSCORE', KEYS[4], ARGV[1]) then return 0 end",
+    "if redis.call('ZADD', KEYS[1], 'NX', ARGV[2], ARGV[1]) == 0 then return 0 end",
+    "redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])",
+    "if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[4]) then redis.call('PEXPIRE', KEYS[1], ARGV[4]) end",
+    "return 1",
+].join("\n");
+/**
+ * Lua: requeue expired leases, then atomically move up to N due ids into inflight (lease = now+leaseMs).
+ * Each move ADDs before it REMoves: a script is not rolled back when a write fails mid-way (e.g. OOM under
+ * noeviction), so the id is never left in neither set.
+ */
+const POP_SCRIPT = [
+    "--@tgjobs:pop",
+    "local now = tonumber(ARGV[1])",
+    "local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, 100)",
+    "for _, id in ipairs(expired) do",
+    "  redis.call('ZADD', KEYS[1], now, id)",
+    "  redis.call('ZREM', KEYS[2], id)",
+    "end",
+    "local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, tonumber(ARGV[3]))",
+    "for _, id in ipairs(ids) do",
+    "  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[2]), id)",
+    "  redis.call('ZREM', KEYS[1], id)",
+    "end",
+    "if #ids > 0 and redis.call('PTTL', KEYS[2]) < tonumber(ARGV[4]) then redis.call('PEXPIRE', KEYS[2], ARGV[4]) end",
+    "return ids",
+].join("\n");
+const jobKeys = {
+    due: (clientId, mobile) => `tgjobs::due::${clientId}::${mobile}`,
+    inflight: (clientId, mobile) => `tgjobs::inflight::${clientId}::${mobile}`,
+    job: (clientId, mobile, id) => `tgjobs::job::${clientId}::${mobile}::${id}`,
+    done: (clientId, mobile, id) => `tgjobs::done::${clientId}::${mobile}::${id}`,
+};
+function serializePayload(value) {
+    return JSON.stringify(value, (_key, v) => (typeof v === "bigint" ? v.toString() : v));
+}
+function clampAttempts(value) {
+    const n = Math.floor(Number(value ?? DEFAULT_MAX_ATTEMPTS));
+    if (!Number.isFinite(n) || n < 1)
+        return 1;
+    return Math.min(n, MAX_ATTEMPTS_HARD_CAP);
+}
+class RedisJobScheduler {
+    constructor(options = {}) {
+        this.fallbackTimers = new Map();
+        this.fallbackDone = new Set();
+        this.timer = null;
+        this.ticking = null;
+        this.stopped = true;
+        this.stopRequested = false;
+        this.clientId = options.clientId ?? process.env.clientId ?? "";
+        this.mobile = options.mobile ?? process.env.mobile ?? "";
+        this.tickMs = Math.max(50, options.tickMs ?? 1000);
+        this.leaseMs = Math.max(1000, options.leaseMs ?? DEFAULT_LEASE_MS);
+        this.batchSize = Math.max(1, options.batchSize ?? 20);
+        this.stopWaitMs = Math.max(0, options.stopWaitMs ?? STOP_WAIT_MS);
+        this.now = options.now ?? Date.now;
+        this.redisProvider = options.redis ?? (() => (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.getStateRedis)());
+        this.handlers = options.handlers ?? new Map();
+    }
+    registerHandler(type, handler) {
+        if (!type || typeof handler !== "function")
+            throw new Error("registerJobHandler needs a type and a handler");
+        this.handlers.set(type, handler);
+    }
+    jobKey(id) { return jobKeys.job(this.clientId, this.mobile, id); }
+    doneKey(id) { return jobKeys.done(this.clientId, this.mobile, id); }
+    hasHandlers() { return this.handlers.size > 0; }
+    isRunning() { return !this.stopped; }
+    configure(options) {
+        if (options.clientId)
+            this.clientId = options.clientId;
+        if (options.mobile)
+            this.mobile = options.mobile;
+        if (options.tickMs)
+            this.tickMs = Math.max(50, options.tickMs);
+    }
+    async schedule(options) {
+        const id = String(options.id ?? "").trim();
+        if (!id || !options.type)
+            throw new Error("scheduleJob needs an id and a type");
+        const now = this.now();
+        const delayMs = Math.max(0, Math.floor(Number(options.delayMs) || 0));
+        const maxLateMs = Math.max(0, Math.floor(options.maxLateMs ?? DEFAULT_MAX_LATE_MS));
+        const payload = {
+            id,
+            type: options.type,
+            chatId: options.chatId == null ? null : String(options.chatId),
+            clientId: this.clientId,
+            mobile: this.mobile,
+            params: options.params ?? {},
+            dueAt: now + delayMs,
+            maxLateMs,
+            createdAt: now,
+            semantics: options.semantics ?? "at-most-once",
+            attempt: 0,
+            maxAttempts: options.semantics === "at-least-once" ? clampAttempts(options.maxAttempts) : 1,
+        };
+        // GramJS ids are BigInteger/bigint: serialize them as strings (JSON.stringify throws on bigint, and a throw
+        // here must not be mistaken for a Redis outage). The handler gets the JSON round-trip in-process too.
+        payload.params = JSON.parse(serializePayload(payload.params));
+        const redis = this.clientId && this.mobile ? await this.redisProvider() : null;
+        if (redis) {
+            try {
+                const ttlMs = delayMs + maxLateMs + JOB_PAYLOAD_GRACE_MS;
+                const added = await redis.eval(SCHEDULE_SCRIPT, 4, jobKeys.due(this.clientId, this.mobile), this.jobKey(id), this.doneKey(id), jobKeys.inflight(this.clientId, this.mobile), id, payload.dueAt, serializePayload(payload), ttlMs);
+                if (Number(added) === 1) {
+                    logger.debug(`[tg-jobs] scheduled ${payload.type} id=${id} in ${delayMs}ms (${payload.semantics})`);
+                    return "scheduled";
+                }
+                logger.debug(`[tg-jobs] duplicate schedule ignored id=${id}`);
+                return "duplicate";
+            }
+            catch (error) {
+                (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.schedule", error);
+            }
+        }
+        return this.scheduleInProcess(payload, delayMs);
+    }
+    scheduleInProcess(payload, delayMs) {
+        if (this.fallbackTimers.has(payload.id) || this.fallbackDone.has(payload.id))
+            return "duplicate";
+        logger.warn(`[tg-jobs] Redis unavailable: ${payload.type} id=${payload.id} scheduled non-durable (lost on restart)`);
+        const timer = setTimeout(() => {
+            this.fallbackTimers.delete(payload.id);
+            this.fallbackDone.add(payload.id);
+            if (this.fallbackDone.size > 5000) {
+                const oldest = this.fallbackDone.values().next().value;
+                if (oldest !== undefined)
+                    this.fallbackDone.delete(oldest);
+            }
+            void this.runHandler(payload, 0, false).catch(() => undefined);
+        }, delayMs);
+        timer.unref?.();
+        this.fallbackTimers.set(payload.id, timer);
+        return "non-durable";
+    }
+    async cancel(id) {
+        let cancelled = false;
+        const timer = this.fallbackTimers.get(id);
+        if (timer) {
+            clearTimeout(timer);
+            this.fallbackTimers.delete(id);
+            cancelled = true;
+        }
+        const redis = this.clientId && this.mobile ? await this.redisProvider() : null;
+        if (!redis)
+            return cancelled;
+        try {
+            const multi = redis.multi();
+            multi.zrem(jobKeys.due(this.clientId, this.mobile), id);
+            multi.del(this.jobKey(id));
+            const results = await multi.exec();
+            return cancelled || Number(results?.[0]?.[1] ?? 0) > 0;
+        }
+        catch (error) {
+            (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.cancel", error);
+            return cancelled;
+        }
+    }
+    start() {
+        if (!this.stopped)
+            return;
+        this.stopped = false;
+        this.stopRequested = false;
+        logger.log(`[tg-jobs] poller started clientId=${this.clientId || "-"} mobile=${this.mobile || "-"} tick=${this.tickMs}ms`);
+        this.schedulePoll();
+    }
+    schedulePoll() {
+        if (this.stopped)
+            return;
+        this.timer = setTimeout(() => {
+            this.timer = null;
+            void this.tick().finally(() => this.schedulePoll());
+        }, this.tickMs);
+        this.timer.unref?.();
+    }
+    async stop() {
+        this.stopped = true;
+        this.stopRequested = true;
+        if (this.timer)
+            clearTimeout(this.timer);
+        this.timer = null;
+        for (const timer of this.fallbackTimers.values())
+            clearTimeout(timer);
+        if (this.fallbackTimers.size)
+            logger.warn(`[tg-jobs] dropping ${this.fallbackTimers.size} non-durable job(s) on stop`);
+        this.fallbackTimers.clear();
+        if (!this.ticking)
+            return;
+        // A handler can be mid-send (flood waits, slow Telegram): do not let it eat the shutdown budget. Its job is
+        // already claimed (at-most-once) or still leased (at-least-once: the next process requeues it).
+        let timer;
+        const gaveUp = await Promise.race([
+            this.ticking.then(() => false, () => false),
+            new Promise((resolve) => { timer = setTimeout(() => resolve(true), this.stopWaitMs); timer.unref?.(); }),
+        ]);
+        if (timer)
+            clearTimeout(timer);
+        if (gaveUp)
+            logger.warn(`[tg-jobs] stop: a running job did not finish within ${this.stopWaitMs}ms; not waiting`);
+    }
+    /** One poll: pops due jobs and runs them in order. Returns how many handlers ran. Never overlaps itself. */
+    tick() {
+        if (this.ticking)
+            return this.ticking;
+        this.ticking = this.pollOnce().finally(() => { this.ticking = null; });
+        return this.ticking;
+    }
+    async pollOnce() {
+        if (!this.handlers.size || !this.clientId || !this.mobile)
+            return 0;
+        const redis = await this.redisProvider();
+        if (!redis)
+            return 0;
+        const dueKey = jobKeys.due(this.clientId, this.mobile);
+        const inflightKey = jobKeys.inflight(this.clientId, this.mobile);
+        let ids;
+        const now = this.now();
+        try {
+            const popped = await redis.eval(POP_SCRIPT, 2, dueKey, inflightKey, now, this.leaseMs, this.batchSize, this.leaseMs + JOB_PAYLOAD_GRACE_MS);
+            ids = Array.isArray(popped) ? popped.map(String) : [];
+        }
+        catch (error) {
+            (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.pop", error);
+            return 0;
+        }
+        let ran = 0;
+        for (const id of ids) {
+            if (this.stopRequested && ran > 0) {
+                // Hand the rest back now: left in flight they would wait out the 10 min lease and then be dropped
+                // as stale (maxLateMs) by the next process.
+                const rest = ids.slice(ids.indexOf(id));
+                const multi = redis.multi();
+                for (const left of rest)
+                    multi.zadd(dueKey, now, left);
+                multi.zrem(inflightKey, ...rest);
+                await multi.exec().catch((error) => (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.stop-requeue", error));
+                break;
+            }
+            try {
+                if (await this.process(redis, id, inflightKey))
+                    ran += 1;
+            }
+            catch (error) {
+                // Only Redis calls throw here (handler errors are handled in process). Put the id straight back
+                // instead of waiting out the 10 min lease, which would make it stale (maxLateMs) and drop it. Safe:
+                // an at-most-once job claimed before the failure is skipped by its done marker on the next pop.
+                (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.process", error);
+                const multi = redis.multi();
+                multi.zadd(dueKey, this.now(), id);
+                multi.zrem(inflightKey, id);
+                const requeued = await multi.exec().then(() => true, () => false);
+                logger.error(`[tg-jobs] processing failed id=${id}; ${requeued ? "requeued" : "lease will requeue it"}`, error);
+            }
+        }
+        return ran;
+    }
+    async finish(redis, id, inflightKey, markDone) {
+        const multi = redis.multi();
+        multi.zrem(inflightKey, id);
+        multi.del(this.jobKey(id));
+        if (markDone)
+            multi.set(this.doneKey(id), "1", "EX", JOB_DONE_TTL_SECONDS);
+        await multi.exec();
+    }
+    async process(redis, id, inflightKey) {
+        const raw = await redis.get(this.jobKey(id));
+        if (!raw) {
+            logger.warn(`[tg-jobs] job ${id} has no payload (expired?); dropped`);
+            await this.finish(redis, id, inflightKey, false);
+            return false;
+        }
+        let payload;
+        try {
+            payload = JSON.parse(raw);
+        }
+        catch {
+            logger.error(`[tg-jobs] job ${id} payload unreadable; dropped`);
+            await this.finish(redis, id, inflightKey, false);
+            return false;
+        }
+        const now = this.now();
+        const lateMs = Math.max(0, now - payload.dueAt);
+        if (payload.mobile !== this.mobile) {
+            logger.warn(`[tg-jobs] drop ${payload.type} id=${id}: scheduled for mobile ${payload.mobile}, running as ${this.mobile}`);
+            await this.finish(redis, id, inflightKey, false);
+            return false;
+        }
+        if (lateMs > payload.maxLateMs) {
+            logger.warn(`[tg-jobs] drop stale ${payload.type} id=${id}: ${lateMs}ms late > maxLateMs ${payload.maxLateMs}`);
+            await this.finish(redis, id, inflightKey, false);
+            return false;
+        }
+        if (!this.handlers.has(payload.type)) {
+            const multi = redis.multi();
+            multi.zrem(inflightKey, id);
+            multi.zadd(jobKeys.due(this.clientId, this.mobile), now + UNKNOWN_TYPE_REQUEUE_MS, id);
+            await multi.exec();
+            logger.warn(`[tg-jobs] no handler for ${payload.type} (id=${id}) in this process; requeued +${UNKNOWN_TYPE_REQUEUE_MS}ms`);
+            return false;
+        }
+        if (payload.semantics === "at-most-once") {
+            const claimed = await redis.set(this.doneKey(id), "1", "EX", JOB_DONE_TTL_SECONDS, "NX");
+            if (claimed !== "OK") {
+                logger.debug(`[tg-jobs] ${id} already claimed; skipped`);
+                await this.finish(redis, id, inflightKey, false);
+                return false;
+            }
+            await this.finish(redis, id, inflightKey, false);
+            await this.runHandler(payload, lateMs, true).catch(() => undefined);
+            return true;
+        }
+        try {
+            await this.runHandler(payload, lateMs, true);
+            await this.finish(redis, id, inflightKey, true);
+        }
+        catch {
+            await this.retryOrDrop(redis, payload, inflightKey);
+        }
+        return true;
+    }
+    async retryOrDrop(redis, payload, inflightKey) {
+        const attempt = payload.attempt + 1;
+        const maxAttempts = clampAttempts(payload.maxAttempts);
+        if (attempt >= maxAttempts) {
+            logger.error(`[tg-jobs] ${payload.type} id=${payload.id} failed ${attempt}/${maxAttempts} attempts; giving up`);
+            await this.finish(redis, payload.id, inflightKey, false);
+            return;
+        }
+        const now = this.now();
+        const delay = (0,_utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_1__.getBackoffDelay)(attempt - 1, { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS, jitterFraction: 0.1 });
+        const next = { ...payload, attempt, dueAt: now + delay };
+        const multi = redis.multi();
+        multi.set(this.jobKey(payload.id), serializePayload(next), "PX", delay + payload.maxLateMs + JOB_PAYLOAD_GRACE_MS);
+        multi.zrem(inflightKey, payload.id);
+        multi.zadd(jobKeys.due(this.clientId, this.mobile), next.dueAt, payload.id);
+        await multi.exec();
+        logger.warn(`[tg-jobs] ${payload.type} id=${payload.id} attempt ${attempt}/${maxAttempts} failed; retry in ${delay}ms`);
+    }
+    async runHandler(payload, lateMs, durable) {
+        const handler = this.handlers.get(payload.type);
+        if (!handler) {
+            logger.warn(`[tg-jobs] no handler for ${payload.type} (id=${payload.id}); dropped`);
+            return;
+        }
+        try {
+            await handler(payload.params ?? {}, {
+                jobId: payload.id,
+                type: payload.type,
+                chatId: payload.chatId,
+                mobile: payload.mobile,
+                clientId: payload.clientId,
+                attempt: payload.attempt,
+                dueAt: payload.dueAt,
+                lateMs,
+                durable,
+            });
+        }
+        catch (error) {
+            logger.error(`[tg-jobs] handler ${payload.type} failed id=${payload.id} attempt=${payload.attempt}`, error);
+            throw error;
+        }
+    }
+}
+// ─── Process-wide default scheduler ─────────────────────────────────────────
+let defaultScheduler = null;
+/** Handlers registered with registerJobHandler (module load time); shared by every process-wide scheduler. */
+const handlerRegistry = new Map();
+/** A scheduler wired to the module handler registry (what the process poller uses; tests build restarts with it). */
+function createRegistryJobScheduler(options = {}) {
+    return new RedisJobScheduler({ ...options, handlers: handlerRegistry });
+}
+function scheduler() {
+    if (!defaultScheduler)
+        defaultScheduler = createRegistryJobScheduler();
+    return defaultScheduler;
+}
+function registerJobHandler(type, handler) {
+    if (!type || typeof handler !== "function")
+        throw new Error("registerJobHandler needs a type and a handler");
+    handlerRegistry.set(type, handler);
+    // A scheduler injected with its own handler map (tests) gets it too.
+    defaultScheduler?.registerHandler(type, handler);
+}
+/** Job types registered in this process (diagnostics / tests). */
+function registeredJobTypes() {
+    return [...handlerRegistry.keys()];
+}
+function scheduleJob(options) {
+    return scheduler().schedule(options);
+}
+function cancelJob(id) {
+    return scheduler().cancel(id);
+}
+/** Starts (or re-targets) the process poller. Polls Redis only while at least one handler is registered. */
+function startJobPoller(options = {}) {
+    const s = scheduler();
+    s.configure(options);
+    s.start();
+    return s;
+}
+async function stopJobPoller() {
+    if (defaultScheduler)
+        await defaultScheduler.stop();
+}
+/** Tests only. */
+function __resetJobsForTests(next = null) {
+    defaultScheduler = next;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/state/mirrors.ts"
+/*!***************************************************!*\
+  !*** ../../packages/tg-core/src/state/mirrors.ts ***!
+  \***************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RedisDeadline: () => (/* binding */ RedisDeadline),
+/* harmony export */   RedisTimeWindow: () => (/* binding */ RedisTimeWindow),
+/* harmony export */   RedisTimestampHash: () => (/* binding */ RedisTimestampHash)
+/* harmony export */ });
+/* harmony import */ var _state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/**
+ * Small write-through mirrors built on state-redis. Each one shadows a common in-memory shape:
+ *  - RedisDeadline:       "paused until T" (+ small JSON meta), key expires at T.
+ *  - RedisTimestampHash:  Map<id, epochMs> (refused chats, per-chat state), whole hash TTL refreshed on write.
+ *  - RedisTimeWindow:     number[] of event times inside a sliding window (rate limits), ZSET pruned on write.
+ * The caller keeps its own Map/array authoritative and calls these on every change; `load()` is for boot.
+ */
+
+class RedisDeadline {
+    constructor(key, label) { this.key = key; this.label = label; }
+    /** Mirrors "paused until `until`". A past deadline deletes the key. */
+    save(until, now = Date.now(), meta = {}) {
+        const key = this.key();
+        if (!key)
+            return Promise.resolve(false);
+        const remaining = Math.ceil(until - now);
+        if (remaining <= 0)
+            return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+        const value = JSON.stringify({ until, ...meta });
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.set(key, value, "PX", remaining); });
+    }
+    clear() {
+        const key = this.key();
+        if (!key)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+    }
+    /** The stored deadline if still in the future; null when absent, expired or Redis unavailable. */
+    async load(now = Date.now()) {
+        const key = this.key();
+        if (!key)
+            return null;
+        const raw = await (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.get(key));
+        if (!raw)
+            return null;
+        try {
+            const parsed = JSON.parse(raw);
+            const until = Number(parsed.until);
+            if (!Number.isFinite(until) || until <= now)
+                return null;
+            const meta = {};
+            for (const [k, v] of Object.entries(parsed)) {
+                if (k !== "until" && typeof v === "number" && Number.isFinite(v))
+                    meta[k] = v;
+            }
+            return { until, meta: meta };
+        }
+        catch {
+            return null;
+        }
+    }
+}
+class RedisTimestampHash {
+    constructor(key, ttlMs, label) { this.key = key; this.ttlMs = ttlMs; this.label = label; }
+    set(field, at) {
+        const key = this.key();
+        if (!key || !field)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
+            m.hset(key, field, String(at));
+            m.pexpire(key, this.ttlMs);
+        });
+    }
+    /** Raw string value variant (JSON per-field state). */
+    setValue(field, value) {
+        const key = this.key();
+        if (!key || !field)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
+            m.hset(key, field, value);
+            m.pexpire(key, this.ttlMs);
+        });
+    }
+    delete(...fields) {
+        const key = this.key();
+        const clean = fields.filter(Boolean);
+        if (!key || clean.length === 0)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.hdel(key, ...clean); });
+    }
+    clear() {
+        const key = this.key();
+        if (!key)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+    }
+    /** [field, epochMs] pairs younger than the TTL, oldest first; null when Redis unavailable. */
+    async load(now = Date.now()) {
+        const raw = await this.loadRaw();
+        return raw === null ? null : (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.freshTimestampEntries)(raw, now, this.ttlMs);
+    }
+    async loadRaw() {
+        const key = this.key();
+        if (!key)
+            return null;
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.hgetall(key));
+    }
+}
+let windowSeq = 0;
+class RedisTimeWindow {
+    constructor(key, windowMs, label) { this.key = key; this.windowMs = windowMs; this.label = label; }
+    /** Mirrors one event at `at`; prunes entries older than the window and refreshes the TTL. */
+    add(at) {
+        const key = this.key();
+        if (!key)
+            return Promise.resolve(false);
+        windowSeq = (windowSeq + 1) % 1000000;
+        const member = `${at}:${process.pid}:${windowSeq}`;
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
+            m.zadd(key, at, member);
+            m.zremrangebyscore(key, "-inf", at - this.windowMs);
+            m.pexpire(key, this.windowMs);
+        });
+    }
+    clear() {
+        const key = this.key();
+        if (!key)
+            return Promise.resolve(false);
+        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+    }
+    /** Event times inside the window (ascending); null when Redis unavailable. */
+    async load(now = Date.now()) {
+        const key = this.key();
+        if (!key)
+            return null;
+        const members = await (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.zrangebyscore(key, now - this.windowMs + 1, "+inf"));
+        if (members === null)
+            return null;
+        return members
+            .map((member) => Number(String(member).split(":")[0]))
+            .filter((at) => Number.isFinite(at) && at > now - this.windowMs)
+            .sort((a, b) => a - b);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/state/state-redis.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-core/src/state/state-redis.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   STATE_REDIS_READ_TIMEOUT_MS: () => (/* binding */ STATE_REDIS_READ_TIMEOUT_MS),
+/* harmony export */   STATE_REDIS_RETRY_AFTER_MS: () => (/* binding */ STATE_REDIS_RETRY_AFTER_MS),
+/* harmony export */   currentMobile: () => (/* binding */ currentMobile),
+/* harmony export */   freshTimestampEntries: () => (/* binding */ freshTimestampEntries),
+/* harmony export */   getStateRedis: () => (/* binding */ getStateRedis),
+/* harmony export */   isStateRedisDegraded: () => (/* binding */ isStateRedisDegraded),
+/* harmony export */   noteStateRedisFailure: () => (/* binding */ noteStateRedisFailure),
+/* harmony export */   readState: () => (/* binding */ readState),
+/* harmony export */   setStateRedisForTests: () => (/* binding */ setStateRedisForTests),
+/* harmony export */   stateKey: () => (/* binding */ stateKey),
+/* harmony export */   writeThrough: () => (/* binding */ writeThrough)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * Restart-safe state: the Redis side of "memory is authoritative, Redis is a mirror".
+ *
+ * Rules every caller follows:
+ *  - The in-memory structure stays the primary copy. Hot paths never wait on Redis.
+ *  - Writes are write-through and fire-and-forget (`writeThrough`): one MULTI per change, errors logged.
+ *  - Reads happen only at boot (seed) or on paths that are not inbound->reply (`readState`, bounded).
+ *  - Redis down = keep working in memory. The outage is logged once (warn) and the recovery once (log).
+ *  - Every key is `namespace::identifier` and carries a TTL.
+ */
+
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("state-redis");
+/** After a failure, skip Redis for this long (no connect storm, no pile of pending promises). */
+const STATE_REDIS_RETRY_AFTER_MS = 30000;
+/** Default bound on any state read (boot seed or a non-hot-path check). */
+const STATE_REDIS_READ_TIMEOUT_MS = 3000;
+let override;
+let unavailableUntil = 0;
+let degraded = false;
+/**
+ * Tests (and only tests) inject a client here. `null` = Redis unavailable; `undefined` = back to the shared
+ * RedisClient. Also clears the outage bookkeeping.
+ */
+function setStateRedisForTests(client) {
+    override = client;
+    unavailableUntil = 0;
+    degraded = false;
+}
+/** True while the mirror is in a logged outage (health/diagnostics). */
+function isStateRedisDegraded() {
+    return degraded;
+}
+// Captured at load so a caller's (or a test's) patched global timers cannot fire or count these deadlines.
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = nativeSetTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => { if (timer)
+        nativeClearTimeout(timer); });
+}
+const defaultProvider = async () => {
+    const client = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.getReady();
+    return client;
+};
+/** Records an outage (warn once) and starts the retry-after window. */
+function noteStateRedisFailure(label, error) {
+    unavailableUntil = Date.now() + STATE_REDIS_RETRY_AFTER_MS;
+    const message = error instanceof Error ? error.message : String(error);
+    if (!degraded) {
+        degraded = true;
+        logger.warn(`[state-redis] Redis unavailable (${label}): ${message}. Restart-safe state is memory-only until it recovers.`);
+    }
+    else {
+        logger.debug(`[state-redis] still unavailable (${label}): ${message}`);
+    }
+}
+function noteSuccess() {
+    if (degraded) {
+        degraded = false;
+        logger.log("[state-redis] Redis reachable again; restart-safe state mirroring resumed.");
+    }
+}
+/** The Redis client, or null when it is (recently) unavailable. Never throws. */
+async function getStateRedis(timeoutMs = STATE_REDIS_READ_TIMEOUT_MS) {
+    if (override !== undefined)
+        return override;
+    if (Date.now() < unavailableUntil)
+        return null;
+    try {
+        return await withDeadline(defaultProvider(), timeoutMs, "Redis connect");
+    }
+    catch (error) {
+        noteStateRedisFailure("connect", error);
+        return null;
+    }
+}
+/**
+ * Fire-and-forget write-through: `build` queues commands on one MULTI. Never throws, never blocks the caller.
+ * Returns the promise only so tests can await it.
+ */
+function writeThrough(label, build) {
+    return (async () => {
+        const redis = await getStateRedis();
+        if (!redis)
+            return false;
+        try {
+            const multi = redis.multi();
+            build(multi);
+            const results = await withDeadline(multi.exec(), STATE_REDIS_READ_TIMEOUT_MS, `${label} write`);
+            const failed = results?.find(([err]) => err);
+            if (failed)
+                throw failed[0];
+            noteSuccess();
+            return true;
+        }
+        catch (error) {
+            noteStateRedisFailure(label, error);
+            return false;
+        }
+    })();
+}
+/**
+ * Bounded read for boot seeding or a non-hot-path check. Returns null when Redis is unavailable, slow or
+ * fails: the caller then keeps its in-memory view (fail-open).
+ */
+async function readState(label, read, timeoutMs = STATE_REDIS_READ_TIMEOUT_MS) {
+    const redis = await getStateRedis(timeoutMs);
+    if (!redis)
+        return null;
+    try {
+        const value = await withDeadline(read(redis), timeoutMs, `${label} read`);
+        noteSuccess();
+        return value;
+    }
+    catch (error) {
+        noteStateRedisFailure(label, error);
+        return null;
+    }
+}
+/** `namespace::a::b` key, or null when any part is missing (the mirror then stays memory-only). */
+function stateKey(namespace, ...parts) {
+    const clean = [];
+    for (const part of parts) {
+        if (part === null || part === undefined)
+            return null;
+        const text = String(part).trim();
+        if (!text || text === "undefined" || text === "null")
+            return null;
+        clean.push(text);
+    }
+    return [namespace, ...clean].join("::");
+}
+/** The current process's account (tg-aut runs one mobile per process; remote config sets it). */
+function currentMobile() {
+    const mobile = process.env.mobile?.trim();
+    return mobile ? mobile : null;
+}
+/** Hash entries -> [field, epoch ms] pairs no older than `maxAgeMs`, oldest first. */
+function freshTimestampEntries(hash, now, maxAgeMs) {
+    if (!hash)
+        return [];
+    const entries = [];
+    for (const [field, raw] of Object.entries(hash)) {
+        const at = Number(raw);
+        if (!Number.isFinite(at) || at <= 0 || now - at > maxAgeMs)
+            continue;
+        entries.push([field, at]);
+    }
+    return entries.sort((a, b) => a[1] - b[1]);
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts"
 /*!******************************************************************!*\
   !*** ../../packages/tg-core/src/telegram-utils/checkTgHealth.ts ***!
@@ -12494,7 +13312,9 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* binding */ SPAM_BOT_USERNAME),
+/* harmony export */   __resetSpamBotNotificationClaimsForTests: () => (/* binding */ __resetSpamBotNotificationClaimsForTests),
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
+/* harmony export */   claimSpamBotNotificationDurable: () => (/* binding */ claimSpamBotNotificationDurable),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
 /* harmony export */   describeSpamBotReply: () => (/* binding */ describeSpamBotReply),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
@@ -12507,6 +13327,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+
 
 
 
@@ -12652,6 +13474,34 @@ function describeSpamBotReply(text, now = new Date()) {
 function claimSpamBotNotification(mobile, messageId) {
     if (messageId === null)
         return true;
+    if (!claimInMemory(mobile, messageId))
+        return false;
+    // Mirror the claim (SET NX EX 300) so a restarted process's manual probe does not re-notify it.
+    const key = spamBotNotificationKey(mobile, messageId);
+    if (key)
+        void (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.writeThrough)("spambot.notified", (m) => { m.set(key, "1", "EX", SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS / 1000, "NX"); });
+    return true;
+}
+/**
+ * Restart-safe form of claimSpamBotNotification for async callers: the in-memory claim first, then
+ * SET NX EX 300 in Redis, so a reply already notified by the previous process is not notified again.
+ * Redis unavailable = the in-memory answer (fail-open: the operator may get one duplicate).
+ */
+async function claimSpamBotNotificationDurable(mobile, messageId) {
+    if (messageId === null)
+        return true;
+    if (!claimInMemory(mobile, messageId))
+        return false;
+    const key = spamBotNotificationKey(mobile, messageId);
+    if (!key)
+        return true;
+    const claimed = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.readState)("spambot.notified", async (redis) => (await redis.set(key, "1", "EX", SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS / 1000, "NX")) === "OK");
+    return claimed ?? true;
+}
+function spamBotNotificationKey(mobile, messageId) {
+    return (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.stateKey)("spambot::notified", mobile, messageId);
+}
+function claimInMemory(mobile, messageId) {
     const now = Date.now();
     for (const [key, expiresAt] of spamBotNotificationClaims) {
         if (expiresAt <= now)
@@ -12662,6 +13512,10 @@ function claimSpamBotNotification(mobile, messageId) {
         return false;
     spamBotNotificationClaims.set(key, now + SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS);
     return true;
+}
+/** Tests only: forget in-process claims (simulates a restart). */
+function __resetSpamBotNotificationClaimsForTests() {
+    spamBotNotificationClaims.clear();
 }
 /**
  * Logs and notifies the operator about the latest SpamBot reply. This is shared
@@ -12682,7 +13536,7 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         return { latestReply: null, replyIsFresh: false };
     }
     logger.info(`[SpamBot probe] ${mobile}: ${latestReply.text}`);
-    if (!claimSpamBotNotification(mobile, latestReply.messageId)) {
+    if (!(await claimSpamBotNotificationDurable(mobile, latestReply.messageId))) {
         return { latestReply, replyIsFresh };
     }
     try {
@@ -13233,6 +14087,10 @@ class RedisClient {
      * Ensures the lazy Redis client is command-ready before use.
      * This preserves `enableOfflineQueue: false` while avoiding startup races.
      */
+    /** Public form of getReadyClient: the shared client once command-ready (rejects if it cannot get there). */
+    static async getReady() {
+        return RedisClient.getReadyClient();
+    }
     static async getReadyClient() {
         const client = RedisClient.getClient();
         if (client.status === "ready") {
@@ -15069,6 +15927,68 @@ function isExpectedTelegramLogOutcome(err) {
     else
         text = String(err);
     return EXPECTED_TG_OUTCOME_RE.test(text);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/exponential-backoff.ts"
+/*!***************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/exponential-backoff.ts ***!
+  \***************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getBackoffDelay: () => (/* binding */ getBackoffDelay),
+/* harmony export */   withBackoff: () => (/* binding */ withBackoff)
+/* harmony export */ });
+/**
+ * Exponential backoff utility with jitter.
+ * Used for reconnection attempts and retry logic.
+ */
+const DEFAULT_CONFIG = {
+    baseMs: 2000,
+    maxMs: 32000,
+    jitterFraction: 0.1,
+};
+/**
+ * Calculate delay for a given attempt using exponential backoff with jitter.
+ * @param attempt - Zero-based attempt number
+ * @param config - Backoff configuration
+ * @returns Delay in milliseconds
+ */
+function getBackoffDelay(attempt, config = {}) {
+    const { baseMs, maxMs, jitterFraction } = { ...DEFAULT_CONFIG, ...config };
+    const exponentialDelay = Math.min(baseMs * Math.pow(2, attempt), maxMs);
+    const jitter = exponentialDelay * jitterFraction * (Math.random() * 2 - 1);
+    return Math.max(0, Math.floor(exponentialDelay + jitter));
+}
+/**
+ * Execute an async function with exponential backoff retries.
+ * @param fn - Async function to execute
+ * @param maxRetries - Maximum number of retries (0 = no retry)
+ * @param shouldRetry - Optional predicate to decide if error is retryable
+ * @param config - Backoff configuration
+ * @returns Result of the function
+ */
+async function withBackoff(fn, maxRetries = 3, shouldRetry, config) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        }
+        catch (error) {
+            lastError = error;
+            if (attempt >= maxRetries)
+                break;
+            if (shouldRetry && !shouldRetry(error, attempt))
+                break;
+            const delay = getBackoffDelay(attempt, config);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+    throw lastError;
 }
 
 
@@ -18393,8 +19313,8 @@ __webpack_require__.r(__webpack_exports__);
  * ELIGIBLE for a given line by that line's own length — a line only receives the 10-space
  * indent if it's short enough that padding it can't approach the wrap width; a longer line is
  * capped to 5 or 0 automatically. Real message pools (generateFollowupMsg, generateCustomMsg)
- * run 5-33 chars, median 11 — most lines keep the full staircase effect; only the rare long
- * line gets pulled back.
+ * run about 20 visible chars at the median (measured 2026-10-20) — short lines keep the full
+ * staircase; longer ones step down a tier.
  *
  * A message gets ONE of two looks, never both: a STAIRCASE (indented lines, plain blank-line
  * rhythm) or SEPARATORS (flush-left lines divided by a short dot run). Mixing them stacks two
@@ -18412,11 +19332,14 @@ const INDENT_10 = '          '; // 10 spaces
 const MAX_LEN_FOR_INDENT_10 = 20;
 const MAX_LEN_FOR_INDENT_5 = 35;
 const MAX_LINE_BREAKS = 2;
+// Every shape starts flush left. The send path trims the whole message, so an indented first
+// line always lost its indent (26% of picks): "descending" arrived as a copy of SMALL_PEAK and the
+// 2-line "step up" shapes arrived flat. Flat shapes were dropped too: they showed no pattern at
+// all (2026-10-20, owner review of live sends).
 const PATTERNS_3LINE = {
     BUILD_UP: { indent: [0, 5, 10] },
     PEAK_MIDDLE: { indent: [0, 10, 0] },
-    DESCENDING: { indent: [10, 5, 0] },
-    FLAT_WIDE_CLOSE: { indent: [0, 0, 0] },
+    IN_AND_BACK: { indent: [0, 10, 5] },
     SMALL_PEAK: { indent: [0, 5, 0] },
 };
 // Two-line messages are the most common shape in the pools, so they get the same range of
@@ -18426,9 +19349,6 @@ const PATTERNS_3LINE = {
 const PATTERNS_2LINE = {
     STEP_DOWN: { indent: [0, 5] },
     STEP_DOWN_WIDE: { indent: [0, 10] },
-    STEP_UP: { indent: [5, 0] },
-    STEP_UP_WIDE: { indent: [10, 0] },
-    FLAT: { indent: [0, 0] },
 };
 const PATTERN_KEYS_3LINE = Object.keys(PATTERNS_3LINE);
 const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
@@ -18440,11 +19360,9 @@ const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
  * longest messages, which need the visual break the most, as the only ones that always looked
  * identical between sends.
  *
- * The shapes are the same four ideas the short tables express, extended to any length:
+ * The shapes are the short tables' ideas extended to any length, all starting flush left:
  *   BUILD_UP    step inward line by line, capped at the deepest tier
- *   DESCENDING  the reverse — start deep and walk back out to flush left
  *   PEAK        step in to the middle, then back out
- *   FLAT        no indent; the blank-line rhythm carries it alone
  *
  * Each step is one tier (0 -> 5 -> 10) and clamps at 10 rather than growing without bound, so a
  * long message can never march off the right edge of the bubble. capIndentForLength() still caps
@@ -18453,10 +19371,8 @@ const PATTERN_KEYS_2LINE = Object.keys(PATTERNS_2LINE);
 function buildLongPatterns(lineCount) {
     const tier = (step) => Math.min(step, 2) * 5;
     const buildUp = Array.from({ length: lineCount }, (_, i) => tier(i));
-    const descending = Array.from({ length: lineCount }, (_, i) => tier(lineCount - 1 - i));
     const peak = Array.from({ length: lineCount }, (_, i) => tier(Math.min(i, lineCount - 1 - i)));
-    const flat = Array.from({ length: lineCount }, () => 0);
-    return [buildUp, descending, peak, flat];
+    return [buildUp, peak];
 }
 /**
  * Vertical rhythm. Not random — each mode has exactly one, chosen by the mode.
@@ -18478,20 +19394,19 @@ const STAIRCASE_LINE_BREAKS = 2;
  * SEPARATOR mode keeps every line flush left and divides them with a short dot run attached
  * directly to the lines; STAIRCASE mode indents the lines and uses a blank-line gap instead.
  *
- * Two shapes, both dot-based:
- *   INLINE   a single short run on one line ('.', '..', '...', '. . .')
- *   STACKED  dots on consecutive lines ('.\n.', '.\n.\n.') — the vertical spacer style the
- *            message pools already author by hand, which opens the bubble up more than one line
+ * Only one shape: STACKED dots on consecutive lines ('.\n.', '.\n.\n.') — the vertical spacer
+ * style the message pools already author by hand. Inline runs on a single line ('.', '...',
+ * '. . .') were removed 2026-10-20 at the owner's request.
  *
  * Kept to dots (not ~ or -) because those read as a typed pause rather than a drawn divider, and
  * deliberately short: anything longer looks like a drawn rule.
  */
 // Every run is flush left: indentation belongs to staircase mode only, and a separator that
 // stepped inward would read as a staircase made of dots.
-const SEPARATOR_RUNS_INLINE = ['.', '..', '...', '. . .'];
 const SEPARATOR_RUNS_STACKED = ['.\n.', '.\n.\n.'];
 /**
- * Stacked runs are only offered on a 2-line message, where there is exactly ONE gap to fill.
+ * Stacked runs are only offered on a 2-line message, where there is exactly ONE gap to fill, so
+ * separator mode only applies to 2-line messages; 3+ lines always get a staircase.
  *
  * On a 3-line message there are two gaps, and a stacked run in both rebuilds the very shape the
  * sanitizer strips on the way in — dot-separated sentences stacked into a cramped block (the
@@ -18499,9 +19414,7 @@ const SEPARATOR_RUNS_STACKED = ['.\n.', '.\n.\n.'];
  * of runs because it only sampled one random layout per run.
  */
 function separatorRunsFor(lineCount) {
-    return lineCount === 2
-        ? [...SEPARATOR_RUNS_INLINE, ...SEPARATOR_RUNS_STACKED]
-        : SEPARATOR_RUNS_INLINE;
+    return lineCount === 2 ? SEPARATOR_RUNS_STACKED : [];
 }
 /** Share of patterned messages that use dot separators instead of a staircase. */
 const SEPARATOR_MODE_CHANCE = 0.35;
@@ -18548,8 +19461,9 @@ function getPatternedIndent(message) {
     if (lines.length < 2)
         return lines.join('\n\n');
     // Separators OR staircase, never both in one message.
-    if (Math.random() < SEPARATOR_MODE_CHANCE) {
-        const separator = pick(separatorRunsFor(lines.length));
+    const separatorRuns = separatorRunsFor(lines.length);
+    if (separatorRuns.length > 0 && Math.random() < SEPARATOR_MODE_CHANCE) {
+        const separator = pick(separatorRuns);
         return lines.join(`\n${separator}\n`);
     }
     let indents;
@@ -18566,7 +19480,9 @@ function getPatternedIndent(message) {
     return lines
         .map((line, i) => {
         const rawIndent = pattern.indent[i] ?? 0;
-        const safeIndent = capIndentForLength(rawIndent, line.length);
+        // Visible characters, not UTF-16 units: bold glyphs (𝗔) count 2 units each and
+        // lost the 10-space tier at about 10 visible letters.
+        const safeIndent = capIndentForLength(rawIndent, Array.from(line).length);
         const breakCount = Math.min(STAIRCASE_LINE_BREAKS, MAX_LINE_BREAKS);
         const isLast = i === lines.length - 1;
         const trailer = isLast ? '' : '\n'.repeat(breakCount);
@@ -18615,6 +19531,8 @@ function selectRandomElements(array, n) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_IDLE_WAIT_MAX_MS: () => (/* binding */ DEFAULT_IDLE_WAIT_MAX_MS),
+/* harmony export */   DEFAULT_IDLE_WAIT_POLL_MS: () => (/* binding */ DEFAULT_IDLE_WAIT_POLL_MS),
 /* harmony export */   chooseMaintenanceRestartDelayMs: () => (/* binding */ chooseMaintenanceRestartDelayMs),
 /* harmony export */   readMaintenanceRestartConfig: () => (/* binding */ readMaintenanceRestartConfig),
 /* harmony export */   scheduleRandomizedMaintenanceRestart: () => (/* binding */ scheduleRandomizedMaintenanceRestart)
@@ -18625,6 +19543,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_MIN_HOURS = 24;
 const DEFAULT_MAX_HOURS = 30;
 const MAX_TIMER_HOURS = Math.floor(0x7fffffff / HOUR_MS);
+const DEFAULT_IDLE_WAIT_MAX_MS = 15 * 60 * 1000;
+const DEFAULT_IDLE_WAIT_POLL_MS = 30 * 1000;
 /** Read one bounded maintenance-restart policy shared by both Telegram runtimes. */
 function readMaintenanceRestartConfig(env = process.env) {
     const enabled = env.SERVICE_MAINTENANCE_RESTART_ENABLED?.trim().toLowerCase() !== 'false';
@@ -18657,11 +19577,34 @@ function scheduleRandomizedMaintenanceRestart(options) {
     const now = options.now ?? Date.now;
     const delayMs = chooseMaintenanceRestartDelayMs(config.minHours, config.maxHours, options.random);
     const scheduledAtMs = now() + delayMs;
-    const timer = (0,_timers__WEBPACK_IMPORTED_MODULE_0__.scheduleUnrefTimeout)(() => {
+    let timer;
+    const fire = () => {
         Promise.resolve().then(options.restart).catch((error) => {
             options.onError?.(error);
         });
-    }, delayMs);
+    };
+    const idle = options.waitUntilIdle;
+    const maxWaitMs = Math.max(0, idle?.maxWaitMs ?? DEFAULT_IDLE_WAIT_MAX_MS);
+    const pollMs = Math.max(1, idle?.pollMs ?? DEFAULT_IDLE_WAIT_POLL_MS);
+    const attempt = (waitedMs) => {
+        let busy = false;
+        try {
+            busy = !!idle && !idle.isIdle();
+        }
+        catch (error) {
+            options.onError?.(error);
+        }
+        if (busy && waitedMs < maxWaitMs) {
+            if (waitedMs === 0)
+                options.log('Maintenance restart waiting for active work to finish', { service: options.service, maxWaitMinutes: Math.round(maxWaitMs / 60000) });
+            timer = (0,_timers__WEBPACK_IMPORTED_MODULE_0__.scheduleUnrefTimeout)(() => attempt(waitedMs + pollMs), pollMs);
+            return;
+        }
+        if (busy)
+            options.log('Maintenance restart wait cap reached; restarting with work still active', { service: options.service, waitedMinutes: Math.round(waitedMs / 60000) });
+        fire();
+    };
+    timer = (0,_timers__WEBPACK_IMPORTED_MODULE_0__.scheduleUnrefTimeout)(() => attempt(0), delayMs);
     options.log('Maintenance restart scheduled', {
         service: options.service,
         minHours: config.minHours,
@@ -19445,12 +20388,11 @@ __webpack_require__.r(__webpack_exports__);
  *     staircase with blank-line gaps, or flush-left lines divided by a dot run, never both.
  *
  *     UPDATED 2026-09-12: this used to be ">2 content lines", so 2-line messages kept their stored
- *     spacing and never received a pattern at all. patternedIndent now defines five 2-line shapes
- *     (including the deep 10-space step and its reverse) plus separator mode, so a 2-line message
+ *     spacing and never received a pattern at all. patternedIndent now defines 2-line step-down
+ *     shapes (5 and 10 spaces) plus stacked-dot separator mode, so a 2-line message
  *     gets the same varied treatment as a 3-line one. Keeping the old threshold meant the most
  *     common pool shape was the one shape that never varied between sends.
- *   - 4+ real content lines: no pattern is defined for that length, so getPatternedIndent falls
- *     back to flat blank-line separation with no indentation.
+ *   - 4+ real content lines: getPatternedIndent generates build-up / peak shapes for any length.
  */
 
 /** Max consecutive newlines to keep. One blank line is human; four is a broken layout. */
@@ -19466,9 +20408,13 @@ function collapseLetterSpacing(line) {
 function stripFrameCharacters(text) {
     return text.replace(/[─-╿▀-▟■-◿]+/g, ' ');
 }
-/** A "real" content line has a letter, digit, or emoji. Separator-only lines never count. */
+/**
+ * A "real" content line has a letter, digit, emoji, or flag letter. Separator-only lines never
+ * count. Flag letters (🇻 🇮 🇩 …) are not Extended_Pictographic, so "VIDEO CALL" banners written
+ * in them used to be dropped as separators.
+ */
 function isContentLine(line) {
-    return /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(line);
+    return /[\p{L}\p{N}\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(line);
 }
 /**
  * Normalize the structure of a promotion message without altering its wording.
@@ -27071,6 +28017,7 @@ function formatPersonaTimestampShort(value, nowMs = Date.now()) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   __resetPersonaFailureBudgetForTests: () => (/* binding */ __resetPersonaFailureBudgetForTests),
 /* harmony export */   verifyAndCorrectPersona: () => (/* binding */ verifyAndCorrectPersona)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -27083,6 +28030,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /**
  * Persona Verifier
  *
@@ -27099,6 +28047,7 @@ __webpack_require__.r(__webpack_exports__);
  *  - Profile photo refresh is delegated to CommonTgService when needed
  *  - skips reassignment once an assignment already exists
  */
+
 
 
 
@@ -27161,14 +28110,42 @@ async function performOrganicPreamble(client, intensity) {
 }
 // ─── Failure budget ──────────────────────────────────────────────────────────
 const MAX_PERSONA_FAILURES = 3;
+/** The budget is mirrored to Redis (persona::fail::{mobile}) for a day so a restart does not refill it. */
+const PERSONA_FAILURE_TTL_MS = 24 * 60 * 60 * 1000;
 const personaFailureCounts = new Map();
+const personaFailureSeeded = new Set();
 function getFailureCount(mobile) {
     return personaFailureCounts.get(mobile) ?? 0;
+}
+/** First check per mobile in this process also reads the mirrored count (verification is not a hot path). */
+async function loadFailureCount(mobile) {
+    if (!personaFailureSeeded.has(mobile)) {
+        const key = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.stateKey)('persona::fail', mobile);
+        const raw = key ? await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.readState)('persona.fail', (r) => r.get(key)) : null;
+        if (raw !== null || !key)
+            personaFailureSeeded.add(mobile);
+        const stored = Number(raw);
+        if (Number.isFinite(stored) && stored > getFailureCount(mobile))
+            personaFailureCounts.set(mobile, stored);
+    }
+    return getFailureCount(mobile);
 }
 function incrementFailure(mobile) {
     const next = (personaFailureCounts.get(mobile) ?? 0) + 1;
     personaFailureCounts.set(mobile, next);
+    const key = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.stateKey)('persona::fail', mobile);
+    if (key) {
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.writeThrough)('persona.fail', (m) => {
+            m.incr(key);
+            m.pexpire(key, PERSONA_FAILURE_TTL_MS);
+        });
+    }
     return next;
+}
+/** Tests only: forget the in-process budget (simulates a restart). */
+function __resetPersonaFailureBudgetForTests() {
+    personaFailureCounts.clear();
+    personaFailureSeeded.clear();
 }
 // ─── Assignment guards ───────────────────────────────────────────────────────
 function hasAssignment(doc) {
@@ -27253,7 +28230,7 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         correctedPhotos: false,
     };
     // Failure budget guard
-    if (getFailureCount(mobile) >= MAX_PERSONA_FAILURES) {
+    if (await loadFailureCount(mobile) >= MAX_PERSONA_FAILURES) {
         logger.warn(`[Persona] [${mobile}] Failure budget exhausted, skipping verification`);
         return result;
     }
@@ -27709,12 +28686,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+/* harmony import */ var _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/state/mirrors */ "../../packages/tg-core/src/state/mirrors.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+
+
 
 
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("ReactionRateLimiter");
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+/** The account state hash outlives the longest halt (PEER_FLOOD <= 6 h) and the rolling 24 h stats day. */
+const REACTION_STATE_TTL_MS = 25 * HOUR_MS;
 /**
  * Adaptive rate limiter for reactions with:
  * - Multi-modal delay distribution (70/20/10 short/medium/long)
@@ -27751,8 +28736,14 @@ class ReactionRateLimiter {
         this.hourlyFloodTimestamps = [];
         // --- PEER_FLOOD tracking ---
         this.peerFloodReleaseTime = 0;
+        /** True once loadStats() read a stats file (otherwise lastStatsReset is just "process start"). */
+        this.loadedFromFile = false;
         this.instanceId = config.instanceId;
-        this.config = _ReactionTypes__WEBPACK_IMPORTED_MODULE_3__.DEFAULT_REACTION_CONFIG;
+        // Auto-generated ids (rs_<n>_<ts>) change every process: nothing to resume, so no mirror.
+        this.mirrorEnabled = config.redisMirror !== false && !!this.instanceId && !/^rs_\d+_\d+$/.test(this.instanceId);
+        this.hourlyMirror = new _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::hourly'), HOUR_MS, 'reactions.hourly');
+        this.floodMirror = new _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::floods'), HOUR_MS, 'reactions.floods');
+        this.config = _ReactionTypes__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_REACTION_CONFIG;
         this.MIN_DELAY_MS = config.minDelayMs ?? this.config.MIN_DELAY_MS;
         this.MAX_DELAY_MS = config.maxDelayMs ?? this.config.MAX_DELAY_MS;
         this.TARGET_DELAY_MS = config.targetDelayMs ?? this.config.TARGET_DELAY_MS;
@@ -27780,6 +28771,7 @@ class ReactionRateLimiter {
     async initialize() {
         try {
             await this.loadStats();
+            await this.seedFromRedis();
             logger.log(`Initialized with ${this.stats.totalReactions} total reactions, ${this.stats.totalFloods} floods`);
             logger.log(`Current optimal delay: ${(this.stats.optimalDelayMs / 1000).toFixed(1)}s`);
         }
@@ -27870,9 +28862,19 @@ class ReactionRateLimiter {
         return reached;
     }
     recordChannelReaction(channelId) {
-        this.channelLastReaction.set(channelId, Date.now());
+        const now = Date.now();
+        this.channelLastReaction.set(channelId, now);
         const count = this.channelDailyCount.get(channelId) ?? 0;
         this.channelDailyCount.set(channelId, count + 1);
+        const key = this.mirrorKey('reactions::chan');
+        if (key) {
+            const expireAt = Math.max(this.lastStatsReset + DAY_MS, now + HOUR_MS);
+            void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.chan', (m) => {
+                m.hincrby(key, `c:${channelId}`, 1);
+                m.hset(key, `t:${channelId}`, String(now));
+                m.pexpireat(key, expireAt);
+            });
+        }
     }
     // ==================== Delay Calculation ====================
     /**
@@ -27892,7 +28894,7 @@ class ReactionRateLimiter {
             return Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, Math.floor(delay)));
         }
         // Multi-modal delay distribution
-        let delay = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_3__.pickMultiModalDelay)();
+        let delay = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_5__.pickMultiModalDelay)();
         // Ensure within bounds
         return Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, Math.floor(delay)));
     }
@@ -27902,7 +28904,10 @@ class ReactionRateLimiter {
         this.stats.consecutiveSuccesses++;
         this.stats.lastReactionTime = Date.now();
         // Track hourly
-        this.hourlyReactionTimestamps.push(Date.now());
+        const reactedAt = Date.now();
+        this.hourlyReactionTimestamps.push(reactedAt);
+        void this.hourlyMirror.add(reactedAt);
+        this.mirrorIncrement('totalReactions');
         // Sliding window for PID
         this.stats.reactionTimestamps.push(Date.now());
         if (this.stats.reactionTimestamps.length > this.SLIDING_WINDOW_SIZE) {
@@ -27957,10 +28962,12 @@ class ReactionRateLimiter {
         this.lastFloodTime = now;
         // Track floods per hour
         this.hourlyFloodTimestamps.push(now);
+        void this.floodMirror.add(now);
         // Wider buffer: random between 1.5x and 2.0x
         const bufferMultiplier = this.config.FLOOD_BUFFER_MIN +
             Math.random() * (this.config.FLOOD_BUFFER_MAX - this.config.FLOOD_BUFFER_MIN);
         this.floodReleaseTime = now + (waitSeconds * 1000 * bufferMultiplier);
+        this.mirrorFields({ floodReleaseTime: this.floodReleaseTime, lastFloodTime: now });
         // Clear PID sliding window
         this.stats.reactionTimestamps = [];
         this.accumulatedError = 0;
@@ -27992,7 +28999,9 @@ class ReactionRateLimiter {
         this.lastFloodTime = Date.now();
         this.stats.lastFloodTime = Date.now();
         // Track in hourly floods
-        this.hourlyFloodTimestamps.push(Date.now());
+        this.hourlyFloodTimestamps.push(this.lastFloodTime);
+        void this.floodMirror.add(this.lastFloodTime);
+        this.mirrorFields({ peerFloodReleaseTime: this.peerFloodReleaseTime, lastFloodTime: this.lastFloodTime });
         // Clear PID state
         this.stats.reactionTimestamps = [];
         this.accumulatedError = 0;
@@ -28061,6 +29070,10 @@ class ReactionRateLimiter {
             // Reset per-channel daily counts
             this.channelDailyCount.clear();
             this.channelLimitWarned.clear();
+            this.mirrorFields({ totalReactions: 0, lastStatsReset: resetTimestamp });
+            const chanKey = this.mirrorKey('reactions::chan');
+            if (chanKey)
+                void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.chan', (m) => { m.del(chanKey); });
             // Clean up stale channelLastReaction entries (>24h old) to prevent memory leak
             const staleThreshold = Date.now() - 24 * 60 * 60 * 1000;
             for (const [channelId, timestamp] of this.channelLastReaction.entries()) {
@@ -28085,6 +29098,102 @@ class ReactionRateLimiter {
     }
     async flush() {
         await this.persistStats();
+    }
+    // ==================== Redis mirror ====================
+    mirrorKey(namespace) {
+        return this.mirrorEnabled ? (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.stateKey)(namespace, this.instanceId) : null;
+    }
+    mirrorFields(fields) {
+        const key = this.mirrorKey('reactions::state');
+        if (!key)
+            return;
+        const flat = Object.entries(fields).flatMap(([field, value]) => [field, String(value)]);
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.state', (m) => {
+            m.hset(key, ...flat);
+            m.pexpire(key, REACTION_STATE_TTL_MS);
+        });
+    }
+    mirrorIncrement(field) {
+        const key = this.mirrorKey('reactions::state');
+        if (!key)
+            return;
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.state', (m) => {
+            m.hincrby(key, field, 1);
+            m.pexpire(key, REACTION_STATE_TTL_MS);
+        });
+    }
+    /**
+     * Boot seed (after the stats file): flood/peer-flood halts, the daily total, the hourly reaction and
+     * flood windows and per-channel daily counts come back from Redis. The file stays a one-time migration
+     * fallback: deadlines take the later of the two, so neither source can shorten a halt. Then a full
+     * snapshot is written so later HINCRBYs build on the same baseline.
+     */
+    async seedFromRedis() {
+        const stateKeyName = this.mirrorKey('reactions::state');
+        const chanKey = this.mirrorKey('reactions::chan');
+        if (!stateKeyName || !chanKey)
+            return;
+        const now = Date.now();
+        const [state, hourly, floods, chan] = await Promise.all([
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.readState)('reactions.state', (r) => r.hgetall(stateKeyName)),
+            this.hourlyMirror.load(now),
+            this.floodMirror.load(now),
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.readState)('reactions.chan', (r) => r.hgetall(chanKey)),
+        ]);
+        if (state === null && hourly === null && floods === null && chan === null) {
+            logger.warn(`[${this.instanceId}] Redis unavailable at boot; reaction limits seeded from the stats file only`);
+            return;
+        }
+        const num = (value) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? n : 0;
+        };
+        let sameDay = false;
+        if (state && Object.keys(state).length > 0) {
+            this.floodReleaseTime = Math.max(this.floodReleaseTime, num(state.floodReleaseTime));
+            this.peerFloodReleaseTime = Math.max(this.peerFloodReleaseTime, num(state.peerFloodReleaseTime));
+            this.lastFloodTime = Math.max(this.lastFloodTime, num(state.lastFloodTime));
+            this.stats.lastFloodTime = Math.max(this.stats.lastFloodTime, this.lastFloodTime);
+            const redisReset = num(state.lastStatsReset);
+            if (redisReset > 0 && (redisReset > this.lastStatsReset || !this.loadedFromFile)) {
+                this.lastStatsReset = redisReset;
+                this.stats.lastStatsReset = redisReset;
+                this.stats.totalReactions = num(state.totalReactions);
+                sameDay = true;
+            }
+            else if (redisReset === this.lastStatsReset) {
+                this.stats.totalReactions = Math.max(this.stats.totalReactions, num(state.totalReactions));
+                sameDay = true;
+            }
+        }
+        if (hourly && hourly.length > this.hourlyReactionTimestamps.length)
+            this.hourlyReactionTimestamps = hourly;
+        if (floods && floods.length > this.hourlyFloodTimestamps.length)
+            this.hourlyFloodTimestamps = floods;
+        if (chan && sameDay) {
+            for (const [field, raw] of Object.entries(chan)) {
+                const value = num(raw);
+                if (field.startsWith('c:')) {
+                    const id = field.slice(2);
+                    this.channelDailyCount.set(id, Math.max(this.channelDailyCount.get(id) ?? 0, value));
+                }
+                else if (field.startsWith('t:')) {
+                    const id = field.slice(2);
+                    if (now - value < DAY_MS)
+                        this.channelLastReaction.set(id, Math.max(this.channelLastReaction.get(id) ?? 0, value));
+                }
+            }
+        }
+        this.mirrorFields({
+            totalReactions: this.stats.totalReactions,
+            lastStatsReset: this.lastStatsReset,
+            floodReleaseTime: this.floodReleaseTime,
+            peerFloodReleaseTime: this.peerFloodReleaseTime,
+            lastFloodTime: this.lastFloodTime,
+        });
+        if (this.isInFloodWait()) {
+            logger.warn(`[${this.instanceId}] Restored reaction halt: ${Math.ceil(this.getFloodWaitRemaining() / 1000)}s remaining`);
+        }
     }
     // ==================== Internal ====================
     pruneHourlyTimestamps() {
@@ -28141,6 +29250,7 @@ class ReactionRateLimiter {
             this.accumulatedError = 0;
             this.lastError = 0;
             this.stats.optimalDelayMs = Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, this.stats.optimalDelayMs));
+            this.loadedFromFile = true;
             logger.log(`Loaded stats from disk`);
         }
         catch (error) {
@@ -30374,6 +31484,7 @@ class TelegramService {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTE_DECLINE_PASSWORD_RESET_JOB: () => (/* binding */ PROMOTE_DECLINE_PASSWORD_RESET_JOB),
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -30412,11 +31523,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _modules_calls_CallManager__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../modules/calls/CallManager */ "./src/modules/calls/CallManager.ts");
 /* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
 /* harmony import */ var _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../utils/sendMessageQueue */ "./src/utils/sendMessageQueue.ts");
-/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
-/* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _route_state_store__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./route-state-store */ "./src/core/route-state-store.ts");
+/* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
+/* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
+/* harmony import */ var _tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/jobs/redis-jobs */ "../../packages/tg-core/src/jobs/redis-jobs.ts");
+/* harmony import */ var _promote_jobs__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./promote-jobs */ "./src/core/promote-jobs.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 var _a;
 
 
@@ -30453,12 +31566,32 @@ var _a;
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_33__.Logger("TelegramManager");
-function scheduleTelegramManagerTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_32__.scheduleUnrefTimeout)(() => callback().catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, context);
-    }), delayMs);
-}
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__.Logger("TelegramManager");
+/** Delayed password-reset decline after a login code (durable, per mobile). */
+const PROMOTE_DECLINE_PASSWORD_RESET_JOB = "promote.declinePasswordReset";
+const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000;
+const PASSWORD_RESET_DECLINE_MAX_LATE_MS = 30 * 60 * 1000;
+// Re-checked when it fires: the mobile's manager must still be live in this process with a connected client.
+(0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_33__.registerJobHandler)(PROMOTE_DECLINE_PASSWORD_RESET_JOB, async (params, ctx) => {
+    const mobile = String(params.mobile ?? ctx.mobile);
+    const manager = TelegramManager.getActiveInstance(mobile);
+    if (manager && manager.passwordResetJobId === ctx.jobId)
+        manager.passwordResetJobId = null;
+    const client = manager?.client;
+    if (!manager || !client?.connected) {
+        logger.info(`${mobile}: password-reset decline skipped (mobile not connected here)`);
+        return;
+    }
+    try {
+        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_19__.declinePasswordReset)(client, mobile);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.delayedDeclinePasswordReset.${mobile}`);
+        throw error;
+    }
+});
 async function sendTelegramManagerNotification(category, notification, context) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.BotConfig.getInstance().sendMessage(category, notification);
@@ -30493,7 +31626,7 @@ async function fetchOldestSessionFallback(mobile) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_34__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__.getApiKey)(),
         },
         data: {
             mobile,
@@ -30554,7 +31687,7 @@ async function triggerPromoteProfilePhotoRefresh(client, mobile, clientId, profi
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_34__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__.getApiKey)(),
         },
         data: {},
         timeout: 15000,
@@ -30579,6 +31712,11 @@ class TelegramManager {
     }
     static getAllInstances() {
         return Array.from(_a.activeInstances.values());
+    }
+    /** The live (not destroyed) manager for a mobile, if this process runs it. */
+    static getActiveInstance(mobile) {
+        const instance = _a.activeInstances.get(mobile);
+        return instance && !instance.isDestroyed ? instance : undefined;
     }
     static getInstanceCount() {
         return _a.activeInstances.size;
@@ -30644,6 +31782,10 @@ class TelegramManager {
         this.ROUTE_ATTRIBUTION_PACE_MIN_MS = 750;
         this.ROUTE_ATTRIBUTION_PACE_JITTER_MS = 750;
         this.passwordResetTimeout = null;
+        /** The pending durable password-reset decline job (latest login code wins). */
+        this.passwordResetJobId = null;
+        /** Redis mirror of routeStateMap + pendingRouteChats (memory stays authoritative). */
+        this.routeStoreInstance = null;
         // Array limits
         this.MAX_EVENT_HANDLERS = 10;
         // Reusable filter instance - same reference used for add and remove
@@ -30731,6 +31873,64 @@ class TelegramManager {
         // startup-config value until the first 5-min health check runs.
         void this.refreshRouteUsername();
         this.startRouteConversionReconciler();
+        void this.restoreRouteState();
+    }
+    get routeStore() {
+        const mobile = this.clientDetails?.mobile;
+        if (!mobile)
+            return null;
+        if (!this.routeStoreInstance)
+            this.routeStoreInstance = new _route_state_store__WEBPACK_IMPORTED_MODULE_30__.PromoteRouteStore(mobile);
+        return this.routeStoreInstance;
+    }
+    setRouteState(chatId, state) {
+        this.routeStateMap.set(chatId, state);
+        void this.routeStore?.saveRoute(chatId, state);
+    }
+    deleteRouteState(chatId) {
+        if (this.routeStateMap.delete(chatId))
+            void this.routeStore?.deleteRoute(chatId);
+    }
+    deletePendingRoute(chatId) {
+        if (this.pendingRouteChats.delete(chatId))
+            void this.routeStore?.removeBacklog(chatId);
+    }
+    /**
+     * Boot: brings back route escalation state touched within the live-map window (so a user mid-escalation
+     * is not sent stage 1 again) and the 24 h conversion backlog. Never overwrites newer in-memory entries.
+     */
+    async restoreRouteState() {
+        const store = this.routeStore;
+        if (!store)
+            return;
+        try {
+            const now = Date.now();
+            const snapshot = await store.load(now, this.LIVE_MAP_ENTRY_TTL);
+            if (!snapshot || this.isDestroyed)
+                return;
+            let routes = 0;
+            for (const [chatId, state] of snapshot.routes) {
+                if (this.routeStateMap.has(chatId))
+                    continue;
+                this.routeStateMap.set(chatId, state);
+                if (!this.liveMap.has(chatId))
+                    this.liveMap.set(chatId, state.lastSentAt);
+                routes += 1;
+            }
+            let backlog = 0;
+            for (const [chatId, routedAt] of snapshot.backlog) {
+                if (this.pendingRouteChats.has(chatId))
+                    continue;
+                this.pendingRouteChats.set(chatId, routedAt);
+                backlog += 1;
+            }
+            if (routes || backlog) {
+                logger.info(`[PromoteRoute] ${this.clientDetails?.mobile} restored ${routes} route state(s) and ${backlog} pending route(s) from Redis`);
+            }
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails?.mobile}: route state restore failed`, false);
+        }
     }
     /** Recheck this mobile's in-memory routed users every 10 minutes. */
     startRouteConversionReconciler() {
@@ -30812,6 +32012,8 @@ class TelegramManager {
                 const otherEventsHandler = this.callManager.handlePhoneCallEvent.bind(this.callManager);
                 this.eventHandlers.push([this.newMessageFilter, newMessageHandler]);
                 this.client.addEventHandler(newMessageHandler, this.newMessageFilter);
+                // This mobile's durable jobs (e.g. a password-reset decline scheduled before a restart) can run now.
+                (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.startPromoteJobs)(this.clientDetails.mobile);
                 this.eventHandlers.push([null, otherEventsHandler]);
                 this.client.addEventHandler(otherEventsHandler);
                 // Limit eventHandlers array size
@@ -30878,7 +32080,7 @@ class TelegramManager {
                             if (verifyResult.workingName) {
                                 this.clientDetails.name = verifyResult.workingName;
                                 process.env.name = verifyResult.workingName;
-                                (0,_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_31__.refreshRuntimeMessages)();
+                                (0,_messages_runtime_messages__WEBPACK_IMPORTED_MODULE_32__.refreshRuntimeMessages)();
                             }
                             logger.info(`[Persona] Verification completed for ${this.clientDetails.mobile}`, {
                                 workingName: verifyResult.workingName || null,
@@ -31189,7 +32391,7 @@ class TelegramManager {
             for (const [chatId, timestamp] of this.liveMap.entries()) {
                 if (now - timestamp > this.LIVE_MAP_ENTRY_TTL) {
                     this.liveMap.delete(chatId);
-                    this.routeStateMap.delete(chatId);
+                    this.deleteRouteState(chatId);
                     removed++;
                 }
             }
@@ -31200,7 +32402,7 @@ class TelegramManager {
                 const toRemove = this.liveMap.size - this.LIVE_MAP_MAX_SIZE;
                 for (let i = 0; i < toRemove; i++) {
                     this.liveMap.delete(entries[i][0]);
-                    this.routeStateMap.delete(entries[i][0]);
+                    this.deleteRouteState(entries[i][0]);
                     removed++;
                 }
             }
@@ -31272,6 +32474,9 @@ class TelegramManager {
             this.isDestroyed = true;
             const mobile = this.clientDetails?.mobile;
             logger.info(`${mobile}: Disposing TelegramManager instance...`);
+            // Stop this mobile's job poller (due jobs stay in Redis for the next owner of the mobile).
+            if (mobile)
+                await (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.stopPromoteJobs)(mobile).catch((error) => logger.warn(`${mobile}: stopping job poller failed`, error));
             // Stop all client-bound workers before releasing the Telegram transport.
             await this.detachClientBoundServices();
             await this.cleanupClient();
@@ -31282,7 +32487,7 @@ class TelegramManager {
             this.apiHash = null;
             // Remove from daysLeftMap to prevent unbounded growth
             if (mobile) {
-                (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_30__.removeDaysLeft)(mobile);
+                (0,_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_31__.removeDaysLeft)(mobile);
             }
             // Remove from static instances map
             if (mobile) {
@@ -31459,7 +32664,9 @@ class TelegramManager {
             throw error;
         }
         // Only a confirmed Telegram send enters this mobile's in-memory conversion backlog.
-        this.pendingRouteChats.set(chatId, Date.now());
+        const routedAt = Date.now();
+        this.pendingRouteChats.set(chatId, routedAt);
+        void this.routeStore?.addBacklog(chatId, routedAt);
         const appService = _app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
         await appService.updateMsgCount(this.clientDetails.clientId);
         if (this.promoterInstance) {
@@ -31558,7 +32765,7 @@ class TelegramManager {
             for (const [chatId, routedAt] of this.pendingRouteChats) {
                 if (routedAt >= cutoff)
                     continue;
-                this.pendingRouteChats.delete(chatId);
+                this.deletePendingRoute(chatId);
                 try {
                     const expiredConversionId = this.getAttributionConversionId(chatId);
                     if (expiredConversionId) {
@@ -31613,7 +32820,7 @@ class TelegramManager {
                     throw new Error(`Routed-user counter update was not acknowledged for ${completed.length} conversion(s)`);
                 }
                 for (const chatId of completed) {
-                    this.pendingRouteChats.delete(chatId);
+                    this.deletePendingRoute(chatId);
                     try {
                         const settledConversionId = this.getAttributionConversionId(chatId);
                         if (settledConversionId)
@@ -31644,7 +32851,7 @@ class TelegramManager {
             // reconcileRoutedUsers() job — it credits a routed user once they reach the main
             // account. The old inline increment here almost never fired (routed users rarely
             // re-message the promote account) and would double-count against the reconciler.
-            this.routeStateMap.delete(chatId);
+            this.deleteRouteState(chatId);
             logger.info(`[PromoteRoute] ${this.clientDetails.mobile}:${chatId} userData exists; skipping route push`, {
                 clientId: this.clientDetails.clientId,
                 totalCount: userData.totalCount ?? 0,
@@ -31668,7 +32875,7 @@ class TelegramManager {
             // recorded per-inbound in handleEvents, so only newUsers here. Best-effort.
             void db.recordDailyUser(this.clientDetails.mobile, { newUsers: 1 });
             const firstStageUseUrl = await this.sendPromoteRouteStageMessage(chatId, 1);
-            this.routeStateMap.set(chatId, {
+            this.setRouteState(chatId, {
                 stage: 1,
                 lastSentAt: Date.now(),
                 callAttempts: 0,
@@ -31684,7 +32891,7 @@ class TelegramManager {
                 await this.callManager.requestCall(chatId);
                 callAttempts += 1;
             }
-            this.routeStateMap.set(chatId, {
+            this.setRouteState(chatId, {
                 stage: 2,
                 lastSentAt: Date.now(),
                 callAttempts,
@@ -31699,7 +32906,7 @@ class TelegramManager {
             await this.callManager.requestCall(chatId);
             callAttempts += 1;
         }
-        this.routeStateMap.set(chatId, {
+        this.setRouteState(chatId, {
             stage: 3,
             lastSentAt: Date.now(),
             callAttempts,
@@ -31737,7 +32944,7 @@ class TelegramManager {
                             logger.info(`${this.clientDetails.mobile.toUpperCase()}:: ${broadcastName} :: `, event.message.text);
                             const spamBotText = event.message.text || 'SpamBot sent an empty message';
                             const spamBotKind = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.classifySpamBotMessage)(spamBotText);
-                            const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.claimSpamBotNotification)(this.clientDetails.mobile, typeof event.message.id === 'number' ? event.message.id : null);
+                            const shouldNotify = await (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.claimSpamBotNotificationDurable)(this.clientDetails.mobile, typeof event.message.id === 'number' ? event.message.id : null);
                             if (spamBotKind === 'released') {
                                 const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.extractSpamBotReleaseDate)(spamBotText);
                                 if (!date) {
@@ -31832,18 +33039,26 @@ class TelegramManager {
                             }, `TelegramManager.serviceMessageNotification.${this.clientDetails.mobile}`);
                             if (event.message.text.toLowerCase().includes('login code')) {
                                 await this.removeOtherAuths();
-                                // Clear existing timeout if any
+                                // Latest login code wins: drop the previous pending decline.
                                 if (this.passwordResetTimeout) {
                                     clearTimeout(this.passwordResetTimeout);
-                                }
-                                // Use this.client instead of event.client to avoid capturing full event in closure
-                                const clientRef = this.client;
-                                this.passwordResetTimeout = scheduleTelegramManagerTask(async () => {
                                     this.passwordResetTimeout = null;
-                                    if (clientRef?.connected) {
-                                        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_19__.declinePasswordReset)(clientRef, this.clientDetails.mobile);
-                                    }
-                                }, 5 * 60 * 1000, `TelegramManager.delayedDeclinePasswordReset.${this.clientDetails.mobile}`);
+                                }
+                                const mobile = this.clientDetails.mobile;
+                                if (this.passwordResetJobId)
+                                    void (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.cancelPromoteJob)(mobile, this.passwordResetJobId).catch(() => undefined);
+                                // Durable per-mobile job (survives a restart); at-least-once: a decline is idempotent.
+                                const jobId = `pwdecline::${mobile}::${typeof event.message.id === "number" ? event.message.id : Date.now()}`;
+                                this.passwordResetJobId = jobId;
+                                await (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.schedulePromoteJob)(mobile, {
+                                    id: jobId,
+                                    type: PROMOTE_DECLINE_PASSWORD_RESET_JOB,
+                                    delayMs: PASSWORD_RESET_DECLINE_DELAY_MS,
+                                    chatId: "777000",
+                                    params: { mobile },
+                                    semantics: "at-least-once",
+                                    maxLateMs: PASSWORD_RESET_DECLINE_MAX_LATE_MS,
+                                }).catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.delayedDeclinePasswordReset.${mobile}`));
                             }
                             if (event.message.text.toLowerCase().includes('request to reset account')) {
                                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_20__.sleep)(2000);
@@ -35779,6 +36994,198 @@ class MobileManager {
 
 /***/ },
 
+/***/ "./src/core/promote-jobs.ts"
+/*!**********************************!*\
+  !*** ./src/core/promote-jobs.ts ***!
+  \**********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   __resetPromoteJobsForTests: () => (/* binding */ __resetPromoteJobsForTests),
+/* harmony export */   cancelPromoteJob: () => (/* binding */ cancelPromoteJob),
+/* harmony export */   promoteJobsClientId: () => (/* binding */ promoteJobsClientId),
+/* harmony export */   promoteJobsFor: () => (/* binding */ promoteJobsFor),
+/* harmony export */   schedulePromoteJob: () => (/* binding */ schedulePromoteJob),
+/* harmony export */   startPromoteJobs: () => (/* binding */ startPromoteJobs),
+/* harmony export */   stopPromoteJobs: () => (/* binding */ stopPromoteJobs)
+/* harmony export */ });
+/* harmony import */ var _tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/jobs/redis-jobs */ "../../packages/tg-core/src/jobs/redis-jobs.ts");
+/**
+ * Durable delayed jobs for promote-clients (survive a restart), on @tg/core/jobs/redis-jobs.
+ *
+ * A promote process runs several mobiles: each gets its own scheduler (its own due ZSET
+ * `tgjobs::due::promote-{clientId}::{mobile}`), started when the mobile connects. The scheduler drops a job whose
+ * mobile does not match, so a job for a mobile that moved to another process never runs here. Handlers are
+ * registered once (module load) in the shared registry, so a restarted process has them before any poller ticks.
+ *
+ * Redis down: redis-jobs runs the job from an in-process timer (logged "non-durable"), as before.
+ */
+
+const schedulers = new Map();
+let schedulerFactory = (mobile) => (0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__.createRegistryJobScheduler)({ clientId: promoteJobsClientId(), mobile });
+/** Job namespace of this promote process (kept apart from tg-aut's on the same Redis). */
+function promoteJobsClientId() {
+    return `promote-${process.env.clientId || "default"}`;
+}
+/** The mobile's scheduler, created and started on first use. */
+function promoteJobsFor(mobile) {
+    let scheduler = schedulers.get(mobile);
+    if (!scheduler) {
+        scheduler = schedulerFactory(mobile);
+        schedulers.set(mobile, scheduler);
+        scheduler.start();
+    }
+    return scheduler;
+}
+/** Starts the mobile's poller (so jobs scheduled before a restart run once the mobile is back). */
+function startPromoteJobs(mobile) {
+    if (mobile)
+        promoteJobsFor(mobile);
+}
+function schedulePromoteJob(mobile, options) {
+    return promoteJobsFor(mobile).schedule(options);
+}
+function cancelPromoteJob(mobile, id) {
+    return schedulers.get(mobile)?.cancel(id) ?? Promise.resolve(false);
+}
+/** Stops one mobile's poller (or all): due jobs stay in Redis for the next owner of the mobile. */
+async function stopPromoteJobs(mobile) {
+    const targets = mobile ? [[mobile, schedulers.get(mobile)]] : [...schedulers.entries()];
+    for (const [key, scheduler] of targets) {
+        if (!scheduler)
+            continue;
+        schedulers.delete(key);
+        await scheduler.stop();
+    }
+}
+/** Tests only. */
+async function __resetPromoteJobsForTests(factory) {
+    await stopPromoteJobs();
+    schedulerFactory = factory ?? ((mobile) => (0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__.createRegistryJobScheduler)({ clientId: promoteJobsClientId(), mobile }));
+}
+
+
+/***/ },
+
+/***/ "./src/core/route-state-store.ts"
+/*!***************************************!*\
+  !*** ./src/core/route-state-store.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTE_ROUTE_STATE_TTL_MS: () => (/* binding */ PROMOTE_ROUTE_STATE_TTL_MS),
+/* harmony export */   PromoteRouteStore: () => (/* binding */ PromoteRouteStore)
+/* harmony export */ });
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/**
+ * Redis mirror of a promote account's reply-routing state (TelegramManager keeps the Maps authoritative).
+ *
+ *   promote::route::{mobile}         HASH  chatId -> {"stage","lastSentAt","callAttempts","firstStageUseUrl"}  TTL 24 h
+ *   promote::routebacklog::{mobile}  ZSET  chatId -> routedAt ms (confirmed route sends awaiting conversion)  TTL 24 h
+ *
+ * Without it a restart re-sent stage 1 (and re-rang) users already mid-escalation, and dropped the 24 h
+ * conversion backlog. Writes are fire-and-forget; load() runs once at boot.
+ */
+
+const PROMOTE_ROUTE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+function parseRoute(raw) {
+    try {
+        const v = JSON.parse(raw);
+        const stage = Number(v.stage);
+        const lastSentAt = Number(v.lastSentAt);
+        if (![1, 2, 3].includes(stage) || !Number.isFinite(lastSentAt))
+            return null;
+        return {
+            stage: stage,
+            lastSentAt,
+            callAttempts: Math.max(0, Number(v.callAttempts) || 0),
+            firstStageUseUrl: v.firstStageUseUrl === true,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+class PromoteRouteStore {
+    constructor(mobile) {
+        this.routeKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::route", mobile);
+        this.backlogKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::routebacklog", mobile);
+    }
+    saveRoute(chatId, state) {
+        const key = this.routeKey;
+        if (!key)
+            return Promise.resolve(false);
+        const value = JSON.stringify({
+            stage: state.stage,
+            lastSentAt: state.lastSentAt,
+            callAttempts: state.callAttempts,
+            firstStageUseUrl: state.firstStageUseUrl,
+        });
+        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.route", (m) => {
+            m.hset(key, chatId, value);
+            m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
+        });
+    }
+    deleteRoute(...chatIds) {
+        const key = this.routeKey;
+        if (!key || chatIds.length === 0)
+            return Promise.resolve(false);
+        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.route", (m) => { m.hdel(key, ...chatIds); });
+    }
+    addBacklog(chatId, routedAt) {
+        const key = this.backlogKey;
+        if (!key)
+            return Promise.resolve(false);
+        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.routebacklog", (m) => {
+            m.zadd(key, routedAt, chatId);
+            m.zremrangebyscore(key, "-inf", routedAt - PROMOTE_ROUTE_STATE_TTL_MS);
+            m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
+        });
+    }
+    removeBacklog(...chatIds) {
+        const key = this.backlogKey;
+        if (!key || chatIds.length === 0)
+            return Promise.resolve(false);
+        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.routebacklog", (m) => { m.zrem(key, ...chatIds); });
+    }
+    /**
+     * Routes last touched within `maxRouteAgeMs` and backlog entries younger than 24 h; null when Redis is
+     * unavailable (the caller then starts empty, as before).
+     */
+    async load(now, maxRouteAgeMs) {
+        const routeKey = this.routeKey;
+        const backlogKey = this.backlogKey;
+        if (!routeKey || !backlogKey)
+            return null;
+        const [hash, backlog] = await Promise.all([
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.route", (r) => r.hgetall(routeKey)),
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.routebacklog", (r) => r.zrangebyscore(backlogKey, now - PROMOTE_ROUTE_STATE_TTL_MS, "+inf", "WITHSCORES")),
+        ]);
+        if (hash === null && backlog === null)
+            return null;
+        const routes = [];
+        for (const [chatId, raw] of Object.entries(hash ?? {})) {
+            const state = parseRoute(raw);
+            if (state && now - state.lastSentAt <= maxRouteAgeMs)
+                routes.push([chatId, state]);
+        }
+        const entries = [];
+        const flat = backlog ?? [];
+        for (let i = 0; i + 1 < flat.length; i += 2) {
+            const at = Number(flat[i + 1]);
+            if (Number.isFinite(at))
+                entries.push([String(flat[i]), at]);
+        }
+        return { routes, backlog: entries };
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/core/setupNewMobile.ts"
 /*!************************************!*\
   !*** ./src/core/setupNewMobile.ts ***!
@@ -35797,6 +37204,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+
 
 
 
@@ -35826,6 +37235,22 @@ async function sendSetupNewMobileNotification(notification, context) {
 }
 const lastExecutionTimeByMobile = new Map();
 const MIN_EXECUTION_INTERVAL = 5 * 60 * 1000; // 5 minutes
+/** The throttle timestamp is mirrored to promote::setup::{mobile} (TTL = the 5 min interval) so a restart keeps it. */
+function setupThrottleKey(mobile) {
+    return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.stateKey)("promote::setup", mobile);
+}
+async function lastExecutionTime(mobile) {
+    const local = lastExecutionTimeByMobile.get(mobile) || 0;
+    const key = setupThrottleKey(mobile);
+    const stored = key ? Number(await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.readState)("promote.setup", (r) => r.get(key))) : 0;
+    return Math.max(local, Number.isFinite(stored) ? stored : 0);
+}
+function recordExecution(mobile, at) {
+    lastExecutionTimeByMobile.set(mobile, at);
+    const key = setupThrottleKey(mobile);
+    if (key)
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.writeThrough)("promote.setup", (m) => { m.set(key, String(at), "PX", MIN_EXECUTION_INTERVAL); });
+}
 const MIN_SERVICE_START_DELAY = 5 * 60 * 1000; // 5 minutes
 const DELETE_MIN_INTERVAL = 1 * 60 * 1000; // 1 minute
 const LIMITED_ACCOUNT_EXIT_DAYS = 3;
@@ -35837,7 +37262,7 @@ function __resetSetupNewMobileForTests(nextServiceStartTime = Date.now()) {
 async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = false, message = 'inactive') {
     logger.info(`[SetupNewMobile] Request for mobile: ${mobile} | daysLeft: ${daysLeft} | message: ${message} | saveOld: ${saveOld} | deleteOld: ${deleteOld}`);
     const currentTime = Date.now();
-    const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld);
+    const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld, await lastExecutionTime(mobile));
     if (!validationResult.canExecute) {
         logger.info('Setup conditions not met:', validationResult.reasons.join('; '));
         await sendSetupNewMobileNotification({
@@ -35863,7 +37288,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
         try {
             await Promise.all(promises);
             // Only update execution time for this mobile if any work was done
-            lastExecutionTimeByMobile.set(mobile, currentTime);
+            recordExecution(mobile, currentTime);
             operationSucceeded = true;
         }
         catch (err) {
@@ -35884,9 +37309,8 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
         scheduleExit(mobile, message, daysLeft, saveOld, deleteOld);
     }
 }
-function validateExecutionConditions(mobile, currentTime, deleteOld) {
+function validateExecutionConditions(mobile, currentTime, deleteOld, lastExecutionTime) {
     const reasons = [];
-    const lastExecutionTime = lastExecutionTimeByMobile.get(mobile) || 0;
     if (deleteOld) {
         if (lastExecutionTime >= currentTime - DELETE_MIN_INTERVAL) {
             reasons.push(`lastExecutionTime not older than 1 min (last: ${new Date(lastExecutionTime).toISOString()})`);
