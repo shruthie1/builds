@@ -14256,12 +14256,12 @@ class BotConfig {
         return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
     }
     /** Client id alone on the first line (owner, 2026-10-19), as in rich cards. */
-    prefixMessage(message, parseMode) {
+    prefixMessage(message, parseMode, gap = false) {
         const prefix = parseMode === 'HTML' ? `<b>${this.clientPrefix(parseMode)}</b>` : this.clientPrefix(parseMode);
-        return `${prefix}\n${message.replace(/^\s*\n/, '')}`;
+        return `${prefix}\n${gap ? '\n' : ''}${message.replace(/^\s*\n/, '')}`;
     }
     outboundMessage(message, parseMode, prefix = true) {
-        return prefix === false ? message : this.prefixMessage(message, parseMode);
+        return prefix === false ? message : this.prefixMessage(message, parseMode, prefix === 'gap');
     }
     formatNotificationMessage(message, options, category) {
         // CLIENT_UPDATES ops notices use the plain house style (no severity icons); other channels are unchanged.
@@ -14475,74 +14475,23 @@ class BotConfig {
         return this.sendMedia(category, 'sendPhoto', photo, options);
     }
     /**
-     * One rich card with the photo embedded (heading, photo, table, quotes, buttons). `onSent` gets the
-     * card's message id (a later verdict can reply to it). Falls back to a classic photo + HTML caption when
-     * Telegram refuses the rich payload.
+     * A screenshot card as a classic photo with an HTML caption (owner, 2026-10-19: a rich-message photo is shown
+     * cropped, the classic photo full width). Caption: bold caps title, blank line, `Label: value` lines starting
+     * with Client, then the quote/details in an expandable blockquote (formatPhotoCaptionHtml). No client prefix
+     * line on top. Bot failover is sendMedia's. `onSent` gets the photo's message id.
      */
     async sendPhotoCard(category, photo, card, options = {}) {
-        await this.ensureInitialized();
-        const data = this.categoryMap.get(category);
-        if (!data || data.botTokens.length === 0) {
-            logger.error(`No valid bots configured for ${category}`);
-            return false;
-        }
-        const botIndex = this.getNextAvailableBotIndex(data, category);
-        if (botIndex == null)
-            return false;
-        const token = data.botTokens[botIndex];
-        const channelId = data.channelId;
-        const input = { ...card, ...(category === ChannelCategory.CLIENT_UPDATES ? { houseStyle: true } : {}) };
-        const html = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: card.source ?? process.env.clientId ?? undefined, imageId: 'shot' });
-        const form = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
-        form.append('chat_id', channelId);
-        form.append('rich_message', JSON.stringify({ html, media: [{ id: 'shot', media: { type: 'photo', media: 'attach://shotfile' } }] }));
-        form.append('shotfile', photo, 'photo.jpg');
-        const keyboard = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(input);
-        if (keyboard)
-            form.append('reply_markup', JSON.stringify(keyboard));
-        if (options.disableNotification)
-            form.append('disable_notification', 'true');
-        if (options.replyToMessageId)
-            form.append('reply_parameters', JSON.stringify({ message_id: options.replyToMessageId, allow_sending_without_reply: true }));
-        try {
-            const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(`https://api.telegram.org/bot${token}/sendRichMessage`, form, {
-                timeout: 30000,
-                headers: { ...form.getHeaders() },
-            });
-            if (response.data?.ok === true) {
-                this.recordSuccessfulBotSend(category, token, channelId);
-                const messageId = response.data?.result?.message_id;
-                if (typeof messageId === 'number') {
-                    try {
-                        options.onSent?.(messageId);
-                    }
-                    catch { /* a caller hook never fails the send */ }
-                }
-                return true;
-            }
-            throw this.createTelegramBotApiError(response, 'Telegram Bot API returned ok=false for sendRichMessage (photo card)');
-        }
-        catch (error) {
-            const { status, description } = this.botSendFailureDetails(error);
-            logger.warn(`BOT rich-photo-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
-            if (this.isBotOrChannelFailure(error)) {
-                if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
-                    data.lastUsedIndex = botIndex;
-                    return this.sendPhotoCard(category, photo, card, options);
-                }
-                return false;
-            }
-            if (Number(status) === 400 || Number(status) === 404) {
-                data.lastUsedIndex = (botIndex - 1 + data.botTokens.length) % data.botTokens.length;
-                const caption = this.formatNotificationMessage(card, {}, category).text;
-                return this.sendMedia(category, 'sendPhoto', photo, {
-                    caption: caption.length > 950 ? `${caption.slice(0, caption.lastIndexOf('\n', 950) > 0 ? caption.lastIndexOf('\n', 950) : 950)}` : caption,
-                    parseMode: 'HTML',
-                    disableNotification: options.disableNotification,
-                });
-            }
-            return false;
-        }
+        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
+        return this.sendMedia(category, 'sendPhoto', photo, {
+            caption,
+            parseMode: 'HTML',
+            prefix: false,
+            disableNotification: options.disableNotification,
+            replyToMessageId: options.replyToMessageId,
+            allowSendingWithoutReply: options.replyToMessageId ? true : undefined,
+            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(card),
+            onSent: options.onSent,
+        });
     }
     /**
      * Send video to a channel
@@ -14796,6 +14745,8 @@ class BotConfig {
             formData.append('disable_notification', 'true');
         if (options.replyToMessageId)
             formData.append('reply_to_message_id', options.replyToMessageId.toString());
+        if (options.replyMarkup)
+            formData.append('reply_markup', typeof options.replyMarkup === 'string' ? options.replyMarkup : JSON.stringify(options.replyMarkup));
         if (options.allowSendingWithoutReply)
             formData.append('allow_sending_without_reply', 'true');
         if (options.protectContent)
@@ -14897,6 +14848,13 @@ class BotConfig {
             });
             if (response.data?.ok === true) {
                 this.recordSuccessfulBotSend(category, token, channelId);
+                const messageId = response.data?.result?.message_id;
+                if (typeof messageId === 'number') {
+                    try {
+                        options.onSent?.(messageId);
+                    }
+                    catch { /* a caller hook never fails the send */ }
+                }
                 return true;
             }
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
@@ -18765,8 +18723,10 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PHOTO_CAPTION_MAX_CHARS: () => (/* binding */ PHOTO_CAPTION_MAX_CHARS),
 /* harmony export */   RICH_MESSAGE_MAX_CHARS: () => (/* binding */ RICH_MESSAGE_MAX_CHARS),
 /* harmony export */   fieldsFromObject: () => (/* binding */ fieldsFromObject),
+/* harmony export */   formatPhotoCaptionHtml: () => (/* binding */ formatPhotoCaptionHtml),
 /* harmony export */   formatRichMessageHtml: () => (/* binding */ formatRichMessageHtml),
 /* harmony export */   humanizeKey: () => (/* binding */ humanizeKey),
 /* harmony export */   notificationButtons: () => (/* binding */ notificationButtons),
@@ -18881,30 +18841,47 @@ function detailLines(input) {
     return (Array.isArray(input.details) ? input.details : [input.details]).map((d) => String(d ?? '')).filter((d) => d.trim());
 }
 /**
- * Rich HTML for sendRichMessage. `prefix` (the clientId) is the first line on its own, then the title,
- * then a field table (owner, 2026-10-18: multi-line, tables wherever there are fields).
+ * Rich HTML for sendRichMessage. Table cards: `prefix` (the clientId) is the first line on its own, then a
+ * field table headed by the title. Line cards (CLIENT_UPDATES, fieldLayout 'lines'): one bold
+ * `clientId · TITLE` line, a blank line, then `Label: value` lines.
  */
 function formatRichMessageHtml(input, opts = {}) {
-    const title = noEmoji(input.title || input.summary) || 'Notification';
+    // CLIENT_UPDATES (houseStyle, unless a card asks for a table) and fieldLayout 'lines' cards are line cards
+    // (owner, 2026-10-19): `<b>client · TITLE IN CAPS</b>`, a blank line, then `<b>Label:</b> value` lines; no table.
+    const updates = input.houseStyle === true && input.fieldLayout !== 'table';
+    const lines = input.fieldLayout === 'lines' || updates;
+    const plainTitle = noEmoji(input.title || input.summary) || 'Notification';
+    const title = lines ? plainTitle.toUpperCase() : plainTitle;
     const titleLess = input.title === '' && !input.summary;
     // Bold lines, not <h3>: the big heading made every card tall (owner, 2026-10-18).
     // title '' = no title line (e.g. a payment screenshot card: the photo says what it is).
     const fields = visibleFields(input);
-    // With fields, the title is the table's header row, right under the client id (owner, 2026-10-19: a
-    // title line above a table left a gap). Without fields it stays a bold line after a blank line.
+    // Table cards: with fields, the title is the table's header row, right under the client id (owner, 2026-10-19:
+    // a title line above a table left a gap). Without fields it stays a bold line after a blank line.
     // Telegram wraps a header cell to the column widths: titles are kept short at their call sites.
     // No field table: the title heads the first data table instead.
-    const headerRow = !titleLess && (fields.length > 0 || (input.tables?.length ?? 0) > 0);
-    const parts = [
-        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`] : []),
-        ...(titleLess || headerRow ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
-    ];
+    const headerRow = !lines && !titleLess && (fields.length > 0 || (input.tables?.length ?? 0) > 0);
+    const parts = [];
+    if (lines) {
+        const head = [opts.prefix, titleLess ? '' : title].filter(Boolean).map((t) => (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(t)).join(' · ');
+        if (head)
+            parts.push(`<p><b>${head}</b>${fields.length ? '<br/>' : ''}</p>`);
+    }
+    else {
+        if (opts.prefix)
+            parts.push(`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`);
+        if (!titleLess && !headerRow)
+            parts.push(`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`);
+    }
     if (opts.imageId)
         parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
-    const summary = input.summary && input.summary !== title ? `<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>` : '';
+    const summary = input.summary && input.summary !== plainTitle ? `<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>` : '';
     if (summary && !headerRow)
         parts.push(summary);
-    if (fields.length) {
+    if (fields.length && lines) {
+        parts.push(`<p>${fields.map((f) => `<b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}:</b> ${cellValue(f)}`).join('<br/>')}</p>`);
+    }
+    else if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
         const head = headerRow ? `<tr><th colspan="2">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</th></tr>` : '';
         parts.push(`<table bordered striped compact>${head}${rows.join('')}</table>`);
@@ -18939,7 +18916,56 @@ function formatRichMessageHtml(input, opts = {}) {
     // Plain lines, not paragraphs (owner, 2026-10-18): <p> spacing made cards tall.
     // A block (table, quote, details, photo) already starts on its own line: a <br/> before it left a blank
     // gap under the title (owner, 2026-10-19).
-    return parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>').replace(/<br\/>\n?(?=<(?:table|blockquote|details|img)\b)/g, '\n');
+    const html = parts.join('\n').replace(/<p>([\s\S]*?)<\/p>\n?/g, '$1<br/>').replace(/<br\/>\n?(?=<(?:table|blockquote|details|img)\b)/g, '\n');
+    // quoteGap: one blank line above the first quote (owner, 2026-10-19: the account login card).
+    return input.quoteGap ? html.replace(/\n?(?=<(?:blockquote|details)\b)/, '<br/>') : html;
+}
+/** Telegram's caption limit (classic sendPhoto). */
+const PHOTO_CAPTION_MAX_CHARS = 1024;
+/**
+ * Classic photo caption for a screenshot card (owner, 2026-10-19: a rich-message photo is shown cropped, the
+ * classic photo full width): `<b>TITLE</b>` and a blank line (no title line when title is ''), then
+ * `<b>Label:</b> value` lines starting with `Client`, then a blank line and the quote / details in one
+ * expandable blockquote. The quote is clipped so the caption fits 1024 chars; the field lines are kept.
+ */
+function formatPhotoCaptionHtml(card, clientId) {
+    const head = [];
+    const title = noEmoji(card.title);
+    if (title)
+        head.push(`<b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title.toUpperCase())}</b>`, '');
+    const fields = [
+        ...(clientId ? [{ label: 'Client', value: clientId, code: false }] : []),
+        ...(card.fields ?? []).filter((f) => f.value !== undefined && f.value !== null && String(f.value) !== ''),
+    ];
+    for (const f of fields) {
+        const value = (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(String(f.value));
+        head.push(`<b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}:</b> ${f.url ? `<a href="${attr(f.url)}">${value}</a>` : value}`);
+    }
+    let caption = head.join('\n');
+    if (caption.length > PHOTO_CAPTION_MAX_CHARS) {
+        // Whole lines only, so no tag or entity is cut.
+        const cut = caption.lastIndexOf('\n', PHOTO_CAPTION_MAX_CHARS);
+        caption = caption.slice(0, cut > 0 ? cut : 0);
+    }
+    const body = [card.quote, ...detailLines(card)].map((t) => String(t ?? '').replace(/\r\n?/g, '\n').trim()).filter(Boolean).join('\n');
+    if (!body)
+        return caption;
+    const open = `${caption ? '\n\n' : ''}<blockquote expandable>`;
+    const close = '</blockquote>';
+    const budget = PHOTO_CAPTION_MAX_CHARS - caption.length - open.length - close.length;
+    const full = (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(body);
+    if (full.length <= budget)
+        return `${caption}${open}${full}${close}`;
+    // Clip the raw text one character at a time and escape it, so an entity (&amp;) is never cut in half.
+    let clipped = '';
+    for (const ch of Array.from(body)) {
+        const next = clipped + (0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(ch);
+        if (next.length + 1 > budget)
+            break;
+        clipped = next;
+    }
+    clipped = clipped.trimEnd();
+    return clipped ? `${caption}${open}${clipped}…${close}` : caption;
 }
 /** "totalSentCount" -> "Total sent count". */
 function humanizeKey(key) {
@@ -31801,6 +31827,7 @@ class TelegramManager {
                                 fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
                                 quote: event.message.text?.slice(0, 500),
                                 quoteLabel: "",
+                                quoteGap: true,
                                 tags: ["promote", "telegram", "auth"],
                             }, `TelegramManager.serviceMessageNotification.${this.clientDetails.mobile}`);
                             if (event.message.text.toLowerCase().includes('login code')) {
