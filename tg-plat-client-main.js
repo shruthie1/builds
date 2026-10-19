@@ -38410,6 +38410,7 @@ AUTHENTICITY (fakeScore, fakeVerdict, fakeSignals, fakeEvidence) - is this a rea
   - Judge ONLY from what is visible. Never guess from the payee, the amount or the user.
   - fakeScore 0.0-1.0 (0 certainly genuine, 1 certainly fake). fakeVerdict genuine | suspicious | fake. Genuine: fakeScore < 0.4.
   - A genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) scores LOW (0.0-0.2). Banners, ads, offers, cashback cards, the "Gemini" button or other app UI in a real app are NOT fake signals.
+  - Many real UPI apps look different from GPay/PhonePe: Fam/FamX ("Paid with fam", "Powered by trio"), CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps and Paytm QR receipts. A ticket, receipt or torn-paper style card is how some of them draw a payment; an unfamiliar or receipt-style layout is NOT evidence of a fake (not_real_app_layout only for a layout that copies a known app and gets it visibly wrong).
   - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator or photo/text editor app (e.g. a "PhoText" watermark: signal generator_stamp); visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a UTR that is not 12 digits, a time like 25:70); a photo of another screen.
   - You do NOT know today's date. Never treat a date or year as future, past or impossible; dates are checked by code.
   - Unsure or just low quality / cropped: fakeScore 0.3-0.5, verdict suspicious or genuine. Low quality alone is not evidence of fraud.
@@ -38427,7 +38428,7 @@ function analysisPromptWithKeys(keysBlock) {
     return `${ANALYSIS_PROMPT}\n\n${keysBlock}`;
 }
 /** Second-opinion prompt (design section 5), single instruction, blind to the first answer. */
-const VERIFICATION_PROMPT = "Look at this payment screenshot. Answer only from what is visible. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. 7) Does the word 'PhoText' (any case, even a faint watermark) appear anywhere? If yes it is a fake made with a photo-editing app: quote it in fakeEvidence. 8) Is this a genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) or fabricated/edited? Give fakeScore 0.0 (certainly genuine) to 1.0 (certainly fake), fakeVerdict genuine|suspicious|fake, fakeSignals (only: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other) and up to 5 short fakeEvidence strings of visible facts. You do not know today's date: never call a date future or impossible. Banners, ads and app buttons inside a real app are not fake signals; score 0.85 or more only with concrete visible evidence; a watermark of a photo/text editor app (e.g. 'PhoText') is such evidence (generator_stamp, quote it in fakeEvidence). Return null for anything not clearly visible.";
+const VERIFICATION_PROMPT = "Look at this image. Answer only from what is visible; do not assume it is a payment or a fake. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. 7) Does the word 'PhoText' (any case, even a faint watermark) appear anywhere? If yes it is a fake made with a photo-editing app: quote it in fakeEvidence. 8) Judge authenticity only from concrete visible evidence: is this an unedited screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, Fam, CRED, bank apps and others), or is there visible proof it was fabricated or edited? Give fakeScore 0.0 (certainly genuine) to 1.0 (certainly fake), fakeVerdict genuine|suspicious|fake, fakeSignals (only: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other) and up to 5 short fakeEvidence strings of visible facts. You do not know today's date: never call a date future or impossible. Banners, ads and app buttons inside a real app are not fake signals; many real UPI apps (Fam/FamX 'Paid with fam', CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps, Paytm QR receipts) draw a ticket/receipt-style card, and an unfamiliar or receipt-style layout is not evidence of a fake; score 0.85 or more only with concrete visible evidence; a watermark of a photo/text editor app (e.g. 'PhoText') is such evidence (generator_stamp, quote it in fakeEvidence). Return null for anything not clearly visible.";
 
 
 /***/ },
@@ -73759,8 +73760,8 @@ function hasHardTextSignal(vision, dbcoll) {
  * no proof rule can fire on a chat page, meme or unclear image; owner 2026-10-19: classification keeps non-payments
  * out, fraud blocking on payments stays as strict as before).
  * BLOCK on: LONG or SHORT disclaimer text in the image text, tier-A blocklist, AI watermark,
- * or an LLM fakeScore >= FAKE_BLOCK_SCORE that is CORROBORATED (second opinion fake, or a code-verified signal: payee
- * not ours / malformed UTR / future date). One model's judgement alone never BLOCKs; it asks for proof. A missing
+ * or an LLM fakeScore >= FAKE_BLOCK_SCORE that is CORROBORATED (second opinion fake with a concrete visible signal from
+ * either model, see CONCRETE_FAKE_SIGNALS; or a code-verified signal: payee not ours / malformed UTR / future date). One model's judgement alone never BLOCKs; it asks for proof. A missing
  * authenticity (OCR-only provider, skipped second opinion) is "no opinion" and can never cause BLOCK.
  */
 function decide(input) {
@@ -73813,10 +73814,11 @@ function decide(input) {
         const s = so?.authenticity ?? null;
         const score = a?.fakeScore ?? 0;
         const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.SECOND_OPINION_FAKE_SCORE);
+        const concrete = [...(a?.signals ?? []), ...(s?.signals ?? [])].some(sig => _thresholds__WEBPACK_IMPORTED_MODULE_4__.CONCRETE_FAKE_SIGNALS.includes(sig));
         const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.SECOND_OPINION_ASK_SCORE);
         if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_4__.FAKE_BLOCK_SCORE) {
             // corroboration by an independent check; the first matching rule names the BLOCK
-            if (secondFake)
+            if (secondFake && concrete)
                 block.push('LLM_FAKE_CONFIRMED_SECOND_OPINION');
             if (payeeNotOurs)
                 block.push('LLM_FAKE_PAYEE_NOT_OURS');
@@ -74145,6 +74147,7 @@ async function lookupReuse(repo, q) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   AUTHENTICITY_FLAG: () => (/* binding */ AUTHENTICITY_FLAG),
+/* harmony export */   CONCRETE_FAKE_SIGNALS: () => (/* binding */ CONCRETE_FAKE_SIGNALS),
 /* harmony export */   FAKE_ASK_SCORE: () => (/* binding */ FAKE_ASK_SCORE),
 /* harmony export */   FAKE_BLOCK_SCORE: () => (/* binding */ FAKE_BLOCK_SCORE),
 /* harmony export */   FUTURE_DATE_SKEW_MS: () => (/* binding */ FUTURE_DATE_SKEW_MS),
@@ -74164,6 +74167,11 @@ const FAKE_BLOCK_SCORE = 0.85;
 const SECOND_OPINION_FAKE_SCORE = 0.7;
 /** Second opinion counts as "suspicious" at this score (or verdict suspicious/fake): ASK_PROOF only. */
 const SECOND_OPINION_ASK_SCORE = 0.5;
+/** Visible-manipulation signals that let two models' "fake" BLOCK. Layout, "impossible values" (UTR/date are checked
+ *  by code), cropped and "other" alone only ask for proof: live 2026-10-11..19, 26 of 67 model-pair blocks rested on
+ *  those alone (a Fam torn-paper receipt, "year 2026 is future", an iPhone ad) and 4 of them were the same image
+ *  accepted on a later send. */
+const CONCRETE_FAKE_SIGNALS = ['edited_amount', 'font_mismatch', 'generator_stamp', 'disclaimer_text', 'ai_watermark', 'photo_of_screen'];
 /** A payment dated further than this after the extraction time cannot be real (IST/UTC mix-ups are 5.5 h). */
 const FUTURE_DATE_SKEW_MS = 6 * 60 * 60 * 1000;
 /** UPI UTR / reference = 12 digits. Digits-only values of this length range that are NOT 12 digits are "clearly malformed";
