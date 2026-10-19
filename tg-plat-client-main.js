@@ -73388,14 +73388,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
 /* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
 /* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _payment_evidence__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./payment-evidence */ "./src/payments/proof-check/payment-evidence.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:proof-decision");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:proof-decision");
 /** Lowercased OCR-Space text + model fullText, whitespace collapsed. Payee matching elsewhere keeps using the whole text. */
 function buildOcrAndText(vision) {
     const e = vision.extraction;
@@ -73428,6 +73430,9 @@ function decide(input) {
     const e = vision.extraction;
     if (!e)
         return { decision: 'ACCEPT', reasons: ['NO_EXTRACTION'], alert: false };
+    // Only a payment screenshot goes through the fake/proof checks (a chat page with the word "payment" is not one).
+    if (!(0,_payment_evidence__WEBPACK_IMPORTED_MODULE_5__.hasPaymentEvidence)(vision))
+        return { decision: 'ACCEPT', reasons: ['NOT_PAYMENT_EVIDENCE'], alert: false };
     const text = buildOcrAndText(vision);
     const so = vision.secondOpinion && !vision.secondOpinion.skipped ? vision.secondOpinion : null;
     const block = [];
@@ -73602,40 +73607,42 @@ function scanDisclaimers(ocrAndText, modelPhrases) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.LONG_DISCLAIMERS),
-/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_8__.OLD_PAYMENT_MESSAGES),
-/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.SHORT_DISCLAIMERS),
-/* harmony export */   authenticityEnabled: () => (/* reexport safe */ _thresholds__WEBPACK_IMPORTED_MODULE_3__.authenticityEnabled),
-/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.buildDuplicateQuery),
+/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.LONG_DISCLAIMERS),
+/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_9__.OLD_PAYMENT_MESSAGES),
+/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.SHORT_DISCLAIMERS),
+/* harmony export */   authenticityEnabled: () => (/* reexport safe */ _thresholds__WEBPACK_IMPORTED_MODULE_4__.authenticityEnabled),
+/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.buildDuplicateQuery),
 /* harmony export */   buildOcrAndText: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.buildOcrAndText),
-/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.checkPayeeUpi),
+/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.checkPayeeUpi),
 /* harmony export */   decide: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.decide),
 /* harmony export */   hasHardTextSignal: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.hasHardTextSignal),
-/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.imageSha256),
-/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_4__.isBlockedFakeScreenshot),
-/* harmony export */   isFutureDated: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_2__.isFutureDated),
-/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.isMaskedVpa),
-/* harmony export */   isUtrMalformed: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_2__.isUtrMalformed),
-/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.lookupReuse),
-/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.lookupServedDuplicate),
-/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_4__.matchBlocklist),
-/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.matchesPhrase),
-/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.normalizeVpa),
-/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.ownIdsFrom),
+/* harmony export */   hasPaymentEvidence: () => (/* reexport safe */ _payment_evidence__WEBPACK_IMPORTED_MODULE_2__.hasPaymentEvidence),
+/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.imageSha256),
+/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_5__.isBlockedFakeScreenshot),
+/* harmony export */   isFutureDated: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_3__.isFutureDated),
+/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.isMaskedVpa),
+/* harmony export */   isUtrMalformed: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_3__.isUtrMalformed),
+/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.lookupReuse),
+/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.lookupServedDuplicate),
+/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_5__.matchBlocklist),
+/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.matchesPhrase),
+/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.normalizeVpa),
+/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.ownIdsFrom),
 /* harmony export */   proofCheck: () => (/* binding */ proofCheck),
-/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.scanDisclaimers),
-/* harmony export */   thresholds: () => (/* reexport module object */ _thresholds__WEBPACK_IMPORTED_MODULE_3__),
-/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.withinOneEdit)
+/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.scanDisclaimers),
+/* harmony export */   thresholds: () => (/* reexport module object */ _thresholds__WEBPACK_IMPORTED_MODULE_4__),
+/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.withinOneEdit)
 /* harmony export */ });
 /* harmony import */ var _decision__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decision */ "./src/payments/proof-check/decision.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
-/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
-/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
-/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
-/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _payment_evidence__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./payment-evidence */ "./src/payments/proof-check/payment-evidence.ts");
+/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:proof-check");
@@ -73649,6 +73656,7 @@ function proofCheck(input) {
         return { decision: 'ACCEPT', reasons: ['PROOF_CHECK_ERROR'], alert: false };
     }
 }
+
 
 
 
@@ -73695,6 +73703,49 @@ const OLD_PAYMENT_MESSAGES = [
     "Ye purana payment hai \u{1F605}\n\nAbhi pay karke naya screenshot bhejo na \u{1F48B}",
     "Hmm sweetie, this one is from before\n\nPay again right now and send me the new screenshot, then we start \u{1F618}",
 ];
+
+
+/***/ },
+
+/***/ "./src/payments/proof-check/payment-evidence.ts"
+/*!******************************************************!*\
+  !*** ./src/payments/proof-check/payment-evidence.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   hasPaymentEvidence: () => (/* binding */ hasPaymentEvidence)
+/* harmony export */ });
+/** Chain providers that only return OCR text (no visual judgement). Their `isPayment` is a keyword match ("payment"). */
+const OCR_ONLY_PROVIDERS = new Set(['rapidapi', 'ocr-space']);
+/** Payment-app names only. Deliberately NOT the generic words of tg-vision PAYMENT_APP_KEYWORDS ("payment", "transaction", "upi"). */
+const APP_NAME = /\b(?:gpay|google\s*pay|phone\s*pe|phonepe|paytm|bhim|amazon\s*pay|mobikwik|cred)\b/i;
+/** x@handle (no dot after the handle, so an e-mail address does not match). */
+const UPI_ID = /[a-z0-9._-]{2,}@[a-z]{2,}\b(?!\.)/i;
+/**
+ * True only when the image is genuinely a payment read. The fake/proof checks apply to payment screenshots only
+ * (owner rule 2026-10-19): a chat page that merely contains the word "payment" must never be blocked as fake.
+ * Only ever used to REMOVE blocks; it does not influence crediting.
+ */
+function hasPaymentEvidence(vision) {
+    const e = vision.extraction;
+    if (!e || vision.outcome === 'not_payment' || e.isPayment !== true)
+        return false;
+    if (!OCR_ONLY_PROVIDERS.has(String(e.provider ?? '').toLowerCase()))
+        return true; // a vision model judged it a payment
+    if (e.status === 'success')
+        return true;
+    if (typeof e.utr === 'string' && e.utr.trim())
+        return true;
+    if (typeof e.payeeUpiId === 'string' && e.payeeUpiId.trim())
+        return true;
+    if (typeof e.app === 'string' && e.app.trim())
+        return true;
+    const text = `${e.ocrText ?? ''} ${e.fullText ?? ''}`;
+    return APP_NAME.test(text) || UPI_ID.test(text);
+}
 
 
 /***/ },
@@ -75220,6 +75271,9 @@ function safeOwnUpiIds() {
 /** The proof-check BLOCK reasons for this screenshot, or null when it is not blocked (or the check failed). */
 function proofBlockReasons(vision, ctx) {
     try {
+        // Only a payment screenshot may be blocked as fake; a non-payment image (chat page, meme) never is.
+        if (!(0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.hasPaymentEvidence)(vision))
+            return null;
         const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.proofCheck)({
             vision,
             ctx: { chatId: ctx.chatId, profile: (process.env.dbcoll || '').toLowerCase(), clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: null, now: deps.now() },
