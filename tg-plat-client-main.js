@@ -25808,11 +25808,13 @@ function detailLines(input) {
  */
 function formatRichMessageHtml(input, opts = {}) {
     const title = noEmoji(input.title || input.summary) || 'Notification';
+    const titleLess = input.title === '' && !input.summary;
     // Bold lines, not <h3>: the big heading made every card tall (owner, 2026-10-18).
     // title '' = no title line (e.g. a payment screenshot card: the photo says what it is).
     const parts = [
-        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b></p>`] : []),
-        ...(input.title === '' && !input.summary ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
+        // A blank line between the client id and the title; the title sits on its table (owner, 2026-10-19).
+        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess ? '' : '<br/>'}</p>`] : []),
+        ...(titleLess ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
     ];
     if (opts.imageId)
         parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
