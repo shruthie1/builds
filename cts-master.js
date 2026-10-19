@@ -54914,17 +54914,22 @@ function formatRichMessageHtml(input, opts = {}) {
     const hasSummary = Boolean(input.summary && input.summary !== title);
     const spoilerAt = !input.spoiler ? '' : quotes.length ? 'quote' : hasSummary ? 'summary' : 'heading';
     const titleLess = input.title === '' && !input.summary && quotes.length > 0;
-    const parts = [
-        ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b>${titleLess ? '' : '<br/>'}</p>`] : []),
-        ...(titleLess ? [] : [`<p><b>${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`]),
-    ];
-    if (hasSummary)
-        parts.push(`<p>${multiline(input.summary)}${spoilerAt === 'summary' ? spoilerTag(input.spoiler) : ''}</p>`);
     const fields = visibleFields(input);
+    const headerRow = !titleLess && fields.length > 0 && spoilerAt !== 'heading';
+    const parts = [
+        ...(opts.prefix ? [`<p><b>${escapeTelegramHtml(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`] : []),
+        ...(titleLess || headerRow ? [] : [`<p><b>${escapeTelegramHtml(title)}</b>${spoilerAt === 'heading' ? spoilerTag(input.spoiler) : ''}</p>`]),
+    ];
+    const summary = hasSummary ? `<p>${multiline(input.summary)}${spoilerAt === 'summary' ? spoilerTag(input.spoiler) : ''}</p>` : '';
+    if (summary && !headerRow)
+        parts.push(summary);
     if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${escapeTelegramHtml(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
-        parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
+        const head = headerRow ? `<tr><th colspan="2">${escapeTelegramHtml(title).replace(/ /g, '&nbsp;')}</th></tr>` : '';
+        parts.push(`<table bordered striped compact>${head}${rows.join('')}</table>`);
     }
+    if (summary && headerRow)
+        parts.push(summary);
     for (const table of input.tables ?? [])
         parts.push(renderTable(table));
     quotes.forEach((q, i) => parts.push(renderQuote(q.label, q.text, i === 0 && spoilerAt === 'quote' ? input.spoiler : undefined)));
