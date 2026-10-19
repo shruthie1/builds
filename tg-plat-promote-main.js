@@ -18886,20 +18886,27 @@ function formatRichMessageHtml(input, opts = {}) {
     const titleLess = input.title === '' && !input.summary;
     // Bold lines, not <h3>: the big heading made every card tall (owner, 2026-10-18).
     // title '' = no title line (e.g. a payment screenshot card: the photo says what it is).
+    const fields = visibleFields(input);
+    // With fields, the title is the table's header row, right under the client id (owner, 2026-10-19: a
+    // title line above a table left a gap). Without fields it stays a bold line after a blank line.
+    const headerRow = !titleLess && fields.length > 0;
     const parts = [
-        // A blank line between the client id and the title; the title sits on its table (owner, 2026-10-19).
-        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess ? '' : '<br/>'}</p>`] : []),
-        ...(titleLess ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
+        ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`] : []),
+        ...(titleLess || headerRow ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
     ];
     if (opts.imageId)
         parts.push(`<img src="tg://photo?id=${attr(opts.imageId)}"/>`);
-    if (input.summary && input.summary !== title)
-        parts.push(`<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>`);
-    const fields = visibleFields(input);
+    const summary = input.summary && input.summary !== title ? `<p>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(input.summary)}</p>` : '';
+    if (summary && !headerRow)
+        parts.push(summary);
     if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
-        parts.push(`<table bordered striped compact>${rows.join('')}</table>`);
+        // Non-breaking spaces: Telegram wraps a header cell to the column widths ("Told: not my / payment").
+        const head = headerRow ? `<tr><th colspan="2">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title).replace(/ /g, '&nbsp;')}</th></tr>` : '';
+        parts.push(`<table bordered striped compact>${head}${rows.join('')}</table>`);
     }
+    if (summary && headerRow)
+        parts.push(summary);
     const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel ?? 'Message', text: input.quote, collapsed: input.quoteCollapsed }] : []), ...(input.quotes ?? [])];
     for (const q of quotes) {
         if (q.text && q.text.trim())
