@@ -58097,8 +58097,8 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__.Logger("tg-aut:process-image");
 /**
- * Ask for the full payment screenshot, never reject: tg-vision could not tell whether the image is a payment
- * (category 'unclear'), or it is a payment whose amount nobody could read (category 'payment', no amount).
+ * Ask for the full payment screenshot, never reject: a payment whose amount nobody could read (category 'payment',
+ * no amount).
  */
 const UNCLEAR_SCREENSHOT_MESSAGES = [
     "Baby I can't see it properly 🙈\n\nSend the **full screenshot** na\nAmount and time should be visible",
@@ -58499,11 +58499,12 @@ async function processImage(event) {
         // Every payment-derived field (isPaymentRelated / Finished / Failed / Mine) is cleared otherwise, so keyword rules
         // cannot drive ops cards or "finish the payment" nudges. `undefined` = the remote analysis result, still judged by
         // the legacy keyword rules in parseImage.
-        //  - 'unclear', or a 'payment' whose amount nobody could read (not a failed one): ask for the full screenshot;
-        //    never deleted, never counted as an invalid photo, never told "not my payment".
+        //  - a 'payment' whose amount nobody could read (not a failed one): ask for the full screenshot; never deleted,
+        //    never counted as an invalid photo, never told "not my payment".
+        //  - 'unclear' gets the ordinary picture reply (final branch), as before a4eb9a1.
         const category = imageDetails.category;
         const paymentWithoutAmount = category === "payment" && !(Number(imageDetails.amount) > 0) && !imageDetails.isFailed;
-        const askFullScreenshot = category === "unclear" || paymentWithoutAmount;
+        const askFullScreenshot = paymentWithoutAmount;
         const parsedImage = (0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_8__.parseImage)(imageDetails);
         const sanitizedData = category === undefined || (category === "payment" && !paymentWithoutAmount)
             ? parsedImage
@@ -59167,9 +59168,7 @@ async function processImage(event) {
             // Never a reject: one ask for the full payment screenshot plus one ops notice (the photo card above). No delete,
             // no invalid-photo count, no re-check timer: the next screenshot the user sends is judged on its own.
             await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_24__.sendMessageWithTimeout)(event.client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
-            await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, paymentWithoutAmount
-                ? { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.', told: true }
-                : { title: 'Unclear pic', summary: 'Could not tell if it is a payment; asked for the full screenshot.', told: true });
+            await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.', told: true });
         }
         else {
             if (sanitizedData.isPaymentMine) {
