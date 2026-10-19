@@ -11765,7 +11765,7 @@ const SPAMBOT_PROBE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 function buildHealthFailureNotification(mobile, reason) {
     return {
         severity: _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR,
-        title: 'Telegram health check failed',
+        title: 'Health failed',
         fields: [
             { label: 'Mobile', value: mobile },
             { label: 'Reason', value: reason, code: false },
@@ -12689,9 +12689,10 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         const status = describeSpamBotReply(latestReply.text);
         const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
             severity: status.healthy ? _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.SUCCESS : _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
-            title: `SpamBot check: ${status.label}`,
+            title: "SpamBot check",
             fields: [
                 { label: "Mobile", value: mobile },
+                { label: "Status", value: status.label, code: false },
                 ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : []),
                 { label: "Replied", value: latestReply.receivedAt ?? "unknown" },
                 ...(replyIsFresh ? [] : [{ label: "Note", value: "No new reply yet; this is the last one", code: false }]),
@@ -15094,7 +15095,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /**
  * Telegram refusing for a normal reason (private/deleted channel, user privacy, reaction limits, bans, the OTHER
- * user deactivated, floods...). Not a bug on our side: logged as WARN and never posted as an "Application error".
+ * user deactivated, floods...). Not a bug on our side: logged as WARN and never posted as an "App error".
  * Our own account being deactivated (USER_DEACTIVATED / USER_DEACTIVATED_BAN) is NOT in this list.
  * Dependency-free so logger.ts and parseError.ts can both use it without import cycles.
  */
@@ -15179,7 +15180,7 @@ async function notifyInternal(prefix, errorDetails, config = DEFAULT_NOTIFICATIO
         try {
             // Which request failed is the useful part; the sender already names the client.
             const sent = await _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.HTTP_FAILURES, {
-                title: "Outbound request failed",
+                title: "Request failed",
                 severity: (errorDetails.status ?? 500) >= 500 ? _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.ERROR : _TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
                 summary: String(formattedMessage),
                 fields: [
@@ -18047,7 +18048,7 @@ const DEFAULT_ERROR_CONFIG = {
     defaultMessage: 'An unknown error occurred',
     defaultError: 'UnknownError'
 };
-/** Expected Telegram refusal (WARN, no "Application error"); the list lives in expected-outcome-log.ts. */
+/** Expected Telegram refusal (WARN, no "App error"); the list lives in expected-outcome-log.ts. */
 function isExpectedTelegramOutcome(message) {
     return (0,_expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__.isExpectedTelegramLogOutcome)(String(message ?? ''));
 }
@@ -18341,7 +18342,7 @@ function parseError(err, prefix, sendErr = true, config = {}) {
                     const notificationMessage = telegramErrorMsg || extractedMessage;
                     const notification = {
                         severity: status >= 500 ? _notification_format__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.ERROR : _notification_format__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.WARNING,
-                        title: 'Application error',
+                        title: 'App error',
                         source: clientId,
                         summary: prefix || undefined,
                         fields: [
@@ -18859,7 +18860,7 @@ function quoteBlock(label, text, collapsed = false) {
     const heading = label ? `<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(label)}</b></p>` : '';
     return `${heading}<blockquote${clipped.length > LONG_QUOTE_CHARS ? ' expandable' : ''}>${body}</blockquote>`;
 }
-function renderTable(table) {
+function renderTable(table, heading) {
     const numeric = new Set(table.numeric ?? []);
     const cell = (v, i, tag) => {
         const align = numeric.has(i) ? ' align="right"' : '';
@@ -18869,8 +18870,10 @@ function renderTable(table) {
     };
     const head = `<tr>${table.columns.map((c, i) => cell(c, i, 'th')).join('')}</tr>`;
     const rows = table.rows.map((r) => `<tr>${table.columns.map((_, i) => cell(r[i], i, 'td')).join('')}</tr>`).join('');
-    const caption = table.title ? `<caption>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(table.title)}</caption>` : '';
-    return `<table bordered striped compact>${caption}${head}${rows}</table>`;
+    // Titles are header rows spanning the table (owner, 2026-10-19), as on field tables; no caption.
+    const titleRows = [heading, table.title].filter(Boolean)
+        .map((t) => `<tr><th colspan="${table.columns.length}">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(t)}</th></tr>`).join('');
+    return `<table bordered striped compact>${titleRows}${head}${rows}</table>`;
 }
 function detailLines(input) {
     if (!input.details)
@@ -18889,7 +18892,9 @@ function formatRichMessageHtml(input, opts = {}) {
     const fields = visibleFields(input);
     // With fields, the title is the table's header row, right under the client id (owner, 2026-10-19: a
     // title line above a table left a gap). Without fields it stays a bold line after a blank line.
-    const headerRow = !titleLess && fields.length > 0;
+    // Telegram wraps a header cell to the column widths: titles are kept short at their call sites.
+    // No field table: the title heads the first data table instead.
+    const headerRow = !titleLess && (fields.length > 0 || (input.tables?.length ?? 0) > 0);
     const parts = [
         ...(opts.prefix ? [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(opts.prefix)}</b>${titleLess || headerRow ? '' : '<br/>'}</p>`] : []),
         ...(titleLess || headerRow ? [] : [`<p><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</b></p>`]),
@@ -18901,10 +18906,10 @@ function formatRichMessageHtml(input, opts = {}) {
         parts.push(summary);
     if (fields.length) {
         const rows = fields.map((f) => `<tr><td><b>${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(f.label)}</b></td><td>${cellValue(f)}</td></tr>`);
-        // Non-breaking spaces: Telegram wraps a header cell to the column widths ("Told: not my / payment").
-        const head = headerRow ? `<tr><th colspan="2">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title).replace(/ /g, '&nbsp;')}</th></tr>` : '';
+        const head = headerRow ? `<tr><th colspan="2">${(0,_notification_format__WEBPACK_IMPORTED_MODULE_0__.escapeTelegramHtml)(title)}</th></tr>` : '';
         parts.push(`<table bordered striped compact>${head}${rows.join('')}</table>`);
     }
+    (input.tables ?? []).forEach((table, i) => parts.push(renderTable(table, headerRow && !fields.length && i === 0 ? title : undefined)));
     if (summary && headerRow)
         parts.push(summary);
     const quotes = [...(input.quote && input.quote.trim() ? [{ label: input.quoteLabel ?? 'Message', text: input.quote, collapsed: input.quoteCollapsed }] : []), ...(input.quotes ?? [])];
@@ -18912,8 +18917,6 @@ function formatRichMessageHtml(input, opts = {}) {
         if (q.text && q.text.trim())
             parts.push(quoteBlock(q.label, q.text, 'collapsed' in q && q.collapsed === true));
     }
-    for (const table of input.tables ?? [])
-        parts.push(renderTable(table));
     const details = detailLines(input);
     if (details.length) {
         const body = details.join('\n');
@@ -19295,7 +19298,7 @@ function runtimeConfigBootNotices(result, service, now = Date.now()) {
     const notices = [];
     if (result.mongoFailure) {
         notices.push({
-            title: 'Mongo boot source failed',
+            title: 'Mongo boot fail',
             severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Service', value: service, code: false },
@@ -19307,7 +19310,7 @@ function runtimeConfigBootNotices(result, service, now = Date.now()) {
     }
     if (result.source === 'cache') {
         notices.push({
-            title: 'Config service unreachable: booted on cached config',
+            title: 'Config down',
             severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Service', value: service, code: false },
@@ -19320,7 +19323,7 @@ function runtimeConfigBootNotices(result, service, now = Date.now()) {
     else if (result.recoveredOutage) {
         const outage = result.recoveredOutage;
         notices.push({
-            title: 'Config service reachable again',
+            title: 'Config back up',
             severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS,
             fields: [
                 { label: 'Service', value: service, code: false },
@@ -19335,7 +19338,7 @@ function runtimeConfigBootNotices(result, service, now = Date.now()) {
 /** Sent when the background refresh after a cache boot reaches the live service. */
 function runtimeConfigRefreshedNotice(service) {
     return {
-        title: 'Config service reachable again',
+        title: 'Config back up',
         severity: _notification_format__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS,
         fields: [{ label: 'Service', value: service, code: false }],
         summary: 'Cached config refreshed.',
@@ -23627,7 +23630,7 @@ class DialogManager {
     }
     notifyPersistentDialogMiss(dialogId, type, error) {
         const notification = {
-            title: "Dialog lookup failed",
+            title: "Lookup failed",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING,
             summary: `Dialog ${dialogId} could not be created from Telegram peer data`,
             fields: [
@@ -29122,7 +29125,7 @@ class ReactionService {
         }
         catch (error) {
             // Telegram-side failure after GramJS's retries: the old pool stays and the next cycle retries, so it
-            // is a warning, not an "Application error" post (keerthi2/ramya2/sneha1, 2026-10-14).
+            // is a warning, not an "App error" post (keerthi2/ramya2/sneha1, 2026-10-14).
             if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramTransportUnavailable)(error)) {
                 logger.warn(`[${this.instanceId}] [Reactions] Channel update failed (Telegram transient): ${error.message}`);
             }
@@ -31726,9 +31729,9 @@ class TelegramManager {
                                 this.promoterInstance.setDaysLeft((0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_7__.sanitizeLimitedDaysLeft)(days));
                                 if (shouldNotify)
                                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                                        title: `Limited · ${this.promoterInstance.daysLeft}d left`,
+                                        title: "Limited",
                                         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
-                                        fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
+                                        fields: [{ label: "Mobile", value: this.clientDetails.mobile }, { label: "Days left", value: this.promoterInstance.daysLeft }],
                                         quote: event.message.text?.slice(0, 500),
                                         quoteLabel: "",
                                         quoteCollapsed: true,
@@ -31765,7 +31768,7 @@ class TelegramManager {
                                 // this.promoterInstance.setDaysLeft(99);
                                 if (shouldNotify)
                                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                                        title: "Harsh-limit warning",
+                                        title: "Harsh limit",
                                         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
                                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
                                         quote: event.message.text?.slice(0, 500),
@@ -31842,10 +31845,11 @@ class TelegramManager {
     async notifySpamBotMessage(text) {
         const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.describeSpamBotReply)(text);
         await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            title: `SpamBot: ${status.label}`,
+            title: "SpamBot",
             severity: status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Mobile', value: this.clientDetails.mobile },
+                { label: 'Status', value: status.label, code: false },
                 ...(status.limitedUntil ? [{ label: 'Limited until', value: status.limitedUntil }] : []),
             ],
             quote: text.slice(0, 500),
@@ -31860,7 +31864,7 @@ class TelegramManager {
         }
         this.checkingAuths = true;
         await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_LOGINS, {
-            title: "Auth cleanup started",
+            title: "Auth cleanup",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.INFO,
             fields: [
                 { label: "Mobile", value: this.clientDetails.mobile },
@@ -31887,9 +31891,9 @@ class TelegramManager {
                 }
                 if (firstRemovedAuth) {
                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.ACCOUNT_LOGINS, {
-                        title: `Removed ${removedCount} other auth${removedCount === 1 ? "" : "s"}`,
+                        title: "Auths removed",
                         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
-                        fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
+                        fields: [{ label: "Mobile", value: this.clientDetails.mobile }, { label: "Count", value: removedCount }],
                         tags: ["promote", "telegram", "auth"],
                     }, `TelegramManager.authRemovedNotification.${this.clientDetails.mobile}`);
                     return firstRemovedAuth;
@@ -32406,7 +32410,7 @@ class AppService {
     // Private Helper Methods
     async notifyRestart(mobile) {
         await this.sendOperatorNotification({
-            title: 'Restart requested',
+            title: 'Restart asked',
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Mobile', value: mobile },
@@ -32778,7 +32782,7 @@ function startConnectionMonitor(isProcessInitialized, isInitializationInProgress
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Connection.bootstrapPending.publicIp", false);
                     }
                     await sendConnectionMonitorNotification({
-                        title: 'Bootstrap still pending',
+                        title: 'Bootstrap wait',
                         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.WARNING,
                         fields: [
                             { label: 'Process', value: _utils__WEBPACK_IMPORTED_MODULE_1__.prcessID.toString() },
@@ -33830,7 +33834,7 @@ class HealthMonitor {
                 }
                 logger.error(`Promotion stopped for ${mobile}, Days: ${daysLeft}`);
                 await sendHealthMonitorNotification({
-                    title: "Promotion stale · replacing mobile",
+                    title: "Stale: replacing",
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
                     fields: [
                         { label: "Mobile", value: mobile },
@@ -34002,7 +34006,7 @@ class HealthMonitor {
         }
         logger.error(`Promotion stopped for ${mobile}, Days: ${daysLeft}`);
         await sendHealthMonitorNotification({
-            title: "Promotion unhealthy · replacing mobile",
+            title: "Unhealthy: swap",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
             fields: [
                 { label: "Mobile", value: mobile },
@@ -34346,7 +34350,7 @@ class HealthMonitor {
         }
         logger.error(`${reason}; exiting process`, { activeCount });
         await sendHealthMonitorNotification({
-            title: "No active mobiles · exiting",
+            title: "No active mobile",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
             summary: reason,
             tags: ["lifecycle", "exit"],
@@ -34645,7 +34649,7 @@ class InactiveMobileScraper {
             const failedReplies = results.flat().filter((result) => !result.success).length;
             // One completion notice per run (no "started"), batched across clients by the UMS digest.
             await notifyInactiveScraper({
-                title: "Inactive mobile scrape",
+                title: "Mobile scrape",
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.SUCCESS,
                 fields: [
                     { label: "Mobiles", value: results.length },
@@ -35193,7 +35197,11 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("mobile-manager");
 async function notifyPreviousSuccessMessages(messages, managerCount) {
     const notification = {
-        title: `${messages.length} previous success messages · ${managerCount} managers`,
+        title: "Past successes",
+        fields: [
+            { label: "Messages", value: messages.length },
+            { label: "Managers", value: managerCount },
+        ],
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
         tags: ["promote", "previous-success"],
     };
@@ -35807,7 +35815,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
         logger.info('Setup conditions not met:', validationResult.reasons.join('; '));
         await sendSetupNewMobileNotification({
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.WARNING,
-            title: "Mobile setup blocked",
+            title: "Setup blocked",
             fields: [
                 { label: "Mobile", value: mobile },
             ],
@@ -35835,7 +35843,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
             logger.error(`[SetupNewMobile] Error executing operations for mobile ${mobile}:`, err);
             await sendSetupNewMobileNotification({
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.ERROR,
-                title: "Mobile setup failed",
+                title: "Setup failed",
                 fields: [
                     { label: "Mobile", value: mobile },
                 ],
@@ -35882,7 +35890,7 @@ async function handleDeleteOperation(mobile, message) {
     try {
         await sendSetupNewMobileNotification({
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.WARNING,
-            title: "Deleting old mobile",
+            title: "Deleting mobile",
             fields: [
                 { label: "Mobile", value: mobile },
                 { label: "Reason", value: message, code: false },
@@ -35902,7 +35910,7 @@ function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
         try {
             await sendSetupNewMobileNotification({
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.NotificationSeverity.CRITICAL,
-                title: "Mobile changed · exiting",
+                title: "Mobile changed",
                 summary: message,
                 fields: [
                     { label: "Mobile", value: mobile },
@@ -36118,7 +36126,7 @@ async function startNewUserProcess(error, mobile, force = false, context = 'runt
     const fingerprint = await loadTelegramFingerprintSummary(mobile);
     const fingerprintSummary = formatTelegramFingerprintSummary(fingerprint);
     await sendPermanentFailureNotification({
-        title: "Permanent failure · replacing mobile",
+        title: "Mobile replaced",
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.CRITICAL,
         fields: [
             { label: "Mobile", value: mobile },
@@ -37374,7 +37382,7 @@ function authMiddleware(req, res, next) {
         }
         logger.warn(`Unauthorized Attempt\nip: ${clientIp || 'unknown IP'}\norigin: ${origin || 'unknown origin'}\npath: ${req.method} ${req.originalUrl || 'unknown path'}`);
         sendUnauthorizedAudit({
-            title: 'Unauthorized request blocked',
+            title: 'Request blocked',
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'IP', value: clientIp || 'unknown IP' },
@@ -37948,9 +37956,10 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // followupMsgSuccessCount write-back is needed here.
             this.stats.deletedCount++;
             await this.sendPromotionLog({
-                title: `@${channelInfo.username} deleted`,
+                title: "Deleted",
                 houseStyle: true,
                 fields: [
+                    { label: "Channel", value: `@${channelInfo.username}`, code: false },
                     { label: "Survived", value: this.formatDuration(Date.now() - messageItem.timestamp), code: false },
                     { label: "Index", value: messageIndex },
                     ...(messageItem.isFollowUp ? [{ label: "Follow-up", value: "yes", code: false }] : []),
@@ -37980,7 +37989,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to remove deleted index ${messageIndex} for ${channelId}`, false);
                 }
                 void this.sendPromotionLog({
-                    title: `Index ${messageIndex} removed · @${channelInfo.username}`,
+                    title: "Index removed",
+                    fields: [
+                        { label: "Channel", value: `@${channelInfo.username}`, code: false },
+                        { label: "Index", value: messageIndex },
+                    ],
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
                     tags: ["promote", "message-index", "cleanup"],
                 }, `Failed to send removed-message notification for ${channelId}`);
@@ -38390,7 +38403,7 @@ function configureConnectionRoute(app) {
                 logger.info('SomeOther Unknown Process Exist');
                 res.status(409).json({ status: 'wrong_process', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() });
                 await sendConnectionRouteNotification({
-                    title: 'Wrong process · shutting down',
+                    title: 'Wrong process',
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.WARNING,
                     fields: [
                         { label: 'Current', value: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() },
@@ -40074,8 +40087,9 @@ function setupExitHandlers() {
             }
             const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(err, "Unhandled Rejection", false);
             await sendPromoteOperatorNotification({
-                title: `Uncaught ${errorDetails.error || "Error"}`,
+                title: "Uncaught error",
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.ERROR,
+                fields: [{ label: "Error", value: String(errorDetails.error || "Error"), code: false }],
                 summary: errorDetails.message?.slice(0, 300),
                 tags: ["promote", "uncaught"],
             }, "Failed to send promote uncaught exception notification");
@@ -40090,8 +40104,9 @@ function setupExitHandlers() {
         try {
             const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(reason, "Unhandled Rejection", false);
             await sendPromoteOperatorNotification({
-                title: `Unhandled rejection · ${errorDetails.error || "Error"}`,
+                title: "Unhandled reject",
                 severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.ERROR,
+                fields: [{ label: "Error", value: String(errorDetails.error || "Error"), code: false }],
                 summary: errorDetails.message?.slice(0, 300),
                 tags: ["promote", "unhandled-rejection"],
             }, "Failed to send promote unhandled rejection notification");
@@ -40153,7 +40168,7 @@ function buildDailyStatsNotification(stats, source) {
     return {
         ...(digest ? { digest } : {}),
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
-        title: 'Daily promote stats',
+        title: 'Daily stats',
         fields: (0,_tg_core_utils_rich_message__WEBPACK_IMPORTED_MODULE_2__.fieldsFromObject)(stats.totalStat),
         tables: mobiles ? [mobiles] : undefined,
         footer: `Source: ${source}`,
@@ -40169,7 +40184,7 @@ function buildDetailedStatsNotification(detailedStats, enhancedMemoryStats, sour
     };
     return {
         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO,
-        title: 'Detailed promote stats',
+        title: 'Detailed stats',
         footer: `Source: ${source}`,
         // Routine per-client health: batched into one table across clients by the UMS digest flusher.
         digest: {
