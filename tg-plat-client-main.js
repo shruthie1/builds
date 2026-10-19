@@ -37578,6 +37578,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   HEDGE_GROUP_SIZE: () => (/* binding */ HEDGE_GROUP_SIZE),
 /* harmony export */   SKIP_AFTER_JUDGED: () => (/* binding */ SKIP_AFTER_JUDGED),
 /* harmony export */   analyzePaymentProof: () => (/* binding */ analyzePaymentProof),
+/* harmony export */   redactForLog: () => (/* binding */ redactForLog),
 /* harmony export */   shouldFallbackForPaymentExtraction: () => (/* binding */ shouldFallbackForPaymentExtraction)
 /* harmony export */ });
 /* harmony import */ var _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/wire-normalize */ "../../packages/tg-vision/src/contract/wire-normalize.ts");
@@ -37586,11 +37587,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../providers */ "../../packages/tg-vision/src/providers/index.ts");
 /* harmony import */ var _providers_provider__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../providers/provider */ "../../packages/tg-vision/src/providers/provider.ts");
 /* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
-/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../rules/text */ "../../packages/tg-vision/src/rules/text.ts");
-/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
-/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
-/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
+/* harmony import */ var _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../rules/payment-evidence */ "../../packages/tg-vision/src/rules/payment-evidence.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _rules_v2__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../rules/v2 */ "../../packages/tg-vision/src/rules/v2.ts");
+/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+/* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
 // The chain (design section 4): OCR pre-check, ordered providers, gates R08-R13, outcome, optional second opinion.
+
 
 
 
@@ -37610,7 +37613,7 @@ const HEDGE_GROUP_SIZE = 3;
 /** Skip the remaining image models once this many found no amount (text-only providers still run). */
 const SKIP_AFTER_JUDGED = 2;
 const TEXT_ONLY = new Set(['rapidapi', 'ocr-space']);
-const JUDGED_CLASSES = new Set(['no_amount', 'low_confidence', 'amount_range']);
+const JUDGED_CLASSES = new Set(['no_amount', 'low_confidence', 'amount_range', 'not_payment']);
 const R12_CONFIDENCE_THRESHOLD = 0.4;
 const PROBE_TIMEOUT_MS = 8000;
 const KEYWORDS = [
@@ -37644,13 +37647,38 @@ function shouldFallbackForPaymentExtraction(e, noteMergedIntoNames) {
         reasons.push('no transaction status markers');
     return { fallback: paymentEvidence && (amountMissingOrZero || lowConfidence), paymentEvidence, reasons };
 }
-function clip(message) {
-    return message.length > 300 ? `${message.slice(0, 300)}...` : message;
+/**
+ * Provider error texts are response snippets; strip anything key-like before it reaches a log line or the stored
+ * attempt message (visionShadow rows): query keys, `apikey: x` / `x-api-key=x` header forms, Bearer tokens, Google
+ * (AIza...), NVIDIA (nvapi-...), Groq (gsk_...) and OpenAI-style (sk-...) keys.
+ */
+function redactForLog(message, max = 160) {
+    const m = String(message ?? '')
+        .replace(/([?&](?:key|api_key|apikey|token)=)[^&\s]+/gi, '$1***')
+        .replace(/\b((?:x-)?api[-_]?key|authorization|token)(["']?\s*[:=]\s*["']?)(?!Bearer\b)[^\s"',&;}]+/gi, '$1$2***')
+        .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, '***')
+        .replace(/\bBearer\s+\S+/gi, 'Bearer ***')
+        .replace(/\b(?:nvapi|gsk|sk)[-_][A-Za-z0-9_-]{10,}/g, '***')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return m.length > max ? `${m.slice(0, max)}...` : m;
 }
+/**
+ * The chain, plus one summary log line. Every provider attempt logs one line itself (`[vision] <provider> ...`), so the
+ * process log shows what ran, how long it took and what it decided (2026-10-19: the per-provider lines were missing
+ * because tg-aut passed no logger and the default is NOOP_LOGGER).
+ */
 async function analyzePaymentProof(image, opts = {}) {
+    const logger = opts.logger ?? _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER;
+    const r = await runChain(image, opts);
+    const by = r.extraction?.provider ?? '-';
+    logger.log(`[vision] result outcome=${r.outcome} category=${r.category} by=${by} amount=${r.extraction?.amount ?? '-'} ${r.totalLatencyMs}ms precheck=${r.precheck.status}/${r.precheck.wordCount}w attempts=${r.attempts.length}`);
+    return r;
+}
+async function runChain(image, opts) {
     const env = opts.env ?? process.env;
-    const v2 = opts.v2 ?? (0,_rules_v2__WEBPACK_IMPORTED_MODULE_7__.rulesV2FromEnv)(env);
-    const logger = opts.logger ?? _transport_retry__WEBPACK_IMPORTED_MODULE_9__.NOOP_LOGGER;
+    const v2 = opts.v2 ?? (0,_rules_v2__WEBPACK_IMPORTED_MODULE_8__.rulesV2FromEnv)(env);
+    const logger = opts.logger ?? _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER;
     const clock = opts.now ?? Date.now;
     const started = clock();
     const nowMs = opts.nowMs ?? started;
@@ -37676,6 +37704,9 @@ async function analyzePaymentProof(image, opts = {}) {
     const doPrecheck = opts.precheck ?? env.VISION_PRECHECK !== 'off';
     let precheck = { status: 'skipped', wordCount: 0 };
     let ocrText = '';
+    // OCR found (almost) no text. OCR is not trusted to reject (a blurry genuine receipt reads as no text), so the
+    // PRIMARY image model still looks once and its verdict decides; nothing else runs (cost stays one call per image).
+    let primaryOnly = false;
     if (doPrecheck) {
         // The prober must not depend on VISION_PROVIDERS: if 'ocr-space' is left out of the chain the registry's OCR-Space
         // still probes (it fails open as 'unavailable' when it has no keys).
@@ -37689,17 +37720,13 @@ async function analyzePaymentProof(image, opts = {}) {
             precheck.text = probe.text;
         if (probe.status === 'text')
             ocrText = probe.text;
-        if (probe.status === 'no-text' && !v2.has('R03-soft')) {
-            return {
-                outcome: 'no_text', extraction: null, attempts, precheck, secondOpinion: null,
-                totalLatencyMs: clock() - started, fallbackUsed: false,
-            };
-        }
-        // V2:R03-soft: no-text no longer rejects; the unreliable probe text is not trusted as ocrText (ocrText stays '')
+        // no-text: the unreliable probe text is not trusted as ocrText (ocrText stays ''). V2:R03-soft keeps the full chain.
+        if (probe.status === 'no-text' && !v2.has('R03-soft'))
+            primaryOnly = true;
     }
     if (providers.length === 0) {
         return {
-            outcome: 'no_providers', extraction: null, attempts, precheck, secondOpinion: null,
+            outcome: 'no_providers', category: 'unclear', extraction: null, attempts, precheck, secondOpinion: null,
             totalLatencyMs: clock() - started, fallbackUsed: false,
         };
     }
@@ -37716,19 +37743,54 @@ async function analyzePaymentProof(image, opts = {}) {
     const hedgeMs = hedgeRaw === undefined || hedgeRaw === '' ? DEFAULT_HEDGE_MS : Number(hedgeRaw);
     const hedging = Number.isFinite(hedgeMs) && hedgeMs > 0;
     let settled = false;
+    // THE category decision (VisionCategory), made here once. Precedence for one image-model read:
+    //  1. the model says "payment"                              -> payment read (amount / confidence gates below)
+    //  2. "not a payment", but the text carries STRONG evidence -> payment read (rescue; it still needs an amount)
+    //  3. "not a payment" after a confident payment read        -> failed attempt (the payment read stands)
+    //  4. "not a payment" from a FALLBACK model                 -> failed attempt; the chain continues (only the primary
+    //     model's "not a payment" is ever final: a fast Groq "no" must not stop the NVIDIA that would credit)
+    //  5. the PRIMARY model's "not a payment", text has payment words:
+    //       unsure (confidence < threshold or no isPayment) and more providers -> failed attempt, chain continues
+    //       otherwise                                                           -> STOP, category `unclear`
+    //  6. the PRIMARY model's "not a payment", no payment words at all          -> STOP, category `not_payment`
+    // OCR-grade reads (text readers, or a model answering prose) are a payment only after a confident payment read or
+    // with strong evidence; otherwise a failed attempt ('unclear'). Confidence is always the model's own (R44 never
+    // raises it), and only a read at or above MIN_CONFIDENCE_THRESHOLD counts as "judged a payment".
+    let paymentJudged = false;
+    const primaryIndex = providers.findIndex((p) => !TEXT_ONLY.has(p.name));
+    const ownUpiIds = () => {
+        try {
+            const v = typeof opts.ownUpiIds === 'function' ? opts.ownUpiIds() : opts.ownUpiIds;
+            return Array.isArray(v) ? v : [];
+        }
+        catch {
+            return [];
+        }
+    };
+    const logAttempt = (name, m, ms, result, warn = false) => {
+        const line = `[vision] ${name}${m ? `/${m}` : ''} ${ms}ms ${result}`;
+        if (warn)
+            logger.warn(line);
+        else
+            logger.log(line);
+    };
     const attempt = async (i, parent) => {
         const provider = providers[i];
-        const remaining = providers.length - i - 1;
+        const remaining = primaryOnly ? 0 : providers.length - i - 1;
+        const isPrimary = i === primaryIndex;
         const t0 = clock();
         let model = '';
         const fail = (errorClass, message, m = model) => {
-            if (!settled)
-                attempts.push({ provider: provider.name, model: m, ok: false, errorClass, message: clip(message), latencyMs: clock() - t0 });
+            if (!settled) {
+                const latencyMs = clock() - t0;
+                attempts.push({ provider: provider.name, model: m, ok: false, errorClass, message: redactForLog(message, 300), latencyMs });
+                logAttempt(provider.name, m, latencyMs, `fail ${errorClass}: ${redactForLog(message)}`, errorClass !== null && _outcome__WEBPACK_IMPORTED_MODULE_2__.OPERATIONAL_CLASSES.has(errorClass));
+            }
             return { kind: 'fail', judged: errorClass !== null && JUDGED_CLASSES.has(errorClass) && !TEXT_ONLY.has(provider.name) };
         };
         try {
             const budget = (0,_config__WEBPACK_IMPORTED_MODULE_1__.providerBudgetMs)(provider.name, env, v2);
-            const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`, parent);
+            const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_10__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`, parent);
             model = raw.model;
             const latencyMs = clock() - t0;
             const parsed = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.parseModelOutput)(raw.text, v2);
@@ -37736,11 +37798,48 @@ async function analyzePaymentProof(image, opts = {}) {
             if (errors.length > 0)
                 return fail('validation', `Response validation failed: ${errors.join(', ')}`);
             let wire = (0,_providers_provider__WEBPACK_IMPORTED_MODULE_4__.applyProviderTweaks)(provider, parsed.wire);
-            // R25(1): low-confidence / non-payment answers are enriched from the model's own text
+            // the model's own confidence: no text merge below may raise it (S7 2026-10-19: R44 lifted a 0.2 Groq read of a
+            // chat page to 0.6 and "₹12" from the chat times won)
+            const ownConfidence = wire.confidence;
+            // category
             const modelText = typeof wire.text === 'string' ? wire.text : '';
+            const ocrGrade = TEXT_ONLY.has(provider.name) || parsed.source === 'ocr_text';
+            const readText = parsed.source === 'ocr_text' ? raw.text : modelText;
+            const evidence = (0,_rules_payment_evidence__WEBPACK_IMPORTED_MODULE_6__.paymentEvidence)(`${readText}\n${ocrText}`, parsed.source === 'json' ? { utr: wire.utr, payeeUpiId: wire.payeeUpiId, app: wire.app, payeeName: wire.payeeName } : {}, { ownUpiIds: ownUpiIds() });
             const rulesExtra = [];
-            if (modelText && (wire.isPayment !== true || (typeof wire.confidence === 'number' && wire.confidence < 0.5))) {
-                const merged = (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.smartMergeWire)(wire, (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.extractPaymentDataFromText)(modelText, v2));
+            let isPaymentRead;
+            let rescued = false;
+            if (ocrGrade) {
+                if (!paymentJudged && !evidence.strong) {
+                    return fail('unclear', `OCR-grade read, ${evidence.weak ? 'payment words only' : 'no payment words'}, no strong payment evidence and no model judged a payment`);
+                }
+                if (!paymentJudged)
+                    rulesExtra.push(`CAT-ocr-${(0,_rules_payment_evidence__WEBPACK_IMPORTED_MODULE_6__.evidenceTag)(evidence)}`);
+                wire = { ...wire, isPayment: true };
+                isPaymentRead = true;
+            }
+            else if (wire.isPayment === true) {
+                isPaymentRead = true;
+            }
+            else if (evidence.strong) {
+                // the model said "not a payment" (or did not say) but the text proves one: a genuine payer the model misread
+                rescued = true;
+                rulesExtra.push(`CAT-rescue-${(0,_rules_payment_evidence__WEBPACK_IMPORTED_MODULE_6__.evidenceTag)(evidence)}`);
+                const fromText = (0,_rules_text__WEBPACK_IMPORTED_MODULE_7__.extractPaymentDataFromText)(readText || ocrText, v2);
+                wire = (0,_rules_text__WEBPACK_IMPORTED_MODULE_7__.smartMergeWire)(wire, fromText);
+                if ((!wire.status || wire.status === 'unknown') && fromText.status)
+                    wire.status = fromText.status;
+                wire.isPayment = true;
+                wire.confidence = ownConfidence;
+                isPaymentRead = true;
+            }
+            else {
+                isPaymentRead = false;
+            }
+            // R25(1): a low-confidence payment answer is enriched from its own text (values only; never the category and
+            // never the confidence)
+            if (isPaymentRead && !rescued && modelText && typeof wire.confidence === 'number' && wire.confidence < 0.5) {
+                const merged = { ...(0,_rules_text__WEBPACK_IMPORTED_MODULE_7__.smartMergeWire)(wire, (0,_rules_text__WEBPACK_IMPORTED_MODULE_7__.extractPaymentDataFromText)(modelText, v2)), confidence: ownConfidence };
                 if (JSON.stringify(merged) !== JSON.stringify(wire))
                     rulesExtra.push('R44');
                 wire = merged;
@@ -37748,15 +37847,39 @@ async function analyzePaymentProof(image, opts = {}) {
             const normalized = (0,_contract_wire_normalize__WEBPACK_IMPORTED_MODULE_0__.normalizeWire)(wire, { ocrText, nowMs, provider: provider.name, model, latencyMs, v2, dayOfMonth: opts.dayOfMonth });
             const extraction = normalized.extraction;
             extraction.rulesApplied.push(...rulesExtra);
-            // R09: only a payment-looking read moves on for low confidence (owner rule 2026-10-13: move next only when it is
-            // payment related and the amount is missing or the read is unsure); a low-confidence chat or selfie read stays with this provider.
-            if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0
-                && shouldFallbackForPaymentExtraction(extraction, !v2.has('R10b')).paymentEvidence) {
+            if (!isPaymentRead) {
+                if (paymentJudged)
+                    return fail('no_amount', 'judged not a payment, but an earlier read judged a payment');
+                const conf = extraction.confidence.toFixed(2);
+                if (!isPrimary) {
+                    // B2: only the primary model's "not a payment" is final; a fallback's is one failed attempt
+                    return fail('not_payment', `fallback model judged not a payment (isPayment ${String(wire.isPayment)}, confidence ${conf}); only the primary model's verdict is final`);
+                }
+                const unsure = wire.isPayment !== false || extraction.confidence < MIN_CONFIDENCE_THRESHOLD;
+                if (evidence.weak) {
+                    if (unsure && remaining > 0) {
+                        return fail('low_confidence', `unsure not-a-payment read (isPayment ${String(wire.isPayment)}, confidence ${conf}) with payment words`);
+                    }
+                    // the primary model says "not a payment" but the text has payment words: never a reject; the chain stops
+                    // (no OCR amount guess) and the user is asked for the full payment screenshot
+                    extraction.rulesApplied.push('CAT-unclear-words');
+                    logAttempt(provider.name, model, latencyMs, `unclear (not_payment conf=${conf} with payment words)`);
+                    return { kind: 'unclear', index: i, provider, model, latencyMs, extraction };
+                }
+                logAttempt(provider.name, model, latencyMs, `not_payment conf=${conf}`);
+                return { kind: 'win', index: i, provider, model, latencyMs, extraction };
+            }
+            // R09: a low-confidence payment read moves on (owner rule 2026-10-13: move next only when it is payment related
+            // and the amount is missing or the read is unsure). It is not a payment judgement (paymentJudged stays false), so
+            // it cannot make a later OCR read a payment.
+            if (extraction.confidence < MIN_CONFIDENCE_THRESHOLD && remaining > 0) {
                 return fail('low_confidence', `Confidence ${extraction.confidence.toFixed(2)} below minimum threshold ${MIN_CONFIDENCE_THRESHOLD}`);
             }
+            if (extraction.confidence >= MIN_CONFIDENCE_THRESHOLD)
+                paymentJudged = true;
             // R11: secondary extraction from the pre-check OCR text
             if (extraction.isPayment === true && extraction.amount === null && ocrText.length > 10) {
-                const secondary = (0,_rules_text__WEBPACK_IMPORTED_MODULE_6__.extractPaymentDataFromText)(ocrText, v2);
+                const secondary = (0,_rules_text__WEBPACK_IMPORTED_MODULE_7__.extractPaymentDataFromText)(ocrText, v2);
                 if (secondary.amount > 0) {
                     extraction.amount = secondary.amount;
                     extraction.confidence = Math.max(extraction.confidence, 0.5);
@@ -37781,14 +37904,19 @@ async function analyzePaymentProof(image, opts = {}) {
                 && (extraction.amount < _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MIN_PAYMENT_AMOUNT || extraction.amount > _rules_amount__WEBPACK_IMPORTED_MODULE_5__.MAX_PAYMENT_AMOUNT)) {
                 return fail('amount_range', `payment amount ${extraction.amount} is outside valid range`);
             }
+            const tags = extraction.rulesApplied.filter((r) => r.startsWith('CAT-'));
+            logAttempt(provider.name, model, latencyMs, `payment amount=${extraction.amount} status=${extraction.status} conf=${extraction.confidence.toFixed(2)}${tags.length ? ` ${tags.join(',')}` : ''}`);
             return { kind: 'win', index: i, provider, model, latencyMs, extraction };
         }
         catch (error) {
             if (settled)
                 return { kind: 'fail', judged: false };
             const message = error instanceof Error ? error.message : String(error);
-            logger.warn(`[vision] ${provider.name} failed: ${message}`);
-            return fail((0,_transport_retry__WEBPACK_IMPORTED_MODULE_9__.classifyError)(error), message);
+            const errorClass = (0,_transport_retry__WEBPACK_IMPORTED_MODULE_10__.classifyError)(error);
+            // gemma's benign escalation means it judged a payment with amount 0
+            if (errorClass === 'escalated')
+                paymentJudged = true;
+            return fail(errorClass, message);
         }
     };
     /** Run providers[group[0]] now and the rest of the group after the hedge delay or the primary's failure. */
@@ -37826,7 +37954,7 @@ async function analyzePaymentProof(image, opts = {}) {
                 pending--;
                 if (done)
                     return;
-                if (step.kind === 'win')
+                if (step.kind !== 'fail')
                     return finish(step);
                 if (step.judged)
                     judged++;
@@ -37852,11 +37980,19 @@ async function analyzePaymentProof(image, opts = {}) {
         settled = true;
         attempts.push({ provider: win.provider.name, model: win.model, ok: true, errorClass: null, message: null, latencyMs: win.latencyMs });
         const extraction = win.extraction;
+        if (win.kind === 'unclear') {
+            // the primary model's "not a payment" on a text with payment words: no amount is verifiable, nobody rejects
+            return {
+                outcome: 'no_verifiable_amount', category: 'unclear', extraction, attempts, precheck, secondOpinion: null,
+                totalLatencyMs: clock() - started, fallbackUsed: win.index > 0,
+            };
+        }
         const outcome = extraction.isPayment === true ? 'extracted' : 'not_payment';
+        const category = extraction.isPayment === true ? 'payment' : 'not_payment';
         // 4. optional second opinion on the winner (never throws, never changes the extraction)
         let secondOpinion = null;
         // the default runner decides internally which triggers run (S1-S5 need VISION_SECOND_OPINION=on, S6 authenticity is on by default)
-        const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_8__.getDefaultSecondOpinionRunner)();
+        const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_9__.getDefaultSecondOpinionRunner)();
         if (runner && outcome === 'extracted') {
             try {
                 secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
@@ -37867,25 +38003,25 @@ async function analyzePaymentProof(image, opts = {}) {
             }
         }
         return {
-            outcome, extraction, attempts, precheck, secondOpinion,
+            outcome, category, extraction, attempts, precheck, secondOpinion,
             totalLatencyMs: clock() - started, fallbackUsed: win.index > 0,
         };
     };
     const imageModels = providers.map((_, k) => k).filter((k) => !TEXT_ONLY.has(providers[k].name));
     const textReaders = providers.map((_, k) => k).filter((k) => TEXT_ONLY.has(providers[k].name));
     // Stage 1: image-model panel. The primary plus its hedged peers, then any further image model one at a time while
-    // fewer than SKIP_AFTER_JUDGED models have found no amount.
+    // fewer than SKIP_AFTER_JUDGED models have found no amount. After a no-text pre-check only the primary runs.
     let judgedImage = 0;
     let next = 0;
     if (imageModels.length > 0) {
-        const panel = imageModels.slice(0, hedging ? HEDGE_GROUP_SIZE : 1);
+        const panel = imageModels.slice(0, hedging && !primaryOnly ? HEDGE_GROUP_SIZE : 1);
         const { win, judged } = await runGroup(panel);
         if (win)
             return succeed(win);
         judgedImage += judged;
         next = panel.length;
     }
-    for (; next < imageModels.length; next++) {
+    for (; !primaryOnly && next < imageModels.length; next++) {
         if (next >= HEDGE_GROUP_SIZE && judgedImage >= SKIP_AFTER_JUDGED) {
             logger.log(`[vision] ${providers[imageModels[next]].name} skipped: ${judgedImage} image models already found no amount`);
             continue;
@@ -37896,16 +38032,18 @@ async function analyzePaymentProof(image, opts = {}) {
         judgedImage += judged;
     }
     // Stage 2: text readers (OCR-grade amounts, last resort), in order.
-    for (const k of textReaders) {
+    for (const k of primaryOnly && imageModels.length > 0 ? [] : textReaders) {
         const { win } = await runGroup([k]);
         if (win)
             return succeed(win);
     }
     // 5. chain exhausted (R15 / R16)
     const exhausted = (0,_outcome__WEBPACK_IMPORTED_MODULE_2__.classifyExhausted)(attempts, ocrText);
+    // a read judged a payment but no amount was verifiable -> payment; nobody could judge it -> unclear
+    const category = paymentJudged ? 'payment' : 'unclear';
     if (exhausted === 'no_verifiable_amount') {
         const extraction = {
-            isPayment: true,
+            isPayment: paymentJudged ? true : null,
             status: 'unknown',
             amount: null,
             currency: null,
@@ -37922,12 +38060,12 @@ async function analyzePaymentProof(image, opts = {}) {
             rulesApplied: [],
         };
         return {
-            outcome: 'no_verifiable_amount', extraction, attempts, precheck, secondOpinion: null,
+            outcome: 'no_verifiable_amount', category, extraction, attempts, precheck, secondOpinion: null,
             totalLatencyMs: clock() - started, fallbackUsed: true,
         };
     }
     return {
-        outcome: 'all_providers_failed', extraction: null, attempts, precheck, secondOpinion: null,
+        outcome: 'all_providers_failed', category, extraction: null, attempts, precheck, secondOpinion: null,
         totalLatencyMs: clock() - started, fallbackUsed: true,
     };
 }
@@ -38038,7 +38176,7 @@ function isNoVerifiableAmount(attempts, ocrText) {
 /** Text-only providers: an OCR "no amount" is not a model having looked at the screenshot. */
 const TEXT_ONLY_PROVIDERS = new Set(['rapidapi', 'ocr-space']);
 /** An image model answered and judged the screenshot (could not confirm a payment amount): a content result. */
-const JUDGEMENT_CLASSES = new Set(['no_amount', 'amount_range', 'low_confidence', 'escalated']);
+const JUDGEMENT_CLASSES = new Set(['no_amount', 'amount_range', 'low_confidence', 'escalated', 'not_payment']);
 /** True when at least one image model (not an OCR-only provider) looked at the screenshot and judged it. */
 function anyModelJudged(attempts) {
     return failedAttempts(attempts).some((a) => !TEXT_ONLY_PROVIDERS.has(a.provider) && a.errorClass !== null && JUDGEMENT_CLASSES.has(a.errorClass));
@@ -38154,6 +38292,13 @@ function fromExtraction(e, opts) {
     };
 }
 function toLegacyImageDetails(result, opts) {
+    const out = legacyFor(result, opts);
+    // the chain's category travels with the legacy shape so tg-aut consumers never re-guess it from text
+    if (result.category)
+        out.category = result.category;
+    return out;
+}
+function legacyFor(result, opts) {
     const v2 = opts.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES;
     switch (result.outcome) {
         case 'extracted':
@@ -38760,39 +38905,44 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ANALYSIS_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.ANALYSIS_PROMPT),
 /* harmony export */   AUTHENTICITY_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.AUTHENTICITY_FIELDS),
-/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.AUTHENTICITY_SECOND_OPINION_SCORE),
+/* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.AUTHENTICITY_SECOND_OPINION_SCORE),
 /* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
-/* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.CURRENCY_REGEX),
-/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.DEFAULT_BUDGETS_MS),
+/* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.CURRENCY_REGEX),
+/* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.DEFAULT_BUDGETS_MS),
 /* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.DEFAULT_PROVIDER_ORDER),
 /* harmony export */   EnvKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.EnvKeyPool),
 /* harmony export */   FAKE_SIGNALS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_SIGNALS),
 /* harmony export */   FAKE_VERDICTS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_VERDICTS),
 /* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_DEFAULT_MODEL),
 /* harmony export */   GEMMA_MODELS: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.GEMMA_MODELS),
-/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.GEMMA_R07B_BUDGET_MS),
+/* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.GEMMA_R07B_BUDGET_MS),
 /* harmony export */   GENERATION_CONFIG: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.GENERATION_CONFIG),
 /* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MAX_PAYMENT_AMOUNT),
 /* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MIN_PAYMENT_AMOUNT),
 /* harmony export */   NOOP_LOGGER: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER),
 /* harmony export */   NO_RULES: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES),
-/* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.OPERATIONAL_CLASSES),
+/* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.OPERATIONAL_CLASSES),
+/* harmony export */   PAYMENT_APP_NAME: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.PAYMENT_APP_NAME),
+/* harmony export */   PAYMENT_STATUS_PHRASE: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.PAYMENT_STATUS_PHRASE),
 /* harmony export */   ProviderError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.ProviderError),
+/* harmony export */   TRANSACTION_REFERENCE: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.TRANSACTION_REFERENCE),
 /* harmony export */   TokenBudget: () => (/* reexport safe */ _transport_token_budget__WEBPACK_IMPORTED_MODULE_12__.TokenBudget),
+/* harmony export */   UPI_ID: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.UPI_ID),
 /* harmony export */   VERIFICATION_PROMPT: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.VERIFICATION_PROMPT),
+/* harmony export */   WEAK_PAYMENT_WORDS: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.WEAK_PAYMENT_WORDS),
 /* harmony export */   WIRE_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_FIELDS),
 /* harmony export */   WIRE_KEYS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.WIRE_KEYS),
 /* harmony export */   advisoryFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.advisoryFlags),
-/* harmony export */   allProvidersFailedMessage: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.allProvidersFailedMessage),
+/* harmony export */   allProvidersFailedMessage: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.allProvidersFailedMessage),
 /* harmony export */   amountOrNull: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.amountOrNull),
 /* harmony export */   analysisPromptWithKeys: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.analysisPromptWithKeys),
-/* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_25__.analyzePaymentProof),
+/* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_26__.analyzePaymentProof),
 /* harmony export */   applyProviderTweaks: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.applyProviderTweaks),
 /* harmony export */   classifyError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.classifyError),
-/* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.classifyExhausted),
+/* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.classifyExhausted),
 /* harmony export */   coerceConfidence: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.coerceConfidence),
-/* harmony export */   combineAll: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.combineAll),
-/* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.combineSecondOpinion),
+/* harmony export */   combineAll: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.combineAll),
+/* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.combineSecondOpinion),
 /* harmony export */   correctNonStandardAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.correctNonStandardAmount),
 /* harmony export */   countWords: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.countWords),
 /* harmony export */   createGeminiProvider: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.createGeminiProvider),
@@ -38804,45 +38954,50 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.createProviders),
 /* harmony export */   createRapidapiProvider: () => (/* reexport safe */ _providers_rapidapi__WEBPACK_IMPORTED_MODULE_20__.createRapidapiProvider),
 /* harmony export */   createRestGenAiClient: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.createRestGenAiClient),
-/* harmony export */   createSecondOpinionRunner: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.createSecondOpinionRunner),
+/* harmony export */   createSecondOpinionRunner: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.createSecondOpinionRunner),
 /* harmony export */   dHash: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.dHash),
+/* harmony export */   evidenceTag: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.evidenceTag),
 /* harmony export */   extractAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.extractAmount),
-/* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPayeeName),
-/* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPayerName),
-/* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.extractPaymentDataFromText),
+/* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPayeeName),
+/* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPayerName),
+/* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPaymentDataFromText),
 /* harmony export */   getDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.getDefaultProviders),
 /* harmony export */   getNumberFromString: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.getNumberFromString),
 /* harmony export */   hamming: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.hamming),
 /* harmony export */   inferStatusFromText: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.inferStatusFromText),
 /* harmony export */   isFalsePositive: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isFalsePositive),
-/* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.isNoVerifiableAmount),
+/* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.isNoVerifiableAmount),
+/* harmony export */   isOurChatPage: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.isOurChatPage),
 /* harmony export */   isRateLimit: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimit),
 /* harmony export */   isRateLimitLegacy: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isRateLimitLegacy),
-/* harmony export */   isStrategyFailure: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_24__.isStrategyFailure),
+/* harmony export */   isStrategyFailure: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.isStrategyFailure),
 /* harmony export */   isTransient: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isTransient),
 /* harmony export */   isValidAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isValidAmount),
 /* harmony export */   istEpochMs: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istEpochMs),
 /* harmony export */   istParts: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.istParts),
 /* harmony export */   keyFingerprint: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.keyFingerprint),
+/* harmony export */   mentionsOwnUpiId: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.mentionsOwnUpiId),
 /* harmony export */   normalizeAuthenticity: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeAuthenticity),
 /* harmony export */   normalizeWire: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeWire),
-/* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.ocrTextToWire),
+/* harmony export */   ocrTextToWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.ocrTextToWire),
 /* harmony export */   parseModelOutput: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.parseModelOutput),
 /* harmony export */   parseRulesV2: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.parseRulesV2),
 /* harmony export */   parseTimeString: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.parseTimeString),
+/* harmony export */   paymentEvidence: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.paymentEvidence),
 /* harmony export */   processChatGptResponse: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.processChatGptResponse),
-/* harmony export */   providerBudgetMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.providerBudgetMs),
+/* harmony export */   providerBudgetMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.providerBudgetMs),
 /* harmony export */   readKeys: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.readKeys),
-/* harmony export */   requestSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.requestSecondOpinion),
+/* harmony export */   redactForLog: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_26__.redactForLog),
+/* harmony export */   requestSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.requestSecondOpinion),
 /* harmony export */   resetDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.resetDefaultProviders),
-/* harmony export */   resolveProviderNames: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_23__.resolveProviderNames),
+/* harmony export */   resolveProviderNames: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.resolveProviderNames),
 /* harmony export */   resolveVisionTime: () => (/* reexport safe */ _rules_time__WEBPACK_IMPORTED_MODULE_2__.resolveVisionTime),
 /* harmony export */   rulesV2FromEnv: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.rulesV2FromEnv),
 /* harmony export */   runWithKeys: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.runWithKeys),
 /* harmony export */   sanitizeExtraction: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.sanitizeExtraction),
-/* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_26__.secondOpinionTriggers),
-/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_25__.shouldFallbackForPaymentExtraction),
-/* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_22__.smartMergeWire),
+/* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.secondOpinionTriggers),
+/* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_26__.shouldFallbackForPaymentExtraction),
+/* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.smartMergeWire),
 /* harmony export */   statusFromFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusFromFlags),
 /* harmony export */   statusToFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusToFlags),
 /* harmony export */   toGeminiSchema: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.toGeminiSchema),
@@ -38878,11 +39033,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _providers_ocr_space__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./providers/ocr-space */ "../../packages/tg-vision/src/providers/ocr-space.ts");
 /* harmony import */ var _providers_rapidapi__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./providers/rapidapi */ "../../packages/tg-vision/src/providers/rapidapi.ts");
 /* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./providers */ "../../packages/tg-vision/src/providers/index.ts");
-/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./rules/text */ "../../packages/tg-vision/src/rules/text.ts");
-/* harmony import */ var _chain_config__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./chain/config */ "../../packages/tg-vision/src/chain/config.ts");
-/* harmony import */ var _chain_outcome__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./chain/outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
-/* harmony import */ var _chain_analyze__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./chain/analyze */ "../../packages/tg-vision/src/chain/analyze.ts");
-/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+/* harmony import */ var _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./rules/payment-evidence */ "../../packages/tg-vision/src/rules/payment-evidence.ts");
+/* harmony import */ var _rules_text__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./rules/text */ "../../packages/tg-vision/src/rules/text.ts");
+/* harmony import */ var _chain_config__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./chain/config */ "../../packages/tg-vision/src/chain/config.ts");
+/* harmony import */ var _chain_outcome__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./chain/outcome */ "../../packages/tg-vision/src/chain/outcome.ts");
+/* harmony import */ var _chain_analyze__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./chain/analyze */ "../../packages/tg-vision/src/chain/analyze.ts");
+/* harmony import */ var _second_opinion__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./second-opinion */ "../../packages/tg-vision/src/second-opinion.ts");
+
 
 
 
@@ -40130,6 +40287,128 @@ function extractAmount(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES) {
 
 /***/ },
 
+/***/ "../../packages/tg-vision/src/rules/payment-evidence.ts"
+/*!**************************************************************!*\
+  !*** ../../packages/tg-vision/src/rules/payment-evidence.ts ***!
+  \**************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PAYMENT_APP_NAME: () => (/* binding */ PAYMENT_APP_NAME),
+/* harmony export */   PAYMENT_STATUS_PHRASE: () => (/* binding */ PAYMENT_STATUS_PHRASE),
+/* harmony export */   TRANSACTION_REFERENCE: () => (/* binding */ TRANSACTION_REFERENCE),
+/* harmony export */   UPI_ID: () => (/* binding */ UPI_ID),
+/* harmony export */   WEAK_PAYMENT_WORDS: () => (/* binding */ WEAK_PAYMENT_WORDS),
+/* harmony export */   evidenceTag: () => (/* binding */ evidenceTag),
+/* harmony export */   isOurChatPage: () => (/* binding */ isOurChatPage),
+/* harmony export */   mentionsOwnUpiId: () => (/* binding */ mentionsOwnUpiId),
+/* harmony export */   paymentEvidence: () => (/* binding */ paymentEvidence)
+/* harmony export */ });
+// Payment evidence in screenshot text: the ONE place that says which words prove "this is a payment screen".
+// Used by the chain (chain/analyze.ts) to decide the image category; nothing downstream re-guesses it from text.
+//
+//  - STRONG evidence: what only a completed payment screen prints (checked on 23 real receipt formats, 2026-10-19):
+//      status     a completed-payment phrase ("Transaction Successful", "Paid successfully", "Payment done",
+//                 GPay's "Paid • 9:12 am", "भुगतान सफल", "debited from your a/c" ...)
+//      reference  a labelled transaction reference with an id (UTR, "UPI Ref. No:", transaction id ...) TOGETHER
+//                 with a success / paid / debited / completed / sent marker. A UTR alone is not strong: anyone can
+//                 type "utr 412345678901" into a chat (owner 2026-10-19).
+//      paidTo     "Paid to / Sent to ..." together with a done marker ("Completed", "Successful", "Debited from"):
+//                 GPay's success page without a txn id, PhonePe History
+//      ourPayee   one of OUR UPI ids together with a paid / debited / completed marker (GPay chat-thread view).
+//                 Our UPI id alone is weak: a screenshot of our own pay page shows it next to "Pay with PhonePe".
+//    Our own web chat page (paidgirls.site chat UI) is never strong evidence, whatever is typed into it.
+//    Strong evidence overturns an image model's "not a payment" (a genuine payer the model misread) and is the only
+//    way an OCR-only read (no model judged the image) becomes a payment. It never supplies an amount on its own.
+//  - WEAK words ("payment", "paid", "upi", "₹150", an app name, any UPI id ...): chat pages, ads and our own pay
+//    prompts carry them ("Send me payment screenshot", "Pay on PhonePe", our UPI id). They never make an image a
+//    payment; they make a primary model's "not a payment" `unclear` (ask for the full screenshot) instead of final.
+/** Completed-payment status phrases. Bare "paid" / "done" / "success" are weak (chat: "just now i paid"). */
+const PAYMENT_STATUS_PHRASE = new RegExp([
+    String.raw `\b(?:payment|transaction|transfer|txn)\s+(?:was\s+|is\s+|has\s+been\s+)?(?:successful(?:ly)?|success|completed|done)\b`,
+    String.raw `\bpaid\s+successfully\b`,
+    String.raw `\bsuccessfully\s+(?:paid|sent|transferred|credited|debited|completed)\b`,
+    String.raw `\b(?:sent|transferred|received)\s+successfully\b`,
+    String.raw `\b(?:has\s+been|was|is)\s+(?:credited|debited)\b`,
+    String.raw `\b(?:credited|debited)\s+(?:to|from|in|into)\s+(?:your\s+|ur\s+)?(?:a\/c|ac|acct|account|bank|wallet)\b`,
+    // GPay chat-thread view: "Paid • 9:12 am"
+    String.raw `\bpaid\s*[•·∙]\s*\d`,
+    // Hindi PhonePe / GPay: "भुगतान सफल" (payment successful)
+    String.raw `भुगतान\s*सफल`,
+].join('|'), 'i');
+/** A labelled transaction reference followed by an id of 10-30 letters/digits (the id is checked for a digit). */
+const TRANSACTION_REFERENCE = /\b(?:utr|rrn|upi\s*ref(?:erence)?\.?(?:\s*(?:no|number|id))?|upi\s*transaction\s*id|transaction\s*(?:id|no|number|ref)|txn\s*(?:id|no|ref)?|ref(?:erence)?\.?\s*(?:no|number|id))\b\.?\s*[:#-]?\s*([a-z0-9]{10,30})\b/gi;
+/** "Paid to" / "Sent to" (the payee line of a receipt or a history row). */
+const PAID_TO = /\b(?:paid|sent|transferred)\s+to\b/i;
+/** What only a finished transfer prints next to its payee line. */
+const DONE_MARKER = /\b(?:completed|successful(?:ly)?|debited\s+from)\b/i;
+/** Next to OUR UPI id: the money left the payer (not our pay page, which says "Pay" / "Pay with ..."). */
+const PAID_MARKER = /\b(?:paid|debited|completed|successful(?:ly)?|success)\b/i;
+/** What a transaction reference must stand next to for it to count (a reference alone is typeable). */
+const REFERENCE_MARKER = /\b(?:paid|debited|credited|completed|successful(?:ly)?|success|(?:payment|money)\s+sent)\b/i;
+/** Our own web chat page (paidgirls.site/<persona>/chat): its UI text. A screenshot of it is never a payment proof. */
+const OUR_CHAT_PAGE_URL = /paidgirls\.site/i;
+const OUR_CHAT_PAGE_UI = [/\bmsg me on telegram\b/i, /\bsend me payment screenshot\b/i, /\bmessage directly\b/i, /\bmessage me directly\b/i, /\btry demo and see\b/i];
+/** True for a screenshot of our own web chat page (the URL, or two of its fixed UI lines). */
+function isOurChatPage(text) {
+    if (OUR_CHAT_PAGE_URL.test(text))
+        return true;
+    return OUR_CHAT_PAGE_UI.filter((re) => re.test(text)).length >= 2;
+}
+/** x@handle (no dot after the handle, so an e-mail address does not match). */
+const UPI_ID = /[a-z0-9._-]{2,}@[a-z]{2,}\b(?!\.)/i;
+const UPI_ID_ALL = /[a-z0-9._-]{2,}@[a-z]{2,}\b(?!\.)/gi;
+/** Payment-app names only (not the generic words "payment", "transaction", "upi"). */
+const PAYMENT_APP_NAME = /\b(?:gpay|google\s*pay|phone\s*pe|phonepe|paytm|bhim|amazon\s*pay|mobikwik|cred)\b/i;
+/** Weak payment words: enough to make a "not a payment" unsure (`unclear`), never enough for "payment". */
+const WEAK_PAYMENT_WORDS = /gpay|google\s*pay|phone\s*pe|paytm|bhim|\bupi\b|payment|transaction|\bpaid\b|\bdebited\b|\bcredited\b|\btxn\b|\butr\b|\breceipt\b|\bamount\b|received\s+from|sent\s+to|transfer|₹\s*\d|\brs\.?\s*\d|\binr\s*\d|भुगतान/i;
+function hasReference(text) {
+    for (const m of text.matchAll(TRANSACTION_REFERENCE)) {
+        if (m[1] && /\d/.test(m[1]))
+            return true;
+    }
+    return false;
+}
+const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
+const normVpa = (v) => v.trim().toLowerCase().replace(/\s+/g, '').split('&')[0];
+/** True when a UPI id in the text (or the model's payee field) is one of ours: same full id, or same handle (>= 6 chars,
+ * OCR often garbles the bank suffix). */
+function mentionsOwnUpiId(text, ownUpiIds, payeeUpiId) {
+    const own = (ownUpiIds ?? []).map(normVpa).filter((v) => v.includes('@'));
+    if (own.length === 0)
+        return false;
+    const handles = new Set(own.map((v) => v.split('@')[0]).filter((h) => h.length >= 6));
+    const ids = new Set(own);
+    const seen = [...text.matchAll(UPI_ID_ALL)].map((m) => normVpa(m[0]));
+    if (nonEmpty(payeeUpiId))
+        seen.push(normVpa(payeeUpiId));
+    return seen.some((v) => ids.has(v) || handles.has(v.split('@')[0]));
+}
+function paymentEvidence(text, fields = {}, opts = {}) {
+    const t = String(text ?? '').replace(/\s+/g, ' ');
+    const status = PAYMENT_STATUS_PHRASE.test(t);
+    const reference = hasReference(t) || (nonEmpty(fields.utr) && /^[a-z0-9]{10,30}$/i.test(fields.utr.replace(/\s+/g, '')) && /\d/.test(fields.utr));
+    const paidTo = PAID_TO.test(t) && DONE_MARKER.test(t);
+    const ourPayee = PAID_MARKER.test(t) && mentionsOwnUpiId(t, opts.ownUpiIds, fields.payeeUpiId);
+    const upiId = UPI_ID.test(t) || (nonEmpty(fields.payeeUpiId) && UPI_ID.test(fields.payeeUpiId));
+    const appName = PAYMENT_APP_NAME.test(t) || (nonEmpty(fields.app) && PAYMENT_APP_NAME.test(fields.app));
+    const ourChatPage = isOurChatPage(t);
+    const strong = !ourChatPage && (status || (reference && REFERENCE_MARKER.test(t)) || paidTo || ourPayee);
+    const weak = strong || upiId || appName || nonEmpty(fields.payeeName) || WEAK_PAYMENT_WORDS.test(t);
+    return { status, reference, ourChatPage, paidTo, ourPayee, upiId, appName, strong, weak };
+}
+/** Short tag of what made the evidence strong (for rulesApplied / logs). */
+function evidenceTag(e) {
+    if (!e.strong)
+        return 'none';
+    return [e.status && 'status', e.reference && 'ref', e.paidTo && 'paidto', e.ourPayee && 'ourpayee'].filter(Boolean).join('+') || 'none';
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-vision/src/rules/sanitize.ts"
 /*!******************************************************!*\
   !*** ../../packages/tg-vision/src/rules/sanitize.ts ***!
@@ -40372,6 +40651,7 @@ const REF_PATTERNS = [
     /(?:ref(?:erence)?|transaction|utr|txn)[:\s#]*([A-Z0-9]{10,25})/i,
     /(?:order|payment)\s*(?:id|no)[:\s#]*([A-Z0-9]{8,25})/i,
 ];
+/** Legacy R43 keyword list (OCR confidence scoring only). The image category is decided from rules/payment-evidence.ts. */
 const PAYMENT_APP_KEYWORDS = /gpay|google pay|phonepe|phone pe|paytm|bhim|upi|payment|transaction|paid to|received from/i;
 function isValidName(name) {
     if (!name || name.length < 2)
@@ -40492,7 +40772,9 @@ function extractPaymentDataFromText(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_3__.
 }
 /**
  * R44 smartMergePaymentData on the wire object. error / confidence < 0.3: text values OVERRIDE and confidence is
- * recomputed (cap 0.75); otherwise only missing values are filled.
+ * recomputed (cap 0.75); otherwise only missing values are filled. Never changes `isPayment`: whether the image is a
+ * payment is the chain's category decision (a bare "payment" in the text flipped a model's "not a payment", kavya1
+ * 2026-10-19).
  */
 function smartMergeWire(wire, text, isError = false) {
     const merged = { ...wire };
@@ -40508,7 +40790,6 @@ function smartMergeWire(wire, text, isError = false) {
             merged.payerName = text.payerName;
         if (text.time)
             merged.timeRaw = text.time;
-        merged.isPayment = text.isPayment;
         if (text.status)
             merged.status = text.status;
     }
@@ -40540,7 +40821,8 @@ function smartMergeWire(wire, text, isError = false) {
 }
 /**
  * R43 parseOcrTextToJson on the wire shape: word count < 5 -> not a payment; payment-app keyword, amount, names,
- * time, reference and status each raise the confidence from 0.3 (cap 0.85).
+ * time, reference and status each raise the confidence from 0.3 (cap 0.85). The `isPayment` here is the legacy
+ * keyword guess; the chain never trusts it for the category of an OCR read (it requires strong payment evidence).
  */
 function ocrTextToWire(ocrText, v2 = _v2__WEBPACK_IMPORTED_MODULE_3__.NO_RULES) {
     const wire = {
@@ -57233,23 +57515,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   detectFakeScreenshot: () => (/* binding */ detectFakeScreenshot)
 /* harmony export */ });
-/* harmony import */ var _utils_common__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/common */ "./src/utils/common.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _payments_proof_check_blocklist__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payments/proof-check/blocklist */ "./src/payments/proof-check/blocklist.ts");
 
-
+/**
+ * processImage's fake-text check on a payment screenshot. The one fraud-text source is payments/proof-check/blocklist.ts:
+ * every phrase of the former substring list (utils/common.ts `fakeScreenshotText`) still blocks, as a whole word or
+ * phrase, plus the persona `bankingname:` rule. Substring false hits ("rs10" inside "Rs100.00 debited", "10911" inside a
+ * UTR) no longer block.
+ */
 function detectFakeScreenshot(text) {
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, _utils_common__WEBPACK_IMPORTED_MODULE_0__.fakeScreenshotText)) {
-        return true;
-    }
-    const profileValue = (process.env.dbcoll)?.toLowerCase()
-        .replace(/\s+/g, '')
-        .slice(0, 5);
-    if (!profileValue) {
-        return false;
-    }
-    const normalizedText = text.replace(/\s+/g, '');
-    const hasBankingNameProfile = new RegExp(`bankingname:?${profileValue}`, 'i').test(normalizedText);
-    return hasBankingNameProfile;
+    return (0,_payments_proof_check_blocklist__WEBPACK_IMPORTED_MODULE_0__.fakeTextBlockReasons)(text, process.env.dbcoll ?? null).length > 0;
 }
 
 
@@ -57678,6 +57953,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
 /* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
 /* harmony import */ var _services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../services/payment/UpiClass */ "./src/services/payment/UpiClass.ts");
+/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
+
 
 
 
@@ -57714,7 +57991,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__.Logger("tg-aut:process-image");
-const MAX_PAYMENT_AMOUNT = 10000;
+/**
+ * Ask for the full payment screenshot, never reject: tg-vision could not tell whether the image is a payment
+ * (category 'unclear'), or it is a payment whose amount nobody could read (category 'payment', no amount).
+ */
+const UNCLEAR_SCREENSHOT_MESSAGES = [
+    "Baby I can't see it properly 🙈\n\nSend the **full screenshot** na\nAmount and time should be visible",
+    "Hmm this is not clear dear 😕\n\nSend me the **full payment screenshot**\nFrom your UPI app",
+    "I can't read the amount baby 🥺\n\nTake the **full screenshot** again\nAnd send it to me",
+    "Cropped pic I can't check 😅\n\nSend the **complete screenshot** baby\nWith amount and time",
+    "Wait baby, it's not clear 🙈\n\nOpen your UPI app\nSend the **payment details screenshot**",
+    "Darling send the **full screenshot** 😚\n\nI need to see the amount\nAnd the payment time",
+];
 function scheduleProcessImageTask(callback, delayMs, context) {
     return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_29__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
@@ -57845,7 +58133,12 @@ allowAmountMismatch = false) {
     }
     return false;
 }
-/** Re-checks of a screenshot whose analysis was unavailable: after 3, then 10 more minutes. */
+/**
+ * Re-checks of a screenshot whose analysis was unavailable: after 3, then 10 more minutes. The chain lives in process
+ * memory only (timers + the maps below): a restart drops it silently. That is safe, never a reject: the held screenshot
+ * was not deleted, not counted invalid and not answered; ops got the "Analysis down" notice for it, and the user can
+ * resend. Nothing re-runs it after a restart.
+ */
 const ANALYSIS_HOLD_DELAYS_MS = [3 * 60000, 10 * 60000];
 const HOLD_MAP_CAP = 2000;
 const pendingHolds = new Map(); // chatId -> pending chain
@@ -58081,8 +58374,21 @@ async function processImage(event) {
             return;
         }
         imageDetails.amount = imageDetails.amount || 0;
-        const sanitizedData = (0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_8__.parseImage)(imageDetails);
-        logger.log(sanitizedData);
+        // Is it a payment? Local analysis carries tg-vision's one category decision; only 'payment' WITH a readable amount
+        // enters the payment / fraud / proof branches below (a chat page that says "payment", "paid" or "demo" never does).
+        // Every payment-derived field (isPaymentRelated / Finished / Failed / Mine) is cleared otherwise, so keyword rules
+        // cannot drive ops cards or "finish the payment" nudges. `undefined` = the remote analysis result, still judged by
+        // the legacy keyword rules in parseImage.
+        //  - 'unclear', or a 'payment' whose amount nobody could read (not a failed one): ask for the full screenshot;
+        //    never deleted, never counted as an invalid photo, never told "not my payment".
+        const category = imageDetails.category;
+        const paymentWithoutAmount = category === "payment" && !(Number(imageDetails.amount) > 0) && !imageDetails.isFailed;
+        const askFullScreenshot = category === "unclear" || paymentWithoutAmount;
+        const parsedImage = (0,_helpers_parseImage__WEBPACK_IMPORTED_MODULE_8__.parseImage)(imageDetails);
+        const sanitizedData = category === undefined || (category === "payment" && !paymentWithoutAmount)
+            ? parsedImage
+            : { ...parsedImage, isPaymentRelated: false, isFinishedPayment: false, isFailedPayment: false, isPaymentMine: false };
+        logger.log({ ...sanitizedData, category: category ?? "remote", askFullScreenshot });
         let userDetails = await db.read(chatId);
         // A blocked user's photo reaches here only while the fake-payment flow's block can still be answered (the real
         // payment page unblocks). Anything that is not a successful payment to us is ignored: no reply, no ops notice,
@@ -58094,7 +58400,7 @@ async function processImage(event) {
         }
         const processedAmount = (0,_normaliseAmount__WEBPACK_IMPORTED_MODULE_19__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
-        if (blockedAnswering && !(amount > 11 && amount <= MAX_PAYMENT_AMOUNT)) {
+        if (blockedAnswering && !(amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_35__.MAX_PAYMENT_AMOUNT)) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
             return;
         }
@@ -58149,7 +58455,7 @@ async function processImage(event) {
             // No evidence photo for a blocked user; the gate announces a credit / unblock if one happens.
         }
         else if (imageDetails &&
-            (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine)) {
+            (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine || askFullScreenshot)) {
             // Single message: the image WITH the analysis as its caption. (Previously this both
             // forwarded the image AND sent a separate text-only card — the same info twice.)
             const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.CLIENT_UPDATES, photoBuffer, paymentEvidenceCard({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }), { onSent: (id) => (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.noteEvidenceCard)(chatId, id) });
@@ -58271,7 +58577,7 @@ async function processImage(event) {
                             });
                         }
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
-                            if (!(amount > 0 && amount <= MAX_PAYMENT_AMOUNT)) {
+                            if (!(amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_35__.MAX_PAYMENT_AMOUNT)) {
                                 await (0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.deleteMessage)(event);
                                 await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
                                 scheduleProcessImageTask(async () => {
@@ -58421,7 +58727,7 @@ async function processImage(event) {
                                                 }
                                             }
                                         }
-                                        else if (amount >= 15 && amount <= MAX_PAYMENT_AMOUNT) {
+                                        else if (amount >= 15 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_35__.MAX_PAYMENT_AMOUNT) {
                                             if (amount >= 30 &&
                                                 amount >= userDetails.payAmount + 20 &&
                                                 (0,_core_utils__WEBPACK_IMPORTED_MODULE_3__.canStartService)(userDetails, amount)) {
@@ -58651,7 +58957,7 @@ async function processImage(event) {
                                         //   - idempotency, keyed on the SCREENSHOT MESSAGE. The surrounding credit
                                         //     paths run inside scheduleProcessImageTask callbacks, and that helper is a
                                         //     bare setTimeout wrapper with no dedupe, so one screenshot can credit twice.
-                                        if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT) {
+                                        if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_35__.MAX_PAYMENT_AMOUNT) {
                                             creditedSeq.delete(chatId);
                                             creditedSeq.set(chatId, ++holdSeq);
                                             capMap(creditedSeq);
@@ -58663,7 +58969,7 @@ async function processImage(event) {
                                                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
                                             }
                                         }
-                                        if (amount > 0 && amount <= MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
+                                        if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_35__.MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
                                             // Only update if amount is greater than current payAmount
                                             // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
                                             userDetails = await db.update(chatId, {
@@ -58736,6 +59042,14 @@ async function processImage(event) {
                     await (0,_helpers__WEBPACK_IMPORTED_MODULE_22__.askToFinishPayment)(event);
                 }
             }
+        }
+        else if (askFullScreenshot) {
+            // Never a reject: one ask for the full payment screenshot plus one ops notice (the photo card above). No delete,
+            // no invalid-photo count, no re-check timer: the next screenshot the user sends is judged on its own.
+            await (0,_telegram_utils_flood_safe_send__WEBPACK_IMPORTED_MODULE_24__.sendMessageWithTimeout)(event.client, chatId, { message: (0,_messages_messageUtils__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
+            await (0,_notices_chat_notice__WEBPACK_IMPORTED_MODULE_21__.notifyChat)(chatId, paymentWithoutAmount
+                ? { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.', told: true }
+                : { title: 'Unclear pic', summary: 'Could not tell if it is a payment; asked for the full screenshot.', told: true });
         }
         else {
             if (sanitizedData.isPaymentMine) {
@@ -73258,13 +73572,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TIER_A_PHRASES: () => (/* binding */ TIER_A_PHRASES),
 /* harmony export */   TIER_B_PHRASES: () => (/* binding */ TIER_B_PHRASES),
 /* harmony export */   bankingNameNeedle: () => (/* binding */ bankingNameNeedle),
+/* harmony export */   fakeTextBlockReasons: () => (/* binding */ fakeTextBlockReasons),
 /* harmony export */   isBlockedFakeScreenshot: () => (/* binding */ isBlockedFakeScreenshot),
 /* harmony export */   matchBlocklist: () => (/* binding */ matchBlocklist),
 /* harmony export */   prepText: () => (/* binding */ prepText)
 /* harmony export */ });
 /* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
 /**
- * Migrated `fakeScreenshotText` (utils/common.ts) with word-boundary matching (design 2.8.1).
+ * The one fraud-text source: the former substring list `fakeScreenshotText` (utils/common.ts, removed 2026-10-19) with
+ * word-boundary matching (design 2.8.1). processImage reaches it through imageUtils/detectFakeScreenshot.ts
+ * (fakeTextBlockReasons: every former phrase still blocks there).
  * Tier A = BLOCK (unique fake-app strings). Tier B = ASK_PROOF (could collide with genuine screens).
  */
 
@@ -73331,6 +73648,26 @@ function matchBlocklist(text, opts = {}) {
     }
     return { tierA, tierB };
 }
+/**
+ * processImage's fake-text BLOCK on a payment screenshot: every phrase of the former `fakeScreenshotText` list blocks,
+ * as it did, but as a whole word / phrase (owner 2026-10-19: no loosening). That is tier A, every tier-B phrase and
+ * pattern, the masked account tails (x1143 ...) WITHOUT the account-context condition the proof check uses, and the
+ * persona `bankingname:` rule. Word boundaries keep "rs10" out of "Rs100.00" and "10911" out of a 12-digit UTR.
+ * (proofCheck keeps its own tiers: tier B there is ASK_PROOF.)
+ */
+function fakeTextBlockReasons(text, dbcoll) {
+    const t = prepText(text);
+    if (!t)
+        return [];
+    const { tierA, tierB } = matchBlocklist(t, { dbcoll });
+    const out = [...tierA, ...tierB];
+    for (const tail of MASKED_TAILS) {
+        const id = `x${tail}`;
+        if (!out.includes(id) && new RegExp(`${NO_DIGIT_BEFORE}x{1,}${tail}(?!\\d)`).test(t))
+            out.push(id);
+    }
+    return out;
+}
 /** Boundary-safe drop-in for the old boolean `detectFakeScreenshot` (BLOCK tier only). */
 function isBlockedFakeScreenshot(text, dbcoll) {
     return matchBlocklist(text, { dbcoll }).tierA.length > 0;
@@ -73388,16 +73725,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
 /* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
 /* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _payment_evidence__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./payment-evidence */ "./src/payments/proof-check/payment-evidence.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:proof-decision");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:proof-decision");
 /** Lowercased OCR-Space text + model fullText, whitespace collapsed. Payee matching elsewhere keeps using the whole text. */
 function buildOcrAndText(vision) {
     const e = vision.extraction;
@@ -73420,7 +73755,10 @@ function hasHardTextSignal(vision, dbcoll) {
     }
 }
 /**
- * Pure rule engine (design 6 + LLM authenticity). BLOCK on: LONG disclaimer text in the image text, tier-A blocklist,
+ * Pure rule engine (design 6 + LLM authenticity). Runs only on tg-vision category 'payment' (anything else is ACCEPT:
+ * no proof rule can fire on a chat page, meme or unclear image; owner 2026-10-19: classification keeps non-payments
+ * out, fraud blocking on payments stays as strict as before).
+ * BLOCK on: LONG or SHORT disclaimer text in the image text, tier-A blocklist, AI watermark,
  * or an LLM fakeScore >= FAKE_BLOCK_SCORE that is CORROBORATED (second opinion fake, or a code-verified signal: payee
  * not ours / malformed UTR / future date). One model's judgement alone never BLOCKs; it asks for proof. A missing
  * authenticity (OCR-only provider, skipped second opinion) is "no opinion" and can never cause BLOCK.
@@ -73430,9 +73768,10 @@ function decide(input) {
     const e = vision.extraction;
     if (!e)
         return { decision: 'ACCEPT', reasons: ['NO_EXTRACTION'], alert: false };
-    // Only a payment screenshot goes through the fake/proof checks (a chat page with the word "payment" is not one).
-    if (!(0,_payment_evidence__WEBPACK_IMPORTED_MODULE_5__.hasPaymentEvidence)(vision))
-        return { decision: 'ACCEPT', reasons: ['NOT_PAYMENT_EVIDENCE'], alert: false };
+    // Only a payment screenshot goes through the fake/proof checks. The category is tg-vision's one decision
+    // (VisionResult.category); a chat page with the word "payment" or "demo" is never a payment here.
+    if (vision.category !== 'payment')
+        return { decision: 'ACCEPT', reasons: ['NOT_A_PAYMENT'], alert: false };
     const text = buildOcrAndText(vision);
     const so = vision.secondOpinion && !vision.secondOpinion.skipped ? vision.secondOpinion : null;
     const block = [];
@@ -73530,8 +73869,9 @@ __webpack_require__.r(__webpack_exports__);
 /**
  * Disclaimer phrase tiers (design 6, P1/P3).
  * LONG: specific generator-app text, deterministic BLOCK when found in the OCR text.
- * SHORT: generator words ("sample", "demo"...): BLOCK too when printed in the OCR text (owner 2026-10-18: any
- * "sample only" / "entertainment" style text is a fake). Claimed only by a model (not in the text): ASK_PROOF.
+ * SHORT: generator words ("sample", "demo"...): BLOCK too when printed in the OCR text of a PAYMENT screenshot (owner
+ * 2026-10-18: any "sample only" / "entertainment" style text is a fake). Claimed only by a model (not in the text):
+ * ASK_PROOF. Only tg-vision category 'payment' reaches these rules (a chat page saying "Try Demo" never does).
  * Bare "fake" is not a SHORT word: real bank/UPI screens print "beware of fake calls"; it counts only inside
  * LONG phrases ("fake payment").
  */
@@ -73607,42 +73947,40 @@ function scanDisclaimers(ocrAndText, modelPhrases) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.LONG_DISCLAIMERS),
-/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_9__.OLD_PAYMENT_MESSAGES),
-/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.SHORT_DISCLAIMERS),
-/* harmony export */   authenticityEnabled: () => (/* reexport safe */ _thresholds__WEBPACK_IMPORTED_MODULE_4__.authenticityEnabled),
-/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.buildDuplicateQuery),
+/* harmony export */   LONG_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.LONG_DISCLAIMERS),
+/* harmony export */   OLD_PAYMENT_MESSAGES: () => (/* reexport safe */ _messages__WEBPACK_IMPORTED_MODULE_8__.OLD_PAYMENT_MESSAGES),
+/* harmony export */   SHORT_DISCLAIMERS: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.SHORT_DISCLAIMERS),
+/* harmony export */   authenticityEnabled: () => (/* reexport safe */ _thresholds__WEBPACK_IMPORTED_MODULE_3__.authenticityEnabled),
+/* harmony export */   buildDuplicateQuery: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.buildDuplicateQuery),
 /* harmony export */   buildOcrAndText: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.buildOcrAndText),
-/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.checkPayeeUpi),
+/* harmony export */   checkPayeeUpi: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.checkPayeeUpi),
 /* harmony export */   decide: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.decide),
 /* harmony export */   hasHardTextSignal: () => (/* reexport safe */ _decision__WEBPACK_IMPORTED_MODULE_0__.hasHardTextSignal),
-/* harmony export */   hasPaymentEvidence: () => (/* reexport safe */ _payment_evidence__WEBPACK_IMPORTED_MODULE_2__.hasPaymentEvidence),
-/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.imageSha256),
-/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_5__.isBlockedFakeScreenshot),
-/* harmony export */   isFutureDated: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_3__.isFutureDated),
-/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.isMaskedVpa),
-/* harmony export */   isUtrMalformed: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_3__.isUtrMalformed),
-/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.lookupReuse),
-/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_8__.lookupServedDuplicate),
-/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_5__.matchBlocklist),
-/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.matchesPhrase),
-/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.normalizeVpa),
-/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.ownIdsFrom),
+/* harmony export */   imageSha256: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.imageSha256),
+/* harmony export */   isBlockedFakeScreenshot: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_4__.isBlockedFakeScreenshot),
+/* harmony export */   isFutureDated: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_2__.isFutureDated),
+/* harmony export */   isMaskedVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.isMaskedVpa),
+/* harmony export */   isUtrMalformed: () => (/* reexport safe */ _code_checks__WEBPACK_IMPORTED_MODULE_2__.isUtrMalformed),
+/* harmony export */   lookupReuse: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.lookupReuse),
+/* harmony export */   lookupServedDuplicate: () => (/* reexport safe */ _reuse__WEBPACK_IMPORTED_MODULE_7__.lookupServedDuplicate),
+/* harmony export */   matchBlocklist: () => (/* reexport safe */ _blocklist__WEBPACK_IMPORTED_MODULE_4__.matchBlocklist),
+/* harmony export */   matchesPhrase: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.matchesPhrase),
+/* harmony export */   normalizeVpa: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.normalizeVpa),
+/* harmony export */   ownIdsFrom: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.ownIdsFrom),
 /* harmony export */   proofCheck: () => (/* binding */ proofCheck),
-/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_6__.scanDisclaimers),
-/* harmony export */   thresholds: () => (/* reexport module object */ _thresholds__WEBPACK_IMPORTED_MODULE_4__),
-/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_7__.withinOneEdit)
+/* harmony export */   scanDisclaimers: () => (/* reexport safe */ _disclaimers__WEBPACK_IMPORTED_MODULE_5__.scanDisclaimers),
+/* harmony export */   thresholds: () => (/* reexport module object */ _thresholds__WEBPACK_IMPORTED_MODULE_3__),
+/* harmony export */   withinOneEdit: () => (/* reexport safe */ _upi_ownership__WEBPACK_IMPORTED_MODULE_6__.withinOneEdit)
 /* harmony export */ });
 /* harmony import */ var _decision__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decision */ "./src/payments/proof-check/decision.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _payment_evidence__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./payment-evidence */ "./src/payments/proof-check/payment-evidence.ts");
-/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
-/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
-/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
-/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
-/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+/* harmony import */ var _blocklist__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./blocklist */ "./src/payments/proof-check/blocklist.ts");
+/* harmony import */ var _disclaimers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./disclaimers */ "./src/payments/proof-check/disclaimers.ts");
+/* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _reuse__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./reuse */ "./src/payments/proof-check/reuse.ts");
+/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-check/messages.ts");
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:proof-check");
@@ -73656,7 +73994,6 @@ function proofCheck(input) {
         return { decision: 'ACCEPT', reasons: ['PROOF_CHECK_ERROR'], alert: false };
     }
 }
-
 
 
 
@@ -73703,49 +74040,6 @@ const OLD_PAYMENT_MESSAGES = [
     "Ye purana payment hai \u{1F605}\n\nAbhi pay karke naya screenshot bhejo na \u{1F48B}",
     "Hmm sweetie, this one is from before\n\nPay again right now and send me the new screenshot, then we start \u{1F618}",
 ];
-
-
-/***/ },
-
-/***/ "./src/payments/proof-check/payment-evidence.ts"
-/*!******************************************************!*\
-  !*** ./src/payments/proof-check/payment-evidence.ts ***!
-  \******************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   hasPaymentEvidence: () => (/* binding */ hasPaymentEvidence)
-/* harmony export */ });
-/** Chain providers that only return OCR text (no visual judgement). Their `isPayment` is a keyword match ("payment"). */
-const OCR_ONLY_PROVIDERS = new Set(['rapidapi', 'ocr-space']);
-/** Payment-app names only. Deliberately NOT the generic words of tg-vision PAYMENT_APP_KEYWORDS ("payment", "transaction", "upi"). */
-const APP_NAME = /\b(?:gpay|google\s*pay|phone\s*pe|phonepe|paytm|bhim|amazon\s*pay|mobikwik|cred)\b/i;
-/** x@handle (no dot after the handle, so an e-mail address does not match). */
-const UPI_ID = /[a-z0-9._-]{2,}@[a-z]{2,}\b(?!\.)/i;
-/**
- * True only when the image is genuinely a payment read. The fake/proof checks apply to payment screenshots only
- * (owner rule 2026-10-19): a chat page that merely contains the word "payment" must never be blocked as fake.
- * Only ever used to REMOVE blocks; it does not influence crediting.
- */
-function hasPaymentEvidence(vision) {
-    const e = vision.extraction;
-    if (!e || vision.outcome === 'not_payment' || e.isPayment !== true)
-        return false;
-    if (!OCR_ONLY_PROVIDERS.has(String(e.provider ?? '').toLowerCase()))
-        return true; // a vision model judged it a payment
-    if (e.status === 'success')
-        return true;
-    if (typeof e.utr === 'string' && e.utr.trim())
-        return true;
-    if (typeof e.payeeUpiId === 'string' && e.payeeUpiId.trim())
-        return true;
-    if (typeof e.app === 'string' && e.app.trim())
-        return true;
-    const text = `${e.ocrText ?? ''} ${e.fullText ?? ''}`;
-    return APP_NAME.test(text) || UPI_ID.test(text);
-}
 
 
 /***/ },
@@ -74822,6 +75116,9 @@ function legacyWouldDecision(d) {
         return 'hold';
     if (d.isPayment && d.isSuccess && !d.suspectedFake && typeof d.amount === 'number' && d.amount > 0)
         return 'accept';
+    // mirrors processImage's full-screenshot ask (local results only)
+    if (d.category === 'unclear' || (d.category === 'payment' && !(typeof d.amount === 'number' && d.amount > 0) && !d.isFailed))
+        return 'unclear';
     return 'reject';
 }
 /** The legacy credit gate: true only when the legacy credit path would credit this result. */
@@ -74846,7 +75143,7 @@ function classifyDiff(remote, local, remoteAmount, localAmount) {
     if (remote === 'accept') {
         if (REJECT_GROUP.has(local))
             return { agree: false, diffKind: 'local_rejects_remote_accepts' };
-        if (local === 'ask_proof')
+        if (local === 'ask_proof' || local === 'unclear')
             return { agree: false, diffKind: 'local_asks_remote_accepts' };
     }
     if (local === 'accept' && REJECT_GROUP.has(remote))
@@ -74904,7 +75201,7 @@ function snapshotLocal(vision, legacy, proof, durationMs) {
             would = 'ask_proof';
     }
     return {
-        outcome: vision.outcome, provider: e?.provider ?? null, model: e?.model ?? null,
+        outcome: vision.outcome, category: vision.category ?? null, provider: e?.provider ?? null, model: e?.model ?? null,
         isPayment: !!legacy.isPayment, amount: typeof legacy.amount === 'number' ? legacy.amount : 0,
         isSuccess: !!legacy.isSuccess, isFailed: !!legacy.isFailed, isFinished: !!legacy.isFinished,
         noVerifiableAmount: !!legacy.noVerifiableAmount, confidence: typeof legacy.confidence === 'number' ? legacy.confidence : 0,
@@ -74939,7 +75236,7 @@ function failedLocal(error, durationMs, vision) {
         ? { status: vision.precheck.status, wordCount: vision.precheck.wordCount, ms: typeof vision.precheck.ms === 'number' ? vision.precheck.ms : null }
         : null;
     return {
-        outcome: vision?.outcome ?? null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
+        outcome: vision?.outcome ?? null, category: vision?.category ?? null, provider: null, model: null, isPayment: false, amount: 0, isSuccess: false, isFailed: false,
         isFinished: false, noVerifiableAmount: false, confidence: 0, attempts, watermarkPresent: null,
         disclaimerPhrases: [], utr: null, payeeUpiId: null, rulesApplied: [], proofDecision: null, proofReasons: [],
         fakeScore: null, fakeVerdict: null, fakeSignals: [], fakeEvidence: [], secondOpinion: null, precheck,
@@ -75019,8 +75316,13 @@ function imageAnalysisSource(env = process.env) {
     const v = String(env.IMAGE_ANALYSIS_SOURCE ?? '').trim().toLowerCase();
     return v === 'local' || v === 'local-only' || v === 'off-shadow' || v === 'remote-only' ? v : 'remote';
 }
+/** tg-vision logs one line per provider attempt plus a result line; without a logger it is silent (NOOP_LOGGER). */
+const visionLogger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-vision');
 const defaultDeps = () => ({
     analyze: (image) => (0,_tg_vision__WEBPACK_IMPORTED_MODULE_0__.analyzePaymentProof)(image, {
+        logger: visionLogger,
+        // our payee VPAs: "our UPI id + Paid" is strong payment evidence (GPay chat-thread view)
+        ownUpiIds: () => (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.ownIdsFrom)(_services_payment_UpiClass__WEBPACK_IMPORTED_MODULE_3__.UpiIds),
         // S6 (authenticity second opinion) is pointless when a deterministic text signal already blocks
         secondOpinionContext: { hasHardSignal: (e) => (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.hasHardTextSignal)({ extraction: e }, process.env.dbcoll ?? null) },
     }),
@@ -75199,7 +75501,10 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
                 const snap = (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.snapshotRemote)(remote, deps.now() - tr);
                 if ((0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.isLegacyAccept)(remote)) {
                     recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'remote-confirm', finalDecision: 'accept', remoteConfirm: 'ran' });
-                    return withVisionFacts(remote, attempt.vision);
+                    // The remote accepted a payment the local chain did not credit: the decision is now a payment, so
+                    // the category travels as 'payment' (carrying the local 'not_payment' / 'unclear' would make
+                    // processImage drop the remote's credit; leaving it unset would fall back to keyword rules).
+                    return { ...withVisionFacts(remote, attempt.vision), category: 'payment' };
                 }
                 recordLocalMode(photoBuffer, ctx, attempt, snap, { source, decidedBy: 'local', finalDecision: (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_6__.legacyWouldDecision)(attempt.legacy), remoteConfirm: 'ran' });
             }
@@ -75271,9 +75576,7 @@ function safeOwnUpiIds() {
 /** The proof-check BLOCK reasons for this screenshot, or null when it is not blocked (or the check failed). */
 function proofBlockReasons(vision, ctx) {
     try {
-        // Only a payment screenshot may be blocked as fake; a non-payment image (chat page, meme) never is.
-        if (!(0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.hasPaymentEvidence)(vision))
-            return null;
+        // proofCheck accepts anything tg-vision did not categorise as a payment (chat page, meme): never blocked.
         const proof = (0,_proof_check__WEBPACK_IMPORTED_MODULE_4__.proofCheck)({
             vision,
             ctx: { chatId: ctx.chatId, profile: (process.env.dbcoll || '').toLowerCase(), clientId: ctx.clientId, telegramMsgId: ctx.msgId, imageHash: null, now: deps.now() },
@@ -91867,7 +92170,6 @@ const channelSafetyChecker = new ChannelSafetyChecker();
 var __webpack_dirname__ = "src/utils";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   fakeScreenshotText: () => (/* binding */ fakeScreenshotText),
 /* harmony export */   getClientFilePath: () => (/* binding */ getClientFilePath)
 /* harmony export */ });
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! path */ "path");
@@ -91879,16 +92181,6 @@ __webpack_require__.r(__webpack_exports__);
 const moduleDir =  true
     ? __webpack_dirname__
     : 0;
-const fakeScreenshotText = ['wallet txn', 'tn=', 'suncrypto',
-    'x1143', 'fmpibi2147483647', 'x1920', 'june 2020', 'p2032484594584584538',
-    '7070979668', 'indi-home', 'do more with', 'purchase confirmed', 'prepkod', 'preprod',
-    'matlab no more', 'no pin upto 500₹', 'type...', 'the best of upi',
-    "payments successful", 'unlock rewards >', 'unlock rewards>', 'get inked',
-    'himan37922', 'win 5 lucky', 'getaway!', 'updated wallet', 'x621933',
-    'your coupons!', 'x6325', 'x2068', 'x1072', 'photext',
-    'fmpib1731', 'futures &', 'lightning-fast', 'balance 120', '2028010000234',
-    'wallet balance 12', 'rs300', 'rs10', '10911', '115289349823', 'bak stat',
-    'money sitting idle', 'chance to grow'];
 function getClientFilePath(fileName) {
     const clientId = process.env.dbcoll?.toLowerCase() || 'default';
     return path__WEBPACK_IMPORTED_MODULE_0__.resolve(moduleDir, '../', clientId, fileName);
