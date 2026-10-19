@@ -5411,6 +5411,9 @@ let TelegramService = TelegramService_1 = class TelegramService {
     getActiveClientSetup(newMobile) {
         return TelegramManager_1.default.getActiveClientSetup(newMobile);
     }
+    getActiveClientSetupMobiles() {
+        return TelegramManager_1.default.getActiveClientSetupMobiles();
+    }
     hasActiveClientSetup() {
         return TelegramManager_1.default.hasActiveClientSetup();
     }
@@ -8745,6 +8748,16 @@ class TelegramManager {
         }
         return TelegramManager.activeClientSetups.values().next().value;
     }
+    static getActiveClientSetupMobiles() {
+        const mobiles = [];
+        for (const setup of TelegramManager.activeClientSetups.values()) {
+            if (setup.newMobile)
+                mobiles.push(setup.newMobile);
+            if (setup.existingMobile)
+                mobiles.push(setup.existingMobile);
+        }
+        return mobiles;
+    }
     static hasActiveClientSetup() {
         return TelegramManager.activeClientSetups.size > 0;
     }
@@ -9042,6 +9055,9 @@ class TelegramManager {
     async getLastActiveTime() {
         return authOps.getLastActiveTime(this.ctx);
     }
+    async getLastForeignActiveDate() {
+        return authOps.getLastForeignActiveDate(this.ctx);
+    }
     async hasPassword() {
         return authOps.hasPassword(this.ctx);
     }
@@ -9084,6 +9100,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.isOwnAuth = isOwnAuth;
 exports.removeOtherAuths = removeOtherAuths;
 exports.getAuths = getAuths;
+exports.getLastForeignActiveDate = getLastForeignActiveDate;
 exports.getLastActiveTime = getLastActiveTime;
 exports.hasPassword = hasPassword;
 exports.set2fa = set2fa;
@@ -9196,7 +9213,7 @@ async function getAuths(ctx) {
         throw new Error('Client is not initialized');
     return await ctx.client.invoke(new telegram_1.Api.account.GetAuthorizations());
 }
-async function getLastActiveTime(ctx) {
+async function getLastForeignActiveDate(ctx) {
     if (!ctx.client)
         throw new Error('Client is not initialized');
     try {
@@ -9210,13 +9227,16 @@ async function getLastActiveTime(ctx) {
             }
         });
         if (latest === 0)
-            return new Date().toISOString().split('T')[0];
+            return null;
         return new Date(latest * 1000).toISOString().split('T')[0];
     }
     catch (error) {
         ctx.logger.error(ctx.phoneNumber, 'Error getting last active time:', error);
-        return new Date().toISOString().split('T')[0];
+        return null;
     }
+}
+async function getLastActiveTime(ctx) {
+    return (await getLastForeignActiveDate(ctx)) ?? new Date().toISOString().split('T')[0];
 }
 async function hasPassword(ctx) {
     if (!ctx.client)
@@ -22803,8 +22823,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             const me = await telegramClient.getMe();
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
             let updateCount = 0;
+            const hasNameBioPool = (client.firstNames?.length > 0) || (client.bufferLastNames?.length > 0) || (client.bios?.length > 0);
             if ((client.firstNames?.length > 0) || (client.bufferLastNames?.length > 0) || (client.bios?.length > 0) || (client.profilePics?.length > 0)) {
                 let assignment = null;
+                let unassignableReason = null;
                 const hasValidAssignment = (doc.assignedFirstName != null ||
                     doc.assignedLastName != null ||
                     doc.assignedBio != null);
@@ -22891,14 +22913,31 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                             this.logger.log(`Assigned persona "${pick.firstName}" to ${doc.mobile}`);
                         }
                         else {
-                            this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
+                            const fresh = await this.model.findOne({ mobile: doc.mobile }, { assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
+                            if (fresh && (fresh.assignedFirstName != null || fresh.assignedLastName != null || fresh.assignedBio != null)) {
+                                assignment = {
+                                    assignedFirstName: fresh.assignedFirstName,
+                                    assignedLastName: fresh.assignedLastName,
+                                    assignedBio: fresh.assignedBio,
+                                    assignedProfilePics: fresh.assignedProfilePics,
+                                };
+                                this.logger.log(`Using concurrently assigned persona for ${doc.mobile}`);
+                            }
+                            else {
+                                this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
+                                unassignableReason = 'atomic persona assignment guard not met';
+                            }
                         }
                     }
                 }
                 const hasAnyAssignment = assignment != null && (assignment.assignedFirstName != null ||
                     assignment.assignedLastName != null ||
                     assignment.assignedBio != null);
-                if (hasAnyAssignment) {
+                if (!hasNameBioPool) {
+                    this.logger.warn(`Persona pool for ${doc.mobile} has no firstNames/lastNames/bios — marking name/bio step done`);
+                    updateCount = 1;
+                }
+                else if (hasAnyAssignment) {
                     const fullUser = await telegramClient.client.invoke(new telegram_1.Api.users.GetFullUser({ id: new telegram_1.Api.InputUserSelf() }));
                     const currentLastName = this.readNestedString(fullUser, ['users', 0, 'lastName']);
                     const currentBio = this.readNestedString(fullUser, ['fullUser', 'about']);
@@ -22926,6 +22965,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                         updateCount++;
                     }
                     updateCount = Math.max(updateCount, 1);
+                }
+                else if (unassignableReason) {
+                    return await this.recordNameBioStepFailure(doc.mobile, failedAttempts, unassignableReason);
+                }
+                else {
+                    this.logger.warn(`No persona candidate for ${doc.mobile} — marking name/bio step done`);
+                    updateCount = 1;
                 }
             }
             else {
@@ -23869,23 +23915,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
     async updateInfo() {
         const primaryClientMobiles = await this.getPrimaryClientMobiles();
-        const clients = await this.bufferClientModel
-            .find({ status: 'active', lastChecked: { $lt: new Date(Date.now() - 5 * this.ONE_DAY_MS) } })
-            .sort({ channels: 1 })
-            .limit(25);
-        const now = Date.now();
-        for (let i = 0; i < clients.length; i++) {
-            const client = clients[i];
-            if (this.isPrimaryClientMobile(client.mobile, primaryClientMobiles)) {
-                this.logger.debug(`Skipping buffer health check for ${client.mobile}: currently attached as primary client mobile`);
-                continue;
-            }
-            const lastChecked = client.lastChecked ? new Date(client.lastChecked).getTime() : 0;
-            await this.performHealthCheck(client.mobile, lastChecked, now);
-            if (i < clients.length - 1) {
-                await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(16000, 2500, 12000, 20000));
-            }
-        }
+        await this.runPeriodicHealthChecks(primaryClientMobiles);
     }
     async joinchannelForBufferClients(skipExisting = true, clientId) {
         if (this.telegramService.hasActiveClientSetup()) {
@@ -24752,6 +24782,11 @@ __decorate([
     (0, mongoose_1.Prop)({ required: false, type: Date, default: null }),
     __metadata("design:type", Date)
 ], BufferClient.prototype, "lastChecked", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp of the most recent periodic health-check attempt (success or failure).' }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], BufferClient.prototype, "lastHealthCheckAttemptAt", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Operational status for the record.', enum: ['active', 'inactive'] }),
     (0, mongoose_1.Prop)({
@@ -36231,8 +36266,10 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const me = await telegramClient.getMe();
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
             let updateCount = 0;
+            const hasNameBioPool = (client.firstNames?.length > 0) || (client.promoteLastNames?.length > 0) || (client.bios?.length > 0);
             if ((client.firstNames?.length > 0) || (client.promoteLastNames?.length > 0) || (client.bios?.length > 0) || (client.profilePics?.length > 0)) {
                 let assignment = null;
+                let unassignableReason = null;
                 const hasValidAssignment = (doc.assignedFirstName != null ||
                     doc.assignedLastName != null ||
                     doc.assignedBio != null);
@@ -36319,14 +36356,31 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                             this.logger.log(`Assigned persona "${pick.firstName}" to ${doc.mobile}`);
                         }
                         else {
-                            this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
+                            const fresh = await this.model.findOne({ mobile: doc.mobile }, { assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
+                            if (fresh && (fresh.assignedFirstName != null || fresh.assignedLastName != null || fresh.assignedBio != null)) {
+                                assignment = {
+                                    assignedFirstName: fresh.assignedFirstName,
+                                    assignedLastName: fresh.assignedLastName,
+                                    assignedBio: fresh.assignedBio,
+                                    assignedProfilePics: fresh.assignedProfilePics,
+                                };
+                                this.logger.log(`Using concurrently assigned persona for ${doc.mobile}`);
+                            }
+                            else {
+                                this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
+                                unassignableReason = 'atomic persona assignment guard not met';
+                            }
                         }
                     }
                 }
                 const hasAnyAssignment = assignment != null && (assignment.assignedFirstName != null ||
                     assignment.assignedLastName != null ||
                     assignment.assignedBio != null);
-                if (hasAnyAssignment) {
+                if (!hasNameBioPool) {
+                    this.logger.warn(`Persona pool for ${doc.mobile} has no firstNames/lastNames/bios — marking name/bio step done`);
+                    updateCount = 1;
+                }
+                else if (hasAnyAssignment) {
                     const fullUser = await telegramClient.client.invoke(new telegram_1.Api.users.GetFullUser({ id: new telegram_1.Api.InputUserSelf() }));
                     const currentLastName = this.readNestedString(fullUser, ['users', 0, 'lastName']);
                     const currentBio = this.readNestedString(fullUser, ['fullUser', 'about']);
@@ -36354,6 +36408,13 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         updateCount++;
                     }
                     updateCount = Math.max(updateCount, 1);
+                }
+                else if (unassignableReason) {
+                    return await this.recordNameBioStepFailure(doc.mobile, failedAttempts, unassignableReason);
+                }
+                else {
+                    this.logger.warn(`No persona candidate for ${doc.mobile} — marking name/bio step done`);
+                    updateCount = 1;
                 }
             }
             else {
@@ -36813,19 +36874,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         return 'Client enrolled as promote successfully';
     }
     async updateInfo() {
-        const clients = await this.promoteClientModel
-            .find({ status: 'active', lastChecked: { $lt: new Date(Date.now() - 5 * this.ONE_DAY_MS) } })
-            .sort({ channels: 1 })
-            .limit(25);
-        const now = Date.now();
-        for (let i = 0; i < clients.length; i++) {
-            const client = clients[i];
-            const lastChecked = client.lastChecked ? new Date(client.lastChecked).getTime() : 0;
-            await this.performHealthCheck(client.mobile, lastChecked, now);
-            if (i < clients.length - 1) {
-                await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(16000, 2500, 12000, 20000));
-            }
-        }
+        await this.runPeriodicHealthChecks();
     }
     async joinchannelForPromoteClients(skipExisting = true) {
         if (this.telegramService.hasActiveClientSetup()) {
@@ -37564,6 +37613,11 @@ __decorate([
     (0, mongoose_1.Prop)({ required: false, type: Date, default: null }),
     __metadata("design:type", Date)
 ], PromoteClient.prototype, "lastChecked", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp of the most recent periodic health-check attempt (success or failure).' }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], PromoteClient.prototype, "lastHealthCheckAttemptAt", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp of the most recent warmup processing attempt.' }),
     (0, mongoose_1.Prop)({ required: false, type: Date, default: null }),
@@ -40678,6 +40732,8 @@ class BaseClientService {
         this.joinFailureCounts = new Map();
         this.MAX_JOIN_FAILURES_PER_MOBILE = 3;
         this.joinScopeClientId = null;
+        this.PERIODIC_HEALTH_CHECK_LIMIT = 25;
+        this.PERIODIC_HEALTH_CHECK_SPARE = 10;
         this.KNOWN_2FA_PASSWORD = 'Ajtdmwajt1@';
         this.logger = new logger_1.Logger(loggerName);
     }
@@ -40971,6 +41027,62 @@ class BaseClientService {
         await (0, Helpers_1.sleep)(6000 + Math.random() * 3000);
         return preservedMobiles;
     }
+    getHealthCheckBusyMobiles() {
+        const busy = new Set([...this.joinChannelMap.keys(), ...this.leaveChannelMap.keys()]);
+        if (this.telegramService.hasActiveClientSetup()) {
+            for (const mobile of this.telegramService.getActiveClientSetupMobiles())
+                busy.add(mobile);
+        }
+        return busy;
+    }
+    async selectHealthCheckCandidates(excludedMobiles, fetchLimit) {
+        const excluded = Array.from(new Set(excludedMobiles));
+        const base = {
+            status: 'active',
+            warmupPhase: { $in: [warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
+            inUse: { $ne: true },
+            ...(excluded.length > 0 ? { mobile: { $nin: excluded } } : {}),
+        };
+        const now = Date.now();
+        const neverChecked = await this.model
+            .find({
+            ...base,
+            $and: [
+                { $or: [{ lastChecked: null }, { lastChecked: { $exists: false } }] },
+                { $or: [{ lastHealthCheckAttemptAt: null }, { lastHealthCheckAttemptAt: { $lt: new Date(now - this.ONE_DAY_MS) } }] },
+            ],
+        })
+            .sort({ lastHealthCheckAttemptAt: 1, channels: 1 })
+            .limit(fetchLimit);
+        const stale = neverChecked.length < fetchLimit
+            ? await this.model
+                .find({ ...base, lastChecked: { $lt: new Date(now - 5 * this.ONE_DAY_MS) } })
+                .sort({ channels: 1 })
+                .limit(fetchLimit - neverChecked.length)
+            : [];
+        return [...neverChecked, ...stale];
+    }
+    async runPeriodicHealthChecks(extraExcludedMobiles = []) {
+        const limit = this.PERIODIC_HEALTH_CHECK_LIMIT;
+        const clients = await this.selectHealthCheckCandidates([...extraExcludedMobiles, ...this.getHealthCheckBusyMobiles()], limit + this.PERIODIC_HEALTH_CHECK_SPARE);
+        const now = Date.now();
+        let checked = 0;
+        for (const client of clients) {
+            if (checked >= limit)
+                break;
+            if (this.getHealthCheckBusyMobiles().has(client.mobile)) {
+                this.logger.debug(`Skipping ${this.clientType} health check for ${client.mobile}: busy in join/leave queue or client setup`);
+                continue;
+            }
+            if (checked > 0) {
+                await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(16000, 2500, 12000, 20000));
+            }
+            const lastChecked = client.lastChecked ? new Date(client.lastChecked).getTime() : 0;
+            await this.performHealthCheck(client.mobile, lastChecked, now);
+            checked++;
+        }
+        return checked;
+    }
     async performHealthCheck(mobile, lastChecked, now) {
         const healthCheckIntervalDays = client_helper_utils_1.ClientHelperUtils.gaussianRandom(7, 1.5, 4, 10);
         const needsHealthCheck = !lastChecked || (now - lastChecked > healthCheckIntervalDays * this.ONE_DAY_MS);
@@ -40979,6 +41091,7 @@ class BaseClientService {
         }
         let telegramClient = null;
         try {
+            await this.update(mobile, { lastHealthCheckAttemptAt: new Date() });
             telegramClient = await connection_manager_1.connectionManager.getClient(mobile, {
                 autoDisconnect: false,
                 handler: false,
@@ -41319,6 +41432,20 @@ class BaseClientService {
             details,
             detailsTitle: 'Error message',
         };
+    }
+    async recordNameBioStepFailure(mobile, failedAttempts, reason) {
+        const fails = failedAttempts + 1;
+        this.logger.warn(`update_name_bio failed for ${mobile}: ${reason} (fails=${fails}/${this.MAX_FAILED_ATTEMPTS})`);
+        await this.update(mobile, {
+            lastUpdateAttempt: new Date(),
+            failedUpdateAttempts: fails,
+            lastUpdateFailure: new Date(),
+            organicActivityAt: new Date(),
+        });
+        if (fails === this.MAX_FAILED_ATTEMPTS) {
+            this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', mobile, [{ label: 'Step', value: 'update_name_bio', code: false }, { label: 'Fails', value: `${fails}/${this.MAX_FAILED_ATTEMPTS}`, code: false }], undefined, reason));
+        }
+        return 0;
     }
     sendAccountNotice(input) {
         const batch = (0, notice_batch_1.currentNoticeBatch)();
@@ -51122,8 +51249,8 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 autoDisconnect: true,
                 handler: false,
             });
-            const [lastActive, me, selfMessages, dialogs, contacts, hasPassword, calls,] = await Promise.all([
-                manager.getLastActiveTime(),
+            const [foreignLastActive, me, selfMessages, dialogs, contacts, hasPassword, calls,] = await Promise.all([
+                manager.getLastForeignActiveDate(),
                 manager.getMe(),
                 manager.getSelfMSgsInfo(),
                 manager.getDialogs({ limit: 5 }),
@@ -51131,6 +51258,8 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 manager.hasPassword(),
                 manager.getCallLogStats(),
             ]);
+            const lastActive = foreignLastActive ??
+                (user.lastActive ? undefined : new Date().toISOString().split('T')[0]);
             await this.usersService.updateByFilter({ $or: [{ tgId: user.tgId }, { mobile: me.phone }] }, {
                 contacts: 'savedCount' in contacts ? contacts.savedCount : 0,
                 calls: calls || {
@@ -51152,7 +51281,7 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 otherVideoCount: selfMessages.otherVideoCount,
                 ownVideoCount: selfMessages.ownVideoCount,
                 twoFA: Boolean(hasPassword),
-                lastActive,
+                ...(lastActive ? { lastActive } : {}),
                 tgId: me.id.toString(),
             });
             try {
