@@ -630,6 +630,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
 /**
  * Conversion Attribution Service — common-chat based ROI.
  *
@@ -638,6 +639,7 @@ __webpack_require__.r(__webpack_exports__);
  * per-channel conversion claims; a channel does not need a recent promotion
  * send record to receive attribution credit.
  */
+
 
 
 
@@ -654,7 +656,7 @@ class ConversionAttributionService {
         this.tracker = tracker;
     }
     static init(intelligenceService, tracker, options = {}) {
-        if (!ConversionAttributionService.instance || shouldReplace(options)) {
+        if (!ConversionAttributionService.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.shouldReplace)(options)) {
             ConversionAttributionService.instance = new ConversionAttributionService(intelligenceService, tracker);
         }
         return ConversionAttributionService.instance;
@@ -780,19 +782,13 @@ function normalizeCommonChatId(value) {
         return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value.toString()) ?? '';
     return '';
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function isIntelligenceServiceLike(value) {
-    return isRecord(value) && typeof value['recordDMConversion'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value) && typeof value['recordDMConversion'] === 'function';
 }
 function isTrackerLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value)
         && typeof value['claimConversion'] === 'function'
         && typeof value['releaseConversion'] === 'function';
-}
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
 }
 
 
@@ -849,6 +845,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool_constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/constants */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/constants.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 
@@ -858,7 +856,7 @@ const CHANNEL_INTELLIGENCE_ROOT_FIELDS = [
 ];
 /** Runtime boundary for every reader and writer of the frozen document shape. */
 function isChannelIntelligence(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value))
         return false;
     const timestamps = value['timestamps'];
     const outcomes = value['outcomes'];
@@ -871,28 +869,28 @@ function isChannelIntelligence(value) {
         && Array.isArray(messagePool)
         && messagePool.length <= _pool_constants__WEBPACK_IMPORTED_MODULE_0__.POOL.MAX_ENTRIES_PER_CHANNEL
         && messagePool.every(isValidPoolEntry)
-        && isRecord(timestamps)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(timestamps)
         && isNonNegativeNumber(timestamps['firstSeenAtMs'])
         && isNonNegativeNumber(timestamps['lastPromotionAtMs'])
         && isNonNegativeNumber(timestamps['updatedAtMs'])
-        && isRecord(outcomes)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(outcomes)
         && isNonNegativeNumber(outcomes['attempted'])
         && isNonNegativeNumber(outcomes['survived'])
         && isNonNegativeNumber(outcomes['deleted'])
         && (outcomes['freeformDeleted'] === undefined || isNonNegativeNumber(outcomes['freeformDeleted']))
         && (outcomes['followUpDeleted'] === undefined || isNonNegativeNumber(outcomes['followUpDeleted']))
-        && isRecord(exploration)
-        && isRecord(exploration['seedProbeCounts'])
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(exploration)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(exploration['seedProbeCounts'])
         && isNonNegativeNumber(exploration['seedProbeCounts']['legacy'])
         && isNonNegativeNumber(exploration['seedProbeCounts']['custom'])
         && isNonNegativeNumber(exploration['seedProbeCounts']['ai'])
-        && isRecord(safety)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(safety)
         && (safety['status'] === 'active' || safety['status'] === 'blocked')
         && isNonNegativeNumber(safety['statusUpdatedAtMs'])
         && isNonNegativeNumber(safety['consecutiveErrors'])
         && (safety['lastErrorType'] === null || typeof safety['lastErrorType'] === 'string')
         && isNonNegativeNumber(safety['lastErrorAtMs'])
-        && isRecord(DMs)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(DMs)
         && isNonNegativeNumber(DMs['credited'])
         && isNonNegativeNumber(DMs['updatedAtMs']);
 }
@@ -909,9 +907,6 @@ function isValidPoolEntry(value) {
 }
 function isNonNegativeNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -934,12 +929,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
 /**
  * Channel Intelligence Service — MongoDB-backed per-channel learning.
  *
  * Writer for bounded message evidence, channel outcomes, safety, and DMs.
  * All writes use atomic $inc/$set to avoid read-modify-write races.
  */
+
 
 
 
@@ -956,7 +953,7 @@ class ChannelIntelligenceService {
         this.collection = collection;
     }
     static init(collection, options = {}) {
-        if (!ChannelIntelligenceService.instance || shouldReplace(options)) {
+        if (!ChannelIntelligenceService.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.shouldReplace)(options)) {
             ChannelIntelligenceService.instance = new ChannelIntelligenceService(collection);
         }
         return ChannelIntelligenceService.instance;
@@ -1464,9 +1461,6 @@ function isAccountSpecificError(value) {
 function normalizeLabel(value, fallback) {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function hasPoolStateEvidence(entry) {
     return safeNonNegative(entry.attempted) > 0
         || safeNonNegative(entry.survived) > 0
@@ -1491,7 +1485,7 @@ function buildCurrentDocumentFilter(channelId, doc) {
         : { channelId };
 }
 function isMatchedUpdateResult(value) {
-    const result = isRecord(value) ? value : null;
+    const result = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.isRecord)(value) ? value : null;
     if (!result)
         return false;
     return safeNonNegative(result['matchedCount']) > 0
@@ -1499,7 +1493,7 @@ function isMatchedUpdateResult(value) {
         || safeNonNegative(result['upsertedCount']) > 0;
 }
 function isCollectionLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.isRecord)(value)
         && typeof value['findOne'] === 'function'
         && typeof value['find'] === 'function'
         && typeof value['updateOne'] === 'function'
@@ -1513,10 +1507,7 @@ async function readCursorArray(cursor) {
     return Array.isArray(rows) ? rows : [];
 }
 function isCursorToArrayLike(value) {
-    return isRecord(value) && typeof value['toArray'] === 'function';
-}
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.isRecord)(value) && typeof value['toArray'] === 'function';
 }
 
 
@@ -1581,12 +1572,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _pool_constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/constants */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/constants.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
 /**
  * Bounded pool percentile engine.
  *
  * The only live percentile is the raw score distribution for reusable message-pool entries.
  * It is used solely to bench weak entries; channel selection relies on outcomes directly.
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:percentile-engine");
@@ -1661,7 +1654,7 @@ class PercentileEngine {
         let messageRawScore = emptyBuckets();
         try {
             const [result] = await source.aggregate(messageRawScorePipeline(nowMs)).toArray();
-            messageRawScore = extractBuckets(isRecord(result) ? result['messageRawScoreValues'] : null);
+            messageRawScore = extractBuckets((0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(result) ? result['messageRawScoreValues'] : null);
         }
         catch (error) {
             logger.warn('messageRawScore aggregation failed; using neutral fallback', error);
@@ -1742,7 +1735,7 @@ function messageRawScorePipeline(nowMs) {
     ];
 }
 function parsePercentiles(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value))
         return null;
     const messageRawScore = sanitizeBuckets(value['messageRawScore']);
     return messageRawScore ? { messageRawScore } : null;
@@ -1751,7 +1744,7 @@ function extractBuckets(facetResult) {
     if (!Array.isArray(facetResult))
         return emptyBuckets();
     const first = facetResult[0];
-    if (!isRecord(first) || !Array.isArray(first['values']))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(first) || !Array.isArray(first['values']))
         return emptyBuckets();
     const values = first['values']
         .filter((value) => typeof value === 'number' && Number.isFinite(value))
@@ -1772,7 +1765,7 @@ function emptyBuckets() {
     return { p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, count: 0 };
 }
 function sanitizeBuckets(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value))
         return null;
     const raw = ['p10', 'p25', 'p50', 'p75', 'p90'].map((key) => safeNumber(value[key]));
     if (raw.some((item) => item === null))
@@ -1798,14 +1791,11 @@ function safeMongoNumber(input) {
 function safeNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function isAggregateableCollectionLike(value) {
-    return isRecord(value) && typeof value['aggregate'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value) && typeof value['aggregate'] === 'function';
 }
 function isRedisLike(value) {
-    return isRecord(value) && typeof value['get'] === 'function' && typeof value['set'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value) && typeof value['get'] === 'function' && typeof value['set'] === 'function';
 }
 
 
@@ -2108,6 +2098,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 
@@ -3574,7 +3566,7 @@ function safeIntervalMs(value, fallback) {
     return Math.max(1000, delayMs);
 }
 function normalizeStats(value) {
-    const stats = isRecord(value) ? value : {};
+    const stats = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
     return {
         successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
         failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
@@ -3583,7 +3575,7 @@ function normalizeStats(value) {
     };
 }
 function normalizeMessageCheckResult(value) {
-    if (!isRecord(value) || !(value['status'] === 'exists'
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) || !(value['status'] === 'exists'
         || value['status'] === 'deleted'
         || value['status'] === 'unknown')) {
         return { status: 'unknown' };
@@ -3610,7 +3602,7 @@ function normalizeMessageText(value) {
     return normalized.length > 0 ? normalized : undefined;
 }
 function normalizeSendResult(value, candidate) {
-    if (!isRecord(value)) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)) {
         return {
             sent: false,
             messageIndex: candidate.randomIndex,
@@ -3654,7 +3646,7 @@ function normalizeChannels(value) {
     return channels;
 }
 function normalizeChannel(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value))
         return null;
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     if (!channelId)
@@ -3694,7 +3686,7 @@ function normalizeReadyMessages(value) {
     return messages;
 }
 function normalizeReadyMessage(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value))
         return null;
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
     const messageId = asNumber(value['messageId']);
@@ -3761,14 +3753,11 @@ function normalizePoolMode(value) {
         ? value
         : null;
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function asRunnerOptions(value) {
-    return isRecord(value) ? value : {};
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
 }
 function isAdapterLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['isActive'] === 'function'
         && typeof value['getStats'] === 'function'
         && typeof value['loadChannels'] === 'function'
@@ -3779,8 +3768,8 @@ function isAdapterLike(value) {
         && typeof value['checkMessage'] === 'function';
 }
 function isAccountLike(value) {
-    return isRecord(value)
-        && isRecord(value['intelligence'])
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value['intelligence'])
         && typeof value['recordSuccess'] === 'function'
         && typeof value['recordDeletion'] === 'function'
         && typeof value['recordFailure'] === 'function'
@@ -3842,7 +3831,7 @@ function shouldRecordExploreFromCandidate(candidate, isFollowUp) {
     return resolveCandidatePoolMode(candidate, isFollowUp) === 'explore';
 }
 function isMessageQueueLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['size'] === 'number'
         && typeof value['enqueue'] === 'function'
         && typeof value['isQueued'] === 'function'
@@ -3866,6 +3855,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 
@@ -3955,7 +3946,7 @@ class PromotionMessageQueue {
     }
 }
 function normalizeQueuedMessage(message) {
-    if (!isRecord(message))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(message))
         return null;
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(message['channelId']);
     const messageId = message['messageId'];
@@ -4007,9 +3998,6 @@ function normalizeText(value) {
     const normalized = value.trim();
     return normalized.length > 0 ? normalized : null;
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function safeQueuedTimestamp(timestamp, now) {
     if (!Number.isFinite(timestamp) || timestamp <= 0)
         return 0;
@@ -4032,6 +4020,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromotionRunnerSupervisor: () => (/* binding */ PromotionRunnerSupervisor)
 /* harmony export */ });
 /* harmony import */ var _promotion_flow_runner__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./promotion-flow-runner */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-flow-runner.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 const SLEEP_GRACE_MS = 2 * 60 * 1000;
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -4054,7 +4044,7 @@ class PromotionRunnerSupervisor {
         this.lastErrorAt = null;
         this.lastError = null;
         this.lastStuckAt = null;
-        if (!isRecord(options) || typeof options['createRunner'] !== 'function') {
+        if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(options) || typeof options['createRunner'] !== 'function') {
             throw new Error('PromotionRunnerSupervisor createRunner is required');
         }
         this.options = options;
@@ -4298,9 +4288,6 @@ function normalizeError(error) {
 function compact(value) {
     return value.replace(/\s+/g, ' ').slice(0, 240);
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 
 /***/ },
@@ -4317,10 +4304,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 function calculatePromotionBatchLimit(input) {
-    const malformedInput = !isRecord(input);
+    const malformedInput = !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(input);
     const safeInput = malformedInput ? {} : input;
     const { scoringEnabled, 
     // Default HEALTHY (not 0): an absent daysLeft means "health unknown", which must NOT be treated as
@@ -4359,9 +4348,6 @@ function calculatePromotionBatchLimit(input) {
         healthMultiplier,
     };
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 
 /***/ },
@@ -4380,6 +4366,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 /* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 /**
@@ -4436,7 +4424,7 @@ function clamp01(value) {
     return Math.max(0, Math.min(1, value));
 }
 function calculateHealthBasedPromotionDelay(input) {
-    const malformedInput = !isRecord(input);
+    const malformedInput = !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(input);
     const safeInput = malformedInput ? {} : input;
     const { successCount = 0, failedCount = 0, daysLeft = -1, deleteRate = 0, random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
     const sessionRate = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeSessionRate)(successCount, failedCount);
@@ -4476,9 +4464,6 @@ function calculateHealthBasedPromotionDelay(input) {
 function symmetricJitter(rangeMs, random) {
     const safeRangeMs = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(rangeMs);
     return Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) * (2 * safeRangeMs)) - safeRangeMs;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -4545,10 +4530,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   evaluatePromotionChannelEligibility: () => (/* binding */ evaluatePromotionChannelEligibility)
 /* harmony export */ });
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 function evaluatePromotionChannelEligibility(input) {
-    const safeInput = isRecord(input) ? input : {};
-    if (!isRecord(safeInput.channel)) {
+    const safeInput = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(input) ? input : {};
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(safeInput.channel)) {
         return { eligible: false, reason: 'Invalid channel' };
     }
     const { channel, now = Date.now(), previousResult, safetyStatus, recentlyQueued = false, } = safeInput;
@@ -4575,9 +4562,6 @@ function evaluatePromotionChannelEligibility(input) {
 function safeTimestamp(value, fallback) {
     return Number.isFinite(value) && value > 0 ? value : fallback;
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 
 /***/ },
@@ -4595,10 +4579,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _delay_policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./delay-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/delay-policy.ts");
 /* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 function evaluateFollowUpScheduling(input) {
-    if (!isRecord(input))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(input))
         return { shouldSchedule: false, reason: 'invalid follow-up input' };
     if (input.isFollowUp === true)
         return { shouldSchedule: false, reason: 'already follow-up' };
@@ -4615,9 +4601,6 @@ function evaluateFollowUpScheduling(input) {
 }
 function calculateFollowUpDelay(baseDelayMs, jitterRangeMs, random = Math.random) {
     return Math.max(0, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(baseDelayMs) + (0,_delay_policy__WEBPACK_IMPORTED_MODULE_0__.symmetricJitter)(jitterRangeMs, random));
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -4661,10 +4644,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 function selectPromotionMessageCandidates(input) {
-    const malformedInput = !isRecord(input);
+    const malformedInput = !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(input);
     const safeInput = malformedInput ? {} : input;
     const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
     const safeIsFollowUp = isFollowUp === true;
@@ -4920,9 +4905,6 @@ function pickMessageId(ids, random) {
 function normalizeMessageIndex(value) {
     return typeof value === 'string' ? value.trim() : '';
 }
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function normalizeReusablePoolEntries(value) {
     return distinctPoolEntriesByContent(value, (entry) => entry.state !== 'benched' && hasReusablePoolSurvival(entry));
 }
@@ -4956,7 +4938,7 @@ function isMoreRecentPoolEntry(candidate, current) {
             && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(candidate.lastSentAtMs) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(current.lastSentAtMs));
 }
 function isPoolEntry(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value)
         && typeof value['key'] === 'string'
         && typeof value['text'] === 'string'
         && (0,_pool__WEBPACK_IMPORTED_MODULE_0__.isMessageSource)(value['source']);
@@ -5803,6 +5785,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 const MESSAGE_SOURCES = ['ai', 'custom', 'legacy'];
 function isMessageSource(value) {
@@ -5831,7 +5815,7 @@ function normalizePoolMessageText(text) {
 }
 /** Validates persisted pool rows before they take part in replacement or selection. */
 function isPoolEntry(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
         return false;
     return typeof value.key === 'string'
         && typeof value.text === 'string'
@@ -5843,9 +5827,6 @@ function isPoolEntry(value) {
         && isFiniteNumber(value.channelSideFailed)
         && isFiniteNumber(value.lastSentAtMs)
         && isFiniteNumber(value.lastValidatedAtMs);
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function isFiniteNumber(value) {
     return typeof value === 'number' && Number.isFinite(value);
@@ -7806,6 +7787,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
 /**
  * Per-mobile channel block store.
  *
@@ -7824,6 +7806,7 @@ __webpack_require__.r(__webpack_exports__);
  * Keys: promote:chanblock:{mobile}:{channelId}
  *   value "perm" (30-day TTL) or "temp" (3h TTL). exists() is enough for the pre-flight check.
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:account-channel-block");
@@ -7897,7 +7880,7 @@ class RedisAccountChannelBlock {
         RedisAccountChannelBlock.instance = undefined;
     }
     key(mobile, channelId) {
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
         if (!safeMobile || !safeChannelId)
             return null;
@@ -7982,7 +7965,7 @@ class RedisAccountChannelBlock {
     /** Batch check — returns the set of channelIds blocked for this mobile (for pre-flight filtering). */
     async filterBlocked(mobile, channelIds) {
         const blocked = new Set();
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         if (!safeMobile || channelIds.length === 0)
             return blocked;
         // Sequential exists() keeps it simple and RedisLike-only (no MGET dependency); channelIds is
@@ -7996,12 +7979,6 @@ class RedisAccountChannelBlock {
         }
         return blocked;
     }
-}
-function normalizeKeyPart(value) {
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
 }
 function isRedisLike(value) {
     return typeof value === 'object' && value !== null
@@ -8030,6 +8007,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
 /**
  * Per-mobile exploration budget: how many UNPROVEN channels an account may try right now.
  *
@@ -8055,6 +8033,7 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Emergency rollback only: env PROMOTION_EXPLORATION_BUDGET=off.
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-channel-state:account-exploration");
@@ -8118,7 +8097,7 @@ class RedisAccountExploration {
     async deniedChannels(mobile, orderedChannelIds, options = {}) {
         const charge = options.charge !== false;
         const denied = new Set();
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         if (!isExplorationBudgetEnabled() || !safeMobile || orderedChannelIds.length === 0)
             return denied;
         try {
@@ -8153,7 +8132,7 @@ class RedisAccountExploration {
         }
     }
     pairKeys(mobile, channelId) {
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
         if (!safeMobile || !safeChannelId)
             return null;
@@ -8167,13 +8146,6 @@ class RedisAccountExploration {
 function toCount(raw) {
     const n = raw === null || raw === undefined ? 0 : Number.parseInt(String(raw), 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
-}
-function normalizeKeyPart(value) {
-    // Same normalization as RedisAccountChannelBlock so both stores key a mobile identically.
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
 }
 
 
@@ -8191,6 +8163,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _pool_account_health__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/account-health */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/account-health.ts");
 /* harmony import */ var _pool_account_cap__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../pool/account-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/account-cap.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 const SNAPSHOT_CACHE_MS = 60000;
@@ -8255,7 +8229,7 @@ class RedisAccountHealthStore {
         this.redis = redis;
     }
     static init(redis, options = {}) {
-        if (!RedisAccountHealthStore.instance || shouldReplace(options)) {
+        if (!RedisAccountHealthStore.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.shouldReplace)(options)) {
             RedisAccountHealthStore.instance = new RedisAccountHealthStore(redis);
         }
         return RedisAccountHealthStore.instance;
@@ -8392,14 +8366,8 @@ function normalizeInteger(value) {
     }
     return 0;
 }
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
-}
 function isRedisLike(value) {
-    return isRecord(value) && typeof value['eval'] === 'function';
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value) && typeof value['eval'] === 'function';
 }
 
 
@@ -8418,6 +8386,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool_account_cap__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/account-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/account-cap.ts");
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+
+
 
 
 
@@ -8455,7 +8427,7 @@ class RedisAccountSendCap {
         this.redis = redis;
     }
     static init(redis, options = {}) {
-        if (!RedisAccountSendCap.instance || shouldReplace(options)) {
+        if (!RedisAccountSendCap.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.shouldReplace)(options)) {
             RedisAccountSendCap.instance = new RedisAccountSendCap(redis);
         }
         return RedisAccountSendCap.instance;
@@ -8496,7 +8468,7 @@ class RedisAccountSendCap {
     }
     async rollback(account, reservationId) {
         const safeAccount = requireAccount(account);
-        const safeReservationId = normalizeKeyPart(reservationId);
+        const safeReservationId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_4__.normalizeKeyPart)(reservationId);
         if (!safeReservationId || typeof this.redis.zrem !== 'function')
             return;
         await this.redis.zrem(keyForAccount(safeAccount), safeReservationId);
@@ -8540,7 +8512,7 @@ function keyForAccount(account) {
     return `promote:acct:${account}:sends24h`;
 }
 function requireAccount(account) {
-    const normalized = normalizeKeyPart(account);
+    const normalized = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_4__.normalizeKeyPart)(account);
     if (!normalized)
         throw new Error('RedisAccountSendCap account is required');
     return normalized;
@@ -8555,22 +8527,10 @@ function normalizeInteger(value) {
     }
     return null;
 }
-function normalizeKeyPart(value) {
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
-}
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
-}
 function isRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value)
         && typeof value['eval'] === 'function'
         && typeof value['zrem'] === 'function';
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 
@@ -8588,6 +8548,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RedisPromotionTracker: () => (/* binding */ RedisPromotionTracker)
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
 /**
  * Redis state for promotion history and conversion coordination.
  *
@@ -8599,6 +8561,8 @@ __webpack_require__.r(__webpack_exports__);
  * swap between clients but we need to know which mobile was active
  * when a user responded.
  */
+
+
 
 const MOBILE_HISTORY_TTL = 7200; // 2 hours
 const CHANNEL_LAST_MOBILE_TTL = 7200; // 2 hours, aligned with attribution window
@@ -8613,7 +8577,7 @@ class RedisPromotionTracker {
         this.redis = redis;
     }
     static init(redis, options = {}) {
-        if (!RedisPromotionTracker.instance || shouldReplace(options)) {
+        if (!RedisPromotionTracker.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.shouldReplace)(options)) {
             RedisPromotionTracker.instance = new RedisPromotionTracker(redis);
         }
         return RedisPromotionTracker.instance;
@@ -8633,8 +8597,8 @@ class RedisPromotionTracker {
      */
     async recordSend(channelId, mobile, clientId) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
-        const safeMobile = normalizeKeyPart(mobile);
-        const safeClientId = normalizeKeyPart(clientId);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
+        const safeClientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(clientId);
         if (!safeChannelId || !safeMobile || !safeClientId)
             return;
         const timestamp = Date.now();
@@ -8664,7 +8628,7 @@ class RedisPromotionTracker {
      * Get promotion history for a mobile number.
      */
     async getMobileHistory(mobile) {
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         if (!safeMobile)
             return [];
         const key = `promote:mobile:${safeMobile}:history`;
@@ -8697,21 +8661,21 @@ class RedisPromotionTracker {
      * attribution, which preserves source-account ownership for routed DMs.
      */
     async markRoutePending(conversionId) {
-        const safeConversionId = normalizeKeyPart(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
         const result = await this.redis.set(`promote:route-pending:${safeConversionId}`, 'pending', 'EX', ROUTE_PENDING_TTL_SECONDS);
         return result === 'OK' || result === 1 || result === true;
     }
     async isRoutePending(conversionId) {
-        const safeConversionId = normalizeKeyPart(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
         return (await this.redis.get(`promote:route-pending:${safeConversionId}`)) !== null;
     }
     /** Clear a pre-send marker when the route CTA was not delivered. */
     async clearRoutePending(conversionId) {
-        const safeConversionId = normalizeKeyPart(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return;
         if (typeof this.redis.del !== 'function') {
@@ -8724,7 +8688,7 @@ class RedisPromotionTracker {
      * update for the same chat must never credit channel intelligence twice.
      */
     async claimConversion(conversionId) {
-        const safeConversionId = normalizeKeyPart(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
         const result = await this.redis.set(`promote:conversion:${safeConversionId}`, 'claimed', 'EX', CONVERSION_CLAIM_TTL, 'NX');
@@ -8736,7 +8700,7 @@ class RedisPromotionTracker {
      * that already produced partial credit.
      */
     async releaseConversion(conversionId) {
-        const safeConversionId = normalizeKeyPart(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return;
         if (typeof this.redis.del !== 'function') {
@@ -8754,28 +8718,25 @@ function parseJson(value) {
     }
 }
 function normalizeSendRecord(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
         return null;
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value['channelId']);
-    const mobile = normalizeKeyPart(value['mobile']);
-    const clientId = normalizeKeyPart(value['clientId']);
+    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['mobile']);
+    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['clientId']);
     const timestamp = value['timestamp'];
     if (!channelId || !mobile || !clientId || !isValidAttributionTimestamp(timestamp, MOBILE_HISTORY_TTL))
         return null;
     return { channelId, mobile, clientId, timestamp };
 }
 function normalizeLastPromoter(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
         return null;
-    const mobile = normalizeKeyPart(value['mobile']);
-    const clientId = normalizeKeyPart(value['clientId']);
+    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['mobile']);
+    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['clientId']);
     const timestamp = value['timestamp'];
     if (!mobile || !clientId || !isValidAttributionTimestamp(timestamp, CHANNEL_LAST_MOBILE_TTL))
         return null;
     return { mobile, clientId, timestamp };
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function isValidAttributionTimestamp(value, ttlSeconds) {
     if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)
@@ -8783,21 +8744,15 @@ function isValidAttributionTimestamp(value, ttlSeconds) {
     const ageMs = Date.now() - value;
     return ageMs >= 0 && ageMs <= ttlSeconds * 1000;
 }
-function normalizeKeyPart(value) {
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
-}
 function isRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['lrange'] === 'function'
         && typeof value['pipeline'] === 'function';
 }
 function isRedisPipelineLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
         && typeof value['lpush'] === 'function'
         && typeof value['ltrim'] === 'function'
         && typeof value['expire'] === 'function'
@@ -8829,9 +8784,6 @@ function getPipelineExecError(value) {
     }
     return null;
 }
-function shouldReplace(options) {
-    return isRecord(options) && options['replace'] === true;
-}
 
 
 /***/ },
@@ -8848,6 +8800,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RedisPromotionVerificationQueue: () => (/* binding */ RedisPromotionVerificationQueue)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+
+
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:verification-queue");
 const PROMOTION_VERIFICATION_TTL_SECONDS = 48 * 60 * 60;
@@ -8855,7 +8811,7 @@ class RedisPromotionVerificationQueue {
     constructor(redis, mobile, maxSize = 500) {
         if (!isRedisLike(redis))
             throw new Error('RedisPromotionVerificationQueue requires Redis get/set/del/lrange/eval');
-        const safeMobile = normalizeKeyPart(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
         if (!safeMobile)
             throw new Error('RedisPromotionVerificationQueue mobile is required');
         this.redis = redis;
@@ -8908,7 +8864,7 @@ class RedisPromotionVerificationQueue {
     }
 }
 function messageKey(message) {
-    const channelId = normalizeKeyPart(message.channelId);
+    const channelId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(message.channelId);
     const messageId = Number.isSafeInteger(message.messageId) && message.messageId > 0 ? String(message.messageId) : null;
     return channelId && messageId ? `${message.workType === 'followUp' ? 'followUp' : 'verify'}:${channelId}:${messageId}` : null;
 }
@@ -8917,12 +8873,12 @@ function parseQueuedMessage(raw) {
         return null;
     try {
         const value = JSON.parse(raw);
-        if (!isRecord(value))
+        if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
             return null;
-        const channelId = normalizeKeyPart(value.channelId);
+        const channelId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value.channelId);
         const messageId = value.messageId;
         const timestamp = value.timestamp;
-        const messageIndex = normalizeKeyPart(value.messageIndex);
+        const messageIndex = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value.messageIndex);
         if (!channelId || typeof messageId !== 'number' || !Number.isSafeInteger(messageId) || messageId <= 0 || typeof timestamp !== 'number' || !Number.isFinite(timestamp) || !messageIndex)
             return null;
         return {
@@ -8951,7 +8907,7 @@ const ENQUEUE_SCRIPT = [
     'return 1',
 ].join('\n');
 function isRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
         && typeof value.get === 'function'
         && typeof value.set === 'function'
         && typeof value.del === 'function'
@@ -8964,11 +8920,26 @@ function isRedisWriteSuccess(value) {
 function isNonEmptyString(value) {
     return typeof value === 'string' && value.length > 0;
 }
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts"
+/*!*******************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts ***!
+  \*******************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   normalizeKeyPart: () => (/* binding */ normalizeKeyPart)
+/* harmony export */ });
+/** Trimmed, non-empty string key segment, or null. Shared so every Redis store keys a mobile identically. */
 function normalizeKeyPart(value) {
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
+    if (typeof value !== 'string')
+        return null;
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : null;
 }
 
 
@@ -9016,6 +8987,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../redis/redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 
@@ -9325,7 +9298,7 @@ function normalizeIdentity(value) {
     return normalized.length > 0 ? normalized : null;
 }
 function isCollectionLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['findOne'] === 'function'
         && typeof value['find'] === 'function'
         && typeof value['findOneAndUpdate'] === 'function'
@@ -9334,27 +9307,27 @@ function isCollectionLike(value) {
         && typeof value['aggregate'] === 'function';
 }
 function isAggregateableCollectionLike(value) {
-    return isRecord(value) && typeof value['aggregate'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) && typeof value['aggregate'] === 'function';
 }
 function isPercentileRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function';
 }
 function isLockRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['exists'] === 'function'
         && typeof value['del'] === 'function';
 }
 function isAccountCapRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['eval'] === 'function'
         && typeof value['zrem'] === 'function';
 }
 function isTrackerRedisLike(value) {
-    if (!isRecord(value)
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         || typeof value['get'] !== 'function'
         || typeof value['set'] !== 'function'
         || typeof value['lrange'] !== 'function'
@@ -9369,7 +9342,7 @@ function isTrackerRedisLike(value) {
     }
 }
 function isVerificationRedisLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['del'] === 'function'
@@ -9377,7 +9350,7 @@ function isVerificationRedisLike(value) {
         && typeof value['eval'] === 'function';
 }
 function isTrackerPipelineLike(value) {
-    return isRecord(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
         && typeof value['lpush'] === 'function'
         && typeof value['ltrim'] === 'function'
         && typeof value['expire'] === 'function'
@@ -9385,10 +9358,7 @@ function isTrackerPipelineLike(value) {
         && typeof value['exec'] === 'function';
 }
 function asRecord(value) {
-    return isRecord(value) ? value : {};
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
 }
 
 
@@ -9407,11 +9377,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/index.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 
 
 const PROMOTION_EXPLORATION_SHARE = 0.20;
 function selectPromotionChannels(options) {
-    const safeOptions = isRecord(options) ? options : {};
+    const safeOptions = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(options) ? options : {};
     const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, } = safeOptions;
     // Channels this mobile cannot post in (per-mobile: USER_BANNED 3h / forbidden permanent). Filtered
     // out entirely in pre-flight so we never select an unsendable channel for this account.
@@ -9446,7 +9418,7 @@ function selectPromotionChannels(options) {
     for (const rawChannel of channels) {
         const channel = normalizeChannel(rawChannel);
         if (!channel) {
-            if (isRecord(rawChannel))
+            if ((0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(rawChannel))
                 skipped.push(rawChannel);
             continue;
         }
@@ -9604,7 +9576,7 @@ function selectPromotionChannels(options) {
     };
 }
 function normalizeChannel(value) {
-    if (!isRecord(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value))
         return null;
     const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value['channelId']);
     if (!channelId)
@@ -9642,9 +9614,6 @@ function conversionSafetyPriorityScore(doc) {
 function evidenceTieBreakScore(doc) {
     return safeNonNegative(doc.outcomes.survived) * 1000
         - safeNonNegative(doc.outcomes.deleted);
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function safeUnitRandom(random) {
     try {
@@ -9778,6 +9747,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shouldHydrateBeforeFinalReject: () => (/* binding */ shouldHydrateBeforeFinalReject),
 /* harmony export */   toLiveChannelObservation: () => (/* binding */ toLiveChannelObservation)
 /* harmony export */ });
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS = 30;
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_MS = DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
 const DEFAULT_CHANNEL_HEALTH_THRESHOLD = 20;
@@ -10115,7 +10086,7 @@ function mergeLiveChannelDocument(existing, live, options) {
     };
 }
 function evaluateChannelPromotionHealth(input, options = {}) {
-    const channel = isRecord(input) ? input : {};
+    const channel = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_0__.isRecord)(input) ? input : {};
     const threshold = safePositiveNumber(options.threshold, DEFAULT_CHANNEL_HEALTH_THRESHOLD);
     const deleteRateMinSamples = safePositiveNumber(options.deleteRateMinSamples, DEFAULT_CHANNEL_DELETE_RATE_MIN_SAMPLES);
     const deleteRateModerate = safePercentRatio(options.deleteRateModeratePercent, DEFAULT_CHANNEL_DELETE_RATE_MODERATE_PERCENT);
@@ -10206,7 +10177,7 @@ function evaluateChannelPromotionHealth(input, options = {}) {
 }
 function resolvePromotionFailureAction(input) {
     let actionInput = { error: input };
-    if (isRecord(input) && 'error' in input) {
+    if ((0,_utils_guards__WEBPACK_IMPORTED_MODULE_0__.isRecord)(input) && 'error' in input) {
         actionInput = { error: input['error'] };
         if (typeof input['channelId'] === 'string') {
             actionInput.channelId = input['channelId'];
@@ -10344,7 +10315,7 @@ function safePercentRatio(value, fallbackPercent) {
 }
 function classifyContentHealth(messagePool, hasEverExplored) {
     const poolEntries = Array.isArray(messagePool)
-        ? messagePool.filter(isRecord)
+        ? messagePool.filter(_utils_guards__WEBPACK_IMPORTED_MODULE_0__.isRecord)
         : null;
     if (!poolEntries) {
         return hasEverExplored === true ? 'exhausted' : 'healthy';
@@ -10414,9 +10385,6 @@ function isProbeCooldownElapsed(bannedAt, now, cooldownDays) {
     if (timestamp === null)
         return false;
     return now - timestamp > cooldownDays * 24 * 60 * 60 * 1000;
-}
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 function errorToText(error) {
     if (error instanceof Error) {
@@ -11185,6 +11153,29 @@ function normalizePositiveInteger(value) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/utils/guards.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-channel-state/src/utils/guards.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isRecord: () => (/* binding */ isRecord),
+/* harmony export */   shouldReplace: () => (/* binding */ shouldReplace)
+/* harmony export */ });
+/** Plain-object guard: non-null object that is not an array. */
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+/** True when an options bag explicitly asks for `{ replace: true }`. */
+function shouldReplace(options) {
+    return isRecord(options) && options['replace'] === true;
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/cache/EntityCacheManager.ts"
 /*!**************************************************************!*\
   !*** ../../packages/tg-core/src/cache/EntityCacheManager.ts ***!
@@ -11734,538 +11725,676 @@ function toIso(value) {
 
 /***/ },
 
-/***/ "../../packages/tg-core/src/jobs/redis-jobs.ts"
-/*!*****************************************************!*\
-  !*** ../../packages/tg-core/src/jobs/redis-jobs.ts ***!
-  \*****************************************************/
+/***/ "../../packages/tg-core/src/http/request-auth.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-core/src/http/request-auth.ts ***!
+  \*******************************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DEFAULT_LEASE_MS: () => (/* binding */ DEFAULT_LEASE_MS),
-/* harmony export */   DEFAULT_MAX_ATTEMPTS: () => (/* binding */ DEFAULT_MAX_ATTEMPTS),
-/* harmony export */   DEFAULT_MAX_LATE_MS: () => (/* binding */ DEFAULT_MAX_LATE_MS),
-/* harmony export */   JOB_DONE_TTL_SECONDS: () => (/* binding */ JOB_DONE_TTL_SECONDS),
-/* harmony export */   JOB_PAYLOAD_GRACE_MS: () => (/* binding */ JOB_PAYLOAD_GRACE_MS),
-/* harmony export */   MAX_ATTEMPTS_HARD_CAP: () => (/* binding */ MAX_ATTEMPTS_HARD_CAP),
-/* harmony export */   POP_SCRIPT: () => (/* binding */ POP_SCRIPT),
-/* harmony export */   RETRY_BASE_MS: () => (/* binding */ RETRY_BASE_MS),
-/* harmony export */   RETRY_MAX_MS: () => (/* binding */ RETRY_MAX_MS),
-/* harmony export */   RedisJobScheduler: () => (/* binding */ RedisJobScheduler),
-/* harmony export */   SCHEDULE_SCRIPT: () => (/* binding */ SCHEDULE_SCRIPT),
-/* harmony export */   STOP_WAIT_MS: () => (/* binding */ STOP_WAIT_MS),
-/* harmony export */   UNKNOWN_TYPE_REQUEUE_MS: () => (/* binding */ UNKNOWN_TYPE_REQUEUE_MS),
-/* harmony export */   __resetJobsForTests: () => (/* binding */ __resetJobsForTests),
-/* harmony export */   cancelJob: () => (/* binding */ cancelJob),
-/* harmony export */   createRegistryJobScheduler: () => (/* binding */ createRegistryJobScheduler),
-/* harmony export */   jobKeys: () => (/* binding */ jobKeys),
-/* harmony export */   registerJobHandler: () => (/* binding */ registerJobHandler),
-/* harmony export */   registeredJobTypes: () => (/* binding */ registeredJobTypes),
-/* harmony export */   scheduleJob: () => (/* binding */ scheduleJob),
-/* harmony export */   startJobPoller: () => (/* binding */ startJobPoller),
-/* harmony export */   stopJobPoller: () => (/* binding */ stopJobPoller)
+/* harmony export */   extractRealClientIP: () => (/* binding */ extractRealClientIP),
+/* harmony export */   extractRealOrigin: () => (/* binding */ extractRealOrigin),
+/* harmony export */   getHeaderValue: () => (/* binding */ getHeaderValue),
+/* harmony export */   matchesIgnoredPath: () => (/* binding */ matchesIgnoredPath),
+/* harmony export */   resolveAuthPassReason: () => (/* binding */ resolveAuthPassReason)
 /* harmony export */ });
-/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/exponential-backoff */ "../../packages/tg-core/src/utils/exponential-backoff.ts");
-/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/**
- * Durable delayed jobs on Redis (restart-safe replacement for "setTimeout then send").
- *
- * Keys (all with TTLs):
- *   tgjobs::due::{clientId}::{mobile}       ZSET  jobId -> dueAt ms
- *   tgjobs::inflight::{clientId}::{mobile}  ZSET  jobId -> lease expiry ms (popped, not yet finished)
- *   tgjobs::job::{clientId}::{mobile}::{jobId}   JSON  payload, TTL = (dueAt-now)+maxLateMs+1h
- *   tgjobs::done::{clientId}::{mobile}::{jobId}  "1"   claim / completion marker, SET NX EX 86400
- * Job ids are natural keys (e.g. `delfinal::{chatId}::{messageId}`) that repeat across accounts (one user DMs
- * several personas; message ids are per account), so payload/done keys are scoped to the account too.
- *
- * Flow: scheduleJob (Lua: skip if done/pending, ZADD NX, SET payload) -> poller tick every tickMs (Lua: requeue
- * expired leases, pop due ids into inflight atomically) -> drop if wrong mobile or later than maxLateMs ->
- * at-most-once claims `done` BEFORE running; at-least-once marks `done` AFTER success and retries a throw with
- * exponential backoff up to a hard cap -> payload deleted.
- *
- * Pending jobs survive a restart: the next poller for the same clientId/mobile simply picks them up. If Redis
- * is unavailable when a job is scheduled, it runs from an in-process setTimeout instead (logged "non-durable").
- */
+/* harmony import */ var _utils_apiKey__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 
-
-
-const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-jobs");
-const JOB_DONE_TTL_SECONDS = 86400;
-const JOB_PAYLOAD_GRACE_MS = 60 * 60000;
-const DEFAULT_MAX_LATE_MS = 10 * 60000;
-const DEFAULT_LEASE_MS = 10 * 60000;
-const DEFAULT_MAX_ATTEMPTS = 3;
-const MAX_ATTEMPTS_HARD_CAP = 5;
-const RETRY_BASE_MS = 5000;
-const RETRY_MAX_MS = 5 * 60000;
-/** A job whose type has no handler in this process is put back this far ahead (bounded by maxLateMs). */
-const UNKNOWN_TYPE_REQUEUE_MS = 30000;
-const STOP_WAIT_MS = 5000;
-/** Lua: skip when done/pending/in flight; otherwise ZADD NX + payload + keep the ZSET TTL >= this job's TTL. */
-const SCHEDULE_SCRIPT = [
-    "--@tgjobs:schedule",
-    "if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end",
-    "if redis.call('ZSCORE', KEYS[4], ARGV[1]) then return 0 end",
-    "if redis.call('ZADD', KEYS[1], 'NX', ARGV[2], ARGV[1]) == 0 then return 0 end",
-    "redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])",
-    "if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[4]) then redis.call('PEXPIRE', KEYS[1], ARGV[4]) end",
-    "return 1",
-].join("\n");
-/**
- * Lua: requeue expired leases, then atomically move up to N due ids into inflight (lease = now+leaseMs).
- * Each move ADDs before it REMoves: a script is not rolled back when a write fails mid-way (e.g. OOM under
- * noeviction), so the id is never left in neither set.
- */
-const POP_SCRIPT = [
-    "--@tgjobs:pop",
-    "local now = tonumber(ARGV[1])",
-    "local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, 100)",
-    "for _, id in ipairs(expired) do",
-    "  redis.call('ZADD', KEYS[1], now, id)",
-    "  redis.call('ZREM', KEYS[2], id)",
-    "end",
-    "local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, tonumber(ARGV[3]))",
-    "for _, id in ipairs(ids) do",
-    "  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[2]), id)",
-    "  redis.call('ZREM', KEYS[1], id)",
-    "end",
-    "if #ids > 0 and redis.call('PTTL', KEYS[2]) < tonumber(ARGV[4]) then redis.call('PEXPIRE', KEYS[2], ARGV[4]) end",
-    "return ids",
-].join("\n");
-const jobKeys = {
-    due: (clientId, mobile) => `tgjobs::due::${clientId}::${mobile}`,
-    inflight: (clientId, mobile) => `tgjobs::inflight::${clientId}::${mobile}`,
-    job: (clientId, mobile, id) => `tgjobs::job::${clientId}::${mobile}::${id}`,
-    done: (clientId, mobile, id) => `tgjobs::done::${clientId}::${mobile}::${id}`,
-};
-function serializePayload(value) {
-    return JSON.stringify(value, (_key, v) => (typeof v === "bigint" ? v.toString() : v));
-}
-function clampAttempts(value) {
-    const n = Math.floor(Number(value ?? DEFAULT_MAX_ATTEMPTS));
-    if (!Number.isFinite(n) || n < 1)
-        return 1;
-    return Math.min(n, MAX_ATTEMPTS_HARD_CAP);
-}
-class RedisJobScheduler {
-    constructor(options = {}) {
-        this.fallbackTimers = new Map();
-        this.fallbackDone = new Set();
-        this.timer = null;
-        this.ticking = null;
-        this.stopped = true;
-        this.stopRequested = false;
-        this.clientId = options.clientId ?? process.env.clientId ?? "";
-        this.mobile = options.mobile ?? process.env.mobile ?? "";
-        this.tickMs = Math.max(50, options.tickMs ?? 1000);
-        this.leaseMs = Math.max(1000, options.leaseMs ?? DEFAULT_LEASE_MS);
-        this.batchSize = Math.max(1, options.batchSize ?? 20);
-        this.stopWaitMs = Math.max(0, options.stopWaitMs ?? STOP_WAIT_MS);
-        this.now = options.now ?? Date.now;
-        this.redisProvider = options.redis ?? (() => (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.getStateRedis)());
-        this.handlers = options.handlers ?? new Map();
-    }
-    registerHandler(type, handler) {
-        if (!type || typeof handler !== "function")
-            throw new Error("registerJobHandler needs a type and a handler");
-        this.handlers.set(type, handler);
-    }
-    jobKey(id) { return jobKeys.job(this.clientId, this.mobile, id); }
-    doneKey(id) { return jobKeys.done(this.clientId, this.mobile, id); }
-    hasHandlers() { return this.handlers.size > 0; }
-    isRunning() { return !this.stopped; }
-    configure(options) {
-        if (options.clientId)
-            this.clientId = options.clientId;
-        if (options.mobile)
-            this.mobile = options.mobile;
-        if (options.tickMs)
-            this.tickMs = Math.max(50, options.tickMs);
-    }
-    async schedule(options) {
-        const id = String(options.id ?? "").trim();
-        if (!id || !options.type)
-            throw new Error("scheduleJob needs an id and a type");
-        const now = this.now();
-        const delayMs = Math.max(0, Math.floor(Number(options.delayMs) || 0));
-        const maxLateMs = Math.max(0, Math.floor(options.maxLateMs ?? DEFAULT_MAX_LATE_MS));
-        const payload = {
-            id,
-            type: options.type,
-            chatId: options.chatId == null ? null : String(options.chatId),
-            clientId: this.clientId,
-            mobile: this.mobile,
-            params: options.params ?? {},
-            dueAt: now + delayMs,
-            maxLateMs,
-            createdAt: now,
-            semantics: options.semantics ?? "at-most-once",
-            attempt: 0,
-            maxAttempts: options.semantics === "at-least-once" ? clampAttempts(options.maxAttempts) : 1,
-        };
-        // GramJS ids are BigInteger/bigint: serialize them as strings (JSON.stringify throws on bigint, and a throw
-        // here must not be mistaken for a Redis outage). The handler gets the JSON round-trip in-process too.
-        payload.params = JSON.parse(serializePayload(payload.params));
-        const redis = this.clientId && this.mobile ? await this.redisProvider() : null;
-        if (redis) {
-            try {
-                const ttlMs = delayMs + maxLateMs + JOB_PAYLOAD_GRACE_MS;
-                const added = await redis.eval(SCHEDULE_SCRIPT, 4, jobKeys.due(this.clientId, this.mobile), this.jobKey(id), this.doneKey(id), jobKeys.inflight(this.clientId, this.mobile), id, payload.dueAt, serializePayload(payload), ttlMs);
-                if (Number(added) === 1) {
-                    logger.debug(`[tg-jobs] scheduled ${payload.type} id=${id} in ${delayMs}ms (${payload.semantics})`);
-                    return "scheduled";
+// Shared by the tg-aut and promote-clients auth middlewares. Each app keeps its own middleware
+// (ignore-path list, query-key handling, logging and failure responses differ per app).
+const AUTH_ALLOWED_IPS = ['31.97.59.2', '148.230.84.50', '13.228.225.19', '18.142.128.26', '54.254.162.138'];
+const AUTH_ALLOWED_ORIGINS = [
+    'https://paidgirls.site',
+    'https://zomcall.netlify.app',
+    'https://tgchats.netlify.app',
+    'https://tg-chats.netlify.app',
+    'https://report-upi.netlify.app'
+].map(origin => origin.toLowerCase());
+/** True when any of `urls` equals a string entry (case-insensitive) or matches a RegExp entry. */
+function matchesIgnoredPath(ignorePaths, ...urls) {
+    for (const urlToTest of urls.filter(Boolean)) {
+        for (const ignore of ignorePaths) {
+            if (typeof ignore === 'string') {
+                if (ignore.toLowerCase() === urlToTest.toLowerCase()) {
+                    return true;
                 }
-                logger.debug(`[tg-jobs] duplicate schedule ignored id=${id}`);
-                return "duplicate";
             }
-            catch (error) {
-                (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.schedule", error);
+            else if (ignore.test(urlToTest)) {
+                return true;
             }
         }
-        return this.scheduleInProcess(payload, delayMs);
     }
-    scheduleInProcess(payload, delayMs) {
-        if (this.fallbackTimers.has(payload.id) || this.fallbackDone.has(payload.id))
-            return "duplicate";
-        logger.warn(`[tg-jobs] Redis unavailable: ${payload.type} id=${payload.id} scheduled non-durable (lost on restart)`);
-        const timer = setTimeout(() => {
-            this.fallbackTimers.delete(payload.id);
-            this.fallbackDone.add(payload.id);
-            if (this.fallbackDone.size > 5000) {
-                const oldest = this.fallbackDone.values().next().value;
-                if (oldest !== undefined)
-                    this.fallbackDone.delete(oldest);
-            }
-            void this.runHandler(payload, 0, false).catch(() => undefined);
-        }, delayMs);
-        timer.unref?.();
-        this.fallbackTimers.set(payload.id, timer);
-        return "non-durable";
+    return false;
+}
+/** Why the request may pass auth (API key, then IP allowlist, then origin allowlist), or null. */
+function resolveAuthPassReason(apiKey, clientIp, origin) {
+    // ✅ FIXED: Handle empty/whitespace API keys
+    if ((0,_utils_apiKey__WEBPACK_IMPORTED_MODULE_0__.isAcceptedApiKey)(apiKey)) {
+        return 'API key valid';
     }
-    async cancel(id) {
-        let cancelled = false;
-        const timer = this.fallbackTimers.get(id);
-        if (timer) {
-            clearTimeout(timer);
-            this.fallbackTimers.delete(id);
-            cancelled = true;
-        }
-        const redis = this.clientId && this.mobile ? await this.redisProvider() : null;
-        if (!redis)
-            return cancelled;
+    else if (clientIp && clientIp !== 'unknown' && AUTH_ALLOWED_IPS.includes(clientIp)) {
+        return 'IP allowed';
+    }
+    else if (origin && AUTH_ALLOWED_ORIGINS.includes(origin.toLowerCase())) {
+        return 'Origin allowed';
+    }
+    return null;
+}
+function getHeaderValue(request, headerName) {
+    const value = request.headers[headerName.toLowerCase()];
+    // ✅ FIXED: Handle array header values
+    return Array.isArray(value) ? value[0] : value;
+}
+function extractRealClientIP(request) {
+    const cfConnectingIP = getHeaderValue(request, 'cf-connecting-ip');
+    if (cfConnectingIP)
+        return cfConnectingIP;
+    const xRealIP = getHeaderValue(request, 'x-real-ip');
+    if (xRealIP)
+        return xRealIP;
+    const xForwardedFor = getHeaderValue(request, 'x-forwarded-for');
+    if (xForwardedFor)
+        return xForwardedFor.split(',')[0].trim();
+    if (request.ip)
+        return request.ip.replace('::ffff:', '');
+    if (request.connection?.remoteAddress) {
+        return request.connection.remoteAddress.replace('::ffff:', '');
+    }
+    return 'unknown';
+}
+function extractProtocol(request) {
+    const xForwardedProto = getHeaderValue(request, 'x-forwarded-proto');
+    if (xForwardedProto)
+        return xForwardedProto.toLowerCase();
+    const cfVisitor = getHeaderValue(request, 'cf-visitor');
+    if (cfVisitor) {
         try {
-            const multi = redis.multi();
-            multi.zrem(jobKeys.due(this.clientId, this.mobile), id);
-            multi.del(this.jobKey(id));
-            const results = await multi.exec();
-            return cancelled || Number(results?.[0]?.[1] ?? 0) > 0;
-        }
-        catch (error) {
-            (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.cancel", error);
-            return cancelled;
-        }
-    }
-    start() {
-        if (!this.stopped)
-            return;
-        this.stopped = false;
-        this.stopRequested = false;
-        logger.log(`[tg-jobs] poller started clientId=${this.clientId || "-"} mobile=${this.mobile || "-"} tick=${this.tickMs}ms`);
-        this.schedulePoll();
-    }
-    schedulePoll() {
-        if (this.stopped)
-            return;
-        this.timer = setTimeout(() => {
-            this.timer = null;
-            void this.tick().finally(() => this.schedulePoll());
-        }, this.tickMs);
-        this.timer.unref?.();
-    }
-    async stop() {
-        this.stopped = true;
-        this.stopRequested = true;
-        if (this.timer)
-            clearTimeout(this.timer);
-        this.timer = null;
-        for (const timer of this.fallbackTimers.values())
-            clearTimeout(timer);
-        if (this.fallbackTimers.size)
-            logger.warn(`[tg-jobs] dropping ${this.fallbackTimers.size} non-durable job(s) on stop`);
-        this.fallbackTimers.clear();
-        if (!this.ticking)
-            return;
-        // A handler can be mid-send (flood waits, slow Telegram): do not let it eat the shutdown budget. Its job is
-        // already claimed (at-most-once) or still leased (at-least-once: the next process requeues it).
-        let timer;
-        const gaveUp = await Promise.race([
-            this.ticking.then(() => false, () => false),
-            new Promise((resolve) => { timer = setTimeout(() => resolve(true), this.stopWaitMs); timer.unref?.(); }),
-        ]);
-        if (timer)
-            clearTimeout(timer);
-        if (gaveUp)
-            logger.warn(`[tg-jobs] stop: a running job did not finish within ${this.stopWaitMs}ms; not waiting`);
-    }
-    /** One poll: pops due jobs and runs them in order. Returns how many handlers ran. Never overlaps itself. */
-    tick() {
-        if (this.ticking)
-            return this.ticking;
-        this.ticking = this.pollOnce().finally(() => { this.ticking = null; });
-        return this.ticking;
-    }
-    async pollOnce() {
-        if (!this.handlers.size || !this.clientId || !this.mobile)
-            return 0;
-        const redis = await this.redisProvider();
-        if (!redis)
-            return 0;
-        const dueKey = jobKeys.due(this.clientId, this.mobile);
-        const inflightKey = jobKeys.inflight(this.clientId, this.mobile);
-        let ids;
-        const now = this.now();
-        try {
-            const popped = await redis.eval(POP_SCRIPT, 2, dueKey, inflightKey, now, this.leaseMs, this.batchSize, this.leaseMs + JOB_PAYLOAD_GRACE_MS);
-            ids = Array.isArray(popped) ? popped.map(String) : [];
-        }
-        catch (error) {
-            (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.pop", error);
-            return 0;
-        }
-        let ran = 0;
-        for (const id of ids) {
-            if (this.stopRequested && ran > 0) {
-                // Hand the rest back now: left in flight they would wait out the 10 min lease and then be dropped
-                // as stale (maxLateMs) by the next process.
-                const rest = ids.slice(ids.indexOf(id));
-                const multi = redis.multi();
-                for (const left of rest)
-                    multi.zadd(dueKey, now, left);
-                multi.zrem(inflightKey, ...rest);
-                await multi.exec().catch((error) => (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.stop-requeue", error));
-                break;
-            }
-            try {
-                if (await this.process(redis, id, inflightKey))
-                    ran += 1;
-            }
-            catch (error) {
-                // Only Redis calls throw here (handler errors are handled in process). Put the id straight back
-                // instead of waiting out the 10 min lease, which would make it stale (maxLateMs) and drop it. Safe:
-                // an at-most-once job claimed before the failure is skipped by its done marker on the next pop.
-                (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.noteStateRedisFailure)("tgjobs.process", error);
-                const multi = redis.multi();
-                multi.zadd(dueKey, this.now(), id);
-                multi.zrem(inflightKey, id);
-                const requeued = await multi.exec().then(() => true, () => false);
-                logger.error(`[tg-jobs] processing failed id=${id}; ${requeued ? "requeued" : "lease will requeue it"}`, error);
-            }
-        }
-        return ran;
-    }
-    async finish(redis, id, inflightKey, markDone) {
-        const multi = redis.multi();
-        multi.zrem(inflightKey, id);
-        multi.del(this.jobKey(id));
-        if (markDone)
-            multi.set(this.doneKey(id), "1", "EX", JOB_DONE_TTL_SECONDS);
-        await multi.exec();
-    }
-    async process(redis, id, inflightKey) {
-        const raw = await redis.get(this.jobKey(id));
-        if (!raw) {
-            logger.warn(`[tg-jobs] job ${id} has no payload (expired?); dropped`);
-            await this.finish(redis, id, inflightKey, false);
-            return false;
-        }
-        let payload;
-        try {
-            payload = JSON.parse(raw);
+            const visitor = JSON.parse(cfVisitor);
+            if (visitor.scheme)
+                return visitor.scheme.toLowerCase();
         }
         catch {
-            logger.error(`[tg-jobs] job ${id} payload unreadable; dropped`);
-            await this.finish(redis, id, inflightKey, false);
-            return false;
+            // ignore
         }
-        const now = this.now();
-        const lateMs = Math.max(0, now - payload.dueAt);
-        if (payload.mobile !== this.mobile) {
-            logger.warn(`[tg-jobs] drop ${payload.type} id=${id}: scheduled for mobile ${payload.mobile}, running as ${this.mobile}`);
-            await this.finish(redis, id, inflightKey, false);
-            return false;
-        }
-        if (lateMs > payload.maxLateMs) {
-            logger.warn(`[tg-jobs] drop stale ${payload.type} id=${id}: ${lateMs}ms late > maxLateMs ${payload.maxLateMs}`);
-            await this.finish(redis, id, inflightKey, false);
-            return false;
-        }
-        if (!this.handlers.has(payload.type)) {
-            const multi = redis.multi();
-            multi.zrem(inflightKey, id);
-            multi.zadd(jobKeys.due(this.clientId, this.mobile), now + UNKNOWN_TYPE_REQUEUE_MS, id);
-            await multi.exec();
-            logger.warn(`[tg-jobs] no handler for ${payload.type} (id=${id}) in this process; requeued +${UNKNOWN_TYPE_REQUEUE_MS}ms`);
-            return false;
-        }
-        if (payload.semantics === "at-most-once") {
-            const claimed = await redis.set(this.doneKey(id), "1", "EX", JOB_DONE_TTL_SECONDS, "NX");
-            if (claimed !== "OK") {
-                logger.debug(`[tg-jobs] ${id} already claimed; skipped`);
-                await this.finish(redis, id, inflightKey, false);
-                return false;
-            }
-            await this.finish(redis, id, inflightKey, false);
-            await this.runHandler(payload, lateMs, true).catch(() => undefined);
-            return true;
-        }
+    }
+    if (request.secure)
+        return 'https';
+    const xForwardedSsl = getHeaderValue(request, 'x-forwarded-ssl');
+    if (xForwardedSsl?.toLowerCase() === 'on')
+        return 'https';
+    return  false ? 0 : 'http';
+}
+function extractRealOrigin(request) {
+    const origin = getHeaderValue(request, 'origin');
+    if (origin)
+        return origin;
+    const xOriginalHost = getHeaderValue(request, 'x-original-host');
+    if (xOriginalHost)
+        return `${extractProtocol(request)}://${xOriginalHost}`;
+    const xForwardedHost = getHeaderValue(request, 'x-forwarded-host');
+    if (xForwardedHost)
+        return `${extractProtocol(request)}://${xForwardedHost}`;
+    const host = getHeaderValue(request, 'host');
+    if (host)
+        return `${extractProtocol(request)}://${host}`;
+    const referer = getHeaderValue(request, 'referer');
+    if (referer) {
         try {
-            await this.runHandler(payload, lateMs, true);
-            await this.finish(redis, id, inflightKey, true);
+            const refererUrl = new URL(referer);
+            return `${refererUrl.protocol}//${refererUrl.host}`;
         }
         catch {
-            await this.retryOrDrop(redis, payload, inflightKey);
-        }
-        return true;
-    }
-    async retryOrDrop(redis, payload, inflightKey) {
-        const attempt = payload.attempt + 1;
-        const maxAttempts = clampAttempts(payload.maxAttempts);
-        if (attempt >= maxAttempts) {
-            logger.error(`[tg-jobs] ${payload.type} id=${payload.id} failed ${attempt}/${maxAttempts} attempts; giving up`);
-            await this.finish(redis, payload.id, inflightKey, false);
-            return;
-        }
-        const now = this.now();
-        const delay = (0,_utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_1__.getBackoffDelay)(attempt - 1, { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS, jitterFraction: 0.1 });
-        const next = { ...payload, attempt, dueAt: now + delay };
-        const multi = redis.multi();
-        multi.set(this.jobKey(payload.id), serializePayload(next), "PX", delay + payload.maxLateMs + JOB_PAYLOAD_GRACE_MS);
-        multi.zrem(inflightKey, payload.id);
-        multi.zadd(jobKeys.due(this.clientId, this.mobile), next.dueAt, payload.id);
-        await multi.exec();
-        logger.warn(`[tg-jobs] ${payload.type} id=${payload.id} attempt ${attempt}/${maxAttempts} failed; retry in ${delay}ms`);
-    }
-    async runHandler(payload, lateMs, durable) {
-        const handler = this.handlers.get(payload.type);
-        if (!handler) {
-            logger.warn(`[tg-jobs] no handler for ${payload.type} (id=${payload.id}); dropped`);
-            return;
-        }
-        try {
-            await handler(payload.params ?? {}, {
-                jobId: payload.id,
-                type: payload.type,
-                chatId: payload.chatId,
-                mobile: payload.mobile,
-                clientId: payload.clientId,
-                attempt: payload.attempt,
-                dueAt: payload.dueAt,
-                lateMs,
-                durable,
-            });
-        }
-        catch (error) {
-            logger.error(`[tg-jobs] handler ${payload.type} failed id=${payload.id} attempt=${payload.attempt}`, error);
-            throw error;
+            // ignore
         }
     }
-}
-// ─── Process-wide default scheduler ─────────────────────────────────────────
-let defaultScheduler = null;
-/** Handlers registered with registerJobHandler (module load time); shared by every process-wide scheduler. */
-const handlerRegistry = new Map();
-/** A scheduler wired to the module handler registry (what the process poller uses; tests build restarts with it). */
-function createRegistryJobScheduler(options = {}) {
-    return new RedisJobScheduler({ ...options, handlers: handlerRegistry });
-}
-function scheduler() {
-    if (!defaultScheduler)
-        defaultScheduler = createRegistryJobScheduler();
-    return defaultScheduler;
-}
-function registerJobHandler(type, handler) {
-    if (!type || typeof handler !== "function")
-        throw new Error("registerJobHandler needs a type and a handler");
-    handlerRegistry.set(type, handler);
-    // A scheduler injected with its own handler map (tests) gets it too.
-    defaultScheduler?.registerHandler(type, handler);
-}
-/** Job types registered in this process (diagnostics / tests). */
-function registeredJobTypes() {
-    return [...handlerRegistry.keys()];
-}
-function scheduleJob(options) {
-    return scheduler().schedule(options);
-}
-function cancelJob(id) {
-    return scheduler().cancel(id);
-}
-/** Starts (or re-targets) the process poller. Polls Redis only while at least one handler is registered. */
-function startJobPoller(options = {}) {
-    const s = scheduler();
-    s.configure(options);
-    s.start();
-    return s;
-}
-async function stopJobPoller() {
-    if (defaultScheduler)
-        await defaultScheduler.stop();
-}
-/** Tests only. */
-function __resetJobsForTests(next = null) {
-    defaultScheduler = next;
+    return undefined;
 }
 
 
 /***/ },
 
-/***/ "../../packages/tg-core/src/state/mirrors.ts"
-/*!***************************************************!*\
-  !*** ../../packages/tg-core/src/state/mirrors.ts ***!
-  \***************************************************/
+/***/ "../../packages/tg-core/src/state/durable-queue.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/state/durable-queue.ts ***!
+  \*********************************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   RedisDeadline: () => (/* binding */ RedisDeadline),
-/* harmony export */   RedisTimeWindow: () => (/* binding */ RedisTimeWindow),
-/* harmony export */   RedisTimestampHash: () => (/* binding */ RedisTimestampHash)
+/* harmony export */   DelayedQueue: () => (/* binding */ DelayedQueue),
+/* harmony export */   DurableQueue: () => (/* binding */ DurableQueue),
+/* harmony export */   MAX_LATE_MS: () => (/* binding */ MAX_LATE_MS),
+/* harmony export */   shutdownDurableQueues: () => (/* binding */ shutdownDurableQueues)
 /* harmony export */ });
-/* harmony import */ var _state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /**
- * Small write-through mirrors built on state-redis. Each one shadows a common in-memory shape:
- *  - RedisDeadline:       "paused until T" (+ small JSON meta), key expires at T.
- *  - RedisTimestampHash:  Map<id, epochMs> (refused chats, per-chat state), whole hash TTL refreshed on write.
- *  - RedisTimeWindow:     number[] of event times inside a sliding window (rate limits), ZSET pruned on write.
- * The caller keeps its own Map/array authoritative and calls these on every change; `load()` is for boot.
+ * Durable queues: memory is the working copy, Redis a backup reloaded at boot.
+ *
+ *  - A record is small plain data: ids, text, a file path, a kind, a due time. Never closures, events,
+ *    clients or Telegram objects: after a restart the app's own `kind` switch turns it back into work.
+ *  - One Redis hash per account + queue (field = record id, value = JSON), TTL refreshed on every write.
+ *  - Redis down: the queue keeps working from memory (state-redis logs the outage once). When Redis is back every
+ *    backup is rewritten from memory, so a record that ran or was added during the outage is not lost or re-run.
+ *  - DelayedQueue adds one plain setTimeout per record; a record is removed right before it runs (so it
+ *    runs at most once), and one found more than 30 min overdue at boot is dropped with a log. A record that
+ *    comes due before the app wires the runner waits for it (setRunner).
  */
 
-class RedisDeadline {
-    constructor(key, label) { this.key = key; this.label = label; }
-    /** Mirrors "paused until `until`". A past deadline deletes the key. */
-    save(until, now = Date.now(), meta = {}) {
-        const key = this.key();
-        if (!key)
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("durable-queue");
+const MAX_LATE_MS = 30 * 60000;
+const ARGS_WARN_BYTES = 4096;
+const queues = new Set();
+const delayedQueues = new Set();
+(0,_state_redis__WEBPACK_IMPORTED_MODULE_1__.onStateRedisRecovered)(() => { for (const queue of queues)
+    void queue.flush(); });
+class DurableQueue {
+    constructor(options) {
+        this.records = new Map();
+        /** Set by the shutdown flush: later changes stay in memory so the flushed backup is what the next process gets. */
+        this.closed = false;
+        this.label = options.label;
+        this.backup = new _state_redis__WEBPACK_IMPORTED_MODULE_1__.RedisHash(() => (this.closed ? null : options.key()), options.ttlMs, options.label);
+        queues.add(this);
+    }
+    get size() { return this.records.size; }
+    has(id) { return this.records.has(id); }
+    get(id) { return this.records.get(id); }
+    list() { return [...this.records.values()]; }
+    /** Adds (or replaces) a record and backs it up. */
+    add(record) {
+        this.records.set(record.id, record);
+        const json = JSON.stringify(record);
+        if (json.length > ARGS_WARN_BYTES)
+            logger.warn(`[${this.label}] record ${record.id} (${record.kind}) is ${json.length} bytes; keep queue records small`);
+        return this.backup.set(record.id, json);
+    }
+    /** Drops a record. `evenIfAbsent` also deletes a backed-up one not in memory (left by the previous process, not loaded yet). */
+    remove(id, evenIfAbsent = false) {
+        if (!this.records.delete(id) && !evenIfAbsent)
             return Promise.resolve(false);
-        const remaining = Math.ceil(until - now);
-        if (remaining <= 0)
-            return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
-        const value = JSON.stringify({ until, ...meta });
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.set(key, value, "PX", remaining); });
+        return this.backup.delete(id);
     }
     clear() {
+        this.records.clear();
+        return this.backup.clear();
+    }
+    /**
+     * Boot: reads the backup once and merges it under what is already in memory. Records more than `maxLateMs`
+     * overdue are dropped (logged). Returns the loaded records, oldest due first.
+     */
+    async loadAtBoot(now = Date.now(), maxLateMs = MAX_LATE_MS) {
+        const hash = await this.backup.loadRaw();
+        if (!hash)
+            return [];
+        const loaded = [];
+        const stale = [];
+        for (const [id, raw] of Object.entries(hash)) {
+            const record = parseRecord(raw);
+            if (!record) {
+                stale.push(id);
+                logger.warn(`[${this.label}] dropped unreadable record ${id} after restart`);
+            }
+            else if (now - record.dueAt > maxLateMs) {
+                stale.push(id);
+                logger.warn(`[${this.label}] dropped ${record.kind} for ${record.chatId}: ${Math.round((now - record.dueAt) / 60000)} min overdue after restart`);
+            }
+            else if (!this.records.has(id)) {
+                this.records.set(id, record);
+                loaded.push(record);
+            }
+        }
+        if (stale.length)
+            void this.backup.delete(...stale);
+        return loaded.sort((a, b) => a.dueAt - b.dueAt);
+    }
+    /** Forgets this queue (no more shutdown flush); its Redis backup stays for the next owner. */
+    dispose() {
+        queues.delete(this);
+    }
+    /** Rewrites the whole backup from memory; `close` (shutdown) then keeps later changes in memory only. */
+    flush(close = false) {
+        const written = this.backup.replace(this.list().map((record) => [record.id, JSON.stringify(record)]));
+        if (close)
+            this.closed = true;
+        return written;
+    }
+}
+function parseRecord(raw) {
+    try {
+        const record = JSON.parse(raw);
+        return record && typeof record.id === "string" && typeof record.kind === "string" && Number.isFinite(record.dueAt) ? record : null;
+    }
+    catch {
+        return null;
+    }
+}
+let seq = 0;
+/** A durable queue of delayed work: one setTimeout per record, `run` (the app's kind switch) when it is due. */
+class DelayedQueue {
+    constructor(options, run = null) {
+        this.timers = new Map();
+        this.queue = new DurableQueue(options);
+        this.run = run;
+        delayedQueues.add(this);
+    }
+    /** Wires the kind switch and arms the records that came due (or were loaded) before it was wired. */
+    setRunner(run, now = Date.now()) {
+        this.run = run;
+        for (const record of this.queue.list()) {
+            if (this.timers.has(record.id))
+                continue;
+            if (now - record.dueAt > MAX_LATE_MS) {
+                logger.warn(`[delayed] dropped ${record.kind} for ${record.chatId}: ${Math.round((now - record.dueAt) / 60000)} min overdue before the runner was ready`);
+                void this.queue.remove(record.id);
+                continue;
+            }
+            this.arm(record.id, Math.max(0, record.dueAt - now));
+        }
+    }
+    /** Schedules `kind` for `chatId` in `delayMs`. Returns the record id (`id` or a generated one). */
+    schedule(spec) {
+        seq = (seq + 1) % 1000000;
+        const chatId = String(spec.chatId);
+        const id = spec.id ?? `${spec.kind}:${chatId}:${Date.now().toString(36)}.${seq.toString(36)}`;
+        this.clearTimer(id);
+        const delayMs = Math.max(0, spec.delayMs);
+        const record = { id, chatId, kind: spec.kind, args: spec.args, dueAt: Date.now() + delayMs };
+        void this.queue.add(record);
+        this.arm(record.id, delayMs);
+        return id;
+    }
+    /** Drops a pending record. Returns whether one was pending. */
+    cancel(id) {
+        if (!id)
+            return false;
+        this.clearTimer(id);
+        const pending = this.queue.has(id);
+        void this.queue.remove(id, true);
+        return pending;
+    }
+    /** Boot: re-arms the records the previous process left (overdue ones run now). Returns how many. */
+    async loadAtBoot(now = Date.now()) {
+        const records = await this.queue.loadAtBoot(now);
+        for (const record of records)
+            this.arm(record.id, Math.max(0, record.dueAt - now));
+        return records.length;
+    }
+    /** Clears the timers; the records stay in memory and in Redis for the next process. */
+    stop() {
+        for (const timer of this.timers.values())
+            clearTimeout(timer);
+        this.timers.clear();
+    }
+    /** Stops the timers and forgets this queue (a promote mobile that left the process); Redis keeps the records. */
+    dispose() {
+        this.stop();
+        this.queue.dispose();
+        delayedQueues.delete(this);
+    }
+    clearTimer(id) {
+        const timer = this.timers.get(id);
+        if (timer)
+            clearTimeout(timer);
+        this.timers.delete(id);
+    }
+    arm(id, delayMs) {
+        const timer = setTimeout(() => void this.fire(id), delayMs);
+        timer.unref?.();
+        this.timers.set(id, timer);
+    }
+    async fire(id) {
+        this.timers.delete(id);
+        const record = this.queue.get(id);
+        // No runner yet (boot): the record stays queued and setRunner arms it again.
+        if (!record || !this.run)
+            return;
+        void this.queue.remove(id);
+        try {
+            await this.run(record);
+        }
+        catch (error) {
+            logger.error(`[delayed] ${record.kind} for ${record.chatId} failed`, error);
+        }
+    }
+}
+/** Graceful shutdown: stop every delayed timer and flush every queue backup, waiting at most `timeoutMs`. */
+async function shutdownDurableQueues(timeoutMs = 3000) {
+    for (const delayed of delayedQueues)
+        delayed.stop();
+    const flushes = Promise.all([...queues].map((queue) => queue.flush(true)));
+    await (0,_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(flushes, timeoutMs, "queue flush").catch((error) => logger.warn(`[shutdown] queue flush incomplete: ${error.message}`));
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/state/state-redis.ts"
+/*!*******************************************************!*\
+  !*** ../../packages/tg-core/src/state/state-redis.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MirroredTimestampMap: () => (/* binding */ MirroredTimestampMap),
+/* harmony export */   RedisDeadline: () => (/* binding */ RedisDeadline),
+/* harmony export */   RedisHash: () => (/* binding */ RedisHash),
+/* harmony export */   RedisTimeWindow: () => (/* binding */ RedisTimeWindow),
+/* harmony export */   RedisWrites: () => (/* binding */ RedisWrites),
+/* harmony export */   STATE_REDIS_TIMEOUT_MS: () => (/* binding */ STATE_REDIS_TIMEOUT_MS),
+/* harmony export */   currentMobile: () => (/* binding */ currentMobile),
+/* harmony export */   onStateRedisRecovered: () => (/* binding */ onStateRedisRecovered),
+/* harmony export */   readState: () => (/* binding */ readState),
+/* harmony export */   setStateRedisForTests: () => (/* binding */ setStateRedisForTests),
+/* harmony export */   stateKey: () => (/* binding */ stateKey),
+/* harmony export */   withDeadline: () => (/* binding */ withDeadline),
+/* harmony export */   writeOnce: () => (/* binding */ writeOnce)
+/* harmony export */ });
+/* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * Restart-safe state: memory is the working copy, Redis a backup read once at boot.
+ *
+ *  - Hot paths never wait on Redis. Writes are fire-and-forget and go through a backup class below (one MULTI per
+ *    change, errors logged); reads happen only at boot (`readState`, bounded).
+ *  - Redis down = keep working in memory. The outage is logged once (warn) and the recovery once (log). Map backups
+ *    remember the latest unwritten change per slot and replay them when Redis is back (KeyedBackup).
+ *  - Every key is `namespace::identifier` and carries a TTL.
+ *
+ * Backup shapes:
+ *  - RedisDeadline:        "paused until T" (+ small JSON meta), key expires at T.
+ *  - RedisHash:            a Map<id, string | number> as one hash, TTL refreshed on write (durable-queue.ts uses it too).
+ *  - MirroredTimestampMap: a bounded in-memory Map<id, epochMs> backed by a RedisHash.
+ *  - RedisTimeWindow:      number[] of event times inside a sliding window (rate limits).
+ *  - RedisWrites:          any other shape (JSON keys, ZSETs, counters, several keys per change): the caller gives
+ *                          the commands and names the slots; same outage replay as the classes above.
+ */
+
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("state-redis");
+/** After a failure, skip Redis for this long (no connect storm, no pile of pending promises). */
+const RETRY_AFTER_MS = 30000;
+/** Bound on any state read or write. */
+const STATE_REDIS_TIMEOUT_MS = 3000;
+let override;
+let unavailableUntil = 0;
+let degraded = false;
+/**
+ * Tests (and only tests) inject a client here. `null` = Redis unavailable; `undefined` = back to the shared
+ * RedisClient. Also clears the outage bookkeeping.
+ */
+function setStateRedisForTests(client) {
+    override = client;
+    unavailableUntil = 0;
+    degraded = false;
+}
+// Captured at load so a caller's (or a test's) patched global timers cannot fire or count these deadlines.
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+/** Rejects when `promise` has not settled within `ms`. */
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = nativeSetTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => { if (timer)
+        nativeClearTimeout(timer); });
+}
+function noteFailure(label, error) {
+    unavailableUntil = Date.now() + RETRY_AFTER_MS;
+    const message = error instanceof Error ? error.message : String(error);
+    if (!degraded) {
+        degraded = true;
+        logger.warn(`[state-redis] Redis unavailable (${label}): ${message}. Restart-safe state is memory-only until it recovers.`);
+    }
+    else {
+        logger.debug(`[state-redis] still unavailable (${label}): ${message}`);
+    }
+}
+const recoveryListeners = new Set();
+/** `listener` runs each time Redis is reachable again after an outage, so a backup can rewrite what it missed. */
+function onStateRedisRecovered(listener) {
+    recoveryListeners.add(listener);
+}
+function noteSuccess() {
+    if (degraded) {
+        degraded = false;
+        logger.log("[state-redis] Redis reachable again; restart-safe backups resumed.");
+        for (const listener of recoveryListeners)
+            listener();
+    }
+}
+/** The Redis client, or null when it is (recently) unavailable. Never throws. */
+async function getStateRedis() {
+    if (override !== undefined)
+        return override;
+    if (Date.now() < unavailableUntil)
+        return null;
+    try {
+        return await withDeadline(_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.getReady(), STATE_REDIS_TIMEOUT_MS, "Redis connect");
+    }
+    catch (error) {
+        noteFailure("connect", error);
+        return null;
+    }
+}
+/**
+ * One MULTI with `build`'s commands. Never throws. Only the backups below call it: they remember what failed and
+ * replay it, so callers never write Redis directly (a direct write would be lost in an outage).
+ */
+async function sendMulti(label, build) {
+    const redis = await getStateRedis();
+    if (!redis)
+        return false;
+    try {
+        const multi = redis.multi();
+        build(multi);
+        const results = await withDeadline(multi.exec(), STATE_REDIS_TIMEOUT_MS, `${label} write`);
+        const failed = results?.find(([err]) => err);
+        if (failed)
+            throw failed[0];
+        noteSuccess();
+        return true;
+    }
+    catch (error) {
+        noteFailure(label, error);
+        return false;
+    }
+}
+/**
+ * One MULTI that is NOT remembered or replayed if it fails. Only for a write that is safe to lose and unsafe to run
+ * late (e.g. releasing a claim: a late DEL could delete a newer claim). Never throws.
+ */
+function writeOnce(label, build) {
+    return sendMulti(label, build);
+}
+/** Bounded boot read. Returns null when Redis is unavailable, slow or fails: the caller keeps its memory view. */
+async function readState(label, read) {
+    const redis = await getStateRedis();
+    if (!redis)
+        return null;
+    try {
+        const value = await withDeadline(read(redis), STATE_REDIS_TIMEOUT_MS, `${label} read`);
+        noteSuccess();
+        return value;
+    }
+    catch (error) {
+        noteFailure(label, error);
+        return null;
+    }
+}
+/** `namespace::a::b` key, or null when any part is missing (the backup then stays memory-only). */
+function stateKey(namespace, ...parts) {
+    const clean = [];
+    for (const part of parts) {
+        if (part === null || part === undefined)
+            return null;
+        const text = String(part).trim();
+        if (!text || text === "undefined" || text === "null")
+            return null;
+        clean.push(text);
+    }
+    return [namespace, ...clean].join("::");
+}
+/** The current process's account (tg-aut runs one mobile per process; remote config sets it). */
+function currentMobile() {
+    const mobile = process.env.mobile?.trim();
+    return mobile ? mobile : null;
+}
+/** Per backup: how many unwritten changes are remembered for replay (oldest dropped beyond this). */
+const MAX_PENDING_PER_BACKUP = 1000;
+const MAX_TRACKED_SLOTS = 2048;
+const backupsBehind = new Set();
+/**
+ * What every backup below shares: its key (null = memory-only, nothing is written or read) and a log label.
+ *
+ * Outage handling: a change that could not be written (Redis down, or inside the 30 s skip window) is remembered
+ * as the latest intended op for its slot (the whole key, or one hash field / window member; last write wins).
+ * While any are remembered, new changes join them and every write sends all of them, in order, in one MULTI;
+ * when Redis is reachable again they are replayed the same way. So a delete or clear made during an outage is
+ * not undone by the stale backup at the next restart. Assumes a single connection fails commands in issue order.
+ */
+class KeyedBackup {
+    constructor(key, label) {
+        /** slot -> latest unwritten op; Map order = replay order. */
+        this.pending = new Map();
+        /** slot -> seq of the newest op issued for it (so an older op failing late cannot shadow a newer one). */
+        this.newest = new Map();
+        /** key -> seq of the newest whole-key op (clear/replace/del): older field ops are superseded by it. */
+        this.newestWhole = new Map();
+        this.seq = 0;
+        this.flushChain = Promise.resolve(true);
+        this.droppedWarned = false;
+        this.key = key;
+        this.label = label;
+    }
+    /** Unwritten changes waiting for Redis (tests / diagnostics). */
+    get pendingCount() { return this.pending.size; }
+    /**
+     * `fields` = the slots inside the key this change touches (hash fields, window members), each with the build
+     * that replays just that slot; omitted = the change covers the whole key and supersedes every earlier field
+     * change for it. `build` is what is sent when nothing is waiting (one MULTI, same commands as always).
+     */
+    write(build, fields) {
         const key = this.key();
         if (!key)
             return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+        const at = Date.now();
+        const ops = fields === undefined
+            ? [[key, { key, build, at, seq: ++this.seq }]]
+            : fields.map(([field, fieldBuild]) => [`${key}\u0000${field}`, { key, build: fieldBuild, at, seq: ++this.seq }]);
+        for (const [slot, op] of ops)
+            this.track(this.newest, slot, op.seq);
+        if (fields === undefined) {
+            this.track(this.newestWhole, key, ops[0][1].seq);
+            for (const [pendingSlot, pendingOp] of this.pending) {
+                if (pendingOp.key === key)
+                    this.pending.delete(pendingSlot);
+            }
+        }
+        if (this.pending.size > 0) {
+            for (const [slot, op] of ops)
+                this.remember(slot, op);
+            return this.flushPending();
+        }
+        return sendMulti(this.label, (multi) => build(multi, key, Date.now() - at)).then((ok) => {
+            if (!ok)
+                for (const [slot, op] of ops)
+                    this.remember(slot, op);
+            return ok;
+        });
     }
-    /** The stored deadline if still in the future; null when absent, expired or Redis unavailable. */
-    async load(now = Date.now()) {
+    read(read) {
         const key = this.key();
-        if (!key)
-            return null;
-        const raw = await (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.get(key));
+        return key ? readState(this.label, (redis) => read(redis, key)) : Promise.resolve(null);
+    }
+    /** Writes every remembered change in one MULTI, after any flush already running. */
+    flushPending() {
+        this.flushChain = this.flushChain.then(() => this.flushOnce(), () => this.flushOnce());
+        return this.flushChain;
+    }
+    async flushOnce() {
+        if (this.pending.size === 0) {
+            backupsBehind.delete(this);
+            return true;
+        }
+        if (!this.key())
+            return false; // memory-only now (e.g. a closed queue): keep them, write nothing
+        const batch = [...this.pending.entries()];
+        const ok = await sendMulti(`${this.label} replay`, (multi) => {
+            const now = Date.now();
+            for (const [, op] of batch)
+                op.build(multi, op.key, now - op.at);
+        });
+        if (ok) {
+            for (const [slot, op] of batch)
+                if (this.pending.get(slot) === op)
+                    this.pending.delete(slot);
+            if (this.pending.size === 0) {
+                backupsBehind.delete(this);
+                this.droppedWarned = false;
+            }
+        }
+        return ok;
+    }
+    remember(slot, op) {
+        if ((this.newest.get(slot) ?? 0) > op.seq)
+            return; // a newer change to this slot was issued
+        if ((this.newestWhole.get(op.key) ?? 0) > op.seq)
+            return; // a later clear/replace covers it
+        const existing = this.pending.get(slot);
+        if (existing && existing.seq > op.seq)
+            return;
+        this.pending.delete(slot);
+        this.pending.set(slot, op);
+        while (this.pending.size > MAX_PENDING_PER_BACKUP) {
+            const oldest = this.pending.keys().next().value;
+            if (oldest === undefined)
+                break;
+            this.pending.delete(oldest);
+            if (!this.droppedWarned) {
+                this.droppedWarned = true;
+                logger.warn(`[state-redis] ${this.label}: more than ${MAX_PENDING_PER_BACKUP} changes waiting for Redis; dropping the oldest`);
+            }
+        }
+        backupsBehind.add(this);
+    }
+    track(map, slot, seq) {
+        map.delete(slot);
+        map.set(slot, seq);
+        while (map.size > MAX_TRACKED_SLOTS) {
+            const oldest = map.keys().next().value;
+            if (oldest === undefined)
+                break;
+            map.delete(oldest);
+        }
+    }
+}
+onStateRedisRecovered(() => { for (const backup of [...backupsBehind])
+    void backup.flushPending(); });
+class RedisDeadline extends KeyedBackup {
+    /** Backs up "paused until `until`". A past deadline deletes the key. */
+    save(until, now = Date.now(), meta = {}) {
+        const remaining = Math.ceil(until - now);
+        const value = JSON.stringify({ until, ...meta });
+        return this.write((m, key, elapsed) => {
+            const left = remaining - elapsed;
+            if (left > 0)
+                m.set(key, value, "PX", left);
+            else
+                m.del(key);
+        });
+    }
+    clear() {
+        return this.write((m, key) => { m.del(key); });
+    }
+    /** The stored deadline if still in the future; null when absent, expired, unreadable or Redis unavailable. */
+    async load(now = Date.now()) {
+        const raw = await this.read((r, key) => r.get(key));
         if (!raw)
             return null;
         try {
@@ -12285,80 +12414,136 @@ class RedisDeadline {
         }
     }
 }
-class RedisTimestampHash {
-    constructor(key, ttlMs, label) { this.key = key; this.ttlMs = ttlMs; this.label = label; }
-    set(field, at) {
-        const key = this.key();
-        if (!key || !field)
+/** Backup of a Map<id, string | number> as one hash; every write refreshes the whole hash's TTL. */
+class RedisHash extends KeyedBackup {
+    constructor(key, ttlMs, label) { super(key, label); this.ttlMs = ttlMs; }
+    set(field, value) {
+        if (!field)
             return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
-            m.hset(key, field, String(at));
-            m.pexpire(key, this.ttlMs);
-        });
-    }
-    /** Raw string value variant (JSON per-field state). */
-    setValue(field, value) {
-        const key = this.key();
-        if (!key || !field)
-            return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
-            m.hset(key, field, value);
-            m.pexpire(key, this.ttlMs);
-        });
+        const build = (m, key) => { m.hset(key, field, String(value)); m.pexpire(key, this.ttlMs); };
+        return this.write(build, [[field, build]]);
     }
     delete(...fields) {
-        const key = this.key();
         const clean = fields.filter(Boolean);
-        if (!key || clean.length === 0)
+        if (clean.length === 0)
             return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.hdel(key, ...clean); });
+        return this.write((m, key) => { m.hdel(key, ...clean); }, clean.map((field) => [field, (m, key) => { m.hdel(key, field); }]));
     }
     clear() {
-        const key = this.key();
-        if (!key)
-            return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+        return this.write((m, key) => { m.del(key); });
     }
-    /** [field, epochMs] pairs younger than the TTL, oldest first; null when Redis unavailable. */
+    /** Rewrites the whole hash as `entries` (none = deleted). */
+    replace(entries) {
+        return this.write((m, key) => {
+            m.del(key);
+            if (entries.length) {
+                m.hset(key, ...entries.flat());
+                m.pexpire(key, this.ttlMs);
+            }
+        });
+    }
+    /** The stored fields as raw strings; null when Redis unavailable. */
+    loadRaw() {
+        return this.read((r, key) => r.hgetall(key));
+    }
+    /** Values read as epoch ms: [field, epochMs] pairs younger than the TTL, oldest first; null when Redis unavailable. */
     async load(now = Date.now()) {
-        const raw = await this.loadRaw();
-        return raw === null ? null : (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.freshTimestampEntries)(raw, now, this.ttlMs);
-    }
-    async loadRaw() {
-        const key = this.key();
-        if (!key)
+        const hash = await this.loadRaw();
+        if (hash === null)
             return null;
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.hgetall(key));
+        const entries = [];
+        for (const [field, raw] of Object.entries(hash)) {
+            const at = Number(raw);
+            if (Number.isFinite(at) && at > 0 && now - at <= this.ttlMs)
+                entries.push([field, at]);
+        }
+        return entries.sort((a, b) => a[1] - b[1]);
+    }
+}
+/**
+ * Map<id, epochMs> in recency order (re-noting an id moves it to the end), bounded at `max` (oldest forgotten
+ * first), backed by a RedisHash when one is given. Memory is authoritative; `mergeSeed` is for boot.
+ */
+class MirroredTimestampMap {
+    constructor(max, mirror = null) {
+        this.entries = new Map();
+        this.max = max;
+        this.mirror = mirror;
+    }
+    get size() { return this.entries.size; }
+    has(id) { return this.entries.has(id); }
+    get(id) { return this.entries.get(id); }
+    /** Records `id` at `at` as the newest entry. Returns true when it was not present before. */
+    note(id, at) {
+        const added = !this.entries.has(id);
+        this.entries.delete(id);
+        this.entries.set(id, at);
+        void this.mirror?.set(id, at);
+        if (this.entries.size > this.max) {
+            const oldest = this.entries.keys().next().value;
+            if (oldest !== undefined) {
+                this.entries.delete(oldest);
+                void this.mirror?.delete(oldest);
+            }
+        }
+        return added;
+    }
+    delete(id) {
+        const deleted = this.entries.delete(id);
+        if (deleted)
+            void this.mirror?.delete(id);
+        return deleted;
+    }
+    clear() {
+        this.entries.clear();
+        void this.mirror?.clear();
+    }
+    /**
+     * Boot seed: backed-up [id, epochMs] pairs (oldest first) go in as older than every in-memory entry, never
+     * overwriting one; then the oldest beyond `max` are forgotten. Returns how many ids were added.
+     */
+    mergeSeed(seed) {
+        if (seed.length === 0)
+            return 0;
+        const current = new Map(this.entries);
+        this.entries.clear();
+        let added = 0;
+        for (const [id, at] of seed) {
+            if (!current.has(id)) {
+                this.entries.set(id, at);
+                added += 1;
+            }
+        }
+        for (const [id, at] of current)
+            this.entries.set(id, at);
+        while (this.entries.size > this.max) {
+            const oldest = this.entries.keys().next().value;
+            if (oldest === undefined)
+                break;
+            this.entries.delete(oldest);
+        }
+        return added;
     }
 }
 let windowSeq = 0;
-class RedisTimeWindow {
-    constructor(key, windowMs, label) { this.key = key; this.windowMs = windowMs; this.label = label; }
-    /** Mirrors one event at `at`; prunes entries older than the window and refreshes the TTL. */
+class RedisTimeWindow extends KeyedBackup {
+    constructor(key, windowMs, label) { super(key, label); this.windowMs = windowMs; }
+    /** Backs up one event at `at`; prunes entries older than the window and refreshes the TTL. */
     add(at) {
-        const key = this.key();
-        if (!key)
-            return Promise.resolve(false);
         windowSeq = (windowSeq + 1) % 1000000;
         const member = `${at}:${process.pid}:${windowSeq}`;
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => {
+        const build = (m, key, elapsed) => {
+            if (elapsed >= this.windowMs)
+                return; // replayed after it left the window: nothing to keep
             m.zadd(key, at, member);
             m.zremrangebyscore(key, "-inf", at - this.windowMs);
             m.pexpire(key, this.windowMs);
-        });
-    }
-    clear() {
-        const key = this.key();
-        if (!key)
-            return Promise.resolve(false);
-        return (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)(this.label, (m) => { m.del(key); });
+        };
+        return this.write(build, [[member, build]]);
     }
     /** Event times inside the window (ascending); null when Redis unavailable. */
     async load(now = Date.now()) {
-        const key = this.key();
-        if (!key)
-            return null;
-        const members = await (0,_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)(this.label, (r) => r.zrangebyscore(key, now - this.windowMs + 1, "+inf"));
+        const members = await this.read((r, key) => r.zrangebyscore(key, now - this.windowMs + 1, "+inf"));
         if (members === null)
             return null;
         return members
@@ -12367,186 +12552,16 @@ class RedisTimeWindow {
             .sort((a, b) => a - b);
     }
 }
-
-
-/***/ },
-
-/***/ "../../packages/tg-core/src/state/state-redis.ts"
-/*!*******************************************************!*\
-  !*** ../../packages/tg-core/src/state/state-redis.ts ***!
-  \*******************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   STATE_REDIS_READ_TIMEOUT_MS: () => (/* binding */ STATE_REDIS_READ_TIMEOUT_MS),
-/* harmony export */   STATE_REDIS_RETRY_AFTER_MS: () => (/* binding */ STATE_REDIS_RETRY_AFTER_MS),
-/* harmony export */   currentMobile: () => (/* binding */ currentMobile),
-/* harmony export */   freshTimestampEntries: () => (/* binding */ freshTimestampEntries),
-/* harmony export */   getStateRedis: () => (/* binding */ getStateRedis),
-/* harmony export */   isStateRedisDegraded: () => (/* binding */ isStateRedisDegraded),
-/* harmony export */   noteStateRedisFailure: () => (/* binding */ noteStateRedisFailure),
-/* harmony export */   readState: () => (/* binding */ readState),
-/* harmony export */   setStateRedisForTests: () => (/* binding */ setStateRedisForTests),
-/* harmony export */   stateKey: () => (/* binding */ stateKey),
-/* harmony export */   writeThrough: () => (/* binding */ writeThrough)
-/* harmony export */ });
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /**
- * Restart-safe state: the Redis side of "memory is authoritative, Redis is a mirror".
- *
- * Rules every caller follows:
- *  - The in-memory structure stays the primary copy. Hot paths never wait on Redis.
- *  - Writes are write-through and fire-and-forget (`writeThrough`): one MULTI per change, errors logged.
- *  - Reads happen only at boot (seed) or on paths that are not inbound->reply (`readState`, bounded).
- *  - Redis down = keep working in memory. The outage is logged once (warn) and the recovery once (log).
- *  - Every key is `namespace::identifier` and carries a TTL.
+ * Replayed writes for shapes the classes above do not cover. `key()` names the backup (it is passed to every build;
+ * a build may also write keys derived from it). `send(build)` = the change covers the whole key and supersedes
+ * every earlier slot change; `send(build, [[slot, slotBuild], ...])` = it touches only those slots, and after an
+ * outage only the latest `slotBuild` per slot is replayed (so a slot build must be safe to run late and alone).
  */
-
-
-const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("state-redis");
-/** After a failure, skip Redis for this long (no connect storm, no pile of pending promises). */
-const STATE_REDIS_RETRY_AFTER_MS = 30000;
-/** Default bound on any state read (boot seed or a non-hot-path check). */
-const STATE_REDIS_READ_TIMEOUT_MS = 3000;
-let override;
-let unavailableUntil = 0;
-let degraded = false;
-/**
- * Tests (and only tests) inject a client here. `null` = Redis unavailable; `undefined` = back to the shared
- * RedisClient. Also clears the outage bookkeeping.
- */
-function setStateRedisForTests(client) {
-    override = client;
-    unavailableUntil = 0;
-    degraded = false;
-}
-/** True while the mirror is in a logged outage (health/diagnostics). */
-function isStateRedisDegraded() {
-    return degraded;
-}
-// Captured at load so a caller's (or a test's) patched global timers cannot fire or count these deadlines.
-const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
-const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
-function withDeadline(promise, ms, label) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = nativeSetTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-        timer.unref?.();
-    });
-    return Promise.race([promise, timeout]).finally(() => { if (timer)
-        nativeClearTimeout(timer); });
-}
-const defaultProvider = async () => {
-    const client = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__.RedisClient.getReady();
-    return client;
-};
-/** Records an outage (warn once) and starts the retry-after window. */
-function noteStateRedisFailure(label, error) {
-    unavailableUntil = Date.now() + STATE_REDIS_RETRY_AFTER_MS;
-    const message = error instanceof Error ? error.message : String(error);
-    if (!degraded) {
-        degraded = true;
-        logger.warn(`[state-redis] Redis unavailable (${label}): ${message}. Restart-safe state is memory-only until it recovers.`);
+class RedisWrites extends KeyedBackup {
+    send(build, slots) {
+        return this.write(build, slots);
     }
-    else {
-        logger.debug(`[state-redis] still unavailable (${label}): ${message}`);
-    }
-}
-function noteSuccess() {
-    if (degraded) {
-        degraded = false;
-        logger.log("[state-redis] Redis reachable again; restart-safe state mirroring resumed.");
-    }
-}
-/** The Redis client, or null when it is (recently) unavailable. Never throws. */
-async function getStateRedis(timeoutMs = STATE_REDIS_READ_TIMEOUT_MS) {
-    if (override !== undefined)
-        return override;
-    if (Date.now() < unavailableUntil)
-        return null;
-    try {
-        return await withDeadline(defaultProvider(), timeoutMs, "Redis connect");
-    }
-    catch (error) {
-        noteStateRedisFailure("connect", error);
-        return null;
-    }
-}
-/**
- * Fire-and-forget write-through: `build` queues commands on one MULTI. Never throws, never blocks the caller.
- * Returns the promise only so tests can await it.
- */
-function writeThrough(label, build) {
-    return (async () => {
-        const redis = await getStateRedis();
-        if (!redis)
-            return false;
-        try {
-            const multi = redis.multi();
-            build(multi);
-            const results = await withDeadline(multi.exec(), STATE_REDIS_READ_TIMEOUT_MS, `${label} write`);
-            const failed = results?.find(([err]) => err);
-            if (failed)
-                throw failed[0];
-            noteSuccess();
-            return true;
-        }
-        catch (error) {
-            noteStateRedisFailure(label, error);
-            return false;
-        }
-    })();
-}
-/**
- * Bounded read for boot seeding or a non-hot-path check. Returns null when Redis is unavailable, slow or
- * fails: the caller then keeps its in-memory view (fail-open).
- */
-async function readState(label, read, timeoutMs = STATE_REDIS_READ_TIMEOUT_MS) {
-    const redis = await getStateRedis(timeoutMs);
-    if (!redis)
-        return null;
-    try {
-        const value = await withDeadline(read(redis), timeoutMs, `${label} read`);
-        noteSuccess();
-        return value;
-    }
-    catch (error) {
-        noteStateRedisFailure(label, error);
-        return null;
-    }
-}
-/** `namespace::a::b` key, or null when any part is missing (the mirror then stays memory-only). */
-function stateKey(namespace, ...parts) {
-    const clean = [];
-    for (const part of parts) {
-        if (part === null || part === undefined)
-            return null;
-        const text = String(part).trim();
-        if (!text || text === "undefined" || text === "null")
-            return null;
-        clean.push(text);
-    }
-    return [namespace, ...clean].join("::");
-}
-/** The current process's account (tg-aut runs one mobile per process; remote config sets it). */
-function currentMobile() {
-    const mobile = process.env.mobile?.trim();
-    return mobile ? mobile : null;
-}
-/** Hash entries -> [field, epoch ms] pairs no older than `maxAgeMs`, oldest first. */
-function freshTimestampEntries(hash, now, maxAgeMs) {
-    if (!hash)
-        return [];
-    const entries = [];
-    for (const [field, raw] of Object.entries(hash)) {
-        const at = Number(raw);
-        if (!Number.isFinite(at) || at <= 0 || now - at > maxAgeMs)
-            continue;
-        entries.push([field, at]);
-    }
-    return entries.sort((a, b) => a[1] - b[1]);
 }
 
 
@@ -13312,9 +13327,7 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* binding */ SPAM_BOT_USERNAME),
-/* harmony export */   __resetSpamBotNotificationClaimsForTests: () => (/* binding */ __resetSpamBotNotificationClaimsForTests),
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
-/* harmony export */   claimSpamBotNotificationDurable: () => (/* binding */ claimSpamBotNotificationDurable),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
 /* harmony export */   describeSpamBotReply: () => (/* binding */ describeSpamBotReply),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
@@ -13327,8 +13340,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-
 
 
 
@@ -13474,34 +13485,6 @@ function describeSpamBotReply(text, now = new Date()) {
 function claimSpamBotNotification(mobile, messageId) {
     if (messageId === null)
         return true;
-    if (!claimInMemory(mobile, messageId))
-        return false;
-    // Mirror the claim (SET NX EX 300) so a restarted process's manual probe does not re-notify it.
-    const key = spamBotNotificationKey(mobile, messageId);
-    if (key)
-        void (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.writeThrough)("spambot.notified", (m) => { m.set(key, "1", "EX", SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS / 1000, "NX"); });
-    return true;
-}
-/**
- * Restart-safe form of claimSpamBotNotification for async callers: the in-memory claim first, then
- * SET NX EX 300 in Redis, so a reply already notified by the previous process is not notified again.
- * Redis unavailable = the in-memory answer (fail-open: the operator may get one duplicate).
- */
-async function claimSpamBotNotificationDurable(mobile, messageId) {
-    if (messageId === null)
-        return true;
-    if (!claimInMemory(mobile, messageId))
-        return false;
-    const key = spamBotNotificationKey(mobile, messageId);
-    if (!key)
-        return true;
-    const claimed = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.readState)("spambot.notified", async (redis) => (await redis.set(key, "1", "EX", SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS / 1000, "NX")) === "OK");
-    return claimed ?? true;
-}
-function spamBotNotificationKey(mobile, messageId) {
-    return (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.stateKey)("spambot::notified", mobile, messageId);
-}
-function claimInMemory(mobile, messageId) {
     const now = Date.now();
     for (const [key, expiresAt] of spamBotNotificationClaims) {
         if (expiresAt <= now)
@@ -13512,10 +13495,6 @@ function claimInMemory(mobile, messageId) {
         return false;
     spamBotNotificationClaims.set(key, now + SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS);
     return true;
-}
-/** Tests only: forget in-process claims (simulates a restart). */
-function __resetSpamBotNotificationClaimsForTests() {
-    spamBotNotificationClaims.clear();
 }
 /**
  * Logs and notifies the operator about the latest SpamBot reply. This is shared
@@ -13536,7 +13515,7 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         return { latestReply: null, replyIsFresh: false };
     }
     logger.info(`[SpamBot probe] ${mobile}: ${latestReply.text}`);
-    if (!(await claimSpamBotNotificationDurable(mobile, latestReply.messageId))) {
+    if (!claimSpamBotNotification(mobile, latestReply.messageId)) {
         return { latestReply, replyIsFresh };
     }
     try {
@@ -13554,9 +13533,7 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
             details: latestReply.text,
             tags: ["spambot", "manual-health-check"],
         });
-        if (sent === false) {
-            (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error("Manual SpamBot notification returned false"), "spam-bot-probe.notification", false);
-        }
+        (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, "Manual SpamBot notification returned false", "spam-bot-probe.notification");
     }
     catch (error) {
         (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "spam-bot-probe.notification", false);
@@ -13984,6 +13961,13 @@ function redisDbFromUri(uri) {
         return 0;
     }
 }
+/** Longest wait between reconnect attempts. */
+const REDIS_RETRY_MAX_MS = 30000;
+/** Reconnect delay for attempt `times` (1-based): 200 ms doubling, capped at 30 s, plus up to 10% jitter. */
+function redisRetryDelay(times) {
+    const base = Math.min(200 * 2 ** Math.max(0, Math.min(times - 1, 20)), REDIS_RETRY_MAX_MS);
+    return Math.round(base + base * 0.1 * Math.random());
+}
 /**
  * Singleton Redis client with strong typing and extended utility methods.
  */
@@ -14008,13 +13992,16 @@ class RedisClient {
                 keepAlive: 30000,
                 family: 4,
                 enableOfflineQueue: false,
+                // Never give up: an ended client stays dead until forceReconnect, and every backup written during that time
+                // is lost. ioredis calls this once per failed attempt (times = 1, 2, ...).
                 retryStrategy: (times) => {
-                    const delay = Math.min(times * 100, 3000); // Exponential backoff, max 3s
-                    logger.warn(`[Redis Retry] Attempt ${times}/10, next retry in ${delay}ms. Status: ${RedisClient.instance?.status ?? 'unknown'}`);
-                    // Limit retries to prevent infinite reconnection attempts (memory leak prevention)
-                    if (times > 10) {
-                        logger.error(`[Redis Retry] Connection failed after ${times} attempts, giving up. Check: 1) Redis server running? 2) REDIS_URI correct? 3) Credentials correct? 4) Firewall rules?`);
-                        return null; // Stop retrying
+                    RedisClient.failedAttempts = times;
+                    const delay = redisRetryDelay(times);
+                    if (times === 1) {
+                        logger.warn(`[Redis Retry] Connection lost (status: ${RedisClient.instance?.status ?? 'unknown'}); retrying with backoff up to ${REDIS_RETRY_MAX_MS}ms until it is back`);
+                    }
+                    else {
+                        logger.debug(`[Redis Retry] Attempt ${times}, next retry in ${delay}ms`);
                     }
                     return delay;
                 },
@@ -14028,7 +14015,13 @@ class RedisClient {
                     logger.log(`✅ Connected to ${target}`);
                 };
                 const readyHandler = () => {
-                    logger.log("✅ Client ready");
+                    if (RedisClient.failedAttempts > 0) {
+                        logger.warn(`✅ Redis reconnected after ${RedisClient.failedAttempts} failed attempt(s)`);
+                        RedisClient.failedAttempts = 0;
+                    }
+                    else {
+                        logger.log("✅ Client ready");
+                    }
                 };
                 const errorHandler = (err) => {
                     const isAuthError = err.message.includes('NOAUTH') ||
@@ -14041,12 +14034,19 @@ class RedisClient {
                         logger.error(`❌ Redis AUTH FAILURE: ${err.message}`);
                         logger.error(`[Redis Auth Debug] Server requires authentication. Check the credentials in REDIS_URI.`);
                     }
+                    else if (RedisClient.failedAttempts > 1) {
+                        // Already reported at the start of this outage; one error per retry would spam the log.
+                        logger.debug(`Connection error (still reconnecting): ${err.message}${err.code ? ` (code: ${err.code})` : ''}`);
+                    }
                     else {
                         logger.error(`❌ Connection error: ${err.message}${err.code ? ` (code: ${err.code})` : ''}`);
                     }
                 };
                 const closeHandler = () => {
-                    logger.warn("⚠️ Connection closed");
+                    if (RedisClient.failedAttempts > 0)
+                        logger.debug("Connection closed (still reconnecting)");
+                    else
+                        logger.warn("⚠️ Connection closed");
                 };
                 const reconnectingHandler = (delay) => {
                     logger.debug(`🔄 Reconnecting in ${delay}ms`);
@@ -14096,6 +14096,12 @@ class RedisClient {
         if (client.status === "ready") {
             return client;
         }
+        if (client.status === "end") {
+            // Only an explicit quit/disconnect ends the client now (the retry strategy never gives up). Drop the dead
+            // instance so the next call builds a fresh one, and fail this call fast: callers fall back to memory.
+            RedisClient.dropEndedInstance(client);
+            throw new Error("Redis connection ended; a new client will be created on the next call");
+        }
         if (!RedisClient.connectPromise) {
             RedisClient.connectPromise = (async () => {
                 try {
@@ -14115,6 +14121,24 @@ class RedisClient {
             })();
         }
         return RedisClient.connectPromise;
+    }
+    static dropEndedInstance(client) {
+        if (RedisClient.instance !== client)
+            return;
+        RedisClient.removeTrackedListeners(client);
+        RedisClient.instance = null;
+        RedisClient.connectPromise = null;
+        RedisClient.failedAttempts = 0;
+    }
+    /** Removes the event handlers getClient() registered (stored on `_eventHandlers`) so the client can be released. */
+    static removeTrackedListeners(client) {
+        const handlers = client._eventHandlers;
+        if (!handlers)
+            return;
+        logger.debug("Removing event listeners");
+        for (const [event, handler] of Object.entries(handlers))
+            client.removeListener(event, handler);
+        delete client._eventHandlers;
     }
     static async waitForReady(client, timeoutMs = 15000) {
         if (client.status === "ready") {
@@ -14156,19 +14180,7 @@ class RedisClient {
             try {
                 logger.debug("Disconnecting client...");
                 // Remove all event listeners to prevent memory leaks
-                const handlers = RedisClient.instance._eventHandlers;
-                if (handlers) {
-                    logger.debug("Removing event listeners");
-                    RedisClient.instance.removeListener("connect", handlers.connect);
-                    RedisClient.instance.removeListener("ready", handlers.ready);
-                    RedisClient.instance.removeListener("error", handlers.error);
-                    RedisClient.instance.removeListener("close", handlers.close);
-                    RedisClient.instance.removeListener("reconnecting", handlers.reconnecting);
-                    if (handlers.end) {
-                        RedisClient.instance.removeListener("end", handlers.end);
-                    }
-                    delete RedisClient.instance._eventHandlers;
-                }
+                RedisClient.removeTrackedListeners(RedisClient.instance);
                 await RedisClient.instance.quit();
                 logger.log("✅ Client disconnected successfully");
             }
@@ -14178,6 +14190,7 @@ class RedisClient {
             finally {
                 RedisClient.connectPromise = null;
                 RedisClient.instance = null;
+                RedisClient.failedAttempts = 0;
                 logger.debug("Instance cleared");
             }
         }
@@ -14523,6 +14536,8 @@ class RedisClient {
 }
 RedisClient.instance = null;
 RedisClient.connectPromise = null;
+/** Failed reconnect attempts in the current outage (0 = connected / never failed). */
+RedisClient.failedAttempts = 0;
 
 
 /***/ },
@@ -15927,68 +15942,6 @@ function isExpectedTelegramLogOutcome(err) {
     else
         text = String(err);
     return EXPECTED_TG_OUTCOME_RE.test(text);
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-core/src/utils/exponential-backoff.ts"
-/*!***************************************************************!*\
-  !*** ../../packages/tg-core/src/utils/exponential-backoff.ts ***!
-  \***************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   getBackoffDelay: () => (/* binding */ getBackoffDelay),
-/* harmony export */   withBackoff: () => (/* binding */ withBackoff)
-/* harmony export */ });
-/**
- * Exponential backoff utility with jitter.
- * Used for reconnection attempts and retry logic.
- */
-const DEFAULT_CONFIG = {
-    baseMs: 2000,
-    maxMs: 32000,
-    jitterFraction: 0.1,
-};
-/**
- * Calculate delay for a given attempt using exponential backoff with jitter.
- * @param attempt - Zero-based attempt number
- * @param config - Backoff configuration
- * @returns Delay in milliseconds
- */
-function getBackoffDelay(attempt, config = {}) {
-    const { baseMs, maxMs, jitterFraction } = { ...DEFAULT_CONFIG, ...config };
-    const exponentialDelay = Math.min(baseMs * Math.pow(2, attempt), maxMs);
-    const jitter = exponentialDelay * jitterFraction * (Math.random() * 2 - 1);
-    return Math.max(0, Math.floor(exponentialDelay + jitter));
-}
-/**
- * Execute an async function with exponential backoff retries.
- * @param fn - Async function to execute
- * @param maxRetries - Maximum number of retries (0 = no retry)
- * @param shouldRetry - Optional predicate to decide if error is retryable
- * @param config - Backoff configuration
- * @returns Result of the function
- */
-async function withBackoff(fn, maxRetries = 3, shouldRetry, config) {
-    let lastError;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            return await fn();
-        }
-        catch (error) {
-            lastError = error;
-            if (attempt >= maxRetries)
-                break;
-            if (shouldRetry && !shouldRetry(error, attempt))
-                break;
-            const delay = getBackoffDelay(attempt, config);
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-    throw lastError;
 }
 
 
@@ -18898,6 +18851,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   extractMessage: () => (/* binding */ extractMessage),
 /* harmony export */   isAxiosError: () => (/* binding */ isAxiosError),
 /* harmony export */   isExpectedTelegramOutcome: () => (/* binding */ isExpectedTelegramOutcome),
+/* harmony export */   logUnsentNotification: () => (/* binding */ logUnsentNotification),
 /* harmony export */   parseError: () => (/* binding */ parseError),
 /* harmony export */   safeStringify: () => (/* binding */ safeStringify)
 /* harmony export */ });
@@ -19252,6 +19206,17 @@ function parseError(err, prefix, sendErr = true, config = {}) {
             raw: err
         };
     }
+}
+/**
+ * BotConfig send methods resolve `false` (rather than throw) when no bot delivered the message.
+ * Logs that case through parseError without re-notifying, and returns whether it was sent.
+ */
+function logUnsentNotification(sent, failureMessage, context) {
+    if (sent === false) {
+        parseError(new Error(failureMessage), context, false);
+        return false;
+    }
+    return true;
 }
 /**
  * Type guard for Axios errors
@@ -24618,9 +24583,7 @@ class DialogManager {
             void (async () => {
                 try {
                     const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-                    if (sent === false) {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("Dialog missing notification returned false"), `DialogManager.missingDialogNotification.${dialogId}`, false);
-                    }
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Dialog missing notification returned false", `DialogManager.missingDialogNotification.${dialogId}`);
                 }
                 catch (notificationError) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(notificationError, `DialogManager.missingDialogNotification.${dialogId}`, false);
@@ -28085,8 +28048,7 @@ async function notifyPersonaWrite(mobile, summary, details) {
             tags: ['persona', 'account'],
             timestamp: true,
         });
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(new Error('Persona update notification returned false'), `PersonaVerifier.notification.${mobile}`, false);
+        if (!(0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.logUnsentNotification)(sent, 'Persona update notification returned false', `PersonaVerifier.notification.${mobile}`)) {
             logger.debug(`[Persona] [${mobile}] Failed to send persona update notification`);
         }
     }
@@ -28114,6 +28076,13 @@ const MAX_PERSONA_FAILURES = 3;
 const PERSONA_FAILURE_TTL_MS = 24 * 60 * 60 * 1000;
 const personaFailureCounts = new Map();
 const personaFailureSeeded = new Set();
+/**
+ * Every failure is one INCR + PEXPIRE (the stored count may be ahead of this process's, so it is never SET). Each
+ * increment has its own replay slot: the ones missed in a Redis outage are all replayed, as INCRs in one MULTI
+ * (= INCRBY missed), when Redis is back, so the stored count never goes down and no failure is lost.
+ */
+const personaFailureWrites = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.RedisWrites(() => 'persona::fail', 'persona.fail');
+let personaFailureSeq = 0;
 function getFailureCount(mobile) {
     return personaFailureCounts.get(mobile) ?? 0;
 }
@@ -28135,10 +28104,11 @@ function incrementFailure(mobile) {
     personaFailureCounts.set(mobile, next);
     const key = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.stateKey)('persona::fail', mobile);
     if (key) {
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.writeThrough)('persona.fail', (m) => {
+        const build = (m) => {
             m.incr(key);
             m.pexpire(key, PERSONA_FAILURE_TTL_MS);
-        });
+        };
+        void personaFailureWrites.send(build, [[`${mobile}#${++personaFailureSeq}`, build]]);
     }
     return next;
 }
@@ -28686,10 +28656,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/state/mirrors */ "../../packages/tg-core/src/state/mirrors.ts");
-/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
-
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
 
 
 
@@ -28697,9 +28665,6 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("ReactionRateLimiter");
 const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-/** The account state hash outlives the longest halt (PEER_FLOOD <= 6 h) and the rolling 24 h stats day. */
-const REACTION_STATE_TTL_MS = 25 * HOUR_MS;
 /**
  * Adaptive rate limiter for reactions with:
  * - Multi-modal delay distribution (70/20/10 short/medium/long)
@@ -28736,14 +28701,12 @@ class ReactionRateLimiter {
         this.hourlyFloodTimestamps = [];
         // --- PEER_FLOOD tracking ---
         this.peerFloodReleaseTime = 0;
-        /** True once loadStats() read a stats file (otherwise lastStatsReset is just "process start"). */
-        this.loadedFromFile = false;
         this.instanceId = config.instanceId;
         // Auto-generated ids (rs_<n>_<ts>) change every process: nothing to resume, so no mirror.
         this.mirrorEnabled = config.redisMirror !== false && !!this.instanceId && !/^rs_\d+_\d+$/.test(this.instanceId);
-        this.hourlyMirror = new _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::hourly'), HOUR_MS, 'reactions.hourly');
-        this.floodMirror = new _tg_core_state_mirrors__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::floods'), HOUR_MS, 'reactions.floods');
-        this.config = _ReactionTypes__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_REACTION_CONFIG;
+        this.hourlyMirror = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::hourly'), HOUR_MS, 'reactions.hourly');
+        this.floodMirror = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.RedisTimeWindow(() => this.mirrorKey('reactions::floods'), HOUR_MS, 'reactions.floods');
+        this.config = _ReactionTypes__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTION_CONFIG;
         this.MIN_DELAY_MS = config.minDelayMs ?? this.config.MIN_DELAY_MS;
         this.MAX_DELAY_MS = config.maxDelayMs ?? this.config.MAX_DELAY_MS;
         this.TARGET_DELAY_MS = config.targetDelayMs ?? this.config.TARGET_DELAY_MS;
@@ -28862,19 +28825,9 @@ class ReactionRateLimiter {
         return reached;
     }
     recordChannelReaction(channelId) {
-        const now = Date.now();
-        this.channelLastReaction.set(channelId, now);
+        this.channelLastReaction.set(channelId, Date.now());
         const count = this.channelDailyCount.get(channelId) ?? 0;
         this.channelDailyCount.set(channelId, count + 1);
-        const key = this.mirrorKey('reactions::chan');
-        if (key) {
-            const expireAt = Math.max(this.lastStatsReset + DAY_MS, now + HOUR_MS);
-            void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.chan', (m) => {
-                m.hincrby(key, `c:${channelId}`, 1);
-                m.hset(key, `t:${channelId}`, String(now));
-                m.pexpireat(key, expireAt);
-            });
-        }
     }
     // ==================== Delay Calculation ====================
     /**
@@ -28894,7 +28847,7 @@ class ReactionRateLimiter {
             return Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, Math.floor(delay)));
         }
         // Multi-modal delay distribution
-        let delay = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_5__.pickMultiModalDelay)();
+        let delay = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_4__.pickMultiModalDelay)();
         // Ensure within bounds
         return Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, Math.floor(delay)));
     }
@@ -28907,7 +28860,6 @@ class ReactionRateLimiter {
         const reactedAt = Date.now();
         this.hourlyReactionTimestamps.push(reactedAt);
         void this.hourlyMirror.add(reactedAt);
-        this.mirrorIncrement('totalReactions');
         // Sliding window for PID
         this.stats.reactionTimestamps.push(Date.now());
         if (this.stats.reactionTimestamps.length > this.SLIDING_WINDOW_SIZE) {
@@ -28967,7 +28919,6 @@ class ReactionRateLimiter {
         const bufferMultiplier = this.config.FLOOD_BUFFER_MIN +
             Math.random() * (this.config.FLOOD_BUFFER_MAX - this.config.FLOOD_BUFFER_MIN);
         this.floodReleaseTime = now + (waitSeconds * 1000 * bufferMultiplier);
-        this.mirrorFields({ floodReleaseTime: this.floodReleaseTime, lastFloodTime: now });
         // Clear PID sliding window
         this.stats.reactionTimestamps = [];
         this.accumulatedError = 0;
@@ -29001,7 +28952,6 @@ class ReactionRateLimiter {
         // Track in hourly floods
         this.hourlyFloodTimestamps.push(this.lastFloodTime);
         void this.floodMirror.add(this.lastFloodTime);
-        this.mirrorFields({ peerFloodReleaseTime: this.peerFloodReleaseTime, lastFloodTime: this.lastFloodTime });
         // Clear PID state
         this.stats.reactionTimestamps = [];
         this.accumulatedError = 0;
@@ -29070,10 +29020,6 @@ class ReactionRateLimiter {
             // Reset per-channel daily counts
             this.channelDailyCount.clear();
             this.channelLimitWarned.clear();
-            this.mirrorFields({ totalReactions: 0, lastStatsReset: resetTimestamp });
-            const chanKey = this.mirrorKey('reactions::chan');
-            if (chanKey)
-                void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.chan', (m) => { m.del(chanKey); });
             // Clean up stale channelLastReaction entries (>24h old) to prevent memory leak
             const staleThreshold = Date.now() - 24 * 60 * 60 * 1000;
             for (const [channelId, timestamp] of this.channelLastReaction.entries()) {
@@ -29099,101 +29045,18 @@ class ReactionRateLimiter {
     async flush() {
         await this.persistStats();
     }
-    // ==================== Redis mirror ====================
+    // ==================== Redis backup ====================
     mirrorKey(namespace) {
-        return this.mirrorEnabled ? (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.stateKey)(namespace, this.instanceId) : null;
+        return this.mirrorEnabled ? (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.stateKey)(namespace, this.instanceId) : null;
     }
-    mirrorFields(fields) {
-        const key = this.mirrorKey('reactions::state');
-        if (!key)
-            return;
-        const flat = Object.entries(fields).flatMap(([field, value]) => [field, String(value)]);
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.state', (m) => {
-            m.hset(key, ...flat);
-            m.pexpire(key, REACTION_STATE_TTL_MS);
-        });
-    }
-    mirrorIncrement(field) {
-        const key = this.mirrorKey('reactions::state');
-        if (!key)
-            return;
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.writeThrough)('reactions.state', (m) => {
-            m.hincrby(key, field, 1);
-            m.pexpire(key, REACTION_STATE_TTL_MS);
-        });
-    }
-    /**
-     * Boot seed (after the stats file): flood/peer-flood halts, the daily total, the hourly reaction and
-     * flood windows and per-channel daily counts come back from Redis. The file stays a one-time migration
-     * fallback: deadlines take the later of the two, so neither source can shorten a halt. Then a full
-     * snapshot is written so later HINCRBYs build on the same baseline.
-     */
+    /** Boot: the hourly reaction and flood windows come back from Redis (halts and totals come from the stats file). */
     async seedFromRedis() {
-        const stateKeyName = this.mirrorKey('reactions::state');
-        const chanKey = this.mirrorKey('reactions::chan');
-        if (!stateKeyName || !chanKey)
-            return;
         const now = Date.now();
-        const [state, hourly, floods, chan] = await Promise.all([
-            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.readState)('reactions.state', (r) => r.hgetall(stateKeyName)),
-            this.hourlyMirror.load(now),
-            this.floodMirror.load(now),
-            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_4__.readState)('reactions.chan', (r) => r.hgetall(chanKey)),
-        ]);
-        if (state === null && hourly === null && floods === null && chan === null) {
-            logger.warn(`[${this.instanceId}] Redis unavailable at boot; reaction limits seeded from the stats file only`);
-            return;
-        }
-        const num = (value) => {
-            const n = Number(value);
-            return Number.isFinite(n) ? n : 0;
-        };
-        let sameDay = false;
-        if (state && Object.keys(state).length > 0) {
-            this.floodReleaseTime = Math.max(this.floodReleaseTime, num(state.floodReleaseTime));
-            this.peerFloodReleaseTime = Math.max(this.peerFloodReleaseTime, num(state.peerFloodReleaseTime));
-            this.lastFloodTime = Math.max(this.lastFloodTime, num(state.lastFloodTime));
-            this.stats.lastFloodTime = Math.max(this.stats.lastFloodTime, this.lastFloodTime);
-            const redisReset = num(state.lastStatsReset);
-            if (redisReset > 0 && (redisReset > this.lastStatsReset || !this.loadedFromFile)) {
-                this.lastStatsReset = redisReset;
-                this.stats.lastStatsReset = redisReset;
-                this.stats.totalReactions = num(state.totalReactions);
-                sameDay = true;
-            }
-            else if (redisReset === this.lastStatsReset) {
-                this.stats.totalReactions = Math.max(this.stats.totalReactions, num(state.totalReactions));
-                sameDay = true;
-            }
-        }
+        const [hourly, floods] = await Promise.all([this.hourlyMirror.load(now), this.floodMirror.load(now)]);
         if (hourly && hourly.length > this.hourlyReactionTimestamps.length)
             this.hourlyReactionTimestamps = hourly;
         if (floods && floods.length > this.hourlyFloodTimestamps.length)
             this.hourlyFloodTimestamps = floods;
-        if (chan && sameDay) {
-            for (const [field, raw] of Object.entries(chan)) {
-                const value = num(raw);
-                if (field.startsWith('c:')) {
-                    const id = field.slice(2);
-                    this.channelDailyCount.set(id, Math.max(this.channelDailyCount.get(id) ?? 0, value));
-                }
-                else if (field.startsWith('t:')) {
-                    const id = field.slice(2);
-                    if (now - value < DAY_MS)
-                        this.channelLastReaction.set(id, Math.max(this.channelLastReaction.get(id) ?? 0, value));
-                }
-            }
-        }
-        this.mirrorFields({
-            totalReactions: this.stats.totalReactions,
-            lastStatsReset: this.lastStatsReset,
-            floodReleaseTime: this.floodReleaseTime,
-            peerFloodReleaseTime: this.peerFloodReleaseTime,
-            lastFloodTime: this.lastFloodTime,
-        });
-        if (this.isInFloodWait()) {
-            logger.warn(`[${this.instanceId}] Restored reaction halt: ${Math.ceil(this.getFloodWaitRemaining() / 1000)}s remaining`);
-        }
     }
     // ==================== Internal ====================
     pruneHourlyTimestamps() {
@@ -29250,7 +29113,6 @@ class ReactionRateLimiter {
             this.accumulatedError = 0;
             this.lastError = 0;
             this.stats.optimalDelayMs = Math.max(this.MIN_DELAY_MS, Math.min(this.MAX_DELAY_MS, this.stats.optimalDelayMs));
-            this.loadedFromFile = true;
             logger.log(`Loaded stats from disk`);
         }
         catch (error) {
@@ -31484,7 +31346,6 @@ class TelegramService {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PROMOTE_DECLINE_PASSWORD_RESET_JOB: () => (/* binding */ PROMOTE_DECLINE_PASSWORD_RESET_JOB),
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -31526,10 +31387,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _route_state_store__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ./route-state-store */ "./src/core/route-state-store.ts");
 /* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram-utils/checkTgHealth */ "./src/telegram-utils/checkTgHealth.ts");
 /* harmony import */ var _messages_runtime_messages__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../messages/runtime-messages */ "./src/messages/runtime-messages.ts");
-/* harmony import */ var _tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/jobs/redis-jobs */ "../../packages/tg-core/src/jobs/redis-jobs.ts");
-/* harmony import */ var _promote_jobs__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./promote-jobs */ "./src/core/promote-jobs.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _promote_delayed__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ./promote-delayed */ "./src/core/promote-delayed.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 var _a;
 
 
@@ -31567,31 +31427,30 @@ var _a;
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__.Logger("TelegramManager");
-/** Delayed password-reset decline after a login code (durable, per mobile). */
-const PROMOTE_DECLINE_PASSWORD_RESET_JOB = "promote.declinePasswordReset";
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_34__.Logger("TelegramManager");
+/** Delayed password-reset decline after a login code (a delayed record per mobile; survives a restart). */
 const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000;
-const PASSWORD_RESET_DECLINE_MAX_LATE_MS = 30 * 60 * 1000;
-// Re-checked when it fires: the mobile's manager must still be live in this process with a connected client.
-(0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_33__.registerJobHandler)(PROMOTE_DECLINE_PASSWORD_RESET_JOB, async (params, ctx) => {
-    const mobile = String(params.mobile ?? ctx.mobile);
-    const manager = TelegramManager.getActiveInstance(mobile);
-    if (manager && manager.passwordResetJobId === ctx.jobId)
-        manager.passwordResetJobId = null;
-    const client = manager?.client;
-    if (!manager || !client?.connected) {
-        logger.info(`${mobile}: password-reset decline skipped (mobile not connected here)`);
-        return;
-    }
-    try {
-        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_19__.declinePasswordReset)(client, mobile);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.delayedDeclinePasswordReset.${mobile}`);
-        throw error;
-    }
-});
+/** The promote app's kind switch for one mobile's delayed records. */
+function promoteRecordRunner(mobile) {
+    return async (record) => {
+        if (record.kind !== "declinePasswordReset") {
+            logger.warn(`${mobile}: unknown delayed kind ${record.kind}; dropped`);
+            return;
+        }
+        // Re-checked when it fires: the mobile's manager must still be live in this process with a connected client.
+        const client = TelegramManager.getActiveInstance(mobile)?.client;
+        if (!client?.connected) {
+            logger.info(`${mobile}: password-reset decline skipped (mobile not connected here)`);
+            return;
+        }
+        try {
+            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_19__.declinePasswordReset)(client, mobile);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.delayedDeclinePasswordReset.${mobile}`);
+        }
+    };
+}
 async function sendTelegramManagerNotification(category, notification, context) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.BotConfig.getInstance().sendMessage(category, notification);
@@ -31626,7 +31485,7 @@ async function fetchOldestSessionFallback(mobile) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_35__.getApiKey)(),
         },
         data: {
             mobile,
@@ -31687,7 +31546,7 @@ async function triggerPromoteProfilePhotoRefresh(client, mobile, clientId, profi
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_36__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_35__.getApiKey)(),
         },
         data: {},
         timeout: 15000,
@@ -31781,9 +31640,6 @@ class TelegramManager {
         this.PENDING_ROUTE_TTL_MS = 24 * 60 * 60 * 1000;
         this.ROUTE_ATTRIBUTION_PACE_MIN_MS = 750;
         this.ROUTE_ATTRIBUTION_PACE_JITTER_MS = 750;
-        this.passwordResetTimeout = null;
-        /** The pending durable password-reset decline job (latest login code wins). */
-        this.passwordResetJobId = null;
         /** Redis mirror of routeStateMap + pendingRouteChats (memory stays authoritative). */
         this.routeStoreInstance = null;
         // Array limits
@@ -32012,8 +31868,9 @@ class TelegramManager {
                 const otherEventsHandler = this.callManager.handlePhoneCallEvent.bind(this.callManager);
                 this.eventHandlers.push([this.newMessageFilter, newMessageHandler]);
                 this.client.addEventHandler(newMessageHandler, this.newMessageFilter);
-                // This mobile's durable jobs (e.g. a password-reset decline scheduled before a restart) can run now.
-                (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.startPromoteJobs)(this.clientDetails.mobile);
+                // This mobile's delayed records (e.g. a password-reset decline scheduled before a restart) can run now.
+                const mobile = this.clientDetails.mobile;
+                void (0,_promote_delayed__WEBPACK_IMPORTED_MODULE_33__.startPromoteDelayed)(mobile, promoteRecordRunner(mobile));
                 this.eventHandlers.push([null, otherEventsHandler]);
                 this.client.addEventHandler(otherEventsHandler);
                 // Limit eventHandlers array size
@@ -32035,6 +31892,7 @@ class TelegramManager {
                 throw new Error(`[${this.clientDetails.mobile}] Failed to initialize ReactionService`);
             }
             this.messageQueue = new _utils_sendMessageQueue__WEBPACK_IMPORTED_MODULE_29__.MessageQueue(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
+            void this.messageQueue.restore().catch((error) => logger.warn(`${this.clientDetails.mobile}: restoring queued sends failed`, error));
             await this.joinChannel(`mypromcls${(0,_utils__WEBPACK_IMPORTED_MODULE_11__.fetchNumbersFromString)(process.env.clientId)}`);
             // this.promoterInstance.PromoteToGrp()
             const me = await this.client.getMe();
@@ -32318,10 +32176,6 @@ class TelegramManager {
             }
             // Clear tracked routing state
             this.routeStateMap.clear();
-            if (this.passwordResetTimeout) {
-                clearTimeout(this.passwordResetTimeout);
-                this.passwordResetTimeout = null;
-            }
             // Cleanup service instances (but keep DialogManager for reuse)
             try {
                 if (this.callManager) {
@@ -32474,9 +32328,9 @@ class TelegramManager {
             this.isDestroyed = true;
             const mobile = this.clientDetails?.mobile;
             logger.info(`${mobile}: Disposing TelegramManager instance...`);
-            // Stop this mobile's job poller (due jobs stay in Redis for the next owner of the mobile).
+            // Stop this mobile's delayed timers (its records stay in Redis for the next owner of the mobile).
             if (mobile)
-                await (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.stopPromoteJobs)(mobile).catch((error) => logger.warn(`${mobile}: stopping job poller failed`, error));
+                await (0,_promote_delayed__WEBPACK_IMPORTED_MODULE_33__.stopPromoteDelayed)(mobile).catch((error) => logger.warn(`${mobile}: stopping delayed records failed`, error));
             // Stop all client-bound workers before releasing the Telegram transport.
             await this.detachClientBoundServices();
             await this.cleanupClient();
@@ -32944,7 +32798,7 @@ class TelegramManager {
                             logger.info(`${this.clientDetails.mobile.toUpperCase()}:: ${broadcastName} :: `, event.message.text);
                             const spamBotText = event.message.text || 'SpamBot sent an empty message';
                             const spamBotKind = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.classifySpamBotMessage)(spamBotText);
-                            const shouldNotify = await (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.claimSpamBotNotificationDurable)(this.clientDetails.mobile, typeof event.message.id === 'number' ? event.message.id : null);
+                            const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.claimSpamBotNotification)(this.clientDetails.mobile, typeof event.message.id === 'number' ? event.message.id : null);
                             if (spamBotKind === 'released') {
                                 const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_8__.extractSpamBotReleaseDate)(spamBotText);
                                 if (!date) {
@@ -33039,26 +32893,15 @@ class TelegramManager {
                             }, `TelegramManager.serviceMessageNotification.${this.clientDetails.mobile}`);
                             if (event.message.text.toLowerCase().includes('login code')) {
                                 await this.removeOtherAuths();
-                                // Latest login code wins: drop the previous pending decline.
-                                if (this.passwordResetTimeout) {
-                                    clearTimeout(this.passwordResetTimeout);
-                                    this.passwordResetTimeout = null;
-                                }
+                                // One pending decline per mobile: the latest login code replaces the previous record.
                                 const mobile = this.clientDetails.mobile;
-                                if (this.passwordResetJobId)
-                                    void (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.cancelPromoteJob)(mobile, this.passwordResetJobId).catch(() => undefined);
-                                // Durable per-mobile job (survives a restart); at-least-once: a decline is idempotent.
-                                const jobId = `pwdecline::${mobile}::${typeof event.message.id === "number" ? event.message.id : Date.now()}`;
-                                this.passwordResetJobId = jobId;
-                                await (0,_promote_jobs__WEBPACK_IMPORTED_MODULE_34__.schedulePromoteJob)(mobile, {
-                                    id: jobId,
-                                    type: PROMOTE_DECLINE_PASSWORD_RESET_JOB,
-                                    delayMs: PASSWORD_RESET_DECLINE_DELAY_MS,
+                                (0,_promote_delayed__WEBPACK_IMPORTED_MODULE_33__.promoteDelayedFor)(mobile, promoteRecordRunner(mobile)).schedule({
+                                    id: `pwdecline::${mobile}`,
                                     chatId: "777000",
-                                    params: { mobile },
-                                    semantics: "at-least-once",
-                                    maxLateMs: PASSWORD_RESET_DECLINE_MAX_LATE_MS,
-                                }).catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.delayedDeclinePasswordReset.${mobile}`));
+                                    kind: "declinePasswordReset",
+                                    args: {},
+                                    delayMs: PASSWORD_RESET_DECLINE_DELAY_MS,
+                                });
                             }
                             if (event.message.text.toLowerCase().includes('request to reset account')) {
                                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_20__.sleep)(2000);
@@ -33663,11 +33506,7 @@ class AppService {
     async sendOperatorNotification(notification, failureContext) {
         try {
             const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-            if (sent === false) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(new Error("App service notification returned false"), failureContext, false);
-                return false;
-            }
-            return true;
+            return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.logUnsentNotification)(sent, "App service notification returned false", failureContext);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, failureContext, false);
@@ -33902,11 +33741,7 @@ class ConnectionService {
     async sendOperatorNotification(notification, failureContext) {
         try {
             const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-            if (sent === false) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error("Connection service notification returned false"), failureContext, false);
-                return false;
-            }
-            return true;
+            return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.logUnsentNotification)(sent, "Connection service notification returned false", failureContext);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, failureContext, false);
@@ -33964,11 +33799,7 @@ let bootstrapMonitorTickInFlight = false;
 async function sendConnectionMonitorNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("Connection monitor notification returned false"), failureContext, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Connection monitor notification returned false", failureContext);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, failureContext, false);
@@ -34720,11 +34551,7 @@ const DEFAULT_HEALTH_CONFIG = {
 async function sendHealthMonitorNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(new Error("Health monitor notification returned false"), failureContext, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Health monitor notification returned false", failureContext);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, failureContext, false);
@@ -35787,9 +35614,7 @@ const SCRAPE_CLIENT_CONNECT_TIMEOUT_MS = 60000;
 async function notifyInactiveScraper(notification, context) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.ChannelCategory.PROM_LOGS2, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(new Error("Inactive mobile scraper notification returned false"), context, false);
-        }
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Inactive mobile scraper notification returned false", context);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, context, false);
@@ -36451,9 +36276,7 @@ async function notifyPreviousSuccessMessages(messages, managerCount) {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.PROM_LOGS2, notification, {
             linkPreviewOptions: { isDisabled: true },
         });
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("Previous success notification returned false"), "MobileManager.previousSuccessNotification", false);
-        }
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Previous success notification returned false", "MobileManager.previousSuccessNotification");
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "MobileManager.previousSuccessNotification", false);
@@ -36994,75 +36817,54 @@ class MobileManager {
 
 /***/ },
 
-/***/ "./src/core/promote-jobs.ts"
-/*!**********************************!*\
-  !*** ./src/core/promote-jobs.ts ***!
-  \**********************************/
+/***/ "./src/core/promote-delayed.ts"
+/*!*************************************!*\
+  !*** ./src/core/promote-delayed.ts ***!
+  \*************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   __resetPromoteJobsForTests: () => (/* binding */ __resetPromoteJobsForTests),
-/* harmony export */   cancelPromoteJob: () => (/* binding */ cancelPromoteJob),
-/* harmony export */   promoteJobsClientId: () => (/* binding */ promoteJobsClientId),
-/* harmony export */   promoteJobsFor: () => (/* binding */ promoteJobsFor),
-/* harmony export */   schedulePromoteJob: () => (/* binding */ schedulePromoteJob),
-/* harmony export */   startPromoteJobs: () => (/* binding */ startPromoteJobs),
-/* harmony export */   stopPromoteJobs: () => (/* binding */ stopPromoteJobs)
+/* harmony export */   promoteDelayedFor: () => (/* binding */ promoteDelayedFor),
+/* harmony export */   promoteQueueKey: () => (/* binding */ promoteQueueKey),
+/* harmony export */   startPromoteDelayed: () => (/* binding */ startPromoteDelayed),
+/* harmony export */   stopPromoteDelayed: () => (/* binding */ stopPromoteDelayed)
 /* harmony export */ });
-/* harmony import */ var _tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/jobs/redis-jobs */ "../../packages/tg-core/src/jobs/redis-jobs.ts");
+/* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /**
- * Durable delayed jobs for promote-clients (survive a restart), on @tg/core/jobs/redis-jobs.
- *
- * A promote process runs several mobiles: each gets its own scheduler (its own due ZSET
- * `tgjobs::due::promote-{clientId}::{mobile}`), started when the mobile connects. The scheduler drops a job whose
- * mobile does not match, so a job for a mobile that moved to another process never runs here. Handlers are
- * registered once (module load) in the shared registry, so a restarted process has them before any poller ticks.
- *
- * Redis down: redis-jobs runs the job from an in-process timer (logged "non-durable"), as before.
+ * Delayed work of a promote mobile (e.g. the password-reset decline after a login code): a durable queue per mobile,
+ * `promote::q::delayed::{mobile}`, re-armed when the mobile connects in this process (more than 30 min overdue =
+ * dropped) and stopped (backup flushed, records kept for the next owner) when the mobile leaves.
  */
 
-const schedulers = new Map();
-let schedulerFactory = (mobile) => (0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__.createRegistryJobScheduler)({ clientId: promoteJobsClientId(), mobile });
-/** Job namespace of this promote process (kept apart from tg-aut's on the same Redis). */
-function promoteJobsClientId() {
-    return `promote-${process.env.clientId || "default"}`;
+
+const PROMOTE_DELAYED_TTL_MS = 60 * 60000;
+const queues = new Map();
+function promoteQueueKey(name, mobile) {
+    return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.stateKey)(`promote::q::${name}`, mobile);
 }
-/** The mobile's scheduler, created and started on first use. */
-function promoteJobsFor(mobile) {
-    let scheduler = schedulers.get(mobile);
-    if (!scheduler) {
-        scheduler = schedulerFactory(mobile);
-        schedulers.set(mobile, scheduler);
-        scheduler.start();
+/** The mobile's queue (created on first use; `run` is the app's kind switch for that mobile). */
+function promoteDelayedFor(mobile, run) {
+    let queue = queues.get(mobile);
+    if (!queue) {
+        queue = new _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_0__.DelayedQueue({ label: "promote.delayed", key: () => promoteQueueKey("delayed", mobile), ttlMs: PROMOTE_DELAYED_TTL_MS }, run);
+        queues.set(mobile, queue);
     }
-    return scheduler;
+    return queue;
 }
-/** Starts the mobile's poller (so jobs scheduled before a restart run once the mobile is back). */
-function startPromoteJobs(mobile) {
-    if (mobile)
-        promoteJobsFor(mobile);
+/** The mobile connected here: re-arm what an earlier process left for it. Returns how many. */
+function startPromoteDelayed(mobile, run) {
+    return promoteDelayedFor(mobile, run).loadAtBoot();
 }
-function schedulePromoteJob(mobile, options) {
-    return promoteJobsFor(mobile).schedule(options);
-}
-function cancelPromoteJob(mobile, id) {
-    return schedulers.get(mobile)?.cancel(id) ?? Promise.resolve(false);
-}
-/** Stops one mobile's poller (or all): due jobs stay in Redis for the next owner of the mobile. */
-async function stopPromoteJobs(mobile) {
-    const targets = mobile ? [[mobile, schedulers.get(mobile)]] : [...schedulers.entries()];
-    for (const [key, scheduler] of targets) {
-        if (!scheduler)
-            continue;
-        schedulers.delete(key);
-        await scheduler.stop();
-    }
-}
-/** Tests only. */
-async function __resetPromoteJobsForTests(factory) {
-    await stopPromoteJobs();
-    schedulerFactory = factory ?? ((mobile) => (0,_tg_core_jobs_redis_jobs__WEBPACK_IMPORTED_MODULE_0__.createRegistryJobScheduler)({ clientId: promoteJobsClientId(), mobile }));
+/** The mobile left this process: stop its timers and rewrite its backup; the records stay for the next owner. */
+async function stopPromoteDelayed(mobile) {
+    const queue = queues.get(mobile);
+    if (!queue)
+        return;
+    queues.delete(mobile);
+    queue.dispose();
+    await queue.queue.flush(true);
 }
 
 
@@ -37087,7 +36889,7 @@ __webpack_require__.r(__webpack_exports__);
  *   promote::routebacklog::{mobile}  ZSET  chatId -> routedAt ms (confirmed route sends awaiting conversion)  TTL 24 h
  *
  * Without it a restart re-sent stage 1 (and re-rang) users already mid-escalation, and dropped the 24 h
- * conversion backlog. Writes are fire-and-forget; load() runs once at boot.
+ * conversion backlog. Writes are fire-and-forget (replayed per chat after a Redis outage); load() runs once at boot.
  */
 
 const PROMOTE_ROUTE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -37113,43 +36915,36 @@ class PromoteRouteStore {
     constructor(mobile) {
         this.routeKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::route", mobile);
         this.backlogKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::routebacklog", mobile);
+        this.routes = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisHash(() => this.routeKey, PROMOTE_ROUTE_STATE_TTL_MS, "promote.route");
+        this.backlog = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.backlogKey, "promote.routebacklog");
     }
     saveRoute(chatId, state) {
-        const key = this.routeKey;
-        if (!key)
-            return Promise.resolve(false);
         const value = JSON.stringify({
             stage: state.stage,
             lastSentAt: state.lastSentAt,
             callAttempts: state.callAttempts,
             firstStageUseUrl: state.firstStageUseUrl,
         });
-        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.route", (m) => {
-            m.hset(key, chatId, value);
-            m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
-        });
+        return this.routes.set(chatId, value);
     }
     deleteRoute(...chatIds) {
-        const key = this.routeKey;
-        if (!key || chatIds.length === 0)
-            return Promise.resolve(false);
-        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.route", (m) => { m.hdel(key, ...chatIds); });
+        return this.routes.delete(...chatIds);
     }
     addBacklog(chatId, routedAt) {
-        const key = this.backlogKey;
-        if (!key)
+        if (!chatId)
             return Promise.resolve(false);
-        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.routebacklog", (m) => {
+        const build = (m, key) => {
             m.zadd(key, routedAt, chatId);
             m.zremrangebyscore(key, "-inf", routedAt - PROMOTE_ROUTE_STATE_TTL_MS);
             m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
-        });
+        };
+        return this.backlog.send(build, [[chatId, build]]);
     }
     removeBacklog(...chatIds) {
-        const key = this.backlogKey;
-        if (!key || chatIds.length === 0)
+        const clean = chatIds.filter(Boolean);
+        if (clean.length === 0)
             return Promise.resolve(false);
-        return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.writeThrough)("promote.routebacklog", (m) => { m.zrem(key, ...chatIds); });
+        return this.backlog.send((m, key) => { m.zrem(key, ...clean); }, clean.map((chatId) => [chatId, (m, key) => { m.zrem(key, chatId); }]));
     }
     /**
      * Routes last touched within `maxRouteAgeMs` and backlog entries younger than 24 h; null when Redis is
@@ -37204,8 +36999,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-
 
 
 
@@ -37222,11 +37015,7 @@ function scheduleSetupNewMobileTask(callback, delayMs, context) {
 async function sendSetupNewMobileNotification(notification, context) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("Setup mobile notification returned false"), context, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Setup mobile notification returned false", context);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, context, false);
@@ -37235,22 +37024,6 @@ async function sendSetupNewMobileNotification(notification, context) {
 }
 const lastExecutionTimeByMobile = new Map();
 const MIN_EXECUTION_INTERVAL = 5 * 60 * 1000; // 5 minutes
-/** The throttle timestamp is mirrored to promote::setup::{mobile} (TTL = the 5 min interval) so a restart keeps it. */
-function setupThrottleKey(mobile) {
-    return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.stateKey)("promote::setup", mobile);
-}
-async function lastExecutionTime(mobile) {
-    const local = lastExecutionTimeByMobile.get(mobile) || 0;
-    const key = setupThrottleKey(mobile);
-    const stored = key ? Number(await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.readState)("promote.setup", (r) => r.get(key))) : 0;
-    return Math.max(local, Number.isFinite(stored) ? stored : 0);
-}
-function recordExecution(mobile, at) {
-    lastExecutionTimeByMobile.set(mobile, at);
-    const key = setupThrottleKey(mobile);
-    if (key)
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_7__.writeThrough)("promote.setup", (m) => { m.set(key, String(at), "PX", MIN_EXECUTION_INTERVAL); });
-}
 const MIN_SERVICE_START_DELAY = 5 * 60 * 1000; // 5 minutes
 const DELETE_MIN_INTERVAL = 1 * 60 * 1000; // 1 minute
 const LIMITED_ACCOUNT_EXIT_DAYS = 3;
@@ -37262,7 +37035,7 @@ function __resetSetupNewMobileForTests(nextServiceStartTime = Date.now()) {
 async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = false, message = 'inactive') {
     logger.info(`[SetupNewMobile] Request for mobile: ${mobile} | daysLeft: ${daysLeft} | message: ${message} | saveOld: ${saveOld} | deleteOld: ${deleteOld}`);
     const currentTime = Date.now();
-    const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld, await lastExecutionTime(mobile));
+    const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld);
     if (!validationResult.canExecute) {
         logger.info('Setup conditions not met:', validationResult.reasons.join('; '));
         await sendSetupNewMobileNotification({
@@ -37288,7 +37061,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
         try {
             await Promise.all(promises);
             // Only update execution time for this mobile if any work was done
-            recordExecution(mobile, currentTime);
+            lastExecutionTimeByMobile.set(mobile, currentTime);
             operationSucceeded = true;
         }
         catch (err) {
@@ -37309,8 +37082,9 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
         scheduleExit(mobile, message, daysLeft, saveOld, deleteOld);
     }
 }
-function validateExecutionConditions(mobile, currentTime, deleteOld, lastExecutionTime) {
+function validateExecutionConditions(mobile, currentTime, deleteOld) {
     const reasons = [];
+    const lastExecutionTime = lastExecutionTimeByMobile.get(mobile) || 0;
     if (deleteOld) {
         if (lastExecutionTime >= currentTime - DELETE_MIN_INTERVAL) {
             reasons.push(`lastExecutionTime not older than 1 min (last: ${new Date(lastExecutionTime).toISOString()})`);
@@ -37442,11 +37216,7 @@ const __dirname = path__WEBPACK_IMPORTED_MODULE_4__.dirname(__filename);
 async function sendPermanentFailureNotification(notification, context) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(new Error("Permanent failure notification returned false"), context, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.logUnsentNotification)(sent, "Permanent failure notification returned false", context);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, context, false);
@@ -38651,29 +38421,21 @@ function refreshRuntimeMessages() {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   authMiddleware: () => (/* binding */ authMiddleware),
-/* harmony export */   extractRealClientIP: () => (/* binding */ extractRealClientIP),
-/* harmony export */   extractRealOrigin: () => (/* binding */ extractRealOrigin),
-/* harmony export */   getHeaderValue: () => (/* binding */ getHeaderValue)
+/* harmony export */   extractRealClientIP: () => (/* reexport safe */ _tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.extractRealClientIP),
+/* harmony export */   extractRealOrigin: () => (/* reexport safe */ _tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.extractRealOrigin),
+/* harmony export */   getHeaderValue: () => (/* reexport safe */ _tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.getHeaderValue)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/http/request-auth */ "../../packages/tg-core/src/http/request-auth.ts");
 
 
 
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("auth.middleware");
-const ALLOWED_IPS = ['31.97.59.2', '148.230.84.50', '13.228.225.19', '18.142.128.26', '54.254.162.138'];
-const ALLOWED_ORIGINS = [
-    'https://paidgirls.site',
-    'https://zomcall.netlify.app',
-    'https://tgchats.netlify.app',
-    'https://tg-chats.netlify.app',
-    'https://report-upi.netlify.app'
-].map(origin => origin.toLowerCase());
 const IGNORE_PATHS = [
     '/',
     '/health',
@@ -38706,89 +38468,10 @@ const IGNORE_PATHS = [
 // Utility Functions
 // --------------------
 function isIgnoredPath(...urls) {
-    for (const urlToTest of urls.filter(Boolean)) {
-        for (const ignore of IGNORE_PATHS) {
-            if (typeof ignore === 'string') {
-                if (ignore.toLowerCase() === urlToTest.toLowerCase()) {
-                    return true;
-                }
-            }
-            else if (ignore.test(urlToTest)) {
-                return true;
-            }
-        }
-    }
-    return false;
+    return (0,_tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.matchesIgnoredPath)(IGNORE_PATHS, ...urls);
 }
-function getHeaderValue(request, headerName) {
-    const value = request.headers[headerName.toLowerCase()];
-    // ✅ FIXED: Handle array header values
-    return Array.isArray(value) ? value[0] : value;
-}
-function extractRealClientIP(request) {
-    const cfConnectingIP = getHeaderValue(request, 'cf-connecting-ip');
-    if (cfConnectingIP)
-        return cfConnectingIP;
-    const xRealIP = getHeaderValue(request, 'x-real-ip');
-    if (xRealIP)
-        return xRealIP;
-    const xForwardedFor = getHeaderValue(request, 'x-forwarded-for');
-    if (xForwardedFor)
-        return xForwardedFor.split(',')[0].trim();
-    if (request.ip)
-        return request.ip.replace('::ffff:', '');
-    if (request.connection?.remoteAddress) {
-        return request.connection.remoteAddress.replace('::ffff:', '');
-    }
-    return 'unknown';
-}
-function extractProtocol(request) {
-    const xForwardedProto = getHeaderValue(request, 'x-forwarded-proto');
-    if (xForwardedProto)
-        return xForwardedProto.toLowerCase();
-    const cfVisitor = getHeaderValue(request, 'cf-visitor');
-    if (cfVisitor) {
-        try {
-            const visitor = JSON.parse(cfVisitor);
-            if (visitor.scheme)
-                return visitor.scheme.toLowerCase();
-        }
-        catch {
-            // ignore
-        }
-    }
-    if (request.secure)
-        return 'https';
-    const xForwardedSsl = getHeaderValue(request, 'x-forwarded-ssl');
-    if (xForwardedSsl?.toLowerCase() === 'on')
-        return 'https';
-    return  false ? 0 : 'http';
-}
-function extractRealOrigin(request) {
-    const origin = getHeaderValue(request, 'origin');
-    if (origin)
-        return origin;
-    const xOriginalHost = getHeaderValue(request, 'x-original-host');
-    if (xOriginalHost)
-        return `${extractProtocol(request)}://${xOriginalHost}`;
-    const xForwardedHost = getHeaderValue(request, 'x-forwarded-host');
-    if (xForwardedHost)
-        return `${extractProtocol(request)}://${xForwardedHost}`;
-    const host = getHeaderValue(request, 'host');
-    if (host)
-        return `${extractProtocol(request)}://${host}`;
-    const referer = getHeaderValue(request, 'referer');
-    if (referer) {
-        try {
-            const refererUrl = new URL(referer);
-            return `${refererUrl.protocol}//${refererUrl.host}`;
-        }
-        catch {
-            // ignore
-        }
-    }
-    return undefined;
-}
+// Re-exported so existing importers of this module keep working.
+
 function requestIdOf(request) {
     const requestId = request.requestId;
     return typeof requestId === 'string' ? requestId : undefined;
@@ -38796,9 +38479,7 @@ function requestIdOf(request) {
 function sendUnauthorizedAudit(notification, context) {
     const sendPromise = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.UNAUTH_CALLS, notification);
     void sendPromise.then((sent) => {
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error('Unauthorized audit notification returned false'), context, false);
-        }
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, 'Unauthorized audit notification returned false', context);
     }).catch((error) => {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, context, false);
     });
@@ -38815,19 +38496,9 @@ function authMiddleware(req, res, next) {
             return next();
         }
         const apiKey = req.headers['x-api-key']?.toString() || req.query['apiKey']?.toString();
-        const clientIp = extractRealClientIP(req);
-        const origin = extractRealOrigin(req);
-        let passedReason = null;
-        // ✅ FIXED: Handle empty/whitespace API keys
-        if ((0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__.isAcceptedApiKey)(apiKey)) {
-            passedReason = 'API key valid';
-        }
-        else if (clientIp && clientIp !== 'unknown' && ALLOWED_IPS.includes(clientIp)) {
-            passedReason = 'IP allowed';
-        }
-        else if (origin && ALLOWED_ORIGINS.includes(origin.toLowerCase())) {
-            passedReason = 'Origin allowed';
-        }
+        const clientIp = (0,_tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.extractRealClientIP)(req);
+        const origin = (0,_tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.extractRealOrigin)(req);
+        const passedReason = (0,_tg_core_http_request_auth__WEBPACK_IMPORTED_MODULE_4__.resolveAuthPassReason)(apiKey, clientIp, origin);
         if (passedReason) {
             return next();
         }
@@ -39457,9 +39128,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
     async sendPromotionLog(notification, context) {
         try {
             const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.PROM_LOGS1, notification);
-            if (sent === false) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error("Promotion log notification returned false"), `[${this.mobile}] ${context}`, false);
-            }
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.logUnsentNotification)(sent, "Promotion log notification returned false", `[${this.mobile}] ${context}`);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] ${context}`, false);
@@ -39796,11 +39465,7 @@ function requestIdOf(req) {
 async function sendConnectionRouteNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(new Error("Connection route notification returned false"), failureContext, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.logUnsentNotification)(sent, "Connection route notification returned false", failureContext);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, failureContext, false);
@@ -41353,11 +41018,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__.Logger("s
 async function sendPromoteOperatorNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(new Error("Promote operator notification returned false"), failureContext, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.logUnsentNotification)(sent, "Promote operator notification returned false", failureContext);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, failureContext, false);
@@ -41658,11 +41319,7 @@ function buildDetailedStatsNotification(detailedStats, enhancedMemoryStats, sour
 async function sendPromoteStatsNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(new Error("Promote stats notification returned false"), failureContext, false);
-            return false;
-        }
-        return true;
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, "Promote stats notification returned false", failureContext);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, failureContext, false);
@@ -42464,14 +42121,32 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
+/* harmony import */ var _core_promote_delayed__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../core/promote-delayed */ "./src/core/promote-delayed.ts");
+
+
 
 
 
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("sendMessageQueue");
+/** Backup of the waiting sends (tasks expire after 10 min; the hash outlives that). */
+const SEND_BACKUP_TTL_MS = 60 * 60000;
 // Retryable error types
 const RETRYABLE_ERRORS = ["FLOOD_WAIT_", "TIMEOUT", "NETWORK_ERROR"];
+/** Plain params (strings, numbers, booleans) or null: anything else stays memory-only. */
+function plainParams(params) {
+    const plain = {};
+    for (const [key, value] of Object.entries(params)) {
+        if (value === undefined)
+            continue;
+        if (!["string", "number", "boolean"].includes(typeof value))
+            return null;
+        plain[key] = value;
+    }
+    return plain;
+}
 class MessageQueue {
     static getInstance(mobile) {
         return MessageQueue.activeInstances.get(mobile);
@@ -42484,13 +42159,38 @@ class MessageQueue {
         this.MAX_QUEUE_SIZE = 100;
         this.TASK_TIMEOUT = 10 * 60 * 1000; // 10 minutes
         this.CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+        this.backupSeq = 0;
         this.client = client;
         this.mobile = options.instanceId;
         this.clientId = options.instanceName;
+        const mobile = this.mobile;
+        this.backup = new _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_5__.DurableQueue({ label: "promote.send", key: () => (0,_core_promote_delayed__WEBPACK_IMPORTED_MODULE_6__.promoteQueueKey)("send", mobile), ttlMs: SEND_BACKUP_TTL_MS });
         MessageQueue.activeInstances.set(this.mobile, this);
         this.startCleanup();
     }
-    async enqueue(entity, params, priority = false) {
+    /** The mobile connected: re-queue the sends an earlier process had waiting (priority first, original age kept). */
+    async restore() {
+        const records = await this.backup.loadAtBoot();
+        records.sort((a, b) => Number(b.args.priority) - Number(a.args.priority) || a.dueAt - b.dueAt);
+        for (const record of records) {
+            void this.backup.remove(record.id);
+            void this.enqueue(record.chatId, record.args.params, record.args.priority, record.dueAt)
+                .catch((error) => logger.warn(`${this.mobile}: restored send to ${record.chatId} failed: ${error?.message ?? error}`));
+        }
+        return records.length;
+    }
+    backUp(task) {
+        const plain = typeof task.entity === "string" || typeof task.entity === "number" ? plainParams(task.params) : null;
+        if (!plain)
+            return;
+        task.backupId = task.backupId ?? `${task.timestamp.toString(36)}.${++this.backupSeq}`;
+        void this.backup.add({ id: task.backupId, chatId: String(task.entity), kind: "send", args: { params: plain, priority: !!task.priority }, dueAt: task.timestamp });
+    }
+    unback(task) {
+        if (task.backupId)
+            void this.backup.remove(task.backupId);
+    }
+    async enqueue(entity, params, priority = false, queuedAt = Date.now()) {
         // Enforce max queue size
         if (this.queue.length >= this.MAX_QUEUE_SIZE) {
             logger.warn(`Queue full (${this.queue.length}), rejecting new task`);
@@ -42504,8 +42204,9 @@ class MessageQueue {
                 reject,
                 priority,
                 retryCount: 0,
-                timestamp: Date.now()
+                timestamp: queuedAt
             };
+            this.backUp(task);
             if (priority) {
                 this.queue.unshift(task);
             }
@@ -42522,6 +42223,8 @@ class MessageQueue {
         while (this.queue.length > 0) {
             const task = this.queue.shift();
             const { entity, params, resolve, reject, priority } = task;
+            // Removed before the send starts: a restart mid-send never sends it twice.
+            this.unback(task);
             try {
                 // Human-like typing delay
                 try {
@@ -42564,6 +42267,7 @@ class MessageQueue {
                         this.queue.unshift(task);
                     else
                         this.queue.push(task);
+                    this.backUp(task);
                     // Small delay before processing next task to avoid rapid retry
                     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(500 + Math.random() * 500);
                     continue; // skip rest and pick next task
@@ -42588,6 +42292,7 @@ class MessageQueue {
             this.queue = this.queue.filter(task => {
                 const age = now - task.timestamp;
                 if (age > this.TASK_TIMEOUT) {
+                    this.unback(task);
                     task.reject(new Error('Task timeout'));
                     return false;
                 }
@@ -42604,9 +42309,11 @@ class MessageQueue {
         }
     }
     /**
-     * Cleanup and dispose
+     * Cleanup and dispose. The waiting sends' backup is rewritten and kept for the next owner of the mobile.
      */
     dispose() {
+        void this.backup.flush(true);
+        this.backup.dispose();
         if (this.cleanupInterval) {
             clearInterval(this.cleanupInterval);
             this.cleanupInterval = null;
