@@ -39248,7 +39248,9 @@ class RuntimeRestrictionStore {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEFAULT_HEDGE_MS: () => (/* binding */ DEFAULT_HEDGE_MS),
+/* harmony export */   EXTRA_SLOT_STEPS: () => (/* binding */ EXTRA_SLOT_STEPS),
 /* harmony export */   HEDGE_GROUP_SIZE: () => (/* binding */ HEDGE_GROUP_SIZE),
+/* harmony export */   SECONDARY_GEMINI: () => (/* binding */ SECONDARY_GEMINI),
 /* harmony export */   SKIP_AFTER_JUDGED: () => (/* binding */ SKIP_AFTER_JUDGED),
 /* harmony export */   analyzePaymentProof: () => (/* binding */ analyzePaymentProof),
 /* harmony export */   redactForLog: () => (/* binding */ redactForLog),
@@ -39285,10 +39287,18 @@ const DEFAULT_HEDGE_MS = 0;
 const HEDGE_GROUP_SIZE = 3;
 /** Skip the remaining image models once this many found no amount (text-only providers still run). */
 const SKIP_AFTER_JUDGED = 2;
+/** The secondary Gemini step (2026-10-20, out of the default order since the same day; VISION_PROVIDERS can name it). */
+const SECONDARY_GEMINI = 'gemini2';
+/**
+ * Second-step image models that do not take one of the HEDGE_GROUP_SIZE always-run slots when they sit inside them: with
+ * gemma (default chain) or gemini2 (when configured) in front of them, groq and NVIDIA still always run (NVIDIA rescued payments Gemini and Groq
+ * both missed). Default chain: gemini, gemma, groq, nvidia always run; mistral (5th image model) is skipped once
+ * SKIP_AFTER_JUDGED image models found no amount, so it runs only when fewer than two earlier models gave a judgement.
+ */
+const EXTRA_SLOT_STEPS = new Set([SECONDARY_GEMINI, 'gemma']);
 const TEXT_ONLY = new Set(['rapidapi', 'ocr-space']);
 const JUDGED_CLASSES = new Set(['no_amount', 'low_confidence', 'amount_range', 'not_payment']);
 const R12_CONFIDENCE_THRESHOLD = 0.4;
-const PROBE_TIMEOUT_MS = 8000;
 const KEYWORDS = [
     'payment', 'paid', 'txn', 'txnid', 'transaction', 'receipt', 'invoice', 'amount', 'paid to', 'credited', 'debited',
     'paid via', 'ref no', 'reference', 'order', 'success', 'failed', 'payment id', 'transaction id', 'authorization',
@@ -39354,6 +39364,8 @@ async function runChain(image, opts) {
     const logger = opts.logger ?? _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER;
     const clock = opts.now ?? Date.now;
     const started = clock();
+    // chain-level deadline (config.ts DEFAULT_CHAIN_DEADLINE_MS): the caller's 60 s race must never fire
+    const deadlineAt = started + (0,_config__WEBPACK_IMPORTED_MODULE_1__.chainDeadlineMs)(env);
     const nowMs = opts.nowMs ?? started;
     const attempts = [];
     // chain
@@ -39387,7 +39399,7 @@ async function runChain(image, opts) {
         const prober = providers.find((p) => typeof p.probeText === 'function') ?? registry?.get('ocr-space');
         const tp = clock();
         const probe = prober?.probeText
-            ? await prober.probeText(image, minWords, PROBE_TIMEOUT_MS, v2)
+            ? await prober.probeText(image, minWords, _config__WEBPACK_IMPORTED_MODULE_1__.PRECHECK_TIMEOUT_MS, v2)
             : { status: 'unavailable', wordCount: 0, text: '', detail: 'no probe provider' };
         precheck = { status: probe.status, wordCount: probe.wordCount, ms: clock() - tp };
         if (probe.status === 'no-text')
@@ -39412,7 +39424,8 @@ async function runChain(image, opts) {
     //    skipped (Gemma: 0 wins in 196 rows, often a 20 s timeout).
     //  - text readers (RapidAPI, OCR-Space) form their own last stage: their amounts are OCR-grade, never the first word.
     //  Default since 2026-10-13 is VISION_HEDGE_MS=0: the plain sequential chain (owner: sequential is fine). The first
-    //  HEDGE_GROUP_SIZE image models (Gemini, Groq, NVIDIA) always get their turn, so the NVIDIA rescue still happens.
+    //  HEDGE_GROUP_SIZE image models (Gemini, Groq, NVIDIA), plus gemma / gemini2 (EXTRA_SLOT_STEPS), always get their
+    //  turn, so the NVIDIA rescue still happens.
     const hedgeRaw = env.VISION_HEDGE_MS;
     const hedgeMs = hedgeRaw === undefined || hedgeRaw === '' ? DEFAULT_HEDGE_MS : Number(hedgeRaw);
     const hedging = Number.isFinite(hedgeMs) && hedgeMs > 0;
@@ -39462,8 +39475,15 @@ async function runChain(image, opts) {
             }
             return { kind: 'fail', judged: errorClass !== null && JUDGED_CLASSES.has(errorClass) && !TEXT_ONLY.has(provider.name) };
         };
+        const left = deadlineAt - clock();
+        if (left < _config__WEBPACK_IMPORTED_MODULE_1__.MIN_PROVIDER_SLOT_MS) {
+            // not an attempt: nothing ran, so nothing is recorded; the normal exhausted / partial result follows
+            if (!settled)
+                logger.log(`[vision] ${provider.name} skipped: chain deadline (${Math.max(0, left)}ms left)`);
+            return { kind: 'fail', judged: false };
+        }
         try {
-            const budget = (0,_config__WEBPACK_IMPORTED_MODULE_1__.providerBudgetMs)(provider.name, env, v2);
+            const budget = Math.min((0,_config__WEBPACK_IMPORTED_MODULE_1__.providerBudgetMs)(provider.name, env, v2), left);
             const raw = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_10__.withTimeout)((signal) => provider.call(image, signal, v2), budget, `${provider.name} analysis`, parent);
             model = raw.model;
             const latencyMs = clock() - t0;
@@ -39667,9 +39687,14 @@ async function runChain(image, opts) {
         let secondOpinion = null;
         // the default runner decides internally which triggers run (S1-S5 need VISION_SECOND_OPINION=on, S6 authenticity is on by default)
         const runner = opts.secondOpinion ?? (0,_second_opinion__WEBPACK_IMPORTED_MODULE_9__.getDefaultSecondOpinionRunner)();
-        if (runner && outcome === 'extracted') {
+        const soLeft = deadlineAt - clock();
+        if (outcome === 'extracted' && soLeft < _config__WEBPACK_IMPORTED_MODULE_1__.MIN_PROVIDER_SLOT_MS) {
+            logger.log(`[vision] second opinion skipped: chain deadline (${Math.max(0, soLeft)}ms left)`);
+        }
+        else if (runner && outcome === 'extracted') {
             try {
-                secondOpinion = await runner(image, extraction, { ...opts.secondOpinionContext, env, v2 });
+                // cut at the chain deadline: a slow verifier must not let the caller's 60 s race drop this win
+                secondOpinion = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => runner(image, extraction, { ...opts.secondOpinionContext, env, v2 }), soLeft, 'second opinion');
             }
             catch (error) {
                 logger.warn(`[vision] second opinion failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -39690,6 +39715,13 @@ async function runChain(image, opts) {
     // set when a no-text image reached the fallbacks only because the primary gave no verdict: the fallbacks may win with
     // a payment read, but their "not a payment" / "no amount" is not a verdict on it -> outage (hold + primary re-check)
     let primaryNeverJudgedNoText = false;
+    // the first HEDGE_GROUP_SIZE image models always run (gemini, groq, nvidia), plus one slot per EXTRA_SLOT_STEPS member
+    // INSIDE those slots (gemma / gemini2 as a second step); one placed after NVIDIA gets no slot and is skippable
+    let alwaysRun = HEDGE_GROUP_SIZE;
+    for (let k = 0; k < imageModels.length && k < alwaysRun; k++) {
+        if (EXTRA_SLOT_STEPS.has(providers[imageModels[k]].name))
+            alwaysRun++;
+    }
     if (imageModels.length > 0) {
         const panel = imageModels.slice(0, hedging && !primaryOnly ? HEDGE_GROUP_SIZE : 1);
         const { win, judged } = await runGroup(panel);
@@ -39711,7 +39743,7 @@ async function runChain(image, opts) {
         }
     }
     for (; !primaryOnly && next < imageModels.length; next++) {
-        if (next >= HEDGE_GROUP_SIZE && judgedImage >= SKIP_AFTER_JUDGED) {
+        if (next >= alwaysRun && judgedImage >= SKIP_AFTER_JUDGED) {
             logger.log(`[vision] ${providers[imageModels[next]].name} skipped: ${judgedImage} image models already found no amount`);
             continue;
         }
@@ -39775,33 +39807,73 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEFAULT_BUDGETS_MS: () => (/* binding */ DEFAULT_BUDGETS_MS),
 /* harmony export */   DEFAULT_BUDGET_MS: () => (/* binding */ DEFAULT_BUDGET_MS),
+/* harmony export */   DEFAULT_CHAIN_DEADLINE_MS: () => (/* binding */ DEFAULT_CHAIN_DEADLINE_MS),
 /* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* binding */ GEMMA_R07B_BUDGET_MS),
+/* harmony export */   MIN_PROVIDER_SLOT_MS: () => (/* binding */ MIN_PROVIDER_SLOT_MS),
+/* harmony export */   PRECHECK_TIMEOUT_MS: () => (/* binding */ PRECHECK_TIMEOUT_MS),
+/* harmony export */   chainDeadlineMs: () => (/* binding */ chainDeadlineMs),
 /* harmony export */   providerBudgetMs: () => (/* binding */ providerBudgetMs),
-/* harmony export */   resolveProviderNames: () => (/* binding */ resolveProviderNames)
+/* harmony export */   resolveProviderNames: () => (/* binding */ resolveProviderNames),
+/* harmony export */   secondaryGeminiDisabled: () => (/* binding */ secondaryGeminiDisabled)
 /* harmony export */ });
 /* harmony import */ var _providers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../providers */ "../../packages/tg-vision/src/providers/index.ts");
 // Chain configuration read from env at call time (design section 4 "Config"). No env flags beyond the doc's:
-// VISION_PROVIDERS, VISION_TIMEOUTS, VISION_MIN_WORDS, VISION_PRECHECK, VISION_RULES_V2, VISION_SECOND_OPINION.
+// VISION_PROVIDERS, VISION_TIMEOUTS, VISION_CHAIN_DEADLINE_MS, VISION_MIN_WORDS, VISION_PRECHECK, VISION_RULES_V2, VISION_SECOND_OPINION, plus the
+// model overrides GEMINI_VISION_MODEL / GEMINI2_VISION_MODEL (read by the Gemini provider; GEMINI2_VISION_MODEL=off drops the step).
 
-/** R07 outer per-provider budgets (ms), from service-config.json. */
+/**
+ * R07 outer per-provider budgets (ms), measured 2026-10-20. Since the chain-level deadline (VISION_CHAIN_DEADLINE_MS
+ * below) they no longer have to sum under tg-aut's 60 s SHADOW_TIMEOUT_MS: each provider gets min(its budget, time left).
+ *   gemini   12: gemini-2.5-flash-lite median 4.4-5.1 s, p90 6.7 s, max 9.8 s (benchmark + 118-image eval).
+ *   gemma    14: gemma-4-26b-a4b-it median 10.6 s, p90 13.1 s, 0 timeouts in 27 (eval).
+ *   groq      6: fleet p90 1.4 s / p95 1.5 s / max 2.1 s.
+ *   nvidia   12: median 6.3 s, 16 of 17 answers <= 9.8 s; a busy-worker 503 returns in 1.8-2.8 s, then a 3 s wait and a
+ *                p50 5.1 s answer (~11 s), so 12 s keeps that retry.
+ *   mistral   9: pixtral-12b-2409, 21 real screenshots over two sequential runs: p50 ~5 s, 19 <= 6.0 s, one 8.2 s, one
+ *                30 s timeout. 9 s keeps the 8.2 s answer (8 s would cut it); it is accept-only, so a cut costs no verdict.
+ *   rapidapi  6: p50 4.0 s / max 6.2 s.
+ *   ocr-space 4: p90 2.6 s / max 3.6 s.
+ *   gemini2   6: out of the default order (gemini-3.1-flash-lite median 11.5-13.8 s); kept for VISION_PROVIDERS.
+ */
 const DEFAULT_BUDGETS_MS = {
-    // 30 s -> 15 s (2026-10-11): successes p95 8.7 s; with hedging a slow Gemini no longer blocks the chain.
-    gemini: 15000,
-    groq: 15000,
-    nvidia: 20000,
-    mistral: 30000,
-    gemma: 20000,
-    rapidapi: 15000,
-    'ocr-space': 15000,
+    gemini: 12000,
+    gemini2: 6000,
+    gemma: 14000,
+    groq: 6000,
+    nvidia: 12000,
+    mistral: 9000,
+    rapidapi: 6000,
+    'ocr-space': 4000,
 };
 const DEFAULT_BUDGET_MS = 30000;
 /** V2:R07b: Gemma outer budget covers two sequential 15 s models (inner spec is 35 s). */
 const GEMMA_R07B_BUDGET_MS = 32000;
+/** OCR pre-check probe timeout (R02); counts against the chain deadline. */
+const PRECHECK_TIMEOUT_MS = 8000;
+/**
+ * Chain-level deadline (ms), measured from the start of analyzePaymentProof (so the pre-check counts against it). tg-aut
+ * races the whole call against SHADOW_TIMEOUT_MS = 60 s and loses EVERYTHING when that fires (a payment read included),
+ * so the chain stops itself first: each provider gets min(its budget, time left); with less than MIN_PROVIDER_SLOT_MS left
+ * the remaining providers are skipped and the normal exhausted result is returned; a second opinion after a win is cut
+ * at the deadline too. 55 s leaves 5 s of margin for the caller. Env: VISION_CHAIN_DEADLINE_MS.
+ * Arithmetic to mistral (5th step): typical pre-check 2.6 + gemini 12 (worst) + gemma 10.6 + groq 1.4 + nvidia 503 path
+ * 10.9 = 37.5 s, 17.5 s left >= its 9 s. Every step at its full budget (8 + 12 + 14 + 6 + 12 = 52 s) leaves mistral 3 s.
+ */
+const DEFAULT_CHAIN_DEADLINE_MS = 55000;
+/** Below this much time left a provider is not started (no model answers usefully in under ~2 s; groq p90 is 1.4 s). */
+const MIN_PROVIDER_SLOT_MS = 2000;
+function chainDeadlineMs(env) {
+    const raw = Number(String(env.VISION_CHAIN_DEADLINE_MS ?? '').trim());
+    return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CHAIN_DEADLINE_MS;
+}
+/** GEMINI2_VISION_MODEL=off|none|disabled removes the secondary Gemini step, whatever VISION_PROVIDERS says. */
+function secondaryGeminiDisabled(env) {
+    return /^(off|none|disabled?)$/i.test(String(env.GEMINI2_VISION_MODEL ?? '').trim());
+}
 function resolveProviderNames(env) {
     const raw = env.VISION_PROVIDERS;
-    if (!raw || !raw.trim())
-        return [..._providers__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_PROVIDER_ORDER];
-    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+    const names = !raw || !raw.trim() ? [..._providers__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_PROVIDER_ORDER] : raw.split(',').map((s) => s.trim()).filter(Boolean);
+    return secondaryGeminiDisabled(env) ? names.filter((n) => n !== 'gemini2') : names;
 }
 function providerBudgetMs(name, env, v2) {
     const raw = env.VISION_TIMEOUTS;
@@ -39844,7 +39916,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /** Failures that need an operator: provider outage, quota/rate exhaustion, network, crash, misconfiguration. */
 const OPERATIONAL_CLASSES = new Set([
-    'quota', 'rate', 'network', 'server', 'timeout', 'config',
+    'quota', 'rate', 'network', 'server', 'timeout', 'config', 'model_retired',
 ]);
 /** R15 currency marker (matches the substring "rs", as legacy does). */
 const CURRENCY_REGEX = /₹|rs\.?|\binr\b|\$|usd|eur|€|£|gbp/i;
@@ -40601,21 +40673,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
 /* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.CURRENCY_REGEX),
 /* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.DEFAULT_BUDGETS_MS),
+/* harmony export */   DEFAULT_CHAIN_DEADLINE_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.DEFAULT_CHAIN_DEADLINE_MS),
 /* harmony export */   DEFAULT_PROVIDER_ORDER: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.DEFAULT_PROVIDER_ORDER),
 /* harmony export */   EnvKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.EnvKeyPool),
 /* harmony export */   FAKE_SIGNALS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_SIGNALS),
 /* harmony export */   FAKE_VERDICTS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.FAKE_VERDICTS),
+/* harmony export */   GEMINI2_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI2_DEFAULT_MODEL),
+/* harmony export */   GEMINI2_MODEL_ENV: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI2_MODEL_ENV),
 /* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_DEFAULT_MODEL),
+/* harmony export */   GEMINI_MODEL_ENV: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.GEMINI_MODEL_ENV),
 /* harmony export */   GEMMA_MODELS: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.GEMMA_MODELS),
 /* harmony export */   GEMMA_R07B_BUDGET_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.GEMMA_R07B_BUDGET_MS),
 /* harmony export */   GENERATION_CONFIG: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.GENERATION_CONFIG),
 /* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MAX_PAYMENT_AMOUNT),
 /* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.MIN_PAYMENT_AMOUNT),
+/* harmony export */   MIN_PROVIDER_SLOT_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.MIN_PROVIDER_SLOT_MS),
 /* harmony export */   NOOP_LOGGER: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.NOOP_LOGGER),
 /* harmony export */   NO_RULES: () => (/* reexport safe */ _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES),
+/* harmony export */   NVIDIA_CAPACITY_RETRY_MS: () => (/* reexport safe */ _providers_nvidia__WEBPACK_IMPORTED_MODULE_17__.NVIDIA_CAPACITY_RETRY_MS),
 /* harmony export */   OPERATIONAL_CLASSES: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.OPERATIONAL_CLASSES),
 /* harmony export */   PAYMENT_APP_NAME: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.PAYMENT_APP_NAME),
 /* harmony export */   PAYMENT_STATUS_PHRASE: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.PAYMENT_STATUS_PHRASE),
+/* harmony export */   PRECHECK_TIMEOUT_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.PRECHECK_TIMEOUT_MS),
 /* harmony export */   ProviderError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.ProviderError),
 /* harmony export */   TRANSACTION_REFERENCE: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.TRANSACTION_REFERENCE),
 /* harmony export */   TokenBudget: () => (/* reexport safe */ _transport_token_budget__WEBPACK_IMPORTED_MODULE_12__.TokenBudget),
@@ -40630,6 +40709,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   analysisPromptWithKeys: () => (/* reexport safe */ _contract_prompt__WEBPACK_IMPORTED_MODULE_9__.analysisPromptWithKeys),
 /* harmony export */   analyzePaymentProof: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_26__.analyzePaymentProof),
 /* harmony export */   applyProviderTweaks: () => (/* reexport safe */ _providers_provider__WEBPACK_IMPORTED_MODULE_13__.applyProviderTweaks),
+/* harmony export */   chainDeadlineMs: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.chainDeadlineMs),
 /* harmony export */   classifyError: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.classifyError),
 /* harmony export */   classifyExhausted: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.classifyExhausted),
 /* harmony export */   coerceConfidence: () => (/* reexport safe */ _contract_wire_normalize__WEBPACK_IMPORTED_MODULE_5__.coerceConfidence),
@@ -40637,6 +40717,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   combineSecondOpinion: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.combineSecondOpinion),
 /* harmony export */   correctNonStandardAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.correctNonStandardAmount),
 /* harmony export */   countWords: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.countWords),
+/* harmony export */   createGeminiKeyPool: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.createGeminiKeyPool),
 /* harmony export */   createGeminiProvider: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.createGeminiProvider),
 /* harmony export */   createGemmaProvider: () => (/* reexport safe */ _providers_gemma__WEBPACK_IMPORTED_MODULE_15__.createGemmaProvider),
 /* harmony export */   createGroqProvider: () => (/* reexport safe */ _providers_groq__WEBPACK_IMPORTED_MODULE_16__.createGroqProvider),
@@ -40653,10 +40734,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   extractPayeeName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPayeeName),
 /* harmony export */   extractPayerName: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPayerName),
 /* harmony export */   extractPaymentDataFromText: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.extractPaymentDataFromText),
+/* harmony export */   geminiModelFor: () => (/* reexport safe */ _providers_gemini__WEBPACK_IMPORTED_MODULE_14__.geminiModelFor),
 /* harmony export */   getDefaultProviders: () => (/* reexport safe */ _providers__WEBPACK_IMPORTED_MODULE_21__.getDefaultProviders),
 /* harmony export */   getNumberFromString: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.getNumberFromString),
 /* harmony export */   hamming: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.hamming),
 /* harmony export */   inferStatusFromText: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.inferStatusFromText),
+/* harmony export */   isCapacityBusy: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isCapacityBusy),
 /* harmony export */   isFalsePositive: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isFalsePositive),
 /* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.isNoVerifiableAmount),
 /* harmony export */   isOurChatPage: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.isOurChatPage),
@@ -40688,6 +40771,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   runWithKeys: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.runWithKeys),
 /* harmony export */   sanitizeExtraction: () => (/* reexport safe */ _rules_sanitize__WEBPACK_IMPORTED_MODULE_4__.sanitizeExtraction),
 /* harmony export */   secondOpinionTriggers: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.secondOpinionTriggers),
+/* harmony export */   secondaryGeminiDisabled: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.secondaryGeminiDisabled),
 /* harmony export */   shouldFallbackForPaymentExtraction: () => (/* reexport safe */ _chain_analyze__WEBPACK_IMPORTED_MODULE_26__.shouldFallbackForPaymentExtraction),
 /* harmony export */   smartMergeWire: () => (/* reexport safe */ _rules_text__WEBPACK_IMPORTED_MODULE_23__.smartMergeWire),
 /* harmony export */   statusFromFlags: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.statusFromFlags),
@@ -40772,9 +40856,14 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GEMINI2_DEFAULT_MODEL: () => (/* binding */ GEMINI2_DEFAULT_MODEL),
+/* harmony export */   GEMINI2_MODEL_ENV: () => (/* binding */ GEMINI2_MODEL_ENV),
 /* harmony export */   GEMINI_DEFAULT_MODEL: () => (/* binding */ GEMINI_DEFAULT_MODEL),
 /* harmony export */   GEMINI_KEY_ENV: () => (/* binding */ GEMINI_KEY_ENV),
-/* harmony export */   createGeminiProvider: () => (/* binding */ createGeminiProvider)
+/* harmony export */   GEMINI_MODEL_ENV: () => (/* binding */ GEMINI_MODEL_ENV),
+/* harmony export */   createGeminiKeyPool: () => (/* binding */ createGeminiKeyPool),
+/* harmony export */   createGeminiProvider: () => (/* binding */ createGeminiProvider),
+/* harmony export */   geminiModelFor: () => (/* binding */ geminiModelFor)
 /* harmony export */ });
 /* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
 /* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
@@ -40787,14 +40876,43 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const GEMINI_KEY_ENV = ['GEMINI_API_KEYS', 'GEMINI_API_KEY'];
-const GEMINI_DEFAULT_MODEL = 'gemini-flash-lite-latest';
+/**
+ * Pinned primary model (was the rolling alias gemini-flash-lite-latest). Env: GEMINI_VISION_MODEL. Benchmarked 2026-10-20
+ * 16:05-16:25Z through this chain (prompt, schema, parser), 15 calls on a local receipt PNG + a no-text PNG, 2 s apart:
+ *   gemini-2.5-flash-lite        15/15 answered and correct, median 4.4 s, max 9.8 s
+ *   gemini-flash-lite-latest     11/15 (4 timeouts at 30 s), median 23.3 s
+ *   gemini-3.5-flash-lite        11/15, median 23.6 s (same profile as -latest)
+ * Risk: Google already answers 404 "no longer available to new users" for gemini-2.5-flash; if 2.5-flash-lite follows,
+ * the primary fails operationally on every call and gemini2 / the fallbacks carry the chain: set GEMINI_VISION_MODEL.
+ */
+const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+/**
+ * Secondary Gemini step: a different model, fallback authority only. Env: GEMINI2_VISION_MODEL ('off' removes the step).
+ * Same benchmark: gemini-3.1-flash-lite 11/15 answered (4x HTTP 503 "high demand"), all correct, median 13.8 s, 3 of 15
+ * within its 8 s budget; gemini-3.1-flash-lite-preview was similar (11/15, median 11.4 s, 3 within 8 s) but is a preview
+ * id; gemini-3-flash-preview 11/15, median 12.8 s. The GA id was chosen for id stability.
+ */
+const GEMINI2_DEFAULT_MODEL = 'gemini-3.1-flash-lite';
+const GEMINI_MODEL_ENV = 'GEMINI_VISION_MODEL';
+const GEMINI2_MODEL_ENV = 'GEMINI2_VISION_MODEL';
+function createGeminiKeyPool(deps = {}) {
+    return new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'gemini', envNames: GEMINI_KEY_ENV, strategy: 'round-robin', logger: deps.logger, now: deps.now, random: deps.random });
+}
+/** The model a Gemini step calls now: explicit option, else the env override, else the pinned default. */
+function geminiModelFor(opts) {
+    if (opts.model)
+        return opts.model;
+    const raw = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts)[opts.modelEnv ?? GEMINI_MODEL_ENV];
+    const fromEnv = typeof raw === 'string' ? raw.trim() : '';
+    return fromEnv || (opts.defaultModel ?? GEMINI_DEFAULT_MODEL);
+}
 function createGeminiProvider(opts = {}) {
-    const model = opts.model ?? GEMINI_DEFAULT_MODEL;
+    const name = opts.name ?? 'gemini';
     const innerTimeoutMs = opts.innerTimeoutMs ?? 20000;
-    const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'gemini', envNames: GEMINI_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
+    const pool = opts.keyPool ?? createGeminiKeyPool(opts);
     const factory = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.cachedFactory)((0,_provider__WEBPACK_IMPORTED_MODULE_4__.clientFactoryFrom)(opts, opts.clientFactory));
     return {
-        name: 'gemini',
+        name,
         kind: 'llm',
         innerTimeoutMs,
         confidenceCap: null,
@@ -40802,9 +40920,10 @@ function createGeminiProvider(opts = {}) {
         escalateZeroAmount: false,
         async call(image, signal, v2Call) {
             const v2 = v2Call ?? opts.v2;
+            const model = geminiModelFor(opts);
             const data = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image);
             return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
-                name: 'gemini',
+                name,
                 pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2),
                 keyEnvNames: GEMINI_KEY_ENV,
                 timeoutMs: innerTimeoutMs,
@@ -40839,10 +40958,15 @@ function createGeminiProvider(opts = {}) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GEMMA_26B_MODEL: () => (/* binding */ GEMMA_26B_MODEL),
+/* harmony export */   GEMMA_31B_MODEL: () => (/* binding */ GEMMA_31B_MODEL),
 /* harmony export */   GEMMA_KEY_ENV: () => (/* binding */ GEMMA_KEY_ENV),
+/* harmony export */   GEMMA_KNOWN_MODELS: () => (/* binding */ GEMMA_KNOWN_MODELS),
 /* harmony export */   GEMMA_MODELS: () => (/* binding */ GEMMA_MODELS),
+/* harmony export */   GEMMA_MODELS_ENV: () => (/* binding */ GEMMA_MODELS_ENV),
 /* harmony export */   GEMMA_PER_MODEL_TIMEOUT_MS: () => (/* binding */ GEMMA_PER_MODEL_TIMEOUT_MS),
-/* harmony export */   createGemmaProvider: () => (/* binding */ createGemmaProvider)
+/* harmony export */   createGemmaProvider: () => (/* binding */ createGemmaProvider),
+/* harmony export */   gemmaModelsFor: () => (/* binding */ gemmaModelsFor)
 /* harmony export */ });
 /* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
 /* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
@@ -40855,12 +40979,26 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const GEMMA_KEY_ENV = ['GEMMA_API_KEYS', 'GEMINI_API_KEYS', 'GEMINI_API_KEY'];
-const GEMMA_MODELS = ['models/gemma-4-26b-a4b-it', 'models/gemma-4-31b-it'];
+const GEMMA_26B_MODEL = 'models/gemma-4-26b-a4b-it';
+const GEMMA_31B_MODEL = 'models/gemma-4-31b-it';
+/** Default model list (2026-10-20): 26B only; the 31B timed out 24 of 26 calls at 20 s. */
+const GEMMA_MODELS = [GEMMA_26B_MODEL];
+/** Every Gemma model this package knows (VISION_SECOND_OPINION_MODEL may name either). */
+const GEMMA_KNOWN_MODELS = [GEMMA_26B_MODEL, GEMMA_31B_MODEL];
+/** Comma-separated model list override, e.g. "models/gemma-4-26b-a4b-it,models/gemma-4-31b-it" for the old pair. */
+const GEMMA_MODELS_ENV = 'GEMMA_VISION_MODELS';
 const GEMMA_PER_MODEL_TIMEOUT_MS = 15000;
+/** The models a Gemma call walks: explicit option, else the env list, else the default (26B only). */
+function gemmaModelsFor(opts) {
+    if (opts.models && opts.models.length > 0)
+        return opts.models;
+    const raw = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts)[GEMMA_MODELS_ENV];
+    const fromEnv = typeof raw === 'string' ? raw.split(',').map((m) => m.trim()).filter(Boolean) : [];
+    return fromEnv.length > 0 ? fromEnv : GEMMA_MODELS;
+}
 function createGemmaProvider(opts = {}) {
     const perModel = opts.perModelTimeoutMs ?? GEMMA_PER_MODEL_TIMEOUT_MS;
     const innerTimeoutMs = opts.innerTimeoutMs ?? (perModel === GEMMA_PER_MODEL_TIMEOUT_MS ? 35000 : perModel * 2 + 5000);
-    const models = opts.models ?? GEMMA_MODELS;
     const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'gemma', envNames: GEMMA_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
     const factory = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.cachedFactory)((0,_provider__WEBPACK_IMPORTED_MODULE_4__.clientFactoryFrom)(opts, opts.clientFactory));
     return {
@@ -40873,9 +41011,11 @@ function createGemmaProvider(opts = {}) {
         async call(image, signal, v2Call) {
             const v2 = v2Call ?? opts.v2;
             const data = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.toBase64)(image);
+            const env = (0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts);
+            const models = gemmaModelsFor(opts);
             return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
                 name: 'gemma',
-                pool: pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2),
+                pool: pool.get(env, v2),
                 keyEnvNames: GEMMA_KEY_ENV,
                 timeoutMs: innerTimeoutMs,
                 v2,
@@ -40895,14 +41035,15 @@ function createGemmaProvider(opts = {}) {
                         const res = await (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.withTimeout)((s) => request(model, s), perModel, `Gemma ${model}`, sig);
                         return { text: res.text, model, tokens: res.totalTokens };
                     };
-                    try {
-                        return await attempt(models[0]);
-                    }
-                    catch (err) {
-                        if (sig?.aborted)
-                            throw err;
-                        opts.logger?.warn(`[gemma] ${models[0]} failed (${err instanceof Error ? err.message : String(err)}); trying ${models[1]}`);
-                        return attempt(models[1]);
+                    for (let m = 0;; m++) {
+                        try {
+                            return await attempt(models[m]);
+                        }
+                        catch (err) {
+                            if (sig?.aborted || m + 1 >= models.length)
+                                throw err;
+                            opts.logger?.warn(`[gemma] ${models[m]} failed (${err instanceof Error ? err.message : String(err)}); trying ${models[m + 1]}`);
+                        }
                     }
                 },
             });
@@ -41084,10 +41225,25 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia', 'mistral', 'gemma', 'rapidapi', 'ocr-space'];
+/**
+ * Default chain (2026-10-20, owner-approved after the accuracy eval on 118 real non-payment screenshots):
+ *   gemini (2.5-flash-lite, primary: 0 false accepts, median 5.1 s) -> gemma (26B only, accept-only: 26/27 correct,
+ *   0 timeouts, median 10.6 s) -> groq -> nvidia -> mistral (pixtral-12b, accept-only: 0 false accepts, p50 4.9 s)
+ *   -> rapidapi -> ocr-space.
+ * gemini2 (gemini-3.1-flash-lite: 7 of 19 errors/timeouts, median 11.5 s) stays registered but is out of the default:
+ * name it in VISION_PROVIDERS to enable it. Strictly sequential; the chain-level deadline (chain/config.ts
+ * VISION_CHAIN_DEADLINE_MS) keeps the whole run inside tg-aut's 60 s SHADOW_TIMEOUT_MS.
+ */
+const DEFAULT_PROVIDER_ORDER = ['gemini', 'gemma', 'groq', 'nvidia', 'mistral', 'rapidapi', 'ocr-space'];
+/**
+ * Every provider owns its key-pool STATE (cursor + benched keys), even when two read the same key strings (Gemma falls
+ * back to GEMINI_API_KEYS when GEMMA_API_KEYS is unset). A 429 quota benches a key for up to an hour, and Gemma's or
+ * gemini2's quota must never bench the primary Gemini.
+ */
 function createProviders(deps = {}) {
     const providers = [
         (0,_gemini__WEBPACK_IMPORTED_MODULE_0__.createGeminiProvider)(deps),
+        (0,_gemini__WEBPACK_IMPORTED_MODULE_0__.createGeminiProvider)({ ...deps, name: 'gemini2', modelEnv: _gemini__WEBPACK_IMPORTED_MODULE_0__.GEMINI2_MODEL_ENV, defaultModel: _gemini__WEBPACK_IMPORTED_MODULE_0__.GEMINI2_DEFAULT_MODEL }),
         (0,_groq__WEBPACK_IMPORTED_MODULE_2__.createGroqProvider)(deps),
         (0,_nvidia__WEBPACK_IMPORTED_MODULE_4__.createNvidiaProvider)(deps),
         (0,_mistral__WEBPACK_IMPORTED_MODULE_3__.createMistralProvider)(deps),
@@ -41122,10 +41278,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   MISTRAL_CHAT_URL: () => (/* binding */ MISTRAL_CHAT_URL),
 /* harmony export */   MISTRAL_DEFAULT_MODEL: () => (/* binding */ MISTRAL_DEFAULT_MODEL),
+/* harmony export */   MISTRAL_INNER_TIMEOUT_MS: () => (/* binding */ MISTRAL_INNER_TIMEOUT_MS),
 /* harmony export */   MISTRAL_KEY_ENV: () => (/* binding */ MISTRAL_KEY_ENV),
-/* harmony export */   MISTRAL_OCR_MODEL: () => (/* binding */ MISTRAL_OCR_MODEL),
-/* harmony export */   MISTRAL_OCR_URL: () => (/* binding */ MISTRAL_OCR_URL),
-/* harmony export */   createMistralProvider: () => (/* binding */ createMistralProvider)
+/* harmony export */   MISTRAL_MODEL_ENV: () => (/* binding */ MISTRAL_MODEL_ENV),
+/* harmony export */   MODEL_RETIRED: () => (/* binding */ MODEL_RETIRED),
+/* harmony export */   createMistralProvider: () => (/* binding */ createMistralProvider),
+/* harmony export */   isModelRetiredError: () => (/* binding */ isModelRetiredError),
+/* harmony export */   sniffImageMime: () => (/* binding */ sniffImageMime)
 /* harmony export */ });
 /* harmony import */ var _contract_prompt__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../contract/prompt */ "../../packages/tg-vision/src/contract/prompt.ts");
 /* harmony import */ var _contract_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../contract/schema */ "../../packages/tg-vision/src/contract/schema.ts");
@@ -41133,8 +41292,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _transport_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../transport/retry */ "../../packages/tg-vision/src/transport/retry.ts");
 /* harmony import */ var _http__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./http */ "../../packages/tg-vision/src/providers/http.ts");
 /* harmony import */ var _provider__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./provider */ "../../packages/tg-vision/src/providers/provider.ts");
-// Mistral provider (design 2.6): pixtral chat completions (image_url is the data-URL string), then on ANY pixtral
-// error the mistral-ocr-latest markdown (MISTRAL_OCR_FALLBACK=false disables). Key strategy 'front' (R20).
+// Mistral provider (2026-10-20): pixtral-12b-2409 chat completions, a late image-model backup in the default chain.
+// Accept-only like every fallback (chain/analyze.ts: only the primary model's "not a payment" is final).
+// Our Mistral plan: pixtral-12b 30 req/min, 937.5k tokens/min; mistral-small / medium / ocr are 0 req/min, so this
+// provider calls exactly ONE model and never falls back to another Mistral model (the old mistral-ocr-latest fallback
+// is gone). pixtral-12b is legacy: not listed in /v1/models but still answers 200 (2026-10-20 the response reported
+// model "ministral-14b-latest", i.e. Mistral serves it through an alias). When Mistral finally retires it (404, or
+// 400 "Invalid model" / invalid_model), the call fails as MODEL_RETIRED: an OPERATIONAL failure (alerts), never a
+// "not a payment" verdict. Key strategy 'front' (R20).
 
 
 
@@ -41142,12 +41307,39 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const MISTRAL_CHAT_URL = 'https://api.mistral.ai/v1/chat/completions';
-const MISTRAL_OCR_URL = 'https://api.mistral.ai/v1/ocr';
 const MISTRAL_KEY_ENV = ['MISTRAL_API_KEYS', 'MISTRAL_API_KEY'];
-const MISTRAL_DEFAULT_MODEL = 'pixtral-large-latest';
-const MISTRAL_OCR_MODEL = 'mistral-ocr-latest';
+/** Override with MISTRAL_VISION_MODEL (remote config), like GEMINI_VISION_MODEL. */
+const MISTRAL_MODEL_ENV = 'MISTRAL_VISION_MODEL';
+const MISTRAL_DEFAULT_MODEL = 'pixtral-12b-2409';
+/** Log tag + message prefix when the configured model is gone. */
+const MODEL_RETIRED = 'MODEL_RETIRED';
+/** Measured 2026-10-20 on 9 screenshots: p50 6.0 s / max 8.2 s; same as chain/config.ts DEFAULT_BUDGETS_MS.mistral (the outer budget wins). */
+const MISTRAL_INNER_TIMEOUT_MS = 9000;
+/** MIME type for the data URL, sniffed from the magic bytes (Telegram photos are JPEG; documents can be PNG/WebP/GIF). */
+function sniffImageMime(image) {
+    const b = image;
+    if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47)
+        return 'image/png';
+    if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff)
+        return 'image/jpeg';
+    if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+        && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50)
+        return 'image/webp';
+    if (b.length >= 4 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38)
+        return 'image/gif';
+    return _provider__WEBPACK_IMPORTED_MODULE_5__.IMAGE_MIME;
+}
+/** 404 / 410, or Mistral's 400 {"type":"invalid_model","message":"Invalid model: X"}: the model no longer exists. */
+function isModelRetiredError(err) {
+    const e = err;
+    const status = typeof e?.status === 'number' ? e.status : undefined;
+    if (status === 404 || status === 410)
+        return true;
+    const message = typeof e?.message === 'string' ? e.message : String(err);
+    return /invalid_model|invalid model|model[ _-]?not[ _-]?found|no such model|unknown model/i.test(message);
+}
 function createMistralProvider(opts = {}) {
-    const innerTimeoutMs = opts.innerTimeoutMs ?? 30000;
+    const innerTimeoutMs = opts.innerTimeoutMs ?? MISTRAL_INNER_TIMEOUT_MS;
     const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
     const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'mistral', envNames: MISTRAL_KEY_ENV, strategy: 'front', logger: opts.logger, now: opts.now, random: opts.random });
     return {
@@ -41160,37 +41352,9 @@ function createMistralProvider(opts = {}) {
         async call(image, signal, v2Call) {
             const v2 = v2Call ?? opts.v2;
             const env = (0,_provider__WEBPACK_IMPORTED_MODULE_5__.envOf)(opts);
-            const model = env.MISTRAL_VISION_MODEL || MISTRAL_DEFAULT_MODEL;
-            const ocrFallback = env.MISTRAL_OCR_FALLBACK !== 'false';
+            const model = String(env[MISTRAL_MODEL_ENV] ?? '').trim() || MISTRAL_DEFAULT_MODEL;
             const prompt = (0,_contract_prompt__WEBPACK_IMPORTED_MODULE_0__.analysisPromptWithKeys)((0,_contract_schema__WEBPACK_IMPORTED_MODULE_1__.toKeysBlock)());
-            const dataUrl = `data:${_provider__WEBPACK_IMPORTED_MODULE_5__.IMAGE_MIME};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_5__.toBase64)(image)}`;
-            const pixtral = async (apiKey, sig) => {
-                const data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, MISTRAL_CHAT_URL, { authorization: `Bearer ${apiKey}` }, {
-                    model,
-                    temperature: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.temperature,
-                    max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
-                    response_format: { type: 'json_object' },
-                    messages: [{ role: 'user', content: [
-                                { type: 'text', text: prompt },
-                                { type: 'image_url', image_url: dataUrl },
-                            ] }],
-                }, sig);
-                const content = data?.choices?.[0]?.message?.content;
-                if (!content)
-                    throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Pixtral returned empty content', { errorClass: 'empty' });
-                const total = data.usage?.total_tokens;
-                return { text: typeof content === 'string' ? content : JSON.stringify(content), model, tokens: typeof total === 'number' ? total : null };
-            };
-            const ocr = async (apiKey, sig) => {
-                const data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, MISTRAL_OCR_URL, { authorization: `Bearer ${apiKey}` }, {
-                    model: MISTRAL_OCR_MODEL,
-                    document: { type: 'image_url', image_url: dataUrl },
-                }, sig);
-                const markdown = (data?.pages ?? []).map((p) => p.markdown).filter(Boolean).join('\n\n');
-                if (!markdown)
-                    throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Mistral OCR returned empty markdown', { errorClass: 'empty' });
-                return { text: markdown, model: MISTRAL_OCR_MODEL, tokens: null };
-            };
+            const dataUrl = `data:${sniffImageMime(image)};base64,${(0,_provider__WEBPACK_IMPORTED_MODULE_5__.toBase64)(image)}`;
             return (0,_transport_retry__WEBPACK_IMPORTED_MODULE_3__.runWithKeys)({
                 name: 'mistral',
                 pool: pool.get(env, v2),
@@ -41202,15 +41366,37 @@ function createMistralProvider(opts = {}) {
                 signal,
                 isEmpty: (r) => !r.text || r.text.trim() === '' || r.text.trim() === '{}',
                 call: async (apiKey, sig) => {
+                    let data;
                     try {
-                        return await pixtral(apiKey, sig);
+                        data = await (0,_http__WEBPACK_IMPORTED_MODULE_4__.postJson)(fetchFn, MISTRAL_CHAT_URL, { authorization: `Bearer ${apiKey}` }, {
+                            model,
+                            temperature: 0, // owner spec (2026-10-20): deterministic reads
+                            max_tokens: _contract_prompt__WEBPACK_IMPORTED_MODULE_0__.GENERATION_CONFIG.maxOutputTokens,
+                            response_format: { type: 'json_object' },
+                            messages: [{ role: 'user', content: [
+                                        { type: 'text', text: prompt },
+                                        { type: 'image_url', image_url: dataUrl },
+                                    ] }],
+                        }, sig);
                     }
                     catch (err) {
-                        opts.logger?.warn(`[mistral] Pixtral failed: ${err instanceof Error ? err.message : String(err)}. OCR fallback=${ocrFallback}`);
-                        if (!ocrFallback || sig.aborted)
+                        if (!isModelRetiredError(err))
                             throw err;
-                        return ocr(apiKey, sig);
+                        const status = err.status;
+                        const detail = err instanceof Error ? err.message : String(err);
+                        opts.logger?.error(`[mistral] ${MODEL_RETIRED}: model ${model} is gone (${detail}). Set ${MISTRAL_MODEL_ENV} or drop mistral from VISION_PROVIDERS.`);
+                        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError(`${MODEL_RETIRED}: mistral model ${model}: ${detail}`, { status, errorClass: 'model_retired' });
                     }
+                    const content = data?.choices?.[0]?.message?.content;
+                    if (!content)
+                        throw new _transport_retry__WEBPACK_IMPORTED_MODULE_3__.ProviderError('Pixtral returned empty content', { errorClass: 'empty' });
+                    const total = data.usage?.total_tokens;
+                    const served = typeof data.model === 'string' && data.model && data.model !== model ? data.model : null;
+                    return {
+                        text: typeof content === 'string' ? content : JSON.stringify(content),
+                        model: served ? `${model} (served ${served})` : model,
+                        tokens: typeof total === 'number' ? total : null,
+                    };
                 },
             });
         },
@@ -41229,6 +41415,7 @@ function createMistralProvider(opts = {}) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   NVIDIA_CAPACITY_RETRY_MS: () => (/* binding */ NVIDIA_CAPACITY_RETRY_MS),
 /* harmony export */   NVIDIA_DEFAULT_MODEL: () => (/* binding */ NVIDIA_DEFAULT_MODEL),
 /* harmony export */   NVIDIA_KEY_ENV: () => (/* binding */ NVIDIA_KEY_ENV),
 /* harmony export */   NVIDIA_URL: () => (/* binding */ NVIDIA_URL),
@@ -41262,8 +41449,14 @@ function isNvidiaReasoningModel(model) {
 function stripReasoning(text) {
     return text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*?<\/think>/i, '').trim();
 }
+/**
+ * NVIDIA's shared worker answers 503 "Worker local total request limit reached (16/16)" when busy (their limit, not our
+ * key). A 400 ms retry hit the same full worker; wait 3 s instead (2026-10-20: the 503s came back in 1.8-2.8 s and an
+ * answer takes p50 5.1 s, so 2.8 + 3 + 5.1 = 10.9 s fits the 12 s outer budget, chain/config.ts DEFAULT_BUDGETS_MS.nvidia).
+ */
+const NVIDIA_CAPACITY_RETRY_MS = 3000;
 function createNvidiaProvider(opts = {}) {
-    const innerTimeoutMs = opts.innerTimeoutMs ?? 15000; // omni model measured 7.7-11.5 s; outer budget is 20 s
+    const innerTimeoutMs = opts.innerTimeoutMs ?? 15000; // omni model measured 7.7-11.5 s; the 12 s outer budget (chain/config.ts) cuts first
     const fetchFn = (0,_http__WEBPACK_IMPORTED_MODULE_4__.defaultFetch)(opts);
     const pool = new _transport_key_pool__WEBPACK_IMPORTED_MODULE_2__.EnvKeyPool({ name: 'nvidia', envNames: NVIDIA_KEY_ENV, strategy: 'round-robin', logger: opts.logger, now: opts.now, random: opts.random });
     return {
@@ -41284,6 +41477,7 @@ function createNvidiaProvider(opts = {}) {
                 pool: pool.get(env, v2),
                 keyEnvNames: NVIDIA_KEY_ENV,
                 timeoutMs: innerTimeoutMs,
+                capacityRetryDelayMs: opts.capacityRetryDelayMs ?? NVIDIA_CAPACITY_RETRY_MS,
                 v2: v2,
                 sleep: opts.sleep,
                 logger: opts.logger,
@@ -43243,7 +43437,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // 26B: live 2026-10-11 the 31B returned HTTP 500 / 2-38 s on the verify call; 26B answered in ~5 s (fakeScore 0.95 on a known fake).
-const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS[0];
+const SECOND_OPINION_MODEL = _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_26B_MODEL;
 const SECOND_OPINION_TIMEOUT_MS = 12000;
 const AUTHENTICITY_SECOND_OPINION_SCORE = 0.4;
 const isMasked = (vpa) => /\*|x{2,}/i.test(vpa);
@@ -43359,7 +43553,7 @@ function createSecondOpinionRunner(deps = {}) {
             if (!legacyOn && !authOn)
                 return skipped('disabled', deps.model ?? SECOND_OPINION_MODEL);
             // VISION_SECOND_OPINION_MODEL lets ops move to the faster 26B model without a redeploy (31B measured 2-38 s, 26B ~5 s)
-            const model = deps.model ?? _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_MODELS.find((m) => m === String(env.VISION_SECOND_OPINION_MODEL ?? '').trim());
+            const model = deps.model ?? _providers_gemma__WEBPACK_IMPORTED_MODULE_3__.GEMMA_KNOWN_MODELS.find((m) => m === String(env.VISION_SECOND_OPINION_MODEL ?? '').trim());
             return await requestSecondOpinion(image, { ...deps, ...(model ? { model } : {}), env, v2: ctx.v2 ?? deps.v2, pool, budget, factory });
         }
         catch (error) {
@@ -43595,6 +43789,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RATE_LIMIT_COOLDOWN_MS: () => (/* binding */ RATE_LIMIT_COOLDOWN_MS),
 /* harmony export */   classifyError: () => (/* binding */ classifyError),
 /* harmony export */   delay: () => (/* binding */ delay),
+/* harmony export */   isCapacityBusy: () => (/* binding */ isCapacityBusy),
 /* harmony export */   isRateLimit: () => (/* binding */ isRateLimit),
 /* harmony export */   isRateLimitLegacy: () => (/* binding */ isRateLimitLegacy),
 /* harmony export */   isTransient: () => (/* binding */ isTransient),
@@ -43665,6 +43860,15 @@ function isServerCapacityError(err, message) {
     if (status !== undefined && status >= 500 && status <= 599)
         return true;
     return /\bHTTP 5\d\d\b|worker local total request limit/i.test(message);
+}
+/**
+ * The provider is BUSY (HTTP 503 / NVIDIA "Worker local total request limit reached (16/16)"): a capacity error that a
+ * 400 ms retry only hits again. Other 5xx (NVIDIA "EngineCore" 500s) keep the short retry.
+ */
+function isCapacityBusy(err, message = messageOf(err)) {
+    if (statusOf(err) === 503)
+        return true;
+    return /\bHTTP 503\b|worker local total request limit/i.test(message);
 }
 function isRateLimit(err, v2 = _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES) {
     const message = messageOf(err);
@@ -43763,7 +43967,8 @@ async function withTimeout(fn, ms, label, parent) {
 }
 /**
  * Bounded key rotation (R20-R23): at most ONE pass over the keys; a rate-limited key is removed (cooldown) and the
- * next tried; a transient error is retried exactly ONCE on the same key after 400 ms without consuming the key budget.
+ * next tried; a transient error is retried exactly ONCE on the same key after 400 ms (capacityRetryDelayMs when the provider
+ * is busy, isCapacityBusy) without consuming the key budget.
  */
 async function runWithKeys(opts) {
     const { name, pool } = opts;
@@ -43800,7 +44005,15 @@ async function runWithKeys(opts) {
             }
             if (isTransient(error) && transientRetries < maxTransientRetries) {
                 transientRetries++;
-                await sleep((opts.retryDelayMs ?? 400) * transientRetries);
+                const capacity = opts.capacityRetryDelayMs !== undefined && isCapacityBusy(error, message);
+                await sleep(capacity ? opts.capacityRetryDelayMs : (opts.retryDelayMs ?? 400) * transientRetries);
+                if (opts.signal?.aborted) {
+                    // the outer budget ran out during the wait: no second call
+                    throw new ProviderError(`${name} analysis failed: ${message} (retry abandoned: aborted)`, {
+                        status: statusOf(error),
+                        errorClass: classifyError(error),
+                    });
+                }
                 attempt--;
                 continue;
             }
@@ -56501,10 +56714,12 @@ function getPatternStats() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   durationIntent: () => (/* binding */ durationIntent),
 /* harmony export */   extractDurationMinutes: () => (/* binding */ extractDurationMinutes),
 /* harmony export */   firstAmountFromText: () => (/* binding */ firstAmountFromText),
 /* harmony export */   firstNumberFromText: () => (/* binding */ firstNumberFromText),
 /* harmony export */   hasDurationMention: () => (/* binding */ hasDurationMention),
+/* harmony export */   hasMinuteUnit: () => (/* binding */ hasMinuteUnit),
 /* harmony export */   numberMentions: () => (/* binding */ numberMentions),
 /* harmony export */   serviceOfferAmountFromText: () => (/* binding */ serviceOfferAmountFromText)
 /* harmony export */ });
@@ -56599,6 +56814,97 @@ function serviceOfferAmountFromText(text) {
         return knownPlan.value;
     return candidates.find(({ value }) => value >= 25 && value <= 1000)?.value ?? -1;
 }
+// One token each after squeezing repeated letters ("minsss" → "mins"): min, mins, minute(s), minut(s), minit(s),
+// minitue(s), mintue(s), minat, mint(s), miny, mnt(s). Whole tokens only, so "admin" / "minimum" never match.
+const MINUTE_TOKEN = /^(?:min(?:ute|ut|it|itue|tue|at|t|y)?|mnt)s*$/;
+const SECOND_TOKEN = /^(?:secs?|seconds?|scnds?)$/;
+const NUMBER_TOKEN = /^\d+$/;
+// Complaint words that count only right next to the duration ("only 4 minutes", "4 hi min"): two tokens at most.
+const NEAR_COMPLAINT = ['only', 'onli', 'just', 'sirf', 'srf', 'bas', 'itna', 'itni', 'itne', 'keval', 'kewal'];
+// Complaint words that count anywhere in a minutes message ("remaing 6 min", "10min bol ke 4 min kyu??").
+const ANYWHERE_COMPLAINT = ['remaining', 'remaing', 'remain', 'baki', 'baaki', 'banki', 'bacha', 'bache', 'khatam', 'khtm', 'cut', 'short', 'kyu', 'kyun', 'kyon', 'why', 'extend'];
+const ANYWHERE_COMPLAINT_PHRASES = ['not completed', 'not complete', 'nahi hua', 'nhi hua', 'hi hua', 'hua tha', 'bol ke', 'bolke', 'bola tha', 'called for'];
+// "just 2 min, busy" / "wait 5 min" is the user asking us to wait, not a complaint.
+const WAITING = ['wait', 'wt', 'ruko', 'ruk', 'rukja', 'rukjao', 'busy', 'coming', 'aata', 'aati', 'hold', 'brb', 'later'];
+// A complaint with no number at all ("itna hi?", "so short", "call cut ho gaya jaldi").
+const SHORT_COMPLAINT_PHRASES = ['itna hi', 'itni hi', 'itna sa', 'bas itna', 'bas itni', 'itna jaldi', 'itni jaldi', 'so short', 'too short', 'very short', 'bahut short', 'bohot short', 'short call', 'call short', 'jaldi khatam', 'so soon', 'too soon'];
+const ENDED = ['cut', 'khatam', 'khtm', 'over', 'end', 'ended'];
+const QUICKLY = ['jaldi', 'jldi', 'soon', 'early', 'itna', 'itni'];
+const QUESTION_WORDS = ['how', 'hw', 'kitna', 'kitne', 'kitane', 'ketna', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra', 'whats', 'wats', 'milega', 'milenge', 'milegi', 'hoga', 'hogi', 'dogi', 'doge'];
+const QUESTION_PHRASES = ['what is', 'wat is', 'how long', 'kab tak', 'kitni der', 'kitna der'];
+const TIME_WORDS = ['time', 'tym', 'duration', 'der', 'lamba'];
+function durationTokens(text) {
+    return String(text ?? '')
+        .toLowerCase()
+        .replace(/[०-९]/g, (digit) => String(digit.charCodeAt(0) - 0x0966))
+        .replace(/['’]/g, '')
+        .replace(/([a-z])\1{2,}/g, '$1')
+        .replace(/(\d)([a-z])/g, '$1 $2')
+        .replace(/([a-z])(\d)/g, '$1 $2')
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean);
+}
+function isMinuteToken(tokens, index) {
+    const token = tokens[index];
+    // Bare "mn" only straight after a number ("2 mn"), never as a word of its own.
+    return MINUTE_TOKEN.test(token) || (token === 'mn' && index > 0 && NUMBER_TOKEN.test(tokens[index - 1]));
+}
+/** The text names minutes in any spelling ("2min", "how many mints", "kitne mnts", "minsss"). */
+function hasMinuteUnit(text) {
+    const tokens = durationTokens(text);
+    return tokens.some((_, index) => isMinuteToken(tokens, index));
+}
+/**
+ * Question, complaint or neither, for a message about call minutes. A complaint word counts only next to the
+ * duration (so "just tell me how many mins" is a question) or as a short number-less complaint ("itna hi?"); a
+ * complaint wins over a question ("only 5 min?"). Seconds ("only 55 sec") can only make a complaint.
+ */
+function durationIntent(text) {
+    const tokens = durationTokens(text);
+    const joined = ` ${tokens.join(' ')} `;
+    const has = (words) => tokens.some((token) => words.includes(token));
+    const hasPhrase = (phrases) => phrases.some((phrase) => joined.includes(` ${phrase} `));
+    const units = [];
+    const durationNumbers = new Set();
+    tokens.forEach((token, index) => {
+        if (!isMinuteToken(tokens, index) && !SECOND_TOKEN.test(token))
+            return;
+        units.push(index);
+        // "4 min", "4 hi min" / "4 only mins", "mins 6".
+        if (NUMBER_TOKEN.test(tokens[index - 1] ?? ''))
+            durationNumbers.add(index - 1);
+        else if (NUMBER_TOKEN.test(tokens[index - 2] ?? '') && FILLERS.includes(tokens[index - 1]))
+            durationNumbers.add(index - 2);
+        else if (NUMBER_TOKEN.test(tokens[index + 1] ?? ''))
+            durationNumbers.add(index + 1);
+    });
+    const anchors = [...units, ...durationNumbers];
+    const amounts = tokens.map((token, index) => (NUMBER_TOKEN.test(token) && !durationNumbers.has(index) ? index : -1)).filter((index) => index >= 0);
+    const distance = (index, to) => Math.min(Infinity, ...to.map((other) => Math.abs(other - index)));
+    if (units.length > 0) {
+        const nearComplaint = !has(WAITING) && tokens.some((token, index) => {
+            // "hi" is a complaint only after the number/unit ("2 min hi hua", "4 hi min"), never a greeting before it.
+            const cue = NEAR_COMPLAINT.includes(token) || (token === 'hi' && anchors.includes(index - 1));
+            if (!cue)
+                return false;
+            const toDuration = distance(index, anchors);
+            // "10 min only 150?" is a price offer: the cue sits as close to the amount as to the minutes.
+            return toDuration <= 2 && toDuration < distance(index, amounts);
+        });
+        // "3 min more" asks for the rest of the call.
+        const moreAfterUnit = units.some((index) => tokens[index + 1] === 'more');
+        if (nearComplaint || moreAfterUnit || has(ANYWHERE_COMPLAINT) || hasPhrase(ANYWHERE_COMPLAINT_PHRASES)) {
+            return 'complaint';
+        }
+    }
+    else if (!tokens.some((token) => NUMBER_TOKEN.test(token)) && tokens.length <= 8) {
+        if (hasPhrase(SHORT_COMPLAINT_PHRASES) || (has(ENDED) && has(QUICKLY)))
+            return 'complaint';
+    }
+    const aboutMinutes = units.some((index) => isMinuteToken(tokens, index)) || has(TIME_WORDS) || hasPhrase(['how long', 'kab tak']);
+    const asks = has(QUESTION_WORDS) || hasPhrase(QUESTION_PHRASES) || String(text ?? '').trim().endsWith('?');
+    return aboutMinutes && asks ? 'question' : 'none';
+}
 
 
 /***/ },
@@ -56668,6 +56974,22 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("t
 const POST_SHOW_MINUTES_WINDOW_MS = 30 * 60 * 1000;
 function showDeliveredRecently(chatId) {
     return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_19__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
+}
+// Waiting for / asking where the call is: never a complaint about the last call (payment words are checked too).
+const WAITING_FOR_CALL = ['waiting', 'why no call', 'why not call', 'not coming', 'not calling', 'kab', 'where'];
+// "in this price what's the mins?" / "is price me kitne min": minutes for the price already paid, not a price question.
+const MINUTES_FOR_THIS_PRICE = /\b(?:this|that|same)\s+(?:price|amount|rate)\b|\b(?:is|iss|isi)\s+(?:price|amount|rate)\s+(?:me|mein|mai|mei|main|pe|par)\b/;
+/**
+ * "150 kitna minute", "₹150 me kitne min?", "in this price what's the mins": a minutes question whose only number is
+ * the amount (no duration to price), so it wants the duration line, not the price/pay reply.
+ */
+function asksMinutesForPrice(text) {
+    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.durationIntent)(text) !== 'question')
+        return false;
+    if (MINUTES_FOR_THIS_PRICE.test(text.toLowerCase()))
+        return true;
+    const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
+    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
 }
 /**
  * Duration response messages
@@ -57019,14 +57341,26 @@ const paidPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, AGE_QUERY) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitne ki ho', 'kitni ki ho'])) {
                 return false;
             }
+            // Owner 2026-10-20: after a delivered show (the 'demo' moment within 30 min, or demoGiven on the record), a
+            // complaint about the call ("just 2 mins", "itna hi?", "only 55 sec") gets callOverMessages.
+            const PAYMENT_ARRAY = ['pay', 'payment', 'paisa', 'paise', 'transaction', 'amt', 'ant', 'amount', 'rupee', 'rupees', 'rs', '₹', '$'];
+            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.durationIntent)(text);
+            const recentShow = showDeliveredRecently(context.chatId);
+            const showDelivered = recentShow || Boolean(userDetails.demoGiven);
+            // "paid 5 min ago why no call" / "waiting 10 min, call kab?" is a repeat payer waiting for the next call, not
+            // a complaint about the last one: it keeps the pre-2026-10-20 routing below.
+            const waitingForCall = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [...PAYMENT_ARRAY, 'paid']) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, WAITING_FOR_CALL);
+            if (intent === 'complaint' && showDelivered && !waitingForCall) {
+                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, { message: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages) });
+                return true;
+            }
             const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text);
-            const TIME_ARRAY = ['time', 'tim', 'duration', 'durat', 'lamba', 'lamb', 'when', 'wen', 'kab'];
+            const TIME_ARRAY = ['time', 'tim', 'duration', 'durat', 'lamba', 'lamb', 'when', 'wen', 'kab', 'how long'];
             const DURATION_UNITS = ['min', 'mins', 'minute', 'minutes', 'miny', 'mint'];
             const KITNA_ARRAY = ['dher', 'der', 'entha'];
             const HOW_MUCH_QUESTION = ['how much', 'hw much'];
-            const PAYMENT_ARRAY = ['pay', 'payment', 'paisa', 'paise', 'transaction', 'amt', 'ant', 'amount', 'rupee', 'rupees', 'rs', '₹', '$'];
             const bareDurationUnit = DURATION_UNITS.includes(trimPunctuation(text));
-            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS);
+            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.hasMinuteUnit)(text);
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const hasNumberedKitnaDuration = durationMinutes !== -1 &&
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) &&
@@ -57037,23 +57371,27 @@ const paidPatterns = [
             const TIME_TARGET = ["time", "tym", "duration", "min", "mins", "minute", "minutes", "miny", "der", "long"];
             const asksPriceAmount = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HOW_MUCH_QUESTION) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, TIME_TARGET);
             const asksPriceForSpecificDuration = hasHowMuchPrice && hasDurationUnit;
-            const minutesAfterShow = hasDurationUnit && showDeliveredRecently(context.chatId);
-            if (!minutesAfterShow && isDurationExcluded(text) && !typoTolerantDurationQuestion) {
+            const minutesForPrice = asksMinutesForPrice(text);
+            const minutesAfterShow = hasDurationUnit && recentShow;
+            if (!minutesAfterShow && !minutesForPrice && isDurationExcluded(text) && !typoTolerantDurationQuestion) {
                 return false;
             }
             if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [...TIME_ARRAY, ...KITNA_ARRAY]) || hasDurationUnit || typoTolerantDurationQuestion) &&
                 !asksPriceAmount &&
                 !asksPriceForSpecificDuration &&
                 !hasNumberedKitnaDuration &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_ARRAY) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'cost', 'rate', 'amount', 'money', 'pay'])) {
+                (minutesForPrice || (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_ARRAY) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'cost', 'rate', 'amount', 'money', 'pay'])))) {
                 // "remaing 6 min" is 6 minutes, not ₹6 (kavya1 1008701926 2026-10-19 got the "Demo : 1 minute" menu).
                 const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text);
-                const message = minutesAfterShow
-                    ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages)
-                    : money > 0
-                        ? getDurationMessageByAmount(money)
-                        : getDurationMessageByUserState(userDetails);
+                // After a show a question ("how many mins?", "150 kitna minute") gets the duration line for the amount
+                // in the text, else for payAmount; a bare "5 min" right after the show is still about that call.
+                const message = intent === 'question' && showDelivered
+                    ? getDurationMessageByAmount(money > 0 ? money : Number(userDetails.payAmount) || 0)
+                    : minutesAfterShow
+                        ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages)
+                        : money > 0
+                            ? getDurationMessageByAmount(money)
+                            : getDurationMessageByUserState(userDetails);
                 await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, { message });
                 return true;
             }
@@ -57309,6 +57647,9 @@ const paidPatterns = [
                 (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstNumberFromText)(text) === -1 &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount']);
             if (hasBareKitnaDuration)
+                return false;
+            // A minutes question for an amount ("150 kitna minute"): paid_user_duration_time_question answers it.
+            if (asksMinutesForPrice(text))
                 return false;
             if (hasDurationWord && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_FOR_DURATION) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['free', 'timepass', 'time pas'])) {
                 const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text);
@@ -67764,7 +68105,9 @@ function restoreHolds(records) {
     }
     capMap(pendingHolds);
 }
-async function holdForLaterAnalysis(event, chatId) {
+/** Fallback "not a payment" verdicts needed before the final give-up deletes the photo and asks to pay (review 2026-10-20). */
+const MIN_NOT_PAYMENT_VERDICTS_TO_ASK = 2;
+async function holdForLaterAnalysis(event, chatId, held) {
     const msgId = Number(event.message.id) || 0;
     const existing = pendingHolds.get(chatId);
     const sameMessage = existing !== undefined && existing.msgId === msgId;
@@ -67797,7 +68140,94 @@ async function holdForLaterAnalysis(event, chatId) {
     // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
     if (delay !== undefined)
         return;
-    await sendAnalysisUnavailableNotice(chatId, note);
+    // Final give-up. What the fallback image models saw decides the message (only the primary's verdict is final, so none
+    // of this is a reject):
+    //  - any model saw a PAYMENT screen but no usable amount -> evidence only (never deleted: it may be a real payment) and
+    //    the "send the full screenshot" ask. This wins over "not a payment" (a genuine payer is never treated as a non-payer).
+    //  - otherwise >= 2 fallbacks said "not a payment" -> evidence, delete if saved, the ordinary-picture pay ask (no
+    //    compliment, no invalid-photo count). One such verdict alone is not enough (review 2026-10-20): silent.
+    //  - nobody judged it (or one "not a payment") -> silent, as before.
+    const unclearNo = Number(held?.imageDetails?.fallbackUnclearPaymentVerdicts) || 0;
+    const fallbackNo = Number(held?.imageDetails?.fallbackNotPaymentVerdicts) || 0;
+    const extra = [];
+    if (sameMessage && held && (unclearNo >= 1 || fallbackNo >= MIN_NOT_PAYMENT_VERDICTS_TO_ASK)) {
+        const done = await askAfterHoldGiveUp(event, chatId, held, { unclearNo, fallbackNo }, existing);
+        if (done)
+            extra.push(fact("Fallback", done));
+    }
+    await sendAnalysisUnavailableNotice(chatId, note, extra);
+}
+/**
+ * Final hold give-up with fallback verdicts. Evidence photo first. Payment screen, amount unclear (unclearNo >= 1):
+ * the photo is never deleted, the user is asked for the full screenshot. Otherwise (>= 2 "not a payment"): delete the user's
+ * photo ONLY when the evidence was really saved (the unwanted channel has failed for days: item 19-8), then the pay ask
+ * replyToNonPaymentPicture uses (without its compliment). Never counts an invalid photo. Skipped when the chat was credited
+ * since the hold (checked again right before the delete and before the message), or for a blocked
+ * user (no replies to blocked users, owner 2026-10-13). Returns what was done (ops notice line), or null when skipped.
+ */
+async function askAfterHoldGiveUp(event, chatId, held, verdicts, hold) {
+    const msgId = Number(event.message.id) || 0;
+    const { unclearNo, fallbackNo } = verdicts;
+    const unclearPayment = unclearNo >= 1;
+    if (creditedSinceTaken(chatId, hold.takenSeq, hold.takenAt)) {
+        logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: chat credited since the hold; not asking`);
+        return null;
+    }
+    try {
+        const userDetails = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().read(chatId);
+        if (userDetails?.canReply === 0) {
+            logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: blocked user; not asking`);
+            return null;
+        }
+    }
+    catch (error) {
+        logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: user read failed, asking anyway:`, error);
+    }
+    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
+    let broadcastName = "";
+    try {
+        const senderJson = await (0,_conversation_sender__WEBPACK_IMPORTED_MODULE_5__.getSenderJson)(event);
+        broadcastName = senderJson.username ? `@${senderJson.username}` : [senderJson.firstName, senderJson.lastName].filter(Boolean).join(" ");
+    }
+    catch { /* the name is only for the evidence card */ }
+    const seen = unclearPayment
+        ? `${unclearNo} model(s) saw a payment screen but no readable amount${fallbackNo ? `, ${fallbackNo} said not a payment` : ""}`
+        : `${fallbackNo} fallback model(s) said not a payment`;
+    const asked = unclearPayment ? "Asked the user for the full screenshot." : "Asked the user to pay.";
+    const msg = `UNWANTED IMAGE (held, analysis down) : @${process.env.clientId}\nChatId : ${chatId}\nUser : ${broadcastName}\nInvalidCount: ${invalidPhotoCount}\n\n\nPrimary model never answered; ${seen}. ${asked}`;
+    let saved = false;
+    try {
+        saved = await postUnwantedImage(event, chatId, held.photoBuffer, broadcastName, invalidPhotoCount, msg);
+    }
+    catch (error) {
+        logger.error(`[ProcessImage] hold give-up evidence post threw for ${chatId} msg ${msgId}:`, error);
+    }
+    // The evidence post awaits Telegram/bots: the chat may have been credited meanwhile (another screenshot read fine).
+    const creditedNow = (step) => {
+        if (!creditedSinceTaken(chatId, hold.takenSeq, hold.takenAt))
+            return false;
+        logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: chat credited during the give-up (before ${step}); stopping`);
+        return true;
+    };
+    let deleted = false;
+    if (unclearPayment) {
+        // may be a real payment: never delete it
+    }
+    else if (saved) {
+        if (creditedNow("the delete"))
+            return `${seen}; evidence saved; chat credited meanwhile, photo kept, user not asked`;
+        deleted = (await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event)) === true;
+    }
+    else {
+        logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: evidence NOT saved, the photo is kept (not deleted)`);
+    }
+    if (creditedNow("the message"))
+        return `${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}; chat credited meanwhile, user not asked`;
+    const message = unclearPayment ? (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) : pickPayAskMsg();
+    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message });
+    const askedShort = unclearPayment ? "asked for the full screenshot" : "asked to pay";
+    logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: ${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}, ${askedShort}`);
+    return `${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}, user ${unclearPayment ? "asked for the full screenshot" : "asked to pay"}`;
 }
 function creditedSinceTaken(chatId, takenSeq, takenAt) {
     return takenSeq > 0 ? (creditedSeq.get(chatId) ?? 0) > takenSeq : (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.creditedSince)(chatId, takenAt - 1);
@@ -68049,34 +68479,44 @@ async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastN
         logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
     }
 }
-/** Non-payment photo: posted to @unwantedupdates1, bot card on UNVDS as the fallback. */
+/**
+ * Non-payment photo: posted to @unwantedupdates1, bot card on UNVDS as the fallback. Resolves true only when the PHOTO
+ * landed somewhere (forwarded to @unwantedupdates1 with its card, or the UNVDS bot photo was delivered); false when it
+ * did not (a forward that failed while the text card went through is false too). Callers that delete the user's photo
+ * depend on it.
+ */
 async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg) {
     // Primary: the client account posts to @unwantedupdates1 (forward renders the photo in-chat,
     // then a text card with the analysis). forwardToChannel swallows its own errors, but the text
     // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
-    // Fallback ONLY then: bot photo on UNVDS (never CLIENT_UPDATES; no bot is a member of @unwantedupdates1).
+    // Fallback then, and when the forward failed (text card only): bot photo on UNVDS (never CLIENT_UPDATES; no bot is a
+    // member of @unwantedupdates1). True only when the photo itself landed somewhere.
     try {
-        await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__.forwardToChannel)(event, "@unwantedupdates1");
+        const forwarded = await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__.forwardToChannel)(event, "@unwantedupdates1");
         await event.client.sendMessage("@unwantedupdates1", {
             message: msg.slice(0, 1000),
         });
+        if (forwarded)
+            return true;
+        logger.warn(`[ProcessImage] unwanted-image photo NOT forwarded to @unwantedupdates1 for ${chatId} (text card only); falling back to UNVDS bot`);
     }
     catch (error) {
         logger.warn(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
-        const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.UNVDS, photoBuffer, {
-            title: "Unwanted image",
-            fields: [
-                { label: "User", value: broadcastName || "-", code: false },
-                { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
-                { label: "Invalid pics", value: invalidPhotoCount, code: false },
-            ],
-            details: msg.split("\n").slice(4).filter((l) => l.trim()),
-            detailsTitle: "Image analysis",
-        });
-        if (!unwantedSent) {
-            logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
-        }
     }
+    const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.UNVDS, photoBuffer, {
+        title: "Unwanted image",
+        fields: [
+            { label: "User", value: broadcastName || "-", code: false },
+            { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
+            { label: "Invalid pics", value: invalidPhotoCount, code: false },
+        ],
+        details: msg.split("\n").slice(4).filter((l) => l.trim()),
+        detailsTitle: "Image analysis",
+    });
+    if (!unwantedSent) {
+        logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
+    }
+    return unwantedSent === true;
 }
 /** Failed-payment screenshot: delete, tell the user, schedule the reminder. */
 async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer) {
@@ -68408,6 +68848,14 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount) 
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
     }
 }
+/** The pay nudge an ordinary picture gets (also the hold give-up's ask for a fallback "not a payment"). */
+function pickPayAskMsg() {
+    return (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+        (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
+        (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
+        (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Come make me cum darling**"
+    ]);
+}
 /** Ordinary picture: compliment + pay nudge (or delete after 4 invalid), counts invalid photos. */
 async function replyToNonPaymentPicture(event, chatId, imageDetails) {
     const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
@@ -68425,11 +68873,7 @@ async function replyToNonPaymentPicture(event, chatId, imageDetails) {
             ]),
         });
         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
-                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
-                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Come make me cum darling**"
-            ]),
+            message: pickPayAskMsg(),
         });
     }
     else {
@@ -68467,7 +68911,7 @@ async function processImage(event) {
         if (imageDetails.analysisUnavailable) {
             // Our analysis service is down: not the user's fault. Never delete, never count it as an
             // invalid photo; keep the screenshot and check it again later (bounded), and tell ops.
-            await holdForLaterAnalysis(event, chatId);
+            await holdForLaterAnalysis(event, chatId, { photoBuffer: photoBuffer, imageDetails });
             return;
         }
         if (imageDetails.proofBlocked) {
@@ -81164,6 +81608,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SHADOW_TIMEOUT_MS: () => (/* binding */ SHADOW_TIMEOUT_MS),
 /* harmony export */   analyzeImage: () => (/* binding */ analyzeImage),
 /* harmony export */   awaitShadowIdle: () => (/* binding */ awaitShadowIdle),
+/* harmony export */   fallbackNotPaymentVerdicts: () => (/* binding */ fallbackNotPaymentVerdicts),
+/* harmony export */   fallbackUnclearPaymentVerdicts: () => (/* binding */ fallbackUnclearPaymentVerdicts),
 /* harmony export */   getRecordStats: () => (/* binding */ getRecordStats),
 /* harmony export */   getShadowStats: () => (/* binding */ getShadowStats),
 /* harmony export */   imageAnalysisSource: () => (/* binding */ imageAnalysisSource),
@@ -81354,6 +81800,21 @@ function scheduleShadow(image, ctx, remote) {
         logger.warn(`[vision-shadow] schedule failed: ${String(error?.message ?? error)}`);
     }
 }
+const TEXT_READERS = new Set(['rapidapi', 'ocr-space']);
+/** Fallback image models that judged the screenshot "not a payment" (never the primary: its verdict would be final). */
+function fallbackNotPaymentVerdicts(vision) {
+    if (!vision || !Array.isArray(vision.attempts))
+        return 0;
+    return vision.attempts.filter((a) => !a.ok && a.errorClass === 'not_payment' && !TEXT_READERS.has(a.provider)).length;
+}
+/** Attempt classes an image model records only after it read the image as a payment (or right after another model did). */
+const UNCLEAR_PAYMENT_CLASSES = new Set(['no_amount', 'amount_range', 'escalated', 'low_confidence']);
+/** Image models that saw a payment screen but no usable amount (text readers excluded: OCR-grade, not a visual judgement). */
+function fallbackUnclearPaymentVerdicts(vision) {
+    if (!vision || !Array.isArray(vision.attempts))
+        return 0;
+    return vision.attempts.filter((a) => !a.ok && a.errorClass !== null && UNCLEAR_PAYMENT_CLASSES.has(a.errorClass) && !TEXT_READERS.has(a.provider)).length;
+}
 /**
  * Entry point used by processImage. `remoteFn` is getImageDetails (injected so this module stays light and
  * the remote path is untouched). In the default mode the returned object IS the remote's own object.
@@ -81406,7 +81867,7 @@ async function analyzeImage(photoBuffer, ctx, remoteFn) {
         // processImage holds the screenshot and re-checks it later (never deleted, never counted invalid).
         if (source === 'local-only') {
             recordLocalMode(photoBuffer, ctx, attempt, null, { source, decidedBy: 'local', finalDecision: 'hold', remoteConfirm: 'none' });
-            return analysisUnavailableDetails();
+            return analysisUnavailableDetails(fallbackNotPaymentVerdicts(attempt.vision), fallbackUnclearPaymentVerdicts(attempt.vision));
         }
         // local: fall through to the remote result (its own retry + hold handling applies)
     }
@@ -81482,11 +81943,13 @@ function proofBlockReasons(vision, ctx) {
         return null;
     }
 }
-function analysisUnavailableDetails() {
+function analysisUnavailableDetails(fallbackNotPayment = 0, fallbackUnclearPayment = 0) {
     return {
         amount: 0, isPayment: false, isFailed: false, payeeName: '', payerName: '', text: '',
         description: 'Analysis unavailable', wordCount: 0, time: '', isFinished: false, isSuccess: false,
         isInappropriate: false, error: true, confidence: 0, analysisUnavailable: true,
+        ...(fallbackNotPayment > 0 ? { fallbackNotPaymentVerdicts: fallbackNotPayment } : {}),
+        ...(fallbackUnclearPayment > 0 ? { fallbackUnclearPaymentVerdicts: fallbackUnclearPayment } : {}),
     };
 }
 function raceRemote(work, ms) {
@@ -95071,12 +95534,15 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:core-utils');
+/** Deletes the message for both sides. Never throws; resolves true when Telegram accepted the delete, false otherwise. */
 async function deleteMessage(event) {
     try {
         await event.message.delete({ revoke: true });
+        return true;
     }
     catch (error) {
         logger.log((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Failed to Delete Message", true));
+        return false;
     }
 }
 const DELETE_BEFORE_DELAY_MS = 50000;
@@ -95667,9 +96133,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger( true ? __webpack_filename__ : 0);
+/** Never throws. Resolves true when the forward went through, false when it failed (logged here). */
 async function forwardToChannel(event, channel) {
     try {
         await event.message.forwardTo(channel);
+        return true;
     }
     catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
@@ -95677,6 +96145,7 @@ async function forwardToChannel(event, channel) {
             logger.warn("Failed to forward Message", errMsg);
         else
             logger.error("Failed to forward Message", errMsg);
+        return false;
     }
 }
 
