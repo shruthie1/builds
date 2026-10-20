@@ -7894,6 +7894,1106 @@ class PromoLogger {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   runFollowUp: () => (/* binding */ runFollowUp),
+/* harmony export */   scheduleFollowUp: () => (/* binding */ scheduleFollowUp)
+/* harmony export */ });
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+// PromotionFlowRunner: follow-up scheduling and execution.
+
+
+async function scheduleFollowUp(host, message) {
+    if (host.shouldAbortStartedRunnerWork()) {
+        host.log('debug', `Follow-up not scheduled because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
+        return;
+    }
+    let stats;
+    try {
+        stats = (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.normalizeStats)(await host.adapter.getStats());
+    }
+    catch (error) {
+        host.log('warn', `Follow-up stats load failed; not scheduling follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+        return;
+    }
+    const existing = host.followUpTimers.get(message.channelId);
+    const activeFollowUpCount = existing ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
+    const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
+        isFollowUp: message.isFollowUp,
+        daysLeft: stats.daysLeft,
+        channelAvailable: true,
+        activeFollowUpCount,
+        ...(host.options.maxFollowUpCount !== undefined ? { maxFollowUpCount: (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) } : {}),
+    });
+    if (!followUpPolicy.shouldSchedule) {
+        host.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
+        return;
+    }
+    const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.calculateFollowUpDelay)((0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpDelayMs, 15 * 60000), (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpJitterMs, 30000));
+    if (existing)
+        clearTimeout(existing);
+    const followUpWork = {
+        ...message,
+        timestamp: Date.now() + delayMs,
+        workType: 'followUp',
+    };
+    try {
+        await host.messageQueue.enqueueDurable(followUpWork);
+    }
+    catch (error) {
+        host.log('error', `Follow-up persistence failed; skipping follow-up rather than leaving restart-unsafe work; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+        return;
+    }
+    const timeout = setTimeout(() => {
+        if (host.shouldAbortStartedRunnerWork()) {
+            host.log('debug', `Follow-up timer skipped because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
+            return;
+        }
+        void (async () => {
+            try {
+                const claimed = await host.claimFollowUpExecution(followUpWork);
+                if (claimed === null)
+                    return;
+                if (!claimed) {
+                    await host.removeQueuedMessage(followUpWork);
+                    return;
+                }
+                await host.runFollowUp(followUpWork);
+                await host.removeQueuedMessage(followUpWork);
+            }
+            catch (error) {
+                host.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+            }
+            finally {
+                host.followUpTimers.delete(message.channelId);
+            }
+        })();
+    }, delayMs);
+    timeout.unref?.();
+    host.followUpTimers.set(message.channelId, timeout);
+    host.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${host.followUpTimers.size} replacedExisting=${!!existing}`);
+    host.health.totalFollowUpsScheduled += 1;
+    host.health.lastFollowUpScheduledAt = Date.now();
+    void host.callHook('onFollowUpScheduled', () => host.adapter.onFollowUpScheduled?.(message, delayMs));
+}
+async function runFollowUp(host, message) {
+    host.health.lastFollowUpStartedAt = Date.now();
+    try {
+        host.log('debug', `Follow-up execution start; channelId=${message.channelId} messageId=${message.messageId}`);
+        if (host.shouldAbortStartedRunnerWork()) {
+            host.log('debug', `Skipping follow-up for ${message.channelId}: runner stopped`);
+            return;
+        }
+        if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.isActive())) {
+            host.log('debug', `Skipping follow-up for ${message.channelId}: adapter inactive`);
+            return;
+        }
+        if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue())) {
+            host.log('debug', `Skipping follow-up for ${message.channelId}: shouldContinue returned false`);
+            return;
+        }
+        let stats;
+        try {
+            stats = (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.normalizeStats)(await host.adapter.getStats());
+        }
+        catch (error) {
+            host.log('warn', `Follow-up execution stats load failed; skipping follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+            return;
+        }
+        const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
+            isFollowUp: message.isFollowUp,
+            daysLeft: stats.daysLeft,
+            channelAvailable: true,
+        });
+        if (!followUpPolicy.shouldSchedule) {
+            host.log('debug', `Skipping follow-up for ${message.channelId}: ${followUpPolicy.reason ?? 'policy'}`);
+            return;
+        }
+        const channel = await host.adapter.getChannel(message.channelId);
+        if (!channel) {
+            host.log('debug', `Skipping follow-up for ${message.channelId}: channel unavailable`);
+            return;
+        }
+        await host.processChannel(channel, true);
+    }
+    catch (error) {
+        host.log('error', `Follow-up failed for ${message.channelId}: ${host.normalizeError(error)}`);
+    }
+    finally {
+        host.health.lastFollowUpFinishedAt = Date.now();
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts"
+/*!*************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts ***!
+  \*************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   compact: () => (/* binding */ compact),
+/* harmony export */   describeSelection: () => (/* binding */ describeSelection),
+/* harmony export */   formatCandidate: () => (/* binding */ formatCandidate),
+/* harmony export */   formatChannel: () => (/* binding */ formatChannel),
+/* harmony export */   formatCompactChannel: () => (/* binding */ formatCompactChannel),
+/* harmony export */   formatCounts: () => (/* binding */ formatCounts),
+/* harmony export */   formatStats: () => (/* binding */ formatStats),
+/* harmony export */   getSkippedSelectionReason: () => (/* binding */ getSkippedSelectionReason),
+/* harmony export */   normalizeError: () => (/* binding */ normalizeError),
+/* harmony export */   safeJson: () => (/* binding */ safeJson),
+/* harmony export */   summarizeSelectionChannels: () => (/* binding */ summarizeSelectionChannels),
+/* harmony export */   toChannelIdSet: () => (/* binding */ toChannelIdSet)
+/* harmony export */ });
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+
+function formatStats(stats) {
+    return `success=${stats.successCount},failed=${stats.failedCount},failStreak=${stats.failStreak},daysLeft=${stats.daysLeft}`;
+}
+function describeSelection(host, selection, intelligenceDocs) {
+    const intelligenceByChannel = new Map();
+    for (const doc of intelligenceDocs) {
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(doc.channelId);
+        if (channelId)
+            intelligenceByChannel.set(channelId, doc);
+    }
+    const proven = host.toChannelIdSet(selection.proven);
+    const untested = host.toChannelIdSet(selection.untested);
+    const skipCounts = new Map();
+    for (const channel of selection.skipped) {
+        const reason = host.getSkippedSelectionReason(channel, intelligenceByChannel).bucket;
+        skipCounts.set(reason, (skipCounts.get(reason) ?? 0) + 1);
+    }
+    return {
+        skipBreakdown: host.formatCounts(skipCounts),
+        selectedSample: host.summarizeSelectionChannels(selection.selected, (channel) => {
+            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+            if (channelId && proven.has(channelId))
+                return 'proven';
+            if (channelId && untested.has(channelId))
+                return 'untested';
+            return 'backfill';
+        }),
+        skippedSample: host.summarizeSelectionChannels(selection.skipped, (channel) => {
+            return host.getSkippedSelectionReason(channel, intelligenceByChannel).sample;
+        }),
+    };
+}
+function toChannelIdSet(channels) {
+    const ids = new Set();
+    for (const channel of channels) {
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+        if (channelId)
+            ids.add(channelId);
+    }
+    return ids;
+}
+function getSkippedSelectionReason(channel, intelligenceByChannel) {
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channel.channelId);
+    if (!channelId)
+        return { bucket: 'invalid-channel-id', sample: 'invalid-channel-id' };
+    const doc = intelligenceByChannel.get(channelId);
+    if (!doc)
+        return { bucket: 'duplicate-or-invalid', sample: 'duplicate-or-invalid' };
+    if (doc.safety.status === 'blocked')
+        return { bucket: 'safety-blocked', sample: 'safety-blocked' };
+    return { bucket: 'selection-filter', sample: 'selection-filter' };
+}
+function summarizeSelectionChannels(host, channels, label) {
+    if (channels.length === 0)
+        return 'none';
+    return channels
+        .slice(0, 8)
+        .map((channel) => `${host.formatCompactChannel(channel)}:${label(channel)}`)
+        .join('|');
+}
+function formatCounts(counts) {
+    if (counts.size === 0)
+        return 'none';
+    return [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([reason, count]) => `${reason}:${count}`)
+        .join('|');
+}
+function formatChannel(channel) {
+    return [
+        `channelId=${channel.channelId}`,
+        `username=${channel.username ?? 'unknown'}`,
+        `participants=${channel.participantsCount ?? 'unknown'}`,
+        `deleted=${channel.deletedCount ?? 0}`,
+        `success=${channel.successMsgCount ?? 0}`,
+        `failures=${channel.failureMsgCount ?? 0}`,
+    ].join(' ');
+}
+function formatCompactChannel(channel) {
+    return [
+        `channelId=${channel.channelId}`,
+        `username=${channel.username ?? 'unknown'}`,
+        `participants=${channel.participantsCount ?? 'unknown'}`,
+    ].join(',');
+}
+function formatCandidate(candidate) {
+    return `${candidate.kind}:${candidate.randomIndex}:${candidate.strategy ?? 'none'}`;
+}
+function compact(value) {
+    return value.replace(/\s+/g, ' ').slice(0, 240);
+}
+function safeJson(host, value) {
+    try {
+        const serialized = JSON.stringify(value);
+        return typeof serialized === 'string' ? host.compact(serialized) : String(value);
+    }
+    catch {
+        return String(value);
+    }
+}
+function normalizeError(error) {
+    if (error instanceof Error)
+        return error.message || error.name;
+    if (typeof error === 'string')
+        return error;
+    try {
+        return JSON.stringify(error);
+    }
+    catch {
+        return String(error);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   asNumber: () => (/* binding */ asNumber),
+/* harmony export */   asRunnerOptions: () => (/* binding */ asRunnerOptions),
+/* harmony export */   createPoolEntry: () => (/* binding */ createPoolEntry),
+/* harmony export */   createPoolEntryFromText: () => (/* binding */ createPoolEntryFromText),
+/* harmony export */   isAccountLike: () => (/* binding */ isAccountLike),
+/* harmony export */   isAdapterLike: () => (/* binding */ isAdapterLike),
+/* harmony export */   isExactTrue: () => (/* binding */ isExactTrue),
+/* harmony export */   isMessageQueueLike: () => (/* binding */ isMessageQueueLike),
+/* harmony export */   isValidMessageId: () => (/* binding */ isValidMessageId),
+/* harmony export */   mergePromotionHealthSignals: () => (/* binding */ mergePromotionHealthSignals),
+/* harmony export */   normalizeAvailableMessageIds: () => (/* binding */ normalizeAvailableMessageIds),
+/* harmony export */   normalizeChannel: () => (/* binding */ normalizeChannel),
+/* harmony export */   normalizeChannels: () => (/* binding */ normalizeChannels),
+/* harmony export */   normalizeMessageCheckResult: () => (/* binding */ normalizeMessageCheckResult),
+/* harmony export */   normalizeMessageSource: () => (/* binding */ normalizeMessageSource),
+/* harmony export */   normalizeMessageStrategy: () => (/* binding */ normalizeMessageStrategy),
+/* harmony export */   normalizeMessageText: () => (/* binding */ normalizeMessageText),
+/* harmony export */   normalizePoolMode: () => (/* binding */ normalizePoolMode),
+/* harmony export */   normalizePositiveInt: () => (/* binding */ normalizePositiveInt),
+/* harmony export */   normalizeReadyMessage: () => (/* binding */ normalizeReadyMessage),
+/* harmony export */   normalizeReadyMessages: () => (/* binding */ normalizeReadyMessages),
+/* harmony export */   normalizeSendResult: () => (/* binding */ normalizeSendResult),
+/* harmony export */   normalizeStats: () => (/* binding */ normalizeStats),
+/* harmony export */   normalizeText: () => (/* binding */ normalizeText),
+/* harmony export */   randomIntInclusive: () => (/* binding */ randomIntInclusive),
+/* harmony export */   resolveCandidatePoolMode: () => (/* binding */ resolveCandidatePoolMode),
+/* harmony export */   resolveQueuedPoolMode: () => (/* binding */ resolveQueuedPoolMode),
+/* harmony export */   safeBatchTarget: () => (/* binding */ safeBatchTarget),
+/* harmony export */   safeDelayMs: () => (/* binding */ safeDelayMs),
+/* harmony export */   safeElapsedMs: () => (/* binding */ safeElapsedMs),
+/* harmony export */   safeIntervalMs: () => (/* binding */ safeIntervalMs),
+/* harmony export */   safeNonNegativeInt: () => (/* binding */ safeNonNegativeInt),
+/* harmony export */   shouldRecordExploreFromCandidate: () => (/* binding */ shouldRecordExploreFromCandidate),
+/* harmony export */   shouldRollbackDailySendBudget: () => (/* binding */ shouldRollbackDailySendBudget),
+/* harmony export */   withMessageCheckText: () => (/* binding */ withMessageCheckText)
+/* harmony export */ });
+/* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+// PromotionFlowRunner: pure normalisers and guards for adapter/hook results.
+
+
+
+
+
+function safeBatchTarget(value, policyLimit) {
+    const safeLimit = safeNonNegativeInt(policyLimit);
+    if (value === undefined)
+        return safeLimit;
+    const safeValue = safeNonNegativeInt(value);
+    return Math.min(safeValue, safeLimit);
+}
+function safeDelayMs(value, fallback) {
+    if (value !== undefined && Number.isFinite(value) && value >= 0)
+        return Math.floor(value);
+    return safeNonNegativeInt(fallback);
+}
+function randomIntInclusive(min, max) {
+    const safeMin = safeNonNegativeInt(min);
+    const safeMax = Math.max(safeMin, safeNonNegativeInt(max));
+    return safeMin + Math.floor(Math.random() * (safeMax - safeMin + 1));
+}
+function safeIntervalMs(value, fallback) {
+    const delayMs = safeDelayMs(value, fallback);
+    return Math.max(1000, delayMs);
+}
+function normalizeStats(value) {
+    const stats = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) ? value : {};
+    return {
+        successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
+        failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
+        failStreak: safeNonNegativeInt(asNumber(stats['failStreak'])),
+        daysLeft: safeNonNegativeInt(asNumber(stats['daysLeft'])),
+    };
+}
+function normalizeMessageCheckResult(value) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) || !(value['status'] === 'exists'
+        || value['status'] === 'deleted'
+        || value['status'] === 'unknown')) {
+        return { status: 'unknown' };
+    }
+    const messageText = normalizeMessageText(value['messageText']);
+    return {
+        status: value['status'],
+        ...(messageText !== undefined ? { messageText } : {}),
+    };
+}
+function withMessageCheckText(message, result) {
+    // The queued text is the canonical pre-obfuscation candidate used for pool identity. Telegram
+    // returns the delivered text, which may contain random homoglyph/naturalization changes; never
+    // replace a valid canonical value with it or one template becomes many pool entries.
+    if (normalizeMessageText(message.messageText) !== undefined)
+        return message;
+    const messageText = normalizeMessageText(result.messageText);
+    return messageText !== undefined ? { ...message, messageText } : message;
+}
+function normalizeMessageText(value) {
+    if (typeof value !== 'string')
+        return undefined;
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : undefined;
+}
+function normalizeSendResult(value, candidate) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)) {
+        return {
+            sent: false,
+            messageIndex: candidate.randomIndex,
+            errorMessage: 'Malformed promotion send result',
+            terminal: true,
+        };
+    }
+    const messageIndex = typeof value['messageIndex'] === 'string' && value['messageIndex'].trim().length > 0
+        ? value['messageIndex'].trim()
+        : candidate.randomIndex;
+    const errorMessage = typeof value['errorMessage'] === 'string' && value['errorMessage'].trim().length > 0
+        ? value['errorMessage'].trim()
+        : undefined;
+    const messageText = normalizeMessageText(value['messageText']);
+    const messageSource = normalizeMessageSource(value['messageSource']);
+    const rawMessageId = typeof value['messageId'] === 'number' ? value['messageId'] : undefined;
+    const messageId = isValidMessageId(rawMessageId) ? rawMessageId : undefined;
+    const checkableByChannelId = value['checkableByChannelId'] === false ? false : undefined;
+    const attempted = value['attempted'] === false ? false : undefined;
+    return {
+        sent: value['sent'] === true,
+        ...(attempted === false ? { attempted } : {}),
+        messageIndex,
+        ...(messageId !== undefined ? { messageId } : {}),
+        ...(errorMessage !== undefined ? { errorMessage } : {}),
+        ...(value['terminal'] === true ? { terminal: true } : {}),
+        ...(messageText !== undefined ? { messageText } : {}),
+        ...(messageSource !== null ? { messageSource } : {}),
+        ...(checkableByChannelId === false ? { checkableByChannelId } : {}),
+    };
+}
+function normalizeChannels(value) {
+    if (!Array.isArray(value))
+        return [];
+    const channels = [];
+    for (const item of value) {
+        const channel = normalizeChannel(item);
+        if (channel)
+            channels.push(channel);
+    }
+    return channels;
+}
+function normalizeChannel(value) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value))
+        return null;
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(value['channelId']);
+    if (!channelId)
+        return null;
+    return {
+        ...value,
+        channelId,
+    };
+}
+function mergePromotionHealthSignals(channel, doc) {
+    if (!doc)
+        return channel;
+    return {
+        ...channel,
+        ...(Array.isArray(doc.messagePool) ? { messagePool: doc.messagePool } : {}),
+        ...(doc.outcomes ? { outcomes: doc.outcomes } : {}),
+    };
+}
+function normalizeAvailableMessageIds(value) {
+    if (value === undefined)
+        return undefined;
+    if (!Array.isArray(value))
+        return undefined;
+    return value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => item.length > 0);
+}
+function normalizeReadyMessages(value) {
+    if (!Array.isArray(value))
+        return [];
+    const messages = [];
+    for (const item of value) {
+        const message = normalizeReadyMessage(item);
+        if (message)
+            messages.push({ message, original: item });
+    }
+    return messages;
+}
+function normalizeReadyMessage(value) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value))
+        return null;
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(value['channelId']);
+    const messageId = asNumber(value['messageId']);
+    if (!channelId || !isValidMessageId(messageId))
+        return null;
+    const timestamp = asNumber(value['timestamp']);
+    const availableMessageCount = normalizePositiveInt(value['availableMessageCount']);
+    const strategy = normalizeMessageStrategy(value['strategy']);
+    const messageText = normalizeMessageText(value['messageText']);
+    const poolSource = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.isMessageSource)(value['poolSource']) ? value['poolSource'] : null;
+    const poolMode = normalizePoolMode(value['poolMode']);
+    return {
+        channelId,
+        messageId,
+        timestamp: Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0,
+        messageIndex: normalizeText(value['messageIndex']) ?? '0',
+        ...(strategy ? { strategy } : {}),
+        isFollowUp: value['isFollowUp'] === true,
+        ...(availableMessageCount !== null ? { availableMessageCount } : {}),
+        ...(messageText !== undefined ? { messageText } : {}),
+        ...(poolSource ? { poolSource } : {}),
+        ...(poolMode ? { poolMode } : {}),
+    };
+}
+function safeNonNegativeInt(value) {
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+function normalizePositiveInt(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+        ? Math.floor(value)
+        : null;
+}
+function normalizeMessageSource(value) {
+    return (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.isMessageSource)(value) ? value : null;
+}
+function safeElapsedMs(startTimestamp) {
+    if (!Number.isFinite(startTimestamp) || startTimestamp <= 0)
+        return 0;
+    return Math.max(0, Date.now() - startTimestamp);
+}
+function isValidMessageId(messageId) {
+    return messageId !== undefined && Number.isSafeInteger(messageId) && messageId > 0;
+}
+function asNumber(value) {
+    return typeof value === 'number' ? value : Number.NaN;
+}
+function isExactTrue(value) {
+    return value === true;
+}
+function normalizeText(value) {
+    if (typeof value !== 'string')
+        return null;
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : null;
+}
+function normalizeMessageStrategy(value) {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_MESSAGE_STRATEGIES.includes(normalized)
+        ? normalized
+        : null;
+}
+function normalizePoolMode(value) {
+    return value === 'explore' || value === 'reuse'
+        ? value
+        : null;
+}
+function asRunnerOptions(value) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) ? value : {};
+}
+function isAdapterLike(value) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
+        && typeof value['isActive'] === 'function'
+        && typeof value['getStats'] === 'function'
+        && typeof value['loadChannels'] === 'function'
+        && typeof value['getChannel'] === 'function'
+        && typeof value['getIntelligenceDocs'] === 'function'
+        && typeof value['getIntelligenceDoc'] === 'function'
+        && typeof value['sendPromotion'] === 'function'
+        && typeof value['checkMessage'] === 'function';
+}
+function isAccountLike(value) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value['intelligence'])
+        && typeof value['recordSuccess'] === 'function'
+        && typeof value['recordDeletion'] === 'function'
+        && typeof value['recordFailure'] === 'function'
+        && typeof value['recordExploreOutcome'] === 'function'
+        && typeof value['ensurePoolEntry'] === 'function'
+        && typeof value['recordPoolEntrySent'] === 'function'
+        && typeof value['recordPoolEntryOutcome'] === 'function'
+        && typeof value['getDailySendBudgetStatus'] === 'function'
+        && typeof value['reserveDailySendBudget'] === 'function'
+        && typeof value['rollbackDailySendBudget'] === 'function'
+        && typeof value['recordSend'] === 'function'
+        && typeof value['blockChannelPermanent'] === 'function'
+        && typeof value['blockChannelTemporary'] === 'function'
+        && typeof value['blockedChannelsForMobile'] === 'function';
+}
+function shouldRollbackDailySendBudget(result) {
+    // The daily send cap must count ONLY successful sends. Any non-sent outcome — including
+    // account-side failures like USER_BANNED_IN_CHANNEL — releases its reservation, so a failed
+    // attempt never consumes budget. (Previously only channel-classified errors rolled back, so a
+    // spam-limited account's constant USER_BANNED failures each ate a slot and blew past the cap.)
+    return !result.sent;
+}
+function createPoolEntry(result) {
+    if (result.checkableByChannelId === false)
+        return null;
+    return createPoolEntryFromText(result.messageText, result.messageSource);
+}
+function createPoolEntryFromText(text, source) {
+    const normalizedText = normalizeMessageText(text);
+    if (!normalizedText || !(0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.isMessageSource)(source))
+        return null;
+    return {
+        key: (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.poolEntryKey)(normalizedText),
+        text: normalizedText,
+        source,
+        attempted: 0,
+        survived: 0,
+        deleted: 0,
+        channelSideFailed: 0,
+        lastSentAtMs: 0,
+        lastValidatedAtMs: 0,
+        state: 'active',
+    };
+}
+function resolveCandidatePoolMode(candidate, isFollowUp) {
+    if (isFollowUp)
+        return null;
+    return candidate.kind === 'pool' ? 'reuse' : 'explore';
+}
+function resolveQueuedPoolMode(message) {
+    if (message.isFollowUp)
+        return null;
+    const explicit = normalizePoolMode(message.poolMode);
+    if (explicit)
+        return explicit;
+    return (0,_pool__WEBPACK_IMPORTED_MODULE_1__.isPoolMessageIndex)(message.messageIndex) ? 'reuse' : 'explore';
+}
+function shouldRecordExploreFromCandidate(candidate, isFollowUp) {
+    return resolveCandidatePoolMode(candidate, isFollowUp) === 'explore';
+}
+function isMessageQueueLike(value) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
+        && typeof value['size'] === 'number'
+        && typeof value['enqueue'] === 'function'
+        && typeof value['isQueued'] === 'function'
+        && typeof value['readyForCheck'] === 'function'
+        && typeof value['remove'] === 'function';
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts"
+/*!********************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts ***!
+  \********************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   logHookSummary: () => (/* binding */ logHookSummary),
+/* harmony export */   recordAccountSurvival: () => (/* binding */ recordAccountSurvival),
+/* harmony export */   recordChannelBlockOnFailure: () => (/* binding */ recordChannelBlockOnFailure),
+/* harmony export */   recordDeletion: () => (/* binding */ recordDeletion),
+/* harmony export */   recordExploreFailure: () => (/* binding */ recordExploreFailure),
+/* harmony export */   recordExploreSurvival: () => (/* binding */ recordExploreSurvival),
+/* harmony export */   recordFailure: () => (/* binding */ recordFailure),
+/* harmony export */   recordPoolOutcome: () => (/* binding */ recordPoolOutcome),
+/* harmony export */   recordSeedProbeIfLearning: () => (/* binding */ recordSeedProbeIfLearning),
+/* harmony export */   recordSendAnalytics: () => (/* binding */ recordSendAnalytics),
+/* harmony export */   recordSuccess: () => (/* binding */ recordSuccess),
+/* harmony export */   resolveCandidateStrategy: () => (/* binding */ resolveCandidateStrategy),
+/* harmony export */   resolveQueuedPoolSource: () => (/* binding */ resolveQueuedPoolSource)
+/* harmony export */ });
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
+/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+
+
+
+
+
+function recordSendAnalytics(host, channel, candidate, result, outcome, channelIdOverride) {
+    // WRAPPED ON PURPOSE. The sink's own record* calls are already total, but `getAnalytics()`
+    // returns whatever was installed, and a promotion send must survive even a recorder that
+    // throws. Analytics is optional; a send is not. Nothing is logged here either — a broken sink
+    // must not turn into a log flood on the send path.
+    try {
+        const account = host.options.account;
+        const errorMessage = result?.errorMessage ?? '';
+        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_3__.getAnalytics)().recordPromotionSend({
+            clientId: account?.clientId ?? '',
+            mobile: account?.mobile ?? '',
+            channelId: channelIdOverride ?? channel?.channelId ?? '',
+            messageKey: candidate?.poolKey ?? null,
+            messageSource: candidate?.poolSource ?? result?.messageSource ?? null,
+            outcome,
+            // The raw error STRING is never stored — only the matched Telegram token, so the column
+            // stays a fixed low-cardinality vocabulary (FLOOD_WAIT, CHAT_WRITE_FORBIDDEN, ...).
+            errorType: (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.promotionErrorToken)(errorMessage),
+        });
+    }
+    catch {
+        /* analytics must never affect a promotion send */
+    }
+}
+async function recordSuccess(host, channel, candidate, result, isFollowUp, percentiles, aggressive) {
+    const strategy = host.resolveCandidateStrategy(candidate);
+    const availableMessageIds = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeAvailableMessageIds)(channel.availableMsgs);
+    const poolSource = host.resolveQueuedPoolSource(result, isFollowUp);
+    host.recordSendAnalytics(channel, candidate, result, 'delivered');
+    let durabilityFailure = null;
+    await host.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_4__.isValidMessageId)(result.messageId)) {
+        const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.resolveCandidatePoolMode)(candidate, isFollowUp);
+        const queuedMessage = {
+            channelId: channel.channelId,
+            messageId: result.messageId,
+            timestamp: Date.now(),
+            messageIndex: result.messageIndex,
+            strategy,
+            isFollowUp,
+            ...(availableMessageIds !== undefined ? { availableMessageCount: availableMessageIds.length } : {}),
+            ...(result.messageText ? { messageText: result.messageText } : {}),
+            ...(poolSource ? { poolSource } : {}),
+            ...(poolMode ? { poolMode } : {}),
+        };
+        try {
+            await host.messageQueue.enqueueDurable(queuedMessage);
+        }
+        catch (error) {
+            // Telegram has already accepted this message. Continue the accepted
+            // send accounting below, then fail closed before another send can run.
+            durabilityFailure = error;
+        }
+    }
+    else {
+        host.log('warn', `Promotion send returned without messageId; not queueing deletion/follow-up check; ${host.formatChannel(channel)} messageIndex=${result.messageIndex} isFollowUp=${isFollowUp}`);
+    }
+    host.log('info', [
+        'Promotion send recorded',
+        host.formatChannel(channel),
+        `messageId=${result.messageId ?? 'unknown'}`,
+        `messageIndex=${result.messageIndex}`,
+        `strategy=${strategy}`,
+        `isFollowUp=${isFollowUp}`,
+        `queueSize=${host.messageQueue.size}`,
+        `attribution=${host.options.attributionEnabled}`,
+        `redisLock=off`,
+    ].join('; '));
+    host.health.totalSuccessfulSends += 1;
+    host.health.lastSuccessfulSendAt = Date.now();
+    await host.callHook('onSendSuccess', () => host.adapter.onSendSuccess?.(channel, result, isFollowUp));
+    let intelligenceStatus = 'ok';
+    let attributionStatus = host.options.attributionEnabled ? 'ok' : 'off';
+    const poolStatus = 'skipped';
+    const pacingStatus = 'skipped';
+    try {
+        await host.options.account.recordSuccess(channel.channelId, isFollowUp);
+    }
+    catch (error) {
+        intelligenceStatus = 'fail';
+        host.log('warn', `Promotion intelligence success record failed after local success accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+    }
+    if (host.options.attributionEnabled) {
+        try {
+            await host.options.account.recordSend(channel.channelId);
+        }
+        catch (error) {
+            attributionStatus = 'fail';
+            host.log('warn', `Promotion attribution record failed after local success accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        }
+    }
+    host.logHookSummary('success', channel.channelId, strategy, isFollowUp, {
+        intelligence: intelligenceStatus,
+        attribution: attributionStatus,
+        redisLock: 'off',
+        pool: poolStatus,
+        pacing: pacingStatus,
+    });
+    if (durabilityFailure !== null) {
+        host.recordDurabilityFailure(durabilityFailure);
+        host.log('error', `Promotion verification persistence failed after accepted send; pausing account; ${host.formatChannel(channel)} messageId=${result.messageId} error=${host.normalizeError(durabilityFailure)}`);
+        await host.callHook('onDurabilityFailure', () => host.adapter.onDurabilityFailure?.(durabilityFailure));
+        host.stop();
+        throw durabilityFailure;
+    }
+}
+async function recordFailure(host, channel, candidate, result, isFollowUp, percentiles, aggressive) {
+    const errorMessage = result.errorMessage ?? 'Unknown promotion send error';
+    const strategy = host.resolveCandidateStrategy(candidate);
+    const attempted = result.attempted !== false;
+    host.log('warn', [
+        'Promotion send failed',
+        host.formatChannel(channel),
+        `candidate=${host.formatCandidate(candidate)}`,
+        `strategy=${strategy}`,
+        `isFollowUp=${isFollowUp}`,
+        `reason=${host.compact(errorMessage)}`,
+    ].join('; '));
+    if (attempted) {
+        host.health.totalSendFailures += 1;
+        host.health.lastSendFailureAt = Date.now();
+    }
+    await host.callHook('onSendFailure', () => host.adapter.onSendFailure?.(channel, result, isFollowUp));
+    if (!attempted) {
+        // No Telegram request was ever made, so there is no SEND to report. Logging it would inflate
+        // the denominator of every delivery/ban rate this store exists to answer.
+        host.log('debug', `Promotion preflight rejected candidate without Telegram attempt; ${host.formatChannel(channel)} reason=${host.compact(errorMessage)}`);
+        return;
+    }
+    // A real attempt that Telegram refused. USER_BANNED_IN_CHANNEL is the account's own spam limit
+    // leaking into the channel and is the platform's headline metric, so it gets its own outcome
+    // rather than being folded into 'failed'.
+    host.recordSendAnalytics(channel, candidate, result, errorMessage.toUpperCase().includes('USER_BANNED_IN_CHANNEL') ? 'banned' : 'failed');
+    let intelligenceStatus = 'ok';
+    const poolStatus = 'skipped';
+    await host.recordExploreFailure(channel.channelId, candidate, result, isFollowUp);
+    await host.recordChannelBlockOnFailure(channel, result);
+    const pacingStatus = 'skipped';
+    try {
+        await host.options.account.recordFailure(channel.channelId, errorMessage);
+    }
+    catch (error) {
+        intelligenceStatus = 'fail';
+        host.log('warn', `Promotion intelligence failure record failed after local failure accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+    }
+    host.logHookSummary('failure', channel.channelId, strategy, isFollowUp, {
+        intelligence: intelligenceStatus,
+        attribution: 'skipped',
+        redisLock: 'skipped',
+        pool: poolStatus,
+        pacing: pacingStatus,
+    });
+}
+function resolveCandidateStrategy(candidate) {
+    return candidate.strategy || (0,_policy__WEBPACK_IMPORTED_MODULE_0__.messageIndexToStrategy)(candidate.randomIndex) || 'legacy';
+}
+async function recordDeletion(host, message, deletionPolicy) {
+    const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
+    // A delivered message that the channel later removed. The send itself was already recorded as
+    // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
+    // history Mongo cannot answer (its messagePool counters are overwritten in place).
+    host.recordSendAnalytics(null, { poolSource: message.poolSource }, null, 'deleted', message.channelId);
+    host.log('warn', [
+        'Promotion deletion recorded',
+        `channelId=${message.channelId}`,
+        `messageId=${message.messageId}`,
+        `messageIndex=${message.messageIndex}`,
+        `strategy=${strategy}`,
+        `isFollowUp=${message.isFollowUp}`,
+        `survivalMs=${(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.safeElapsedMs)(message.timestamp)}`,
+        `actions=${deletionPolicy.actions.join('|') || 'none'}`,
+    ].join('; '));
+    host.health.totalDeletions += 1;
+    host.health.lastDeletionAt = Date.now();
+    await host.callHook('onMessageDeleted', () => host.adapter.onMessageDeleted?.(message, deletionPolicy));
+    let intelligenceStatus = 'ok';
+    const poolStatus = await host.recordPoolOutcome(message, 'deleted');
+    try {
+        await host.options.account.recordDeletion(message.channelId, (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.safeElapsedMs)(message.timestamp), message.isFollowUp);
+    }
+    catch (error) {
+        intelligenceStatus = 'fail';
+        host.log('warn', `Promotion intelligence deletion record failed after local deletion accounting; channelId=${message.channelId} error=${host.normalizeError(error)}`);
+    }
+    host.logHookSummary('deletion', message.channelId, strategy, message.isFollowUp, {
+        intelligence: intelligenceStatus,
+        attribution: 'skipped',
+        redisLock: 'skipped',
+        pool: poolStatus,
+        pacing: 'skipped',
+    });
+}
+function logHookSummary(host, event, channelId, strategy, isFollowUp, statuses) {
+    host.log('debug', [
+        'Promotion hook summary',
+        `event=${event}`,
+        `channelId=${channelId}`,
+        `strategy=${strategy}`,
+        `isFollowUp=${isFollowUp}`,
+        `intelligence=${statuses.intelligence}`,
+        `attribution=${statuses.attribution}`,
+        `redisLock=${statuses.redisLock}`,
+        `pool=${statuses.pool}`,
+        `pacing=${statuses.pacing}`,
+    ].join('; '));
+}
+function resolveQueuedPoolSource(result, isFollowUp) {
+    if (isFollowUp || !(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.isValidMessageId)(result.messageId))
+        return null;
+    const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.createPoolEntry)(result);
+    if (!entry)
+        return null;
+    // The reusable pool contains only independently validated survivors. This keeps all sources
+    // symmetric and prevents failed exploration from consuming persistent pool capacity.
+    return entry.source;
+}
+async function recordSeedProbeIfLearning(host, channel, candidate, result, isFollowUp) {
+    if (isFollowUp || candidate.kind === 'pool')
+        return;
+    const source = result.messageSource;
+    if (!source)
+        return;
+    if ((0,_policy__WEBPACK_IMPORTED_MODULE_0__.countPoolSurvivors)(channel.messagePool) >= _pool__WEBPACK_IMPORTED_MODULE_1__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET)
+        return;
+    try {
+        await host.options.account.intelligence.incrementSeedProbe(channel.channelId, source);
+    }
+    catch (error) {
+        host.log('warn', `Promotion seed-probe increment failed after local success accounting; ${host.formatChannel(channel)} source=${source} error=${host.normalizeError(error)}`);
+    }
+}
+async function recordPoolOutcome(host, message, outcome) {
+    if (message.isFollowUp)
+        return 'skipped';
+    try {
+        const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.createPoolEntryFromText)(message.messageText, message.poolSource);
+        if (!entry)
+            return 'skipped';
+        // Only independently validated survivors earn a new pool slot.  A deletion may refer to an
+        // existing pooled message, but must not add a failed fresh message to the reusable pool.
+        if (outcome === 'survived') {
+            await host.options.account.ensurePoolEntry(message.channelId, entry);
+        }
+        const recorded = await host.options.account.recordPoolEntrySent(message.channelId, entry.key, Date.now());
+        if (recorded === false) {
+            if (outcome !== 'survived')
+                return 'skipped';
+            // Older account adapters cannot safely replace a full pool. Treat that as a skipped pool
+            // update rather than failing an otherwise valid promotion during a rolling deployment.
+            const recordSurviving = host.options.account.recordSurvivingPoolEntry;
+            if (typeof recordSurviving !== 'function')
+                return 'skipped';
+            return await recordSurviving.call(host.options.account, message.channelId, entry, Date.now())
+                ? 'ok'
+                : 'skipped';
+        }
+        await host.options.account.recordPoolEntryOutcome(message.channelId, entry.key, outcome, Date.now());
+        return 'ok';
+    }
+    catch (error) {
+        const action = outcome === 'survived' ? 'survival' : 'deletion';
+        host.log('warn', `Promotion pool ${action} record failed after queue accounting; channelId=${message.channelId} error=${host.normalizeError(error)}`);
+        return 'fail';
+    }
+}
+async function recordExploreFailure(host, channelId, candidate, result, isFollowUp) {
+    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.shouldRecordExploreFromCandidate)(candidate, isFollowUp))
+        return;
+    if (result.checkableByChannelId === false)
+        return;
+    if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
+        return;
+    try {
+        await host.options.account.recordExploreOutcome(channelId, 'channelSideFailed');
+    }
+    catch (error) {
+        host.log('warn', `Promotion explore failure record failed after channel-side send failure; channelId=${channelId} error=${host.normalizeError(error)}`);
+    }
+}
+async function recordExploreSurvival(host, message) {
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_4__.resolveQueuedPoolMode)(message) !== 'explore')
+        return;
+    try {
+        await host.options.account.recordExploreOutcome(message.channelId, 'survived');
+    }
+    catch (error) {
+        host.log('warn', `Promotion explore survival record failed after queue accounting; channelId=${message.channelId} error=${host.normalizeError(error)}`);
+    }
+}
+async function recordAccountSurvival(host, message) {
+    try {
+        await host.options.account.recordSurvival(message.channelId);
+    }
+    catch (error) {
+        host.log('warn', `Promotion account survival record failed after queue accounting; channelId=${message.channelId} error=${host.normalizeError(error)}`);
+    }
+}
+async function recordChannelBlockOnFailure(host, channel, result) {
+    const errUpper = (result.errorMessage ?? '').toUpperCase();
+    try {
+        if (errUpper.includes('USER_BANNED_IN_CHANNEL')) {
+            await host.options.account.blockChannelTemporary(channel.channelId);
+        }
+        else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
+            await host.options.account.blockChannelPermanent(channel.channelId);
+        }
+    }
+    catch (error) {
+        host.log('warn', `Promotion per-mobile block record failed; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts"
+/*!**************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts ***!
+  \**************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   readDailySendBudget: () => (/* binding */ readDailySendBudget),
+/* harmony export */   reserveDailySendBudget: () => (/* binding */ reserveDailySendBudget),
+/* harmony export */   settleDailySendBudget: () => (/* binding */ settleDailySendBudget),
+/* harmony export */   shouldProcessNextChannel: () => (/* binding */ shouldProcessNextChannel)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+
+
+async function shouldProcessNextChannel(host, channel) {
+    try {
+        if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.isActive())) {
+            host.log('debug', `Promotion cycle stopped before channel; adapter inactive ${host.formatChannel(channel)}`);
+            return false;
+        }
+    }
+    catch (error) {
+        host.log('warn', `Promotion cycle stopped before channel; active check failed ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        return false;
+    }
+    if (!host.adapter.shouldContinue)
+        return true;
+    try {
+        if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue())) {
+            host.log('debug', `Promotion cycle stopped before channel; shouldContinue=false ${host.formatChannel(channel)}`);
+            return false;
+        }
+    }
+    catch (error) {
+        host.log('warn', `Promotion cycle stopped before channel; shouldContinue check failed ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        return false;
+    }
+    const stats = await host.getStatsOrDefault('daily send budget precheck');
+    const budget = await host.readDailySendBudget(channel, stats.daysLeft);
+    if (budget && budget.remaining <= 0) {
+        // Healthy but capped — record it so the health monitor doesn't restart-loop this engine.
+        host.health.lastCycleBudgetExhausted = true;
+        host.log('debug', [
+            'Promotion cycle stopped before channel; daily send cap reached',
+            host.formatChannel(channel),
+            `count=${budget.count}`,
+            `cap=${budget.cap}`,
+            `limited=${budget.limited}`,
+        ].join('; '));
+        return false;
+    }
+    return true;
+}
+async function readDailySendBudget(host, channel, daysLeft) {
+    try {
+        const budget = await host.options.account.getDailySendBudgetStatus(daysLeft);
+        return budget ? { allowed: budget.remaining > 0, reservationId: null, ...budget } : null;
+    }
+    catch (error) {
+        host.log('warn', `Promotion daily send budget status failed; stopping cycle conservatively; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        return {
+            allowed: false,
+            reservationId: null,
+            cap: 0,
+            count: 0,
+            remaining: 0,
+            limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.isSpamLimited)(daysLeft),
+        };
+    }
+}
+async function reserveDailySendBudget(host, channel, daysLeft, isFollowUp) {
+    try {
+        const budget = await host.options.account.reserveDailySendBudget(daysLeft);
+        if (budget && !budget.allowed) {
+            host.log('info', [
+                'Promotion send skipped; daily send cap exhausted',
+                host.formatChannel(channel),
+                `isFollowUp=${isFollowUp}`,
+                `count=${budget.count}`,
+                `cap=${budget.cap}`,
+                `limited=${budget.limited}`,
+            ].join('; '));
+        }
+        return budget ? { ...budget } : null;
+    }
+    catch (error) {
+        host.log('warn', `Promotion daily send reservation failed; pausing sends conservatively; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        return {
+            allowed: false,
+            reservationId: null,
+            cap: 0,
+            count: 0,
+            remaining: 0,
+            limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.isSpamLimited)(daysLeft),
+        };
+    }
+}
+async function settleDailySendBudget(host, result, reservation) {
+    if (!reservation?.reservationId)
+        return;
+    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.shouldRollbackDailySendBudget)(result))
+        return;
+    try {
+        await host.options.account.rollbackDailySendBudget(reservation.reservationId);
+    }
+    catch (error) {
+        host.log('warn', `Promotion daily send rollback failed; reservationId=${reservation.reservationId} error=${host.normalizeError(error)}`);
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/index.ts"
 /*!********************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/index.ts ***!
@@ -7928,19 +9028,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PromotionFlowRunner: () => (/* binding */ PromotionFlowRunner)
 /* harmony export */ });
-/* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
-/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
-/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
+/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
 
 
 
@@ -7952,13 +9050,13 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('promo');
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('pool');
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
+/** The instance as the flow-runner/* modules see it (same object; private members by name). */
+const hostOf = (runner) => runner;
 class PromotionFlowRunner {
     constructor(adapter, options) {
         this.followUpTimers = new Map();
@@ -7998,18 +9096,18 @@ class PromotionFlowRunner {
             totalDurabilityFailures: 0,
             consecutiveCycleFailures: 0,
         };
-        if (!isAdapterLike(adapter)) {
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isAdapterLike)(adapter)) {
             throw new Error('PromotionFlowRunner adapter is required');
         }
-        const safeOptions = asRunnerOptions(options);
-        if (!isAccountLike(safeOptions.account)) {
+        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.asRunnerOptions)(options);
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isAccountLike)(safeOptions.account)) {
             throw new Error('PromotionFlowRunner account context is required');
         }
         this.adapter = adapter;
         this.options = safeOptions;
-        this.messageQueue = isMessageQueueLike(safeOptions.messageQueue)
+        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
-            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -8050,19 +9148,19 @@ class PromotionFlowRunner {
         this.health.startedAt = Date.now();
         this.health.stoppedAt = null;
         this.startQueueChecker();
-        this.log('info', `Promotion runner started; batchTarget=${safeBatchTarget(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
+        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
                 let active = false;
                 try {
-                    active = isExactTrue(await this.adapter.isActive());
+                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isExactTrue)(await this.adapter.isActive());
                 }
                 catch (error) {
                     const normalizedError = this.normalizeError(error);
                     this.recordCycleFailure(normalizedError);
                     this.log('error', `Promotion active-state check failed; keeping runner alive error=${normalizedError}`);
                     if (this.running)
-                        await this.sleep(safeDelayMs(this.options.channelLoopDelayMs, 5000));
+                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
                     continue;
                 }
                 if (!active)
@@ -8080,7 +9178,7 @@ class PromotionFlowRunner {
                     this.log('error', `Promotion cycle failed: ${normalizedError}`);
                 }
                 if (this.running)
-                    await this.sleep(safeDelayMs(this.options.channelLoopDelayMs, 5000));
+                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             }
         }
         finally {
@@ -8096,7 +9194,7 @@ class PromotionFlowRunner {
             await this.checkQueuedMessages();
             let channels = [];
             try {
-                channels = normalizeChannels(await this.adapter.loadChannels());
+                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannels)(await this.adapter.loadChannels());
             }
             catch (error) {
                 const normalizedError = this.normalizeError(error);
@@ -8109,7 +9207,7 @@ class PromotionFlowRunner {
                 return;
             }
             const stats = await this.getStatsOrDefault('planning');
-            const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculatePromotionBatchLimit)({
+            const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.calculatePromotionBatchLimit)({
                 scoringEnabled: this.options.scoringEnabled,
                 daysLeft: stats.daysLeft,
                 successCount: stats.successCount,
@@ -8117,7 +9215,7 @@ class PromotionFlowRunner {
                 failStreak: stats.failStreak,
                 includeJitter: true,
             });
-            const batchTarget = safeBatchTarget(this.options.batchTarget, batchPolicy.limit);
+            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
             let selectedChannels;
             let selectionExploreDenied = 0;
             if (this.options.channelSelectionMode === 'source_order') {
@@ -8153,7 +9251,7 @@ class PromotionFlowRunner {
                 let intelligenceDocs = [];
                 try {
                     const loadedDocs = await this.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
-                    intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence) : [];
+                    intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence) : [];
                 }
                 catch (error) {
                     this.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${this.normalizeError(error)}`);
@@ -8167,7 +9265,7 @@ class PromotionFlowRunner {
                     this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
                     return;
                 }
-                const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_2__.selectPromotionChannels)({
+                const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
                     channels,
                     intelligenceDocs,
                     batchTarget,
@@ -8281,14 +9379,14 @@ class PromotionFlowRunner {
         }
     }
     async processChannel(rawChannel, isFollowUp, refreshBeforePlanning = false) {
-        let channel = normalizeChannel(rawChannel);
+        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannel)(rawChannel);
         if (!channel) {
             this.log('warn', `Promotion channel attempt skipped; malformed channel=${this.safeJson(rawChannel)}`);
             return 'skipped';
         }
         if (refreshBeforePlanning) {
             try {
-                const refreshed = normalizeChannel(await this.adapter.getChannel(channel.channelId));
+                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
                 if (!refreshed) {
                     this.log('debug', `Promotion channel attempt skipped after final state reload; ${this.formatChannel(channel)}`);
                     return 'skipped';
@@ -8307,18 +9405,18 @@ class PromotionFlowRunner {
         let doc = null;
         try {
             const loaded = await this.adapter.getIntelligenceDoc(channel.channelId);
-            doc = (0,_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence)(loaded) ? loaded : null;
+            doc = (0,_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(loaded) ? loaded : null;
         }
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const mergedChannel = mergePromotionHealthSignals(channel, doc);
+        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
         const eligible = await this.evaluateEligibility(planningChannel, doc, percentiles, isFollowUp);
         if (!eligible)
             return 'skipped';
         const stats = await this.getStatsOrDefault('message planning');
-        const availableMessageIds = normalizeAvailableMessageIds(planningChannel.availableMsgs);
+        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
         const messagePolicyInput = {
             isFollowUp,
             ...(planningChannel.freeformDeletedCount !== undefined
@@ -8336,7 +9434,7 @@ class PromotionFlowRunner {
             ...(percentiles ? { percentiles } : {}),
             nowMs: Date.now(),
         };
-        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.selectPromotionMessageCandidates)(messagePolicyInput);
+        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.selectPromotionMessageCandidates)(messagePolicyInput);
         this.log('debug', [
             'Promotion candidate plan',
             this.formatChannel(channel),
@@ -8376,11 +9474,11 @@ class PromotionFlowRunner {
             const result = await this.trySendPromotion(planningChannel, candidate, isFollowUp);
             await this.settleDailySendBudget(result, dailySendBudget);
             if (result.sent) {
-                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(stats.daysLeft));
+                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(stats.daysLeft));
                 return 'sent';
             }
             if (result.errorMessage) {
-                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(stats.daysLeft));
+                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__.isSpamLimited)(stats.daysLeft));
             }
             if (this.shouldAbortStartedRunnerWork()) {
                 this.log('debug', `Promotion candidate loop stopped after settling in-flight result because runner stopped; ${this.formatChannel(channel)} candidate=${this.formatCandidate(candidate)}`);
@@ -8421,10 +9519,10 @@ class PromotionFlowRunner {
         this.health.lastQueueCheckStartedAt = Date.now();
         try {
             const now = Date.now();
-            const checkDelay = safeDelayMs(this.options.messageCheckDelayMs, 15000);
+            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
             let ready = [];
             try {
-                ready = normalizeReadyMessages(this.messageQueue.readyForCheck(now, checkDelay));
+                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay));
             }
             catch (error) {
                 this.log('warn', `Promotion queue ready check failed; skipping queue pass error=${this.normalizeError(error)}`);
@@ -8454,7 +9552,7 @@ class PromotionFlowRunner {
                 }
                 let result;
                 try {
-                    result = normalizeMessageCheckResult(await this.adapter.checkMessage(message));
+                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
                 }
                 catch (error) {
                     this.log('warn', [
@@ -8467,7 +9565,7 @@ class PromotionFlowRunner {
                     continue;
                 }
                 if (result.status === 'exists') {
-                    const existingMessage = withMessageCheckText(message, result);
+                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.withMessageCheckText)(message, result);
                     this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
                     await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
                     await this.recordAccountSurvival(message);
@@ -8477,7 +9575,7 @@ class PromotionFlowRunner {
                     completed.add(entry);
                 }
                 else if (result.status === 'deleted') {
-                    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
+                    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
                     await this.recordDeletion(message, deletionPolicy);
                     completed.add(entry);
                 }
@@ -8505,7 +9603,7 @@ class PromotionFlowRunner {
     }
     startQueueChecker() {
         this.stopQueueChecker();
-        const intervalMs = safeIntervalMs(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
+        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
         this.queueCheckInterval = setInterval(() => {
             if (!this.running)
                 return;
@@ -8569,8 +9667,8 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion adapter recent-queue check failed; continuing without adapter queue signal; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const healthChannel = mergePromotionHealthSignals(channel, doc);
-        const result = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluatePromotionChannelEligibility)({
+        const healthChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.mergePromotionHealthSignals)(channel, doc);
+        const result = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluatePromotionChannelEligibility)({
             channel: healthChannel,
             scoringEnabled: this.options.scoringEnabled && !!percentiles,
             safetyStatus: doc?.safety.status ?? null,
@@ -8585,7 +9683,7 @@ class PromotionFlowRunner {
     }
     async trySendPromotion(channel, candidate, isFollowUp) {
         try {
-            return normalizeSendResult(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
         }
         catch (error) {
             const errorMessage = this.normalizeError(error);
@@ -8622,220 +9720,25 @@ class PromotionFlowRunner {
      * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
      */
     recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride) {
-        // WRAPPED ON PURPOSE. The sink's own record* calls are already total, but `getAnalytics()`
-        // returns whatever was installed, and a promotion send must survive even a recorder that
-        // throws. Analytics is optional; a send is not. Nothing is logged here either — a broken sink
-        // must not turn into a log flood on the send path.
-        try {
-            const account = this.options.account;
-            const errorMessage = result?.errorMessage ?? '';
-            (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_11__.getAnalytics)().recordPromotionSend({
-                clientId: account?.clientId ?? '',
-                mobile: account?.mobile ?? '',
-                channelId: channelIdOverride ?? channel?.channelId ?? '',
-                messageKey: candidate?.poolKey ?? null,
-                messageSource: candidate?.poolSource ?? result?.messageSource ?? null,
-                outcome,
-                // The raw error STRING is never stored — only the matched Telegram token, so the column
-                // stays a fixed low-cardinality vocabulary (FLOOD_WAIT, CHAT_WRITE_FORBIDDEN, ...).
-                errorType: (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.promotionErrorToken)(errorMessage),
-            });
-        }
-        catch {
-            /* analytics must never affect a promotion send */
-        }
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride);
     }
-    async recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        const strategy = this.resolveCandidateStrategy(candidate);
-        const availableMessageIds = normalizeAvailableMessageIds(channel.availableMsgs);
-        const poolSource = this.resolveQueuedPoolSource(result, isFollowUp);
-        this.recordSendAnalytics(channel, candidate, result, 'delivered');
-        let durabilityFailure = null;
-        await this.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
-        if (isValidMessageId(result.messageId)) {
-            const poolMode = resolveCandidatePoolMode(candidate, isFollowUp);
-            const queuedMessage = {
-                channelId: channel.channelId,
-                messageId: result.messageId,
-                timestamp: Date.now(),
-                messageIndex: result.messageIndex,
-                strategy,
-                isFollowUp,
-                ...(availableMessageIds !== undefined ? { availableMessageCount: availableMessageIds.length } : {}),
-                ...(result.messageText ? { messageText: result.messageText } : {}),
-                ...(poolSource ? { poolSource } : {}),
-                ...(poolMode ? { poolMode } : {}),
-            };
-            try {
-                await this.messageQueue.enqueueDurable(queuedMessage);
-            }
-            catch (error) {
-                // Telegram has already accepted this message. Continue the accepted
-                // send accounting below, then fail closed before another send can run.
-                durabilityFailure = error;
-            }
-        }
-        else {
-            this.log('warn', `Promotion send returned without messageId; not queueing deletion/follow-up check; ${this.formatChannel(channel)} messageIndex=${result.messageIndex} isFollowUp=${isFollowUp}`);
-        }
-        this.log('info', [
-            'Promotion send recorded',
-            this.formatChannel(channel),
-            `messageId=${result.messageId ?? 'unknown'}`,
-            `messageIndex=${result.messageIndex}`,
-            `strategy=${strategy}`,
-            `isFollowUp=${isFollowUp}`,
-            `queueSize=${this.messageQueue.size}`,
-            `attribution=${this.options.attributionEnabled}`,
-            `redisLock=off`,
-        ].join('; '));
-        this.health.totalSuccessfulSends += 1;
-        this.health.lastSuccessfulSendAt = Date.now();
-        await this.callHook('onSendSuccess', () => this.adapter.onSendSuccess?.(channel, result, isFollowUp));
-        let intelligenceStatus = 'ok';
-        let attributionStatus = this.options.attributionEnabled ? 'ok' : 'off';
-        const poolStatus = 'skipped';
-        const pacingStatus = 'skipped';
-        try {
-            await this.options.account.recordSuccess(channel.channelId, isFollowUp);
-        }
-        catch (error) {
-            intelligenceStatus = 'fail';
-            this.log('warn', `Promotion intelligence success record failed after local success accounting; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-        }
-        if (this.options.attributionEnabled) {
-            try {
-                await this.options.account.recordSend(channel.channelId);
-            }
-            catch (error) {
-                attributionStatus = 'fail';
-                this.log('warn', `Promotion attribution record failed after local success accounting; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-            }
-        }
-        this.logHookSummary('success', channel.channelId, strategy, isFollowUp, {
-            intelligence: intelligenceStatus,
-            attribution: attributionStatus,
-            redisLock: 'off',
-            pool: poolStatus,
-            pacing: pacingStatus,
-        });
-        if (durabilityFailure !== null) {
-            this.recordDurabilityFailure(durabilityFailure);
-            this.log('error', `Promotion verification persistence failed after accepted send; pausing account; ${this.formatChannel(channel)} messageId=${result.messageId} error=${this.normalizeError(durabilityFailure)}`);
-            await this.callHook('onDurabilityFailure', () => this.adapter.onDurabilityFailure?.(durabilityFailure));
-            this.stop();
-            throw durabilityFailure;
-        }
+    recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
-    async recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        const errorMessage = result.errorMessage ?? 'Unknown promotion send error';
-        const strategy = this.resolveCandidateStrategy(candidate);
-        const attempted = result.attempted !== false;
-        this.log('warn', [
-            'Promotion send failed',
-            this.formatChannel(channel),
-            `candidate=${this.formatCandidate(candidate)}`,
-            `strategy=${strategy}`,
-            `isFollowUp=${isFollowUp}`,
-            `reason=${this.compact(errorMessage)}`,
-        ].join('; '));
-        if (attempted) {
-            this.health.totalSendFailures += 1;
-            this.health.lastSendFailureAt = Date.now();
-        }
-        await this.callHook('onSendFailure', () => this.adapter.onSendFailure?.(channel, result, isFollowUp));
-        if (!attempted) {
-            // No Telegram request was ever made, so there is no SEND to report. Logging it would inflate
-            // the denominator of every delivery/ban rate this store exists to answer.
-            this.log('debug', `Promotion preflight rejected candidate without Telegram attempt; ${this.formatChannel(channel)} reason=${this.compact(errorMessage)}`);
-            return;
-        }
-        // A real attempt that Telegram refused. USER_BANNED_IN_CHANNEL is the account's own spam limit
-        // leaking into the channel and is the platform's headline metric, so it gets its own outcome
-        // rather than being folded into 'failed'.
-        this.recordSendAnalytics(channel, candidate, result, errorMessage.toUpperCase().includes('USER_BANNED_IN_CHANNEL') ? 'banned' : 'failed');
-        let intelligenceStatus = 'ok';
-        const poolStatus = 'skipped';
-        await this.recordExploreFailure(channel.channelId, candidate, result, isFollowUp);
-        await this.recordChannelBlockOnFailure(channel, result);
-        const pacingStatus = 'skipped';
-        try {
-            await this.options.account.recordFailure(channel.channelId, errorMessage);
-        }
-        catch (error) {
-            intelligenceStatus = 'fail';
-            this.log('warn', `Promotion intelligence failure record failed after local failure accounting; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-        }
-        this.logHookSummary('failure', channel.channelId, strategy, isFollowUp, {
-            intelligence: intelligenceStatus,
-            attribution: 'skipped',
-            redisLock: 'skipped',
-            pool: poolStatus,
-            pacing: pacingStatus,
-        });
+    recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     resolveCandidateStrategy(candidate) {
-        return candidate.strategy || (0,_policy__WEBPACK_IMPORTED_MODULE_3__.messageIndexToStrategy)(candidate.randomIndex) || 'legacy';
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.resolveCandidateStrategy)(candidate);
     }
-    async recordDeletion(message, deletionPolicy) {
-        const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
-        // A delivered message that the channel later removed. The send itself was already recorded as
-        // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
-        // history Mongo cannot answer (its messagePool counters are overwritten in place).
-        this.recordSendAnalytics(null, { poolSource: message.poolSource }, null, 'deleted', message.channelId);
-        this.log('warn', [
-            'Promotion deletion recorded',
-            `channelId=${message.channelId}`,
-            `messageId=${message.messageId}`,
-            `messageIndex=${message.messageIndex}`,
-            `strategy=${strategy}`,
-            `isFollowUp=${message.isFollowUp}`,
-            `survivalMs=${safeElapsedMs(message.timestamp)}`,
-            `actions=${deletionPolicy.actions.join('|') || 'none'}`,
-        ].join('; '));
-        this.health.totalDeletions += 1;
-        this.health.lastDeletionAt = Date.now();
-        await this.callHook('onMessageDeleted', () => this.adapter.onMessageDeleted?.(message, deletionPolicy));
-        let intelligenceStatus = 'ok';
-        const poolStatus = await this.recordPoolOutcome(message, 'deleted');
-        try {
-            await this.options.account.recordDeletion(message.channelId, safeElapsedMs(message.timestamp), message.isFollowUp);
-        }
-        catch (error) {
-            intelligenceStatus = 'fail';
-            this.log('warn', `Promotion intelligence deletion record failed after local deletion accounting; channelId=${message.channelId} error=${this.normalizeError(error)}`);
-        }
-        this.logHookSummary('deletion', message.channelId, strategy, message.isFollowUp, {
-            intelligence: intelligenceStatus,
-            attribution: 'skipped',
-            redisLock: 'skipped',
-            pool: poolStatus,
-            pacing: 'skipped',
-        });
+    recordDeletion(message, deletionPolicy) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordDeletion)(hostOf(this), message, deletionPolicy);
     }
     logHookSummary(event, channelId, strategy, isFollowUp, statuses) {
-        this.log('debug', [
-            'Promotion hook summary',
-            `event=${event}`,
-            `channelId=${channelId}`,
-            `strategy=${strategy}`,
-            `isFollowUp=${isFollowUp}`,
-            `intelligence=${statuses.intelligence}`,
-            `attribution=${statuses.attribution}`,
-            `redisLock=${statuses.redisLock}`,
-            `pool=${statuses.pool}`,
-            `pacing=${statuses.pacing}`,
-        ].join('; '));
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
     }
     resolveQueuedPoolSource(result, isFollowUp) {
-        if (isFollowUp || !isValidMessageId(result.messageId))
-            return null;
-        const entry = createPoolEntry(result);
-        if (!entry)
-            return null;
-        // The reusable pool contains only independently validated survivors. This keeps all sources
-        // symmetric and prevents failed exploration from consuming persistent pool capacity.
-        return entry.source;
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.resolveQueuedPoolSource)(result, isFollowUp);
     }
     /**
      * Pool-fill lifecycle: bump this channel's seedProbeCounts[source] when a fresh (non-pool-reuse),
@@ -8844,86 +9747,20 @@ class PromotionFlowRunner {
      * probing a new one, so it must NOT increment. Scoped to this channel's channelId only — never an
      * account-wide counter (see ChannelIntelligenceService.incrementSeedProbe).
      */
-    async recordSeedProbeIfLearning(channel, candidate, result, isFollowUp) {
-        if (isFollowUp || candidate.kind === 'pool')
-            return;
-        const source = result.messageSource;
-        if (!source)
-            return;
-        if ((0,_policy__WEBPACK_IMPORTED_MODULE_3__.countPoolSurvivors)(channel.messagePool) >= _pool__WEBPACK_IMPORTED_MODULE_5__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET)
-            return;
-        try {
-            await this.options.account.intelligence.incrementSeedProbe(channel.channelId, source);
-        }
-        catch (error) {
-            this.log('warn', `Promotion seed-probe increment failed after local success accounting; ${this.formatChannel(channel)} source=${source} error=${this.normalizeError(error)}`);
-        }
+    recordSeedProbeIfLearning(channel, candidate, result, isFollowUp) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
     }
-    async recordPoolOutcome(message, outcome) {
-        if (message.isFollowUp)
-            return 'skipped';
-        try {
-            const entry = createPoolEntryFromText(message.messageText, message.poolSource);
-            if (!entry)
-                return 'skipped';
-            // Only independently validated survivors earn a new pool slot.  A deletion may refer to an
-            // existing pooled message, but must not add a failed fresh message to the reusable pool.
-            if (outcome === 'survived') {
-                await this.options.account.ensurePoolEntry(message.channelId, entry);
-            }
-            const recorded = await this.options.account.recordPoolEntrySent(message.channelId, entry.key, Date.now());
-            if (recorded === false) {
-                if (outcome !== 'survived')
-                    return 'skipped';
-                // Older account adapters cannot safely replace a full pool. Treat that as a skipped pool
-                // update rather than failing an otherwise valid promotion during a rolling deployment.
-                const recordSurviving = this.options.account.recordSurvivingPoolEntry;
-                if (typeof recordSurviving !== 'function')
-                    return 'skipped';
-                return await recordSurviving.call(this.options.account, message.channelId, entry, Date.now())
-                    ? 'ok'
-                    : 'skipped';
-            }
-            await this.options.account.recordPoolEntryOutcome(message.channelId, entry.key, outcome, Date.now());
-            return 'ok';
-        }
-        catch (error) {
-            const action = outcome === 'survived' ? 'survival' : 'deletion';
-            this.log('warn', `Promotion pool ${action} record failed after queue accounting; channelId=${message.channelId} error=${this.normalizeError(error)}`);
-            return 'fail';
-        }
+    recordPoolOutcome(message, outcome) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordPoolOutcome)(hostOf(this), message, outcome);
     }
-    async recordExploreFailure(channelId, candidate, result, isFollowUp) {
-        if (!shouldRecordExploreFromCandidate(candidate, isFollowUp))
-            return;
-        if (result.checkableByChannelId === false)
-            return;
-        if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
-            return;
-        try {
-            await this.options.account.recordExploreOutcome(channelId, 'channelSideFailed');
-        }
-        catch (error) {
-            this.log('warn', `Promotion explore failure record failed after channel-side send failure; channelId=${channelId} error=${this.normalizeError(error)}`);
-        }
+    recordExploreFailure(channelId, candidate, result, isFollowUp) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
     }
-    async recordExploreSurvival(message) {
-        if (resolveQueuedPoolMode(message) !== 'explore')
-            return;
-        try {
-            await this.options.account.recordExploreOutcome(message.channelId, 'survived');
-        }
-        catch (error) {
-            this.log('warn', `Promotion explore survival record failed after queue accounting; channelId=${message.channelId} error=${this.normalizeError(error)}`);
-        }
+    recordExploreSurvival(message) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordExploreSurvival)(hostOf(this), message);
     }
-    async recordAccountSurvival(message) {
-        try {
-            await this.options.account.recordSurvival(message.channelId);
-        }
-        catch (error) {
-            this.log('warn', `Promotion account survival record failed after queue accounting; channelId=${message.channelId} error=${this.normalizeError(error)}`);
-        }
+    recordAccountSurvival(message) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordAccountSurvival)(hostOf(this), message);
     }
     /**
      * Per-mobile ban/forbidden block recording (replaces the retired cross-account channel lock).
@@ -8931,142 +9768,17 @@ class PromotionFlowRunner {
      * clears on its own, so block THIS mobile from the channel for a bounded window (3h) then retry.
      * write/send-forbidden, private, or invalid channels never accept this account — block permanently.
      */
-    async recordChannelBlockOnFailure(channel, result) {
-        const errUpper = (result.errorMessage ?? '').toUpperCase();
-        try {
-            if (errUpper.includes('USER_BANNED_IN_CHANNEL')) {
-                await this.options.account.blockChannelTemporary(channel.channelId);
-            }
-            else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_6__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
-                await this.options.account.blockChannelPermanent(channel.channelId);
-            }
-        }
-        catch (error) {
-            this.log('warn', `Promotion per-mobile block record failed; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-        }
+    recordChannelBlockOnFailure(channel, result) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
     }
-    async scheduleFollowUp(message) {
-        if (this.shouldAbortStartedRunnerWork()) {
-            this.log('debug', `Follow-up not scheduled because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
-            return;
-        }
-        let stats;
-        try {
-            stats = normalizeStats(await this.adapter.getStats());
-        }
-        catch (error) {
-            this.log('warn', `Follow-up stats load failed; not scheduling follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-            return;
-        }
-        const existing = this.followUpTimers.get(message.channelId);
-        const activeFollowUpCount = existing ? Math.max(0, this.followUpTimers.size - 1) : this.followUpTimers.size;
-        const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateFollowUpScheduling)({
-            isFollowUp: message.isFollowUp,
-            daysLeft: stats.daysLeft,
-            channelAvailable: true,
-            activeFollowUpCount,
-            ...(this.options.maxFollowUpCount !== undefined ? { maxFollowUpCount: safeNonNegativeInt(this.options.maxFollowUpCount) } : {}),
-        });
-        if (!followUpPolicy.shouldSchedule) {
-            this.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
-            return;
-        }
-        const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculateFollowUpDelay)(safeDelayMs(this.options.followUpDelayMs, 15 * 60000), safeDelayMs(this.options.followUpJitterMs, 30000));
-        if (existing)
-            clearTimeout(existing);
-        const followUpWork = {
-            ...message,
-            timestamp: Date.now() + delayMs,
-            workType: 'followUp',
-        };
-        try {
-            await this.messageQueue.enqueueDurable(followUpWork);
-        }
-        catch (error) {
-            this.log('error', `Follow-up persistence failed; skipping follow-up rather than leaving restart-unsafe work; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-            return;
-        }
-        const timeout = setTimeout(() => {
-            if (this.shouldAbortStartedRunnerWork()) {
-                this.log('debug', `Follow-up timer skipped because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
-                return;
-            }
-            void (async () => {
-                try {
-                    const claimed = await this.claimFollowUpExecution(followUpWork);
-                    if (claimed === null)
-                        return;
-                    if (!claimed) {
-                        await this.removeQueuedMessage(followUpWork);
-                        return;
-                    }
-                    await this.runFollowUp(followUpWork);
-                    await this.removeQueuedMessage(followUpWork);
-                }
-                catch (error) {
-                    this.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-                }
-                finally {
-                    this.followUpTimers.delete(message.channelId);
-                }
-            })();
-        }, delayMs);
-        timeout.unref?.();
-        this.followUpTimers.set(message.channelId, timeout);
-        this.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${this.followUpTimers.size} replacedExisting=${!!existing}`);
-        this.health.totalFollowUpsScheduled += 1;
-        this.health.lastFollowUpScheduledAt = Date.now();
-        void this.callHook('onFollowUpScheduled', () => this.adapter.onFollowUpScheduled?.(message, delayMs));
+    scheduleFollowUp(message) {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__.scheduleFollowUp)(hostOf(this), message);
     }
-    async runFollowUp(message) {
-        this.health.lastFollowUpStartedAt = Date.now();
-        try {
-            this.log('debug', `Follow-up execution start; channelId=${message.channelId} messageId=${message.messageId}`);
-            if (this.shouldAbortStartedRunnerWork()) {
-                this.log('debug', `Skipping follow-up for ${message.channelId}: runner stopped`);
-                return;
-            }
-            if (!isExactTrue(await this.adapter.isActive())) {
-                this.log('debug', `Skipping follow-up for ${message.channelId}: adapter inactive`);
-                return;
-            }
-            if (this.adapter.shouldContinue && !isExactTrue(await this.adapter.shouldContinue())) {
-                this.log('debug', `Skipping follow-up for ${message.channelId}: shouldContinue returned false`);
-                return;
-            }
-            let stats;
-            try {
-                stats = normalizeStats(await this.adapter.getStats());
-            }
-            catch (error) {
-                this.log('warn', `Follow-up execution stats load failed; skipping follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-                return;
-            }
-            const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.evaluateFollowUpScheduling)({
-                isFollowUp: message.isFollowUp,
-                daysLeft: stats.daysLeft,
-                channelAvailable: true,
-            });
-            if (!followUpPolicy.shouldSchedule) {
-                this.log('debug', `Skipping follow-up for ${message.channelId}: ${followUpPolicy.reason ?? 'policy'}`);
-                return;
-            }
-            const channel = await this.adapter.getChannel(message.channelId);
-            if (!channel) {
-                this.log('debug', `Skipping follow-up for ${message.channelId}: channel unavailable`);
-                return;
-            }
-            await this.processChannel(channel, true);
-        }
-        catch (error) {
-            this.log('error', `Follow-up failed for ${message.channelId}: ${this.normalizeError(error)}`);
-        }
-        finally {
-            this.health.lastFollowUpFinishedAt = Date.now();
-        }
+    runFollowUp(message) {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__.runFollowUp)(hostOf(this), message);
     }
     async sleep(ms) {
-        const delayMs = safeDelayMs(ms, 0);
+        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(ms, 0);
         // Declare the deliberate sleep so the supervisor watchdog doesn't mistake a long post-send rest
         // (12-20 min) for a hung runner.
         this.health.sleepUntil = Date.now() + delayMs;
@@ -9099,29 +9811,29 @@ class PromotionFlowRunner {
     }
     async sleepAfterChannel(outcome) {
         if (outcome !== 'sent') {
-            const delayMs = randomIntInclusive(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
+            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
             this.log('debug', `Promotion retry delay ${delayMs}ms (${outcome})`);
             await this.sleep(delayMs);
             return;
         }
         if (!this.options.scoringEnabled) {
-            await this.sleep(safeDelayMs(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         let stats;
         try {
-            stats = normalizeStats(await this.adapter.getStats());
+            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion delay stats load failed; using configured channel loop delay error=${this.normalizeError(error)}`);
-            await this.sleep(safeDelayMs(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         // Session delete rate feeds the healthy-conservative scaling: deletions / (deletions + sends).
         const deletions = this.health.totalDeletions;
         const sends = this.health.totalSuccessfulSends;
         const deleteRate = deletions + sends > 0 ? deletions / (deletions + sends) : 0;
-        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculateHealthBasedPromotionDelay)({
+        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.calculateHealthBasedPromotionDelay)({
             successCount: stats.successCount,
             failedCount: stats.failedCount,
             failStreak: stats.failStreak,
@@ -9133,11 +9845,11 @@ class PromotionFlowRunner {
     }
     async getStatsOrDefault(context) {
         try {
-            return normalizeStats(await this.adapter.getStats());
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion stats load failed during ${context}; using safe zero counters error=${this.normalizeError(error)}`);
-            return normalizeStats(null);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(null);
         }
     }
     async loadPercentiles(channel) {
@@ -9151,100 +9863,17 @@ class PromotionFlowRunner {
             return null;
         }
     }
-    async shouldProcessNextChannel(channel) {
-        try {
-            if (!isExactTrue(await this.adapter.isActive())) {
-                this.log('debug', `Promotion cycle stopped before channel; adapter inactive ${this.formatChannel(channel)}`);
-                return false;
-            }
-        }
-        catch (error) {
-            this.log('warn', `Promotion cycle stopped before channel; active check failed ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-            return false;
-        }
-        if (!this.adapter.shouldContinue)
-            return true;
-        try {
-            if (!isExactTrue(await this.adapter.shouldContinue())) {
-                this.log('debug', `Promotion cycle stopped before channel; shouldContinue=false ${this.formatChannel(channel)}`);
-                return false;
-            }
-        }
-        catch (error) {
-            this.log('warn', `Promotion cycle stopped before channel; shouldContinue check failed ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-            return false;
-        }
-        const stats = await this.getStatsOrDefault('daily send budget precheck');
-        const budget = await this.readDailySendBudget(channel, stats.daysLeft);
-        if (budget && budget.remaining <= 0) {
-            // Healthy but capped — record it so the health monitor doesn't restart-loop this engine.
-            this.health.lastCycleBudgetExhausted = true;
-            this.log('debug', [
-                'Promotion cycle stopped before channel; daily send cap reached',
-                this.formatChannel(channel),
-                `count=${budget.count}`,
-                `cap=${budget.cap}`,
-                `limited=${budget.limited}`,
-            ].join('; '));
-            return false;
-        }
-        return true;
+    shouldProcessNextChannel(channel) {
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.shouldProcessNextChannel)(hostOf(this), channel);
     }
-    async readDailySendBudget(channel, daysLeft) {
-        try {
-            const budget = await this.options.account.getDailySendBudgetStatus(daysLeft);
-            return budget ? { allowed: budget.remaining > 0, reservationId: null, ...budget } : null;
-        }
-        catch (error) {
-            this.log('warn', `Promotion daily send budget status failed; stopping cycle conservatively; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-            return {
-                allowed: false,
-                reservationId: null,
-                cap: 0,
-                count: 0,
-                remaining: 0,
-                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(daysLeft),
-            };
-        }
+    readDailySendBudget(channel, daysLeft) {
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
-    async reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        try {
-            const budget = await this.options.account.reserveDailySendBudget(daysLeft);
-            if (budget && !budget.allowed) {
-                this.log('info', [
-                    'Promotion send skipped; daily send cap exhausted',
-                    this.formatChannel(channel),
-                    `isFollowUp=${isFollowUp}`,
-                    `count=${budget.count}`,
-                    `cap=${budget.cap}`,
-                    `limited=${budget.limited}`,
-                ].join('; '));
-            }
-            return budget ? { ...budget } : null;
-        }
-        catch (error) {
-            this.log('warn', `Promotion daily send reservation failed; pausing sends conservatively; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
-            return {
-                allowed: false,
-                reservationId: null,
-                cap: 0,
-                count: 0,
-                remaining: 0,
-                limited: Number.isFinite(daysLeft) && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.isSpamLimited)(daysLeft),
-            };
-        }
+    reserveDailySendBudget(channel, daysLeft, isFollowUp) {
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
-    async settleDailySendBudget(result, reservation) {
-        if (!reservation?.reservationId)
-            return;
-        if (!shouldRollbackDailySendBudget(result))
-            return;
-        try {
-            await this.options.account.rollbackDailySendBudget(reservation.reservationId);
-        }
-        catch (error) {
-            this.log('warn', `Promotion daily send rollback failed; reservationId=${reservation.reservationId} error=${this.normalizeError(error)}`);
-        }
+    settleDailySendBudget(result, reservation) {
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -9263,116 +9892,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return `success=${stats.successCount},failed=${stats.failedCount},failStreak=${stats.failStreak},daysLeft=${stats.daysLeft}`;
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        const intelligenceByChannel = new Map();
-        for (const doc of intelligenceDocs) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(doc.channelId);
-            if (channelId)
-                intelligenceByChannel.set(channelId, doc);
-        }
-        const proven = this.toChannelIdSet(selection.proven);
-        const untested = this.toChannelIdSet(selection.untested);
-        const skipCounts = new Map();
-        for (const channel of selection.skipped) {
-            const reason = this.getSkippedSelectionReason(channel, intelligenceByChannel).bucket;
-            skipCounts.set(reason, (skipCounts.get(reason) ?? 0) + 1);
-        }
-        return {
-            skipBreakdown: this.formatCounts(skipCounts),
-            selectedSample: this.summarizeSelectionChannels(selection.selected, (channel) => {
-                const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
-                if (channelId && proven.has(channelId))
-                    return 'proven';
-                if (channelId && untested.has(channelId))
-                    return 'untested';
-                return 'backfill';
-            }),
-            skippedSample: this.summarizeSelectionChannels(selection.skipped, (channel) => {
-                return this.getSkippedSelectionReason(channel, intelligenceByChannel).sample;
-            }),
-        };
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        const ids = new Set();
-        for (const channel of channels) {
-            const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
-            if (channelId)
-                ids.add(channelId);
-        }
-        return ids;
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(channel.channelId);
-        if (!channelId)
-            return { bucket: 'invalid-channel-id', sample: 'invalid-channel-id' };
-        const doc = intelligenceByChannel.get(channelId);
-        if (!doc)
-            return { bucket: 'duplicate-or-invalid', sample: 'duplicate-or-invalid' };
-        if (doc.safety.status === 'blocked')
-            return { bucket: 'safety-blocked', sample: 'safety-blocked' };
-        return { bucket: 'selection-filter', sample: 'selection-filter' };
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        if (channels.length === 0)
-            return 'none';
-        return channels
-            .slice(0, 8)
-            .map((channel) => `${this.formatCompactChannel(channel)}:${label(channel)}`)
-            .join('|');
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        if (counts.size === 0)
-            return 'none';
-        return [...counts.entries()]
-            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-            .map(([reason, count]) => `${reason}:${count}`)
-            .join('|');
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return [
-            `channelId=${channel.channelId}`,
-            `username=${channel.username ?? 'unknown'}`,
-            `participants=${channel.participantsCount ?? 'unknown'}`,
-            `deleted=${channel.deletedCount ?? 0}`,
-            `success=${channel.successMsgCount ?? 0}`,
-            `failures=${channel.failureMsgCount ?? 0}`,
-        ].join(' ');
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return [
-            `channelId=${channel.channelId}`,
-            `username=${channel.username ?? 'unknown'}`,
-            `participants=${channel.participantsCount ?? 'unknown'}`,
-        ].join(',');
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return `${candidate.kind}:${candidate.randomIndex}:${candidate.strategy ?? 'none'}`;
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCandidate)(candidate);
     }
     compact(value) {
-        return value.replace(/\s+/g, ' ').slice(0, 240);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.compact)(value);
     }
     safeJson(value) {
-        try {
-            const serialized = JSON.stringify(value);
-            return typeof serialized === 'string' ? this.compact(serialized) : String(value);
-        }
-        catch {
-            return String(value);
-        }
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        if (error instanceof Error)
-            return error.message || error.name;
-        if (typeof error === 'string')
-            return error;
-        try {
-            return JSON.stringify(error);
-        }
-        catch {
-            return String(error);
-        }
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -9385,300 +9938,6 @@ class PromotionFlowRunner {
         this.health.lastDurabilityFailureAt = Date.now();
         this.health.lastDurabilityFailure = this.compact(this.normalizeError(error));
     }
-}
-function safeBatchTarget(value, policyLimit) {
-    const safeLimit = safeNonNegativeInt(policyLimit);
-    if (value === undefined)
-        return safeLimit;
-    const safeValue = safeNonNegativeInt(value);
-    return Math.min(safeValue, safeLimit);
-}
-function safeDelayMs(value, fallback) {
-    if (value !== undefined && Number.isFinite(value) && value >= 0)
-        return Math.floor(value);
-    return safeNonNegativeInt(fallback);
-}
-function randomIntInclusive(min, max) {
-    const safeMin = safeNonNegativeInt(min);
-    const safeMax = Math.max(safeMin, safeNonNegativeInt(max));
-    return safeMin + Math.floor(Math.random() * (safeMax - safeMin + 1));
-}
-function safeIntervalMs(value, fallback) {
-    const delayMs = safeDelayMs(value, fallback);
-    return Math.max(1000, delayMs);
-}
-function normalizeStats(value) {
-    const stats = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
-    return {
-        successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
-        failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
-        failStreak: safeNonNegativeInt(asNumber(stats['failStreak'])),
-        daysLeft: safeNonNegativeInt(asNumber(stats['daysLeft'])),
-    };
-}
-function normalizeMessageCheckResult(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) || !(value['status'] === 'exists'
-        || value['status'] === 'deleted'
-        || value['status'] === 'unknown')) {
-        return { status: 'unknown' };
-    }
-    const messageText = normalizeMessageText(value['messageText']);
-    return {
-        status: value['status'],
-        ...(messageText !== undefined ? { messageText } : {}),
-    };
-}
-function withMessageCheckText(message, result) {
-    // The queued text is the canonical pre-obfuscation candidate used for pool identity. Telegram
-    // returns the delivered text, which may contain random homoglyph/naturalization changes; never
-    // replace a valid canonical value with it or one template becomes many pool entries.
-    if (normalizeMessageText(message.messageText) !== undefined)
-        return message;
-    const messageText = normalizeMessageText(result.messageText);
-    return messageText !== undefined ? { ...message, messageText } : message;
-}
-function normalizeMessageText(value) {
-    if (typeof value !== 'string')
-        return undefined;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : undefined;
-}
-function normalizeSendResult(value, candidate) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)) {
-        return {
-            sent: false,
-            messageIndex: candidate.randomIndex,
-            errorMessage: 'Malformed promotion send result',
-            terminal: true,
-        };
-    }
-    const messageIndex = typeof value['messageIndex'] === 'string' && value['messageIndex'].trim().length > 0
-        ? value['messageIndex'].trim()
-        : candidate.randomIndex;
-    const errorMessage = typeof value['errorMessage'] === 'string' && value['errorMessage'].trim().length > 0
-        ? value['errorMessage'].trim()
-        : undefined;
-    const messageText = normalizeMessageText(value['messageText']);
-    const messageSource = normalizeMessageSource(value['messageSource']);
-    const rawMessageId = typeof value['messageId'] === 'number' ? value['messageId'] : undefined;
-    const messageId = isValidMessageId(rawMessageId) ? rawMessageId : undefined;
-    const checkableByChannelId = value['checkableByChannelId'] === false ? false : undefined;
-    const attempted = value['attempted'] === false ? false : undefined;
-    return {
-        sent: value['sent'] === true,
-        ...(attempted === false ? { attempted } : {}),
-        messageIndex,
-        ...(messageId !== undefined ? { messageId } : {}),
-        ...(errorMessage !== undefined ? { errorMessage } : {}),
-        ...(value['terminal'] === true ? { terminal: true } : {}),
-        ...(messageText !== undefined ? { messageText } : {}),
-        ...(messageSource !== null ? { messageSource } : {}),
-        ...(checkableByChannelId === false ? { checkableByChannelId } : {}),
-    };
-}
-function normalizeChannels(value) {
-    if (!Array.isArray(value))
-        return [];
-    const channels = [];
-    for (const item of value) {
-        const channel = normalizeChannel(item);
-        if (channel)
-            channels.push(channel);
-    }
-    return channels;
-}
-function normalizeChannel(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value))
-        return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
-    if (!channelId)
-        return null;
-    return {
-        ...value,
-        channelId,
-    };
-}
-function mergePromotionHealthSignals(channel, doc) {
-    if (!doc)
-        return channel;
-    return {
-        ...channel,
-        ...(Array.isArray(doc.messagePool) ? { messagePool: doc.messagePool } : {}),
-        ...(doc.outcomes ? { outcomes: doc.outcomes } : {}),
-    };
-}
-function normalizeAvailableMessageIds(value) {
-    if (value === undefined)
-        return undefined;
-    if (!Array.isArray(value))
-        return undefined;
-    return value
-        .map((item) => (typeof item === 'string' ? item.trim() : ''))
-        .filter((item) => item.length > 0);
-}
-function normalizeReadyMessages(value) {
-    if (!Array.isArray(value))
-        return [];
-    const messages = [];
-    for (const item of value) {
-        const message = normalizeReadyMessage(item);
-        if (message)
-            messages.push({ message, original: item });
-    }
-    return messages;
-}
-function normalizeReadyMessage(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value))
-        return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_9__.normalizeChannelId)(value['channelId']);
-    const messageId = asNumber(value['messageId']);
-    if (!channelId || !isValidMessageId(messageId))
-        return null;
-    const timestamp = asNumber(value['timestamp']);
-    const availableMessageCount = normalizePositiveInt(value['availableMessageCount']);
-    const strategy = normalizeMessageStrategy(value['strategy']);
-    const messageText = normalizeMessageText(value['messageText']);
-    const poolSource = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(value['poolSource']) ? value['poolSource'] : null;
-    const poolMode = normalizePoolMode(value['poolMode']);
-    return {
-        channelId,
-        messageId,
-        timestamp: Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0,
-        messageIndex: normalizeText(value['messageIndex']) ?? '0',
-        ...(strategy ? { strategy } : {}),
-        isFollowUp: value['isFollowUp'] === true,
-        ...(availableMessageCount !== null ? { availableMessageCount } : {}),
-        ...(messageText !== undefined ? { messageText } : {}),
-        ...(poolSource ? { poolSource } : {}),
-        ...(poolMode ? { poolMode } : {}),
-    };
-}
-function safeNonNegativeInt(value) {
-    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
-}
-function normalizePositiveInt(value) {
-    return typeof value === 'number' && Number.isFinite(value) && value > 0
-        ? Math.floor(value)
-        : null;
-}
-function normalizeMessageSource(value) {
-    return (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(value) ? value : null;
-}
-function safeElapsedMs(startTimestamp) {
-    if (!Number.isFinite(startTimestamp) || startTimestamp <= 0)
-        return 0;
-    return Math.max(0, Date.now() - startTimestamp);
-}
-function isValidMessageId(messageId) {
-    return messageId !== undefined && Number.isSafeInteger(messageId) && messageId > 0;
-}
-function asNumber(value) {
-    return typeof value === 'number' ? value : Number.NaN;
-}
-function isExactTrue(value) {
-    return value === true;
-}
-function normalizeText(value) {
-    if (typeof value !== 'string')
-        return null;
-    const normalized = value.trim();
-    return normalized.length > 0 ? normalized : null;
-}
-function normalizeMessageStrategy(value) {
-    const normalized = typeof value === 'string' ? value.trim() : '';
-    return _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_MESSAGE_STRATEGIES.includes(normalized)
-        ? normalized
-        : null;
-}
-function normalizePoolMode(value) {
-    return value === 'explore' || value === 'reuse'
-        ? value
-        : null;
-}
-function asRunnerOptions(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
-}
-function isAdapterLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
-        && typeof value['isActive'] === 'function'
-        && typeof value['getStats'] === 'function'
-        && typeof value['loadChannels'] === 'function'
-        && typeof value['getChannel'] === 'function'
-        && typeof value['getIntelligenceDocs'] === 'function'
-        && typeof value['getIntelligenceDoc'] === 'function'
-        && typeof value['sendPromotion'] === 'function'
-        && typeof value['checkMessage'] === 'function';
-}
-function isAccountLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
-        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value['intelligence'])
-        && typeof value['recordSuccess'] === 'function'
-        && typeof value['recordDeletion'] === 'function'
-        && typeof value['recordFailure'] === 'function'
-        && typeof value['recordExploreOutcome'] === 'function'
-        && typeof value['ensurePoolEntry'] === 'function'
-        && typeof value['recordPoolEntrySent'] === 'function'
-        && typeof value['recordPoolEntryOutcome'] === 'function'
-        && typeof value['getDailySendBudgetStatus'] === 'function'
-        && typeof value['reserveDailySendBudget'] === 'function'
-        && typeof value['rollbackDailySendBudget'] === 'function'
-        && typeof value['recordSend'] === 'function'
-        && typeof value['blockChannelPermanent'] === 'function'
-        && typeof value['blockChannelTemporary'] === 'function'
-        && typeof value['blockedChannelsForMobile'] === 'function';
-}
-function shouldRollbackDailySendBudget(result) {
-    // The daily send cap must count ONLY successful sends. Any non-sent outcome — including
-    // account-side failures like USER_BANNED_IN_CHANNEL — releases its reservation, so a failed
-    // attempt never consumes budget. (Previously only channel-classified errors rolled back, so a
-    // spam-limited account's constant USER_BANNED failures each ate a slot and blew past the cap.)
-    return !result.sent;
-}
-function createPoolEntry(result) {
-    if (result.checkableByChannelId === false)
-        return null;
-    return createPoolEntryFromText(result.messageText, result.messageSource);
-}
-function createPoolEntryFromText(text, source) {
-    const normalizedText = normalizeMessageText(text);
-    if (!normalizedText || !(0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.isMessageSource)(source))
-        return null;
-    return {
-        key: (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_7__.poolEntryKey)(normalizedText),
-        text: normalizedText,
-        source,
-        attempted: 0,
-        survived: 0,
-        deleted: 0,
-        channelSideFailed: 0,
-        lastSentAtMs: 0,
-        lastValidatedAtMs: 0,
-        state: 'active',
-    };
-}
-function resolveCandidatePoolMode(candidate, isFollowUp) {
-    if (isFollowUp)
-        return null;
-    return candidate.kind === 'pool' ? 'reuse' : 'explore';
-}
-function resolveQueuedPoolMode(message) {
-    if (message.isFollowUp)
-        return null;
-    const explicit = normalizePoolMode(message.poolMode);
-    if (explicit)
-        return explicit;
-    return (0,_pool__WEBPACK_IMPORTED_MODULE_5__.isPoolMessageIndex)(message.messageIndex) ? 'reuse' : 'explore';
-}
-function shouldRecordExploreFromCandidate(candidate, isFollowUp) {
-    return resolveCandidatePoolMode(candidate, isFollowUp) === 'explore';
-}
-function isMessageQueueLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
-        && typeof value['size'] === 'number'
-        && typeof value['enqueue'] === 'function'
-        && typeof value['isQueued'] === 'function'
-        && typeof value['readyForCheck'] === 'function'
-        && typeof value['remove'] === 'function';
 }
 
 
@@ -31507,7 +31766,7 @@ class RepositoryContainer {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DialogManager: () => (/* binding */ DialogManager),
-/* harmony export */   DialogType: () => (/* binding */ DialogType)
+/* harmony export */   DialogType: () => (/* reexport safe */ _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType)
 /* harmony export */ });
 /* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/tl */ "telegram/tl");
 /* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_tl__WEBPACK_IMPORTED_MODULE_0__);
@@ -31516,13 +31775,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! big-integer */ "big-integer");
 /* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/telegram-utils/channel-live-facts */ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./dialog-manager/types */ "../../packages/tg-dialogs/src/dialog-manager/types.ts");
+/* harmony import */ var _dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./dialog-manager/dialog-mapping */ "../../packages/tg-dialogs/src/dialog-manager/dialog-mapping.ts");
+/* harmony import */ var _dialog_manager_server_sync__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./dialog-manager/server-sync */ "../../packages/tg-dialogs/src/dialog-manager/server-sync.ts");
+/* harmony import */ var _dialog_manager_sorted_dialogs__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./dialog-manager/sorted-dialogs */ "../../packages/tg-dialogs/src/dialog-manager/sorted-dialogs.ts");
+/* harmony import */ var _dialog_manager_dialog_queries__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./dialog-manager/dialog-queries */ "../../packages/tg-dialogs/src/dialog-manager/dialog-queries.ts");
+/* harmony import */ var _dialog_manager_entity_lookup__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./dialog-manager/entity-lookup */ "../../packages/tg-dialogs/src/dialog-manager/entity-lookup.ts");
+/* harmony import */ var _dialog_manager_read_status__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./dialog-manager/read-status */ "../../packages/tg-dialogs/src/dialog-manager/read-status.ts");
+/* harmony import */ var _dialog_manager_channel_info__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./dialog-manager/channel-info */ "../../packages/tg-dialogs/src/dialog-manager/channel-info.ts");
+/* harmony import */ var _dialog_manager_dialog_stats__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./dialog-manager/dialog-stats */ "../../packages/tg-dialogs/src/dialog-manager/dialog-stats.ts");
+
+
+
+
+
+
+
 
 
 
@@ -31537,49 +31810,10 @@ __webpack_require__.r(__webpack_exports__);
 // NOTE: isPermanentError + handlePermanentTelegramFailure were app-specific (coupled to app utils /
 // inhandlerUpdated). They are now INJECTED via DialogCallbacks (onIsPermanentError /
 // onPermanentFailure) so this shared package carries no app coupling.
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("DialogManager");
-/**
- * Enum for dialog types
- */
-const DialogType = Object.freeze({
-    PERSONAL: "personal",
-    GROUP: "group",
-    CHANNEL: "channel",
-    BOT: "bot"
-});
-/**
- * Strip the `-100` channel/supergroup prefix from a dialog id.
- *
- * ONE place for this inside tg-dialogs, so every comparison here keys ids the same way the rest of
- * the platform does (`/^-100/` — see channel-state.normalizeChannelId, BasePromotionEngine,
- * ReactionService, both dbservices).
- *
- * BUG THIS FIXES: six call sites used `/^-?100/` — with the minus OPTIONAL, which also strips a
- * leading `100` from a BARE id. A real channel id like `1001234567` became `1234567`, so the same
- * chat was keyed one way here and another way in the DB/Redis (split intelligence docs, per-account
- * block sets and send counters). The surrounding comments all said "Remove -100 prefix", so the
- * optional `-` was never intentional.
- */
-function stripChannelPrefix(id) {
-    return String(id ?? '').replace(/^-100/, '');
-}
-/**
- * KIND-MARKED entity-cache key for a peer: user `X`, basic group `-X`, channel/supergroup `-100X`.
- *
- * This is Telegram's own "marked id" convention (the same one GramJS `utils.getPeerId` and our
- * DeduplicatingSession use). It exists because the three kinds SHARE a numeric id-space — keying the
- * entity cache by bare digits lets a channel be returned when a user with the same trailing digits
- * is requested, which is precisely what EntityCacheManager's docblock forbids.
- */
-function peerCacheKey(peer) {
-    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser)
-        return `${peer.userId.toJSNumber()}`;
-    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat)
-        return `-${peer.chatId.toJSNumber()}`;
-    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel)
-        return `-100${peer.channelId.toJSNumber()}`;
-    return undefined;
-}
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("DialogManager");
+
+/** The instance as the dialog-manager/* modules see it (same object; private members by name). */
+const hostOf = (manager) => manager;
 /**
  * Comprehensive Dialog Manager for Telegram using GramJS
  * Supports multiple instances in a single Node.js process
@@ -31617,7 +31851,7 @@ class DialogManager {
     notifyPersistentDialogMiss(dialogId, type, error) {
         const notification = {
             title: "Lookup failed",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING,
             summary: `Dialog ${dialogId} could not be created from Telegram peer data`,
             fields: [
                 { label: "Dialog ID", value: dialogId },
@@ -31631,7 +31865,7 @@ class DialogManager {
         try {
             void (async () => {
                 try {
-                    const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+                    const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Dialog missing notification returned false", `DialogManager.missingDialogNotification.${dialogId}`);
                 }
                 catch (notificationError) {
@@ -31715,18 +31949,7 @@ class DialogManager {
         logger[level](`${prefix} ${message}`, data);
     }
     isExpectedMissingEntityError(error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // A dead/inaccessible channel is expected during dialog resolution — treat it as a
-        // benign miss (debug) rather than an error. CHAT_ID_INVALID / CHANNEL_INVALID /
-        // PEER_ID_INVALID are the Telegram-side equivalents of "entity not found": the channel
-        // was deleted, the account left it, or it never existed. Previously only the GramJS
-        // "Could not find the input entity" string was classified as expected, so these codes
-        // spammed error logs (~120 fleet-wide, same dead channels retried each sync cycle).
-        return (message.includes('Could not find the input entity') ||
-            message.includes('CHAT_ID_INVALID') ||
-            message.includes('CHANNEL_INVALID') ||
-            message.includes('PEER_ID_INVALID') ||
-            message.includes('CHANNEL_PRIVATE'));
+        return (0,_dialog_manager_entity_lookup__WEBPACK_IMPORTED_MODULE_14__.isExpectedMissingEntityError)(error);
     }
     /**
      * Execute callback if provided, with error handling
@@ -31941,110 +32164,14 @@ class DialogManager {
      *
      * @private This method is called automatically by the periodic sync interval
      */
-    async syncWithServer() {
-        this.log('info', 'Starting periodic sync with server');
-        let updatedCount = 0;
-        let newCount = 0;
-        try {
-            // MEMORY FIX: Stop adding if we're at the limit
-            const maxDialogsToProcess = this.MAX_DIALOGS;
-            let processedCount = 0;
-            // Use iterDialogs - library handles pagination and rate limiting
-            for await (const dialog of this.client.iterDialogs({
-                limit: 500,
-                ignoreMigrated: true // Skip migrated chats (best practice)
-            })) {
-                // MEMORY FIX: Stop processing if we've reached the limit
-                if (this.dialogs.size >= maxDialogsToProcess && processedCount >= this.dialogs.size) {
-                    this.log('debug', 'Dialog limit reached, stopping sync', {
-                        currentSize: this.dialogs.size,
-                        limit: maxDialogsToProcess
-                    });
-                    break;
-                }
-                const dialogId = this.getDialogIdFromCustomDialog(dialog);
-                if (!dialogId)
-                    continue;
-                const existing = this.dialogs.get(dialogId);
-                if (existing) {
-                    // Update existing with latest info from server
-                    this.updateDialogFromServerDialog(existing, dialog);
-                    updatedCount++;
-                }
-                else {
-                    // Add new dialog - use dialog properties directly
-                    const dialogInfo = this.createDialogInfoFromCustomDialog(dialog);
-                    if (dialogInfo) {
-                        // MEMORY FIX: Enforce MAX_DIALOGS limit before setting
-                        if (this.dialogs.size >= this.MAX_DIALOGS) {
-                            // Remove oldest dialog to make room
-                            if (this.sortedDialogIds.length > 0) {
-                                const oldestId = this.sortedDialogIds[this.sortedDialogIds.length - 1];
-                                this.dialogs.delete(oldestId);
-                                this.removeFromSortedArray(oldestId);
-                                this.log('debug', 'Dialog limit reached, removed oldest dialog', {
-                                    removedId: oldestId,
-                                    limit: this.MAX_DIALOGS
-                                });
-                            }
-                        }
-                        this.dialogs.set(dialogId, dialogInfo);
-                        this.updateSortedArray(dialogId);
-                        newCount++;
-                    }
-                }
-            }
-            this.lastSyncTime = Date.now();
-            this.lastPeriodicSync = Date.now();
-            this.log('info', 'Sync completed', { updated: updatedCount, new: newCount });
-        }
-        catch (error) {
-            this.log('error', 'Error during sync with server', { error: error instanceof Error ? error.message : String(error) });
-            throw error;
-        }
+    syncWithServer() {
+        return (0,_dialog_manager_server_sync__WEBPACK_IMPORTED_MODULE_11__.syncWithServer)(hostOf(this));
     }
     /**
      * Update existing dialog with latest server data
      */
     updateDialogFromServerDialog(existing, serverDialog) {
-        // Update with latest server data
-        const serverTimestamp = serverDialog.date * 1000;
-        const serverMessageId = serverDialog.message?.id || 0;
-        const serverIsPinned = serverDialog.pinned || false;
-        const serverIsArchived = serverDialog.archived || false;
-        // BACKWARD COMPATIBILITY: isMuted has always been populated from `archived`, and the
-        // /dialogs route copies it into isArchived, so both fields have carried archive state.
-        // Existing clients read isMuted expecting exactly this, so its value is unchanged; the
-        // correctly-named isArchived is added alongside it.
-        const serverIsMuted = serverIsArchived;
-        // Position of the read boundary, for an accurate unread divider.
-        // readInboxMaxId lives on the RAW TL object (Api.Dialog), NOT on GramJS's custom Dialog
-        // wrapper — the wrapper only re-exposes unreadCount/archived/pinned/folderId/message.
-        // Reading it off the wrapper returned undefined, so the field shipped as 0 for every dialog
-        // (verified live: 25 dialogs, all 0, including one with unreadCount=1). The wrapper keeps
-        // the raw object on `.dialog`, so read through that and fall back to the wrapper in case a
-        // caller passes a raw Api.Dialog directly.
-        const rawDialog = serverDialog.dialog;
-        const serverReadInboxMaxId = rawDialog?.readInboxMaxId
-            ?? serverDialog.readInboxMaxId
-            ?? 0;
-        // Update if server has newer message data OR if pinned/muted/read status changed
-        const hasNewerMessage = this.shouldUpdateFromServer(serverTimestamp, serverMessageId, existing);
-        const pinnedStatusChanged = existing.isPinned !== serverIsPinned;
-        const mutedStatusChanged = existing.isMuted !== serverIsMuted;
-        const readStatusChanged = existing.readInboxMaxId !== serverReadInboxMaxId;
-        if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged || readStatusChanged) {
-            this.updateDialog(existing.id, {
-                lastMessageTimestamp: serverTimestamp,
-                lastMessageId: serverMessageId,
-                unreadCount: serverDialog.unreadCount || 0,
-                isMuted: serverIsMuted,
-                isArchived: serverIsArchived,
-                readInboxMaxId: serverReadInboxMaxId,
-                isPinned: serverIsPinned,
-                message: serverDialog.message || null
-            });
-        }
+        return (0,_dialog_manager_server_sync__WEBPACK_IMPORTED_MODULE_11__.updateDialogFromServerDialog)(hostOf(this), existing, serverDialog);
     }
     /**
      * Simple update method for dialogs - immediate synchronous update
@@ -32081,145 +32208,52 @@ class DialogManager {
      * Only increments for incoming messages, preserves for outgoing
      */
     updateUnreadCount(currentCount, isIncoming) {
-        if (isIncoming) {
-            return currentCount + 1;
-        }
-        return currentCount;
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.updateUnreadCount)(currentCount, isIncoming);
     }
     /**
      * Determine if dialog should be updated based on message timestamp and ID
      * Only updates if message is newer than current dialog state
      */
     shouldUpdateDialog(messageTimestamp, messageId, dialog) {
-        return messageTimestamp > dialog.lastMessageTimestamp ||
-            (messageTimestamp === dialog.lastMessageTimestamp && messageId > dialog.lastMessageId);
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.shouldUpdateDialog)(messageTimestamp, messageId, dialog);
     }
     /**
      * Determine if local dialog should be updated from server data
      * Only updates if server has newer data
      */
     shouldUpdateFromServer(serverTimestamp, serverMessageId, localDialog) {
-        return serverTimestamp > localDialog.lastMessageTimestamp ||
-            (serverTimestamp === localDialog.lastMessageTimestamp &&
-                serverMessageId > localDialog.lastMessageId);
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.shouldUpdateFromServer)(serverTimestamp, serverMessageId, localDialog);
     }
     /**
      * Simplified dialog creation using dialog properties directly from iterDialogs
      * Uses GramJS custom Dialog properties correctly
      */
     createDialogInfoFromCustomDialog(dialog) {
-        try {
-            const dialogId = this.getDialogIdFromCustomDialog(dialog);
-            if (!dialogId)
-                return null;
-            // Use dialog properties directly - they're already available!
-            return {
-                id: dialogId,
-                type: this.determineDialogType(dialog),
-                title: dialog.title || dialog.name || "Unknown",
-                unreadCount: dialog.unreadCount || 0,
-                message: dialog.message || null,
-                lastMessageTimestamp: dialog.date * 1000, // Convert seconds to ms
-                lastMessageId: dialog.message?.id || 0,
-                isMuted: dialog.archived || false,
-                isArchived: dialog.archived || false,
-                // Read through `.dialog` — the raw Api.Dialog. GramJS's custom Dialog wrapper does
-                // not re-expose readInboxMaxId, so this was hardcoded 0 and the field was useless.
-                readInboxMaxId: dialog.dialog?.readInboxMaxId ?? 0,
-                isPinned: dialog.pinned || false,
-                peer: this.getPeerFromDialog(dialog)
-            };
-        }
-        catch (error) {
-            this.log('error', 'Error creating dialog info from custom dialog', { error: error instanceof Error ? error.message : String(error) });
-            return null;
-        }
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.createDialogInfoFromCustomDialog)(hostOf(this), dialog);
     }
     /**
      * Determine dialog type from Dialog object
      */
     determineDialogType(dialog) {
-        if (dialog.isUser) {
-            const entity = dialog.entity;
-            return (entity && 'bot' in entity && entity.bot) ? DialogType.BOT : DialogType.PERSONAL;
-        }
-        else if (dialog.isGroup) {
-            return DialogType.GROUP;
-        }
-        else if (dialog.isChannel) {
-            const entity = dialog.entity;
-            if (entity && 'broadcast' in entity && entity.broadcast) {
-                return DialogType.CHANNEL;
-            }
-            // Supergroups (megagroup=true) are GROUP type
-            if (entity && 'megagroup' in entity && entity.megagroup) {
-                return DialogType.GROUP;
-            }
-            // Default for channels without broadcast/megagroup is GROUP
-            return DialogType.GROUP;
-        }
-        return DialogType.PERSONAL;
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.determineDialogType)(dialog);
     }
     /**
      * Extract peer from dialog entity
      */
     getPeerFromDialog(dialog) {
-        const entity = dialog.entity;
-        if (!entity || !('id' in entity)) {
-            throw new Error('Cannot extract peer from dialog: entity missing or invalid');
-        }
-        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_2___default()(entity.id);
-        if (dialog.isUser) {
-            return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
-        }
-        else if (dialog.isGroup) {
-            return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat({ chatId: entityId });
-        }
-        else if (dialog.isChannel) {
-            return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
-        }
-        throw new Error('Cannot extract peer from dialog: unknown dialog type');
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.getPeerFromDialog)(dialog);
     }
     /**
      * Get dialog ID from custom Dialog object
      */
     getDialogIdFromCustomDialog(dialog) {
-        try {
-            if (dialog.isUser && dialog.entity && 'id' in dialog.entity) {
-                return `${dialog.entity.id}`;
-            }
-            else if (dialog.isGroup && dialog.entity && 'id' in dialog.entity) {
-                return `${dialog.entity.id}`;
-            }
-            else if (dialog.isChannel && dialog.entity && 'id' in dialog.entity) {
-                return `${dialog.entity.id}`;
-            }
-            return null;
-        }
-        catch (error) {
-            this.log('error', 'Error getting dialog ID from custom dialog', { error: error instanceof Error ? error.message : String(error) });
-            return null;
-        }
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.getDialogIdFromCustomDialog)(hostOf(this), dialog);
     }
     /**
      * Get user display name
      */
     getUserDisplayName(user) {
-        if (user.firstName && user.lastName) {
-            return `${user.firstName} ${user.lastName}`;
-        }
-        else if (user.firstName) {
-            return user.firstName;
-        }
-        else if (user.lastName) {
-            return user.lastName;
-        }
-        else if (user.username) {
-            return `@${user.username}`;
-        }
-        else {
-            return "Unknown User";
-        }
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.getUserDisplayName)(user);
     }
     /**
      * Setup event handlers for real-time updates (instance-specific)
@@ -32316,7 +32350,7 @@ class DialogManager {
             const message = event.message;
             if (!message.peerId)
                 return;
-            const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(message.peerId);
+            const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(message.peerId);
             if (!dialogId)
                 return;
             // Convert seconds to milliseconds (from package: date is Unix timestamp in seconds)
@@ -32397,7 +32431,7 @@ class DialogManager {
      * Simplified with basic lock protection
      */
     async createDialogFromPeer(peerId, timestamp) {
-        const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(peerId);
+        const dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_6__.getPeerDialogId)(peerId);
         if (!dialogId) {
             return undefined;
         }
@@ -32413,12 +32447,12 @@ class DialogManager {
         this.dialogCreationLocks.add(dialogId);
         try {
             // Check EntityCacheManager first, then fall back to client.getEntity
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().get(dialogId);
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().get(dialogId);
             // .get() returns `| null`; the `if (!entity)` below covers both.
             let entity = cached;
             if (!entity) {
                 try {
-                    entity = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.getEntity(peerId), { timeout: 10000, errorMessage: `GetEntity timeout for ${dialogId}` });
+                    entity = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_4__.withTimeout)(() => this.client.getEntity(peerId), { timeout: 10000, errorMessage: `GetEntity timeout for ${dialogId}` });
                 }
                 catch (error) {
                     this.log('warn', 'Dialog entity unavailable, creating minimal peer-backed dialog', {
@@ -32429,7 +32463,7 @@ class DialogManager {
                 }
             }
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(dialogId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().put(dialogId, entity);
             }
             const dialogInfo = entity
                 ? this.createDialogInfoFromEntity(entity, dialogId, timestamp)
@@ -32465,102 +32499,13 @@ class DialogManager {
         }
     }
     createDialogInfoFromPeer(peer, dialogId, timestamp) {
-        let type;
-        let title;
-        if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser) {
-            type = DialogType.PERSONAL;
-            title = `User ${dialogId}`;
-        }
-        else if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat) {
-            type = DialogType.GROUP;
-            title = `Chat ${dialogId}`;
-        }
-        else if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel) {
-            type = DialogType.GROUP;
-            title = `Channel ${dialogId}`;
-        }
-        else {
-            return undefined;
-        }
-        return {
-            id: dialogId,
-            type,
-            title,
-            unreadCount: 1,
-            lastMessageTimestamp: timestamp,
-            message: null,
-            lastMessageId: 0,
-            isMuted: false,
-            isArchived: false,
-            readInboxMaxId: 0,
-            isPinned: false,
-            peer,
-        };
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.createDialogInfoFromPeer)(peer, dialogId, timestamp);
     }
     /**
      * Create DialogInfo from entity
      */
     createDialogInfoFromEntity(entity, dialogId, timestamp) {
-        let type = DialogType.PERSONAL;
-        let title = "Unknown";
-        // Use instanceof checks first for more reliable type detection
-        if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.User) {
-            // User entities: check if bot, otherwise PERSONAL
-            if (entity.bot) {
-                type = DialogType.BOT;
-            }
-            else {
-                type = DialogType.PERSONAL;
-            }
-            title = this.getUserDisplayName(entity);
-        }
-        else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel) {
-            // Channel entities: check broadcast vs megagroup
-            if (entity.broadcast) {
-                type = DialogType.CHANNEL;
-            }
-            else {
-                type = DialogType.GROUP; // Supergroups are GROUP type
-            }
-            title = entity.title || "Unnamed Channel";
-        }
-        else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
-            // Chat entities are groups
-            type = DialogType.GROUP;
-            title = entity.title || "Unnamed Group";
-        }
-        // Create peer from entity
-        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_2___default()(entity.id);
-        let peer;
-        if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.User) {
-            peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
-        }
-        else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
-            peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat({ chatId: entityId });
-        }
-        else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel) {
-            peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
-        }
-        else {
-            return undefined;
-        }
-        return {
-            id: dialogId,
-            type,
-            title,
-            // Unread count is set to 1 for new dialogs created from incoming messages
-            // This is called from createDialogFromPeer which is used for new messages
-            // The unread count is properly adjusted in handleNewMessage when updating the dialog
-            unreadCount: 1,
-            lastMessageTimestamp: timestamp,
-            message: null,
-            lastMessageId: 0,
-            isMuted: false,
-            isArchived: false,
-            readInboxMaxId: 0,
-            isPinned: false,
-            peer
-        };
+        return (0,_dialog_manager_dialog_mapping__WEBPACK_IMPORTED_MODULE_10__.createDialogInfoFromEntity)(hostOf(this), entity, dialogId, timestamp);
     }
     /**
      * Get diagnostic information about race condition protection
@@ -32576,150 +32521,33 @@ class DialogManager {
      * Maintains order: pinned first, then by descending timestamp
      */
     findInsertIndex(dialog) {
-        let left = 0;
-        let right = this.sortedDialogIds.length;
-        while (left < right) {
-            const mid = Math.floor((left + right) / 2);
-            const midDialog = this.dialogs.get(this.sortedDialogIds[mid]);
-            if (!midDialog) {
-                // Skip invalid entries
-                right = mid;
-                continue;
-            }
-            // Pinned dialogs come first
-            if (dialog.isPinned !== midDialog.isPinned) {
-                if (dialog.isPinned) {
-                    right = mid; // Insert before unpinned
-                }
-                else {
-                    left = mid + 1; // Insert after pinned
-                }
-                continue;
-            }
-            // Within same pinned group, sort by timestamp (descending)
-            if (midDialog.lastMessageTimestamp < dialog.lastMessageTimestamp) {
-                right = mid;
-            }
-            else {
-                left = mid + 1;
-            }
-        }
-        return left;
+        return (0,_dialog_manager_sorted_dialogs__WEBPACK_IMPORTED_MODULE_12__.findInsertIndex)(hostOf(this), dialog);
     }
     /**
      * Update sorted array when dialog properties change
      * Maintains sorted order: pinned first, then by descending timestamp
      */
     updateSortedArray(dialogId) {
-        const dialog = this.dialogs.get(dialogId);
-        if (!dialog) {
-            return; // Dialog doesn't exist, nothing to update
-        }
-        // Remove if exists
-        const index = this.sortedDialogIds.indexOf(dialogId);
-        if (index !== -1) {
-            this.sortedDialogIds.splice(index, 1);
-        }
-        // MEMORY FIX: Enforce MAX_SORTED_DIALOG_IDS limit - remove oldest if exceeded
-        // sortedDialogIds is in descending order, so oldest are at the end
-        if (this.sortedDialogIds.length >= this.MAX_SORTED_DIALOG_IDS) {
-            const removedId = this.sortedDialogIds.pop(); // Remove oldest (last in array)
-            if (removedId && removedId !== dialogId) {
-                this.log('debug', `Sorted dialog IDs array full, removed oldest: ${removedId}`, {
-                    arraySize: this.sortedDialogIds.length,
-                    limit: this.MAX_SORTED_DIALOG_IDS
-                });
-            }
-        }
-        // Binary search and insert at correct position (respects pinned + timestamp)
-        const insertIndex = this.findInsertIndex(dialog);
-        this.sortedDialogIds.splice(insertIndex, 0, dialogId);
+        return (0,_dialog_manager_sorted_dialogs__WEBPACK_IMPORTED_MODULE_12__.updateSortedArray)(hostOf(this), dialogId);
     }
     /**
      * Remove dialog from sorted array
      */
     removeFromSortedArray(dialogId) {
-        const index = this.sortedDialogIds.indexOf(dialogId);
-        if (index !== -1) {
-            this.sortedDialogIds.splice(index, 1);
-        }
+        return (0,_dialog_manager_sorted_dialogs__WEBPACK_IMPORTED_MODULE_12__.removeFromSortedArray)(hostOf(this), dialogId);
     }
     /**
      * High-performance dialog retrieval with guaranteed sorted order
      * Returns dialogs sorted by lastMessageTimestamp (descending)
      */
     getAllDialogs(limit, offset) {
-        if (!this.isInitialized) {
-            this.log('warn', 'getAllDialogs called before initialization');
-            return [];
-        }
-        // Use sorted array to maintain order
-        const sortedIds = this.sortedDialogIds;
-        const start = offset || 0;
-        const end = limit ? start + limit : undefined;
-        const idsToReturn = end !== undefined ? sortedIds.slice(start, end) : sortedIds.slice(start);
-        const result = [];
-        for (const id of idsToReturn) {
-            const dialog = this.dialogs.get(id);
-            if (dialog) {
-                result.push(dialog);
-            }
-        }
-        return result;
+        return (0,_dialog_manager_dialog_queries__WEBPACK_IMPORTED_MODULE_13__.getAllDialogs)(hostOf(this), limit, offset);
     }
     /**
      * Memory-optimized dialog filtering with early exits
      */
     filterDialogs(filter = {}) {
-        // Safety check: return empty array if not initialized
-        if (!this.isInitialized) {
-            this.log('error', 'filterDialogs called before initialization, returning empty array');
-            return [];
-        }
-        if (this.sortedDialogIds.length == 0) {
-            this.log('error', 'No dialogs found, returning empty array');
-            return [];
-        }
-        const results = [];
-        const maxResults = filter.limit || Number.MAX_SAFE_INTEGER;
-        const skipCount = filter.offset || 0;
-        let processedCount = 0;
-        let skippedCount = 0;
-        // Iterate over sorted array to maintain order
-        for (const id of this.sortedDialogIds) {
-            // Early exit if we have enough results
-            if (results.length >= maxResults) {
-                // this.log('error', `Reached max results, returning result array: ${results.length}`);
-                break;
-            }
-            ;
-            const dialog = this.dialogs.get(id);
-            if (!dialog) {
-                this.log('warn', `Dialog not found, skipping: ${id}`);
-                continue;
-            }
-            ;
-            // Apply filters with short-circuit evaluation
-            if (filter.type !== undefined && dialog.type !== filter.type)
-                continue;
-            if (filter.unreadOnly && dialog.unreadCount === 0)
-                continue;
-            if (filter.pinnedOnly && !dialog.isPinned)
-                continue;
-            if (filter.mutedOnly && !dialog.isMuted)
-                continue;
-            if (filter.excludeMuted && dialog.isMuted)
-                continue;
-            // Handle offset
-            if (skippedCount < skipCount) {
-                skippedCount++;
-                continue;
-            }
-            results.push(dialog);
-            processedCount++;
-        }
-        // this.log('info', `filterDialogs completed, returning ${results.length} results`);
-        return results;
+        return (0,_dialog_manager_dialog_queries__WEBPACK_IMPORTED_MODULE_13__.filterDialogs)(hostOf(this), filter);
     }
     /**
      * Get dialogs by type with optional limit
@@ -32755,25 +32583,13 @@ class DialogManager {
      * Get dialogs by multiple types
      */
     getDialogsByTypes(types, limit, offset) {
-        if (!this.isInitialized) {
-            this.log('warn', 'getDialogsByTypes called before initialization');
-            return [];
-        }
-        const allDialogs = this.getAllDialogs();
-        let filtered = allDialogs.filter(dialog => types.includes(dialog.type));
-        if (offset !== undefined || limit !== undefined) {
-            const start = offset || 0;
-            const end = limit ? start + limit : undefined;
-            filtered = filtered.slice(start, end);
-        }
-        this.log('debug', 'getDialogsByTypes', { found: filtered.length, types: types.join(', '), total: this.dialogs.size, limit: limit || 'none' });
-        return filtered;
+        return (0,_dialog_manager_dialog_queries__WEBPACK_IMPORTED_MODULE_13__.getDialogsByTypes)(hostOf(this), types, limit, offset);
     }
     /**
      * Get bot dialogs with optional limit
      */
     getBotDialogs(limit, offset) {
-        return this.filterDialogs({ type: DialogType.BOT, limit, offset });
+        return this.filterDialogs({ type: _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.BOT, limit, offset });
     }
     /**
      * Get non-muted dialogs with optional limit
@@ -32790,7 +32606,7 @@ class DialogManager {
     /**
      * Get a specific dialog by ID, creating a minimal dialog if absent.
      */
-    async getDialog(dialogId, type = DialogType.PERSONAL) {
+    async getDialog(dialogId, type = _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.PERSONAL) {
         // Check cache first
         if (this.dialogs.has(dialogId)) {
             return this.dialogs.get(dialogId);
@@ -32809,21 +32625,21 @@ class DialogManager {
         try {
             // Extract raw ID (remove -100 prefix for channels/groups)
             let rawId = dialogId;
-            if ((type === DialogType.CHANNEL || type === DialogType.GROUP) && dialogId.startsWith('-100')) {
+            if ((type === _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.CHANNEL || type === _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.GROUP) && dialogId.startsWith('-100')) {
                 rawId = dialogId.replace(/^-100/, '');
             }
             let peer;
             switch (type) {
-                case DialogType.PERSONAL:
-                case DialogType.BOT:
+                case _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.PERSONAL:
+                case _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.BOT:
                     peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(rawId) });
                     break;
-                case DialogType.GROUP:
+                case _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.GROUP:
                     // For groups, try PeerChat first, but modern groups use PeerChannel
                     // Try PeerChannel with raw ID (groups are now supergroups/channels)
                     peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(rawId) });
                     break;
-                case DialogType.CHANNEL:
+                case _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.CHANNEL:
                     // For channels, peer needs raw channel ID (without -100 prefix)
                     peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(rawId) });
                     break;
@@ -32849,101 +32665,22 @@ class DialogManager {
      * @param dialogId The ID of the dialog
      * @returns The entity associated with the dialog, or undefined if not found
      */
-    async getEntity(dialogId) {
-        if (!dialogId) {
-            return undefined;
-        }
-        const dialog = this.dialogs.get(dialogId);
-        if (!dialog) {
-            return undefined;
-        }
-        try {
-            let entity;
-            // Channels and supergroups use -100 prefix (standard Telegram format)
-            // Regular groups (legacy) do not use -100 prefix, but most modern groups are supergroups
-            if (dialog.type === DialogType.CHANNEL || dialog.type === DialogType.GROUP) {
-                // Try with -100 prefix first (works for channels and supergroups)
-                if (!dialogId.startsWith('-100')) {
-                    const entityId = `-100${dialogId}`;
-                    try {
-                        entity = await this.client.getEntity(entityId);
-                    }
-                    catch (error) {
-                        // If that fails, might be a regular group - try using peer object
-                        entity = await this.client.getEntity(dialog.peer);
-                    }
-                }
-                else {
-                    // Already has -100 prefix
-                    entity = await this.client.getEntity(dialogId);
-                }
-            }
-            else {
-                // For users/bots, use peer object directly
-                entity = await this.client.getEntity(dialog.peer);
-            }
-            // Write-through: cache resolved entity into EntityCacheManager
-            if (entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(dialogId, entity);
-            }
-            return entity;
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            if (this.isExpectedMissingEntityError(error)) {
-                this.log('debug', `DIALOG entity-miss | ${dialogId} | expected | ${errorMessage.slice(0, 160)}`);
-            }
-            else {
-                this.log('error', `DIALOG entity-error | ${dialogId} | ${errorMessage.slice(0, 160)}`);
-            }
-            return undefined;
-        }
+    getEntity(dialogId) {
+        return (0,_dialog_manager_entity_lookup__WEBPACK_IMPORTED_MODULE_14__.getEntity)(hostOf(this), dialogId);
     }
     /**
      * Get entity for a peer directly
      * @param peer The peer to get entity for
      * @returns The entity, or undefined if not found
      */
-    async getEntityForPeer(peer) {
-        try {
-            const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(peer);
-            // The ENTITY CACHE must be keyed by the KIND-MARKED id, not the bare digits that
-            // getPeerDialogId returns. Telegram's user / basic-group / channel id-spaces overlap, so
-            // user X, chat -X and channel -100X can share trailing digits; EntityCacheManager's own
-            // docblock states it "MUST NOT collapse them onto one key, or get() would return the
-            // wrong-kind (and wrong) entity". Caching under the bare id did exactly that — a channel
-            // stored at "1234567890" was returned for user 1234567890. Symptom: intermittent
-            // PEER_ID_INVALID / CHANNEL_INVALID, or a DM delivered to the wrong peer kind, that looks
-            // like Telegram flakiness. getPeerDialogId's bare form is still correct for the DIALOG map
-            // key (its other callers), so only the cache key is marked here.
-            const cacheKey = peerCacheKey(peer);
-            if (cacheKey) {
-                const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().get(cacheKey);
-                if (cached)
-                    return cached;
-            }
-            const entity = await this.client.getEntity(peer);
-            if (entity && cacheKey) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__.EntityCacheManager.getInstance().put(cacheKey, entity);
-            }
-            return entity;
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            if (this.isExpectedMissingEntityError(error)) {
-                this.log('debug', `DIALOG peer-miss | expected | ${errorMessage.slice(0, 160)}`);
-            }
-            else {
-                this.log('error', `DIALOG peer-error | ${errorMessage.slice(0, 160)}`);
-            }
-            return undefined;
-        }
+    getEntityForPeer(peer) {
+        return (0,_dialog_manager_entity_lookup__WEBPACK_IMPORTED_MODULE_14__.getEntityForPeer)(hostOf(this), peer);
     }
     /**
      * Get entity with async fallback (creates dialog if not found)
      * @deprecated Use getEntity() instead
      */
-    async getEntityAsync(dialogId, type = DialogType.PERSONAL) {
+    async getEntityAsync(dialogId, type = _dialog_manager_types__WEBPACK_IMPORTED_MODULE_9__.DialogType.PERSONAL) {
         // Try to get/create dialog first
         const dialogInfo = await this.getDialog(dialogId, type);
         if (!dialogInfo) {
@@ -32954,132 +32691,20 @@ class DialogManager {
     /**
      * Mark a dialog as read with retry mechanism
      */
-    async markAsRead(dialogIdorMessage) {
-        let dialogId;
-        try {
-            if (typeof dialogIdorMessage === "string") {
-                dialogId = dialogIdorMessage;
-            }
-            else {
-                dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__.getPeerDialogId)(dialogIdorMessage.peerId);
-                if (!dialogId) {
-                    return;
-                }
-            }
-            if (!dialogId) {
-                return;
-            }
-            const dialog = this.dialogs.get(dialogId);
-            if (!dialog) {
-                // Dialog not in cache - skip marking as read
-                // GramJS markAsRead expects a peer object, not a string ID
-                // Marking unknown dialogs as read is not critical
-                this.log('debug', 'Skipping mark as read for unknown dialog', { dialogId });
-                return;
-            }
-            // Skip if already read
-            if (dialog.unreadCount === 0) {
-                try {
-                    await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
-                }
-                catch (error) {
-                    this.log('debug', 'Error marking already-read dialog as read', { dialogId, error: error instanceof Error ? error.message : String(error) });
-                }
-                return;
-            }
-            // Store the previous state for rollback if needed
-            const previousUnreadCount = dialog.unreadCount;
-            // OPTIMISTIC UPDATE: Mark as read locally first
-            dialog.unreadCount = 0;
-            try {
-                // Use GramJS high-level markAsRead method
-                await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => this.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
-                // SUCCESS: Update was applied both locally and on server
-                const readContext = {
-                    previousUnreadCount,
-                    markedReadAt: Date.now(),
-                    lastMessageId: dialog.lastMessageId,
-                    instanceId: this.instanceId,
-                    instanceName: this.instanceName
-                };
-                this.executeCallback('onDialogRead', dialogId, dialog, readContext);
-                // Update dialog immediately
-                this.updateDialog(dialogId, { unreadCount: 0 });
-            }
-            catch (serverError) {
-                // ROLLBACK: Restore previous state if server call failed
-                dialog.unreadCount = previousUnreadCount;
-                this.log('error', 'Failed to mark dialog as read on server', { dialogId, error: serverError instanceof Error ? serverError.message : String(serverError) });
-                throw serverError;
-            }
-        }
-        catch (error) {
-            this.log('error', 'Error marking dialog as read', { error: error instanceof Error ? error.message : String(error) });
-            // markAsRead is not critical, so transient failures are logged and dropped. But a PERMANENT
-            // error here (e.g. 420 FROZEN_METHOD_INVALID on messages.ReadHistory when the account is
-            // frozen) must still trigger the setup/swap flow — otherwise a frozen account runs silently
-            // because this was the only Telegram call it happened to make. handlePermanentDialogFailure
-            // no-ops for transient errors and escalates permanent ones; its re-throw (used to unwind
-            // in-flight fetch loops) is irrelevant here since callers treat markAsRead as fire-and-forget.
-            await this.handlePermanentDialogFailure(error, 'markAsRead').catch(() => { });
-        }
+    markAsRead(dialogIdorMessage) {
+        return (0,_dialog_manager_read_status__WEBPACK_IMPORTED_MODULE_15__.markAsRead)(hostOf(this), dialogIdorMessage);
     }
     /**
      * Mark multiple dialogs as read efficiently
      */
-    async markMultipleAsRead(dialogIds, options = {}) {
-        const { continueOnError = true, maxConcurrent = 5 } = options;
-        const successful = [];
-        const failed = [];
-        // Process in batches to avoid overwhelming the API
-        for (let i = 0; i < dialogIds.length; i += maxConcurrent) {
-            const batch = dialogIds.slice(i, i + maxConcurrent);
-            const batchPromises = batch.map(async (dialogId) => {
-                try {
-                    await this.markAsRead(dialogId);
-                    successful.push(dialogId);
-                }
-                catch (error) {
-                    failed.push({ dialogId, error });
-                    if (!continueOnError) {
-                        throw error;
-                    }
-                }
-            });
-            await Promise.allSettled(batchPromises);
-            // Small delay between batches
-            if (i + maxConcurrent < dialogIds.length) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-        }
-        return { successful, failed };
+    markMultipleAsRead(dialogIds, options = {}) {
+        return (0,_dialog_manager_read_status__WEBPACK_IMPORTED_MODULE_15__.markMultipleAsRead)(hostOf(this), dialogIds, options);
     }
     /**
      * Mark all dialogs as read with progress tracking
      */
-    async markAllAsRead(options = {}) {
-        const unreadDialogs = this.getUnreadDialogs();
-        const dialogIds = unreadDialogs.map(d => d.id);
-        if (dialogIds.length === 0) {
-            this.log('info', 'No unread dialogs to mark as read');
-            return;
-        }
-        const { onProgress, maxConcurrent = 5 } = options;
-        let completed = 0;
-        this.log('info', 'Marking dialogs as read', { count: dialogIds.length });
-        const result = await this.markMultipleAsRead(dialogIds, {
-            continueOnError: true,
-            maxConcurrent
-        });
-        completed = result.successful.length;
-        onProgress?.(completed, dialogIds.length);
-        if (result.failed.length > 0) {
-            this.log('debug', 'Failed to mark some dialogs as read', { failedCount: result.failed.length });
-            result.failed.forEach(({ dialogId, error }) => {
-                this.log('error', 'Failed to mark dialog as read', { dialogId, error: error instanceof Error ? error.message : String(error) });
-            });
-        }
-        this.log('info', 'Successfully marked dialogs as read', { successful: result.successful.length, total: dialogIds.length });
+    markAllAsRead(options = {}) {
+        return (0,_dialog_manager_read_status__WEBPACK_IMPORTED_MODULE_15__.markAllAsRead)(hostOf(this), options);
     }
     /**
      * Get unread dialogs count
@@ -33101,30 +32726,7 @@ class DialogManager {
      * Search dialogs by title with advanced options
      */
     searchDialogs(query, options = {}) {
-        const { limit, offset, type, caseSensitive = false, exactMatch = false } = options;
-        let dialogs = this.getAllDialogs();
-        // Filter by type first if specified
-        if (type !== undefined) {
-            dialogs = dialogs.filter(dialog => dialog.type === type);
-        }
-        // Apply search query
-        const searchQuery = caseSensitive ? query : query.toLowerCase();
-        dialogs = dialogs.filter(dialog => {
-            const title = caseSensitive ? dialog.title : dialog.title.toLowerCase();
-            if (exactMatch) {
-                return title === searchQuery;
-            }
-            else {
-                return title.includes(searchQuery);
-            }
-        });
-        // Apply pagination
-        if (offset !== undefined || limit !== undefined) {
-            const start = offset || 0;
-            const end = limit ? start + limit : undefined;
-            dialogs = dialogs.slice(start, end);
-        }
-        return dialogs;
+        return (0,_dialog_manager_dialog_queries__WEBPACK_IMPORTED_MODULE_13__.searchDialogs)(hostOf(this), query, options);
     }
     /**
      * Get dialogs with high unread count (more than specified threshold)
@@ -33169,61 +32771,8 @@ class DialogManager {
      * @param limit Maximum number of dialogs to fetch
      * @returns Map of dialog ID to DialogInfo, or null if fetch fails
      */
-    async fetchDialogsFromServer(limit = 500) {
-        const tempDialogs = new Map();
-        let totalFetched = 0;
-        const batchSize = 100;
-        try {
-            this.log('info', 'Fetching dialogs from server', { target: limit });
-            // Using GramJS iterDialogs which handles pagination automatically
-            for await (const dialog of this.client.iterDialogs({
-                limit: limit,
-            })) {
-                try {
-                    // Process each dialog with consistent method
-                    const dialogInfo = this.createDialogInfoFromCustomDialog(dialog);
-                    if (dialogInfo) {
-                        // Store in temporary map during fetch to prevent partial state exposure
-                        tempDialogs.set(dialogInfo.id, dialogInfo);
-                    }
-                    totalFetched++;
-                    // Log progress every batch
-                    if (totalFetched % batchSize === 0) {
-                        this.log('info', `Processed ${totalFetched}/${limit} dialogs`, { successfullyLoaded: tempDialogs.size });
-                    }
-                    // Break if we've successfully loaded enough dialogs OR reached fetch limit
-                    // Continue fetching even if some dialogs fail to process
-                    if (tempDialogs.size >= limit || totalFetched >= limit * 1.2) {
-                        this.log('info', 'Reached target', { loaded: tempDialogs.size, fetched: totalFetched });
-                        break;
-                    }
-                }
-                catch (e) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(e, `Failed to retrieve dialog during fetch`);
-                    // Continue processing even if one dialog fails
-                }
-            }
-            // Only return the map if we successfully fetched at least some dialogs
-            if (tempDialogs.size > 0) {
-                this.log('info', `Successfully fetched ${tempDialogs.size} dialogs from server`);
-                return tempDialogs;
-            }
-            else {
-                this.log('warn', 'No dialogs fetched from server');
-                return null;
-            }
-        }
-        catch (error) {
-            if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_4__.isTelegramTransportUnavailable)(error)) {
-                // Telegram-side blip (ramya1 2026-10-15): the existing dialogs are kept and the next sync retries.
-                this.log('warn', 'Dialog fetch skipped (Telegram transient)', { error: error instanceof Error ? error.message : String(error) });
-                return null;
-            }
-            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to fetch dialogs from server');
-            this.log('error', 'Error fetching dialogs from server', { error: error instanceof Error ? error.message : String(error) });
-            await this.handlePermanentDialogFailure(error, 'fetchDialogsFromServer', errorDetails);
-            return null;
-        }
+    fetchDialogsFromServer(limit = 500) {
+        return (0,_dialog_manager_server_sync__WEBPACK_IMPORTED_MODULE_11__.fetchDialogsFromServer)(hostOf(this), limit);
     }
     /**
      * Refresh dialogs from server with fallback mechanism
@@ -33275,121 +32824,8 @@ class DialogManager {
             }
         }
     }
-    async performRefresh(force) {
-        if (this.isInitializing && !force) {
-            this.log('debug', 'Initialization in progress, skipping refresh');
-            return;
-        }
-        // Check cooldown period (unless forced)
-        if (!force && this.lastSyncTime > 0) {
-            const timeSinceLastRefresh = Date.now() - this.lastSyncTime;
-            const cooldownRemaining = this.REFRESH_COOLDOWN_MS - timeSinceLastRefresh;
-            if (cooldownRemaining > 0) {
-                const minutesRemaining = Math.ceil(cooldownRemaining / (60 * 1000));
-                this.log('debug', 'Refresh cooldown active, skipping', {
-                    minutesRemaining,
-                    timeSinceLastRefresh: Math.floor(timeSinceLastRefresh / 1000) + 's'
-                });
-                return;
-            }
-        }
-        // SAFETY: Preserve existing dialogs as backup
-        const currentSize = this.dialogs.size;
-        const backupDialogs = new Map(this.dialogs);
-        const backupSortedIds = [...this.sortedDialogIds];
-        try {
-            // Suspend real-time updates during refresh
-            this.suspendRealTimeUpdates();
-            this.isInitializing = true;
-            // Fetch dialogs into temporary map (doesn't modify existing dialogs)
-            const newDialogs = await this.fetchDialogsFromServer(500);
-            if (!newDialogs || newDialogs.size === 0) {
-                // Fetch failed - preserve existing dialogs
-                this.log('warn', 'Refresh failed: no dialogs fetched, preserving existing dialogs', {
-                    preservedCount: currentSize
-                });
-                this.isInitializing = false;
-                this.resumeRealTimeUpdates();
-                return;
-            }
-            // SUCCESS: Only now do we replace existing dialogs
-            this.dialogs = newDialogs;
-            // Build sorted array from new dialogs
-            this.sortedDialogIds = Array.from(newDialogs.values())
-                .sort((a, b) => {
-                // Pinned dialogs first
-                if (a.isPinned !== b.isPinned) {
-                    return a.isPinned ? -1 : 1;
-                }
-                // Then by timestamp (descending)
-                return b.lastMessageTimestamp - a.lastMessageTimestamp;
-            })
-                .map(dialog => dialog.id);
-            // Update sync time
-            this.lastSyncTime = Date.now();
-            // Mark as initialized if not already
-            if (!this.isInitialized) {
-                this.setupEventHandlers();
-                this.isInitialized = true;
-                this.startPeriodicSync();
-            }
-            // Resume real-time updates
-            this.isInitializing = false;
-            this.resumeRealTimeUpdates();
-            const newSize = this.dialogs.size;
-            this.log('info', 'Refresh completed successfully', { before: currentSize, after: newSize });
-        }
-        catch (error) {
-            // ROLLBACK: Restore backup dialogs on failure
-            this.log('error', 'Error during refresh, restoring existing dialogs', {
-                error: error instanceof Error ? error.message : String(error),
-                restoredCount: backupDialogs.size
-            });
-            this.dialogs = backupDialogs;
-            this.sortedDialogIds = backupSortedIds;
-            this.isInitializing = false;
-            this.resumeRealTimeUpdates();
-            await this.handlePermanentDialogFailure(error, 'refresh');
-            // If we had no dialogs to begin with, try a minimal recovery
-            if (backupDialogs.size === 0) {
-                try {
-                    this.log('info', 'Attempting minimal recovery fetch');
-                    const recoveryDialogs = await this.fetchDialogsFromServer(20);
-                    if (recoveryDialogs && recoveryDialogs.size > 0) {
-                        this.dialogs = recoveryDialogs;
-                        this.sortedDialogIds = Array.from(recoveryDialogs.values())
-                            .sort((a, b) => {
-                            if (a.isPinned !== b.isPinned) {
-                                return a.isPinned ? -1 : 1;
-                            }
-                            return b.lastMessageTimestamp - a.lastMessageTimestamp;
-                        })
-                            .map(dialog => dialog.id);
-                        this.lastSyncTime = Date.now();
-                        if (!this.isInitialized) {
-                            this.setupEventHandlers();
-                            this.isInitialized = true;
-                            this.startPeriodicSync();
-                        }
-                        this.log('info', 'Minimal recovery successful', { recoveredCount: recoveryDialogs.size });
-                    }
-                    else {
-                        this.log('error', 'Minimal recovery fetch failed', { recoveredCount: recoveryDialogs?.size });
-                        return;
-                    }
-                }
-                catch (recoveryError) {
-                    this.log('error', 'Recovery fetch failed', { error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) });
-                    // Re-throw original error, not recovery error
-                    return;
-                }
-            }
-            else {
-                // We had dialogs, so just throw the error - dialogs are already restored
-                this.log('error', 'Recovery fetch failed', { error: error instanceof Error ? error.message : String(error) });
-                return;
-            }
-        }
+    performRefresh(force) {
+        return (0,_dialog_manager_server_sync__WEBPACK_IMPORTED_MODULE_11__.performRefresh)(hostOf(this), force);
     }
     /**
      * Check if dialog manager needs refresh based on time
@@ -33406,173 +32842,8 @@ class DialogManager {
      * @param options Configuration options for channel info collection
      * @returns Promise<ChannelInfoResult> Comprehensive channel information with statistics
      */
-    async getChannelInfo(options = {}) {
-        const startTime = Date.now();
-        // Ensure DialogManager is initialized
-        if (!this.isInitialized) {
-            this.log('debug', 'DialogManager not initialized, initializing now', { operation: 'getChannelInfo' });
-            await this.initialize();
-        }
-        // Apply default options with strict typing
-        const config = {
-            includeChannels: options.includeChannels ?? true,
-            includeGroups: options.includeGroups ?? true,
-            includeSupergroups: options.includeSupergroups ?? true,
-            includeBroadcastChannels: options.includeBroadcastChannels ?? true,
-            sendableOnly: options.sendableOnly ?? false,
-            includeRestricted: options.includeRestricted ?? false,
-            maxDialogs: options.maxDialogs ?? Number.MAX_SAFE_INTEGER,
-            includeIds: options.includeIds ?? true,
-            includeUsernames: options.includeUsernames ?? true
-        };
-        this.log('info', 'Starting channel info collection', { operation: 'getChannelInfo', config, totalDialogs: this.dialogs.size });
-        // Initialize counters and collections
-        const channels = [];
-        const channelIds = [];
-        const channelUsernames = [];
-        let totalProcessed = 0;
-        let totalChannels = 0;
-        let totalGroups = 0;
-        let totalSupergroups = 0;
-        let totalBroadcastChannels = 0;
-        let sendableChannels = 0;
-        let sendableGroups = 0;
-        let restrictedChannels = 0;
-        // Process dialogs efficiently using Map iterator
-        for (const [dialogId, dialogInfo] of this.dialogs) {
-            if (totalProcessed >= config.maxDialogs) {
-                break;
-            }
-            // Only process channel and group dialogs
-            if (dialogInfo.type !== DialogType.CHANNEL && dialogInfo.type !== DialogType.GROUP) {
-                continue;
-            }
-            totalProcessed++;
-            try {
-                // Get entity using getEntity method
-                const entity = await this.getEntity(dialogId);
-                if (!entity) {
-                    this.log('debug', 'No entity found for dialog', { operation: 'getChannelInfo', dialogId, title: dialogInfo.title, type: dialogInfo.type });
-                    continue;
-                }
-                // Ensure entity is a Channel (includes groups and supergroups)
-                if (!(entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel)) {
-                    continue;
-                }
-                // Type-safe channel processing with strict null checks
-                const channel = entity;
-                const isGroup = channel.megagroup === true;
-                const isBroadcast = channel.broadcast === true;
-                const isChannel = !isGroup;
-                if (!this.isChannelTypeIncluded({ isBroadcast, isGroup }, config))
-                    continue;
-                // Check sendability with comprehensive banned rights analysis
-                const defaultBannedRights = channel.defaultBannedRights;
-                const canSendMsgs = this.canSendMsgsToChannel(channel);
-                // Apply sendable filter
-                if (config.sendableOnly && !canSendMsgs)
-                    continue;
-                // Apply restricted filter
-                if (!config.includeRestricted && (channel.restricted === true)) {
-                    restrictedChannels++;
-                    continue;
-                }
-                // Create comprehensive channel info with strict typing
-                const channelInfo = {
-                    channelId: channel.id.toString(),
-                    title: channel.title || 'Unknown Channel',
-                    username: channel.username || null,
-                    participantsCount: channel.participantsCount ?? null,
-                    restricted: channel.restricted === true,
-                    broadcast: isBroadcast,
-                    megagroup: isGroup,
-                    canSendMsgs,
-                    sendMessages: defaultBannedRights?.sendMessages === true,
-                    sendPlain: defaultBannedRights?.sendPlain === true,
-                    accessHash: channel.accessHash?.toString(),
-                };
-                // Update counters
-                if (isChannel && !isGroup) {
-                    totalChannels++;
-                    if (isBroadcast)
-                        totalBroadcastChannels++;
-                    if (canSendMsgs)
-                        sendableChannels++;
-                }
-                else if (isGroup) {
-                    totalGroups++;
-                    if (isGroup)
-                        totalSupergroups++;
-                    if (canSendMsgs)
-                        sendableGroups++;
-                }
-                // Add to collections
-                channels.push(channelInfo);
-                if (config.includeIds && canSendMsgs) {
-                    // Remove -100 prefix for compatibility with existing code
-                    const cleanId = stripChannelPrefix(channelInfo.channelId);
-                    channelIds.push(cleanId);
-                }
-                if (config.includeUsernames && channelInfo.username) {
-                    channelUsernames.push(channelInfo.username);
-                }
-            }
-            catch (error) {
-                this.log('error', 'Error processing dialog for channel info', {
-                    operation: 'getChannelInfo',
-                    dialogId,
-                    title: dialogInfo.title,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                // Execute error callback if provided
-                this.executeCallback('onError', {
-                    operation: 'getChannelInfo',
-                    error,
-                    instanceId: this.instanceId,
-                    instanceName: this.instanceName
-                });
-            }
-        }
-        const executionTimeMs = Date.now() - startTime;
-        // MEMORY OPTIMIZATION: Limit channels array size to prevent huge memory usage
-        // Entity objects in ChannelInfo are extremely large - limit to 200 max
-        const MAX_CHANNELS_IN_RESULT = 400;
-        const limitedChannels = channels.slice(0, MAX_CHANNELS_IN_RESULT);
-        const limitedChannelIds = channelIds.slice(0, MAX_CHANNELS_IN_RESULT);
-        const limitedChannelUsernames = channelUsernames.slice(0, MAX_CHANNELS_IN_RESULT);
-        // Create result with readonly arrays for immutability
-        const result = {
-            totalProcessed,
-            totalChannels,
-            totalGroups,
-            totalSupergroups,
-            totalBroadcastChannels,
-            sendableChannels,
-            sendableGroups,
-            restrictedChannels,
-            channels: Object.freeze([...limitedChannels]),
-            channelIds: Object.freeze([...limitedChannelIds]),
-            channelUsernames: Object.freeze([...limitedChannelUsernames]),
-            executionTimeMs,
-            instanceId: this.instanceId,
-            instanceName: this.instanceName
-        };
-        // MEMORY OPTIMIZATION: Clear original arrays to help GC
-        channels.length = 0;
-        channelIds.length = 0;
-        channelUsernames.length = 0;
-        this.log('info', 'Channel info collection completed', {
-            operation: 'getChannelInfo',
-            result: {
-                totalProcessed: result.totalProcessed,
-                totalChannels: result.totalChannels,
-                totalGroups: result.totalGroups,
-                sendableChannels: result.sendableChannels,
-                sendableGroups: result.sendableGroups,
-                executionTimeMs: result.executionTimeMs
-            }
-        });
-        return result;
+    getChannelInfo(options = {}) {
+        return (0,_dialog_manager_channel_info__WEBPACK_IMPORTED_MODULE_16__.getChannelInfo)(hostOf(this), options);
     }
     /**
      * Determines if messages can be sent to a channel with comprehensive rights analysis
@@ -33581,22 +32852,10 @@ class DialogManager {
      * @returns boolean indicating if messages can be sent
      */
     canSendMsgsToChannel(channel) {
-        return (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)({
-            channelId: channel.id?.toString(),
-            broadcast: channel.broadcast === true,
-            restricted: channel.restricted === true,
-            left: channel.left === true,
-            defaultBannedRights: channel.defaultBannedRights,
-        });
+        return (0,_dialog_manager_channel_info__WEBPACK_IMPORTED_MODULE_16__.canSendMsgsToChannel)(channel);
     }
     isChannelTypeIncluded(channelType, config) {
-        if (channelType.isGroup) {
-            return config.includeSupergroups || config.includeGroups;
-        }
-        if (channelType.isBroadcast) {
-            return config.includeBroadcastChannels;
-        }
-        return config.includeChannels;
+        return (0,_dialog_manager_channel_info__WEBPACK_IMPORTED_MODULE_16__.isChannelTypeIncluded)(channelType, config);
     }
     /**
      * Get channel information for specific channel types with optimized filtering
@@ -33633,220 +32892,8 @@ class DialogManager {
      * @param options Additional filtering options
      * @returns Promise<ChannelInfoResult> Channel information for specified IDs
      */
-    async getChannelInfoById(targetChannelIds, options = {}) {
-        const startTime = Date.now();
-        // Ensure DialogManager is initialized
-        if (!this.isInitialized) {
-            this.log('debug', 'DialogManager not initialized, initializing now', { operation: 'getChannelInfoById' });
-            await this.initialize();
-        }
-        // Normalize input to array
-        const targetIds = Array.isArray(targetChannelIds) ? targetChannelIds : [targetChannelIds];
-        // Normalize channel IDs (handle both with and without -100 prefix)
-        const normalizedTargetIds = new Set(targetIds.flatMap(id => {
-            const cleanId = stripChannelPrefix(id);
-            const withPrefix = `-100${cleanId}`;
-            const withoutPrefix = cleanId;
-            return [id, cleanId, withPrefix, withoutPrefix];
-        }));
-        this.log('info', 'Starting channel info collection by ID', {
-            operation: 'getChannelInfoById',
-            targetIds,
-            normalizedTargetIds: Array.from(normalizedTargetIds),
-            totalDialogs: this.dialogs.size
-        });
-        // Apply default options with strict typing
-        const config = {
-            includeChannels: options.includeChannels ?? true,
-            includeGroups: options.includeGroups ?? true,
-            includeSupergroups: options.includeSupergroups ?? true,
-            includeBroadcastChannels: options.includeBroadcastChannels ?? true,
-            sendableOnly: options.sendableOnly ?? false,
-            includeRestricted: options.includeRestricted ?? true,
-            includeIds: options.includeIds ?? true,
-            includeUsernames: options.includeUsernames ?? true
-        };
-        // Initialize counters and collections
-        const channels = [];
-        const channelIds = [];
-        const channelUsernames = [];
-        let totalProcessed = 0;
-        let totalChannels = 0;
-        let totalGroups = 0;
-        let totalSupergroups = 0;
-        let totalBroadcastChannels = 0;
-        let sendableChannels = 0;
-        let sendableGroups = 0;
-        let restrictedChannels = 0;
-        // Track found and missing IDs
-        const foundIds = new Set();
-        const missingIds = [];
-        // Process dialogs efficiently using Map iterator, but only for matching IDs
-        for (const [dialogId, dialogInfo] of this.dialogs) {
-            // Check if this dialog ID matches any of our target IDs
-            const matchesTarget = normalizedTargetIds.has(dialogId) ||
-                normalizedTargetIds.has(stripChannelPrefix(dialogId)) ||
-                normalizedTargetIds.has(`-100${dialogId}`) ||
-                normalizedTargetIds.has(`-100${dialogId.replace(/^-/, '')}`);
-            if (!matchesTarget) {
-                continue;
-            }
-            // Only process channel and group dialogs
-            if (dialogInfo.type !== DialogType.CHANNEL && dialogInfo.type !== DialogType.GROUP) {
-                continue;
-            }
-            totalProcessed++;
-            foundIds.add(dialogId);
-            try {
-                // Get entity using getEntity method
-                const entity = await this.getEntity(dialogId);
-                if (!entity) {
-                    this.log('debug', 'No entity found for dialog', {
-                        operation: 'getChannelInfoById',
-                        dialogId,
-                        title: dialogInfo.title,
-                        type: dialogInfo.type
-                    });
-                    continue;
-                }
-                // Ensure entity is a Channel (includes groups and supergroups)
-                if (!(entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel)) {
-                    continue;
-                }
-                // Type-safe channel processing with strict null checks
-                const channel = entity;
-                const isGroup = channel.megagroup === true;
-                const isBroadcast = channel.broadcast === true;
-                const isChannel = !isGroup;
-                if (!this.isChannelTypeIncluded({ isBroadcast, isGroup }, config))
-                    continue;
-                // Check sendability with comprehensive banned rights analysis
-                const canSendMsgs = this.canSendMsgsToChannel(channel);
-                // Apply sendable filter
-                if (config.sendableOnly && !canSendMsgs)
-                    continue;
-                // Apply restricted filter
-                if (!config.includeRestricted && (channel.restricted === true)) {
-                    restrictedChannels++;
-                    continue;
-                }
-                // Create comprehensive channel info with strict typing
-                const channelInfo = {
-                    channelId: channel.id.toString(),
-                    title: channel.title || 'Unknown Channel',
-                    username: channel.username || null,
-                    participantsCount: channel.participantsCount ?? null,
-                    restricted: channel.restricted === true,
-                    broadcast: isBroadcast,
-                    megagroup: isGroup,
-                    canSendMsgs,
-                    sendMessages: channel.defaultBannedRights?.sendMessages === true,
-                    sendPlain: channel.defaultBannedRights?.sendPlain === true,
-                    accessHash: channel.accessHash?.toString()
-                };
-                // Update counters
-                if (isChannel && !isGroup) {
-                    totalChannels++;
-                    if (isBroadcast)
-                        totalBroadcastChannels++;
-                    if (canSendMsgs)
-                        sendableChannels++;
-                }
-                else if (isGroup) {
-                    totalGroups++;
-                    if (isGroup)
-                        totalSupergroups++;
-                    if (canSendMsgs)
-                        sendableGroups++;
-                }
-                // Add to collections
-                channels.push(channelInfo);
-                if (config.includeIds && canSendMsgs) {
-                    // Remove -100 prefix for compatibility with existing code
-                    const cleanId = stripChannelPrefix(channelInfo.channelId);
-                    channelIds.push(cleanId);
-                }
-                if (config.includeUsernames && channelInfo.username) {
-                    channelUsernames.push(channelInfo.username);
-                }
-            }
-            catch (error) {
-                this.log('error', 'Error processing dialog for channel info by ID', {
-                    operation: 'getChannelInfoById',
-                    dialogId,
-                    title: dialogInfo.title,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                // Execute error callback if provided
-                this.executeCallback('onError', {
-                    operation: 'getChannelInfoById',
-                    error,
-                    instanceId: this.instanceId,
-                    instanceName: this.instanceName
-                });
-            }
-        }
-        // Identify missing IDs
-        for (const targetId of targetIds) {
-            const found = Array.from(foundIds).some(foundId => foundId === targetId ||
-                stripChannelPrefix(foundId) === stripChannelPrefix(targetId) ||
-                foundId === `-100${targetId}` ||
-                foundId === `-100${targetId.replace(/^-/, '')}`);
-            if (!found) {
-                missingIds.push(targetId);
-            }
-        }
-        const executionTimeMs = Date.now() - startTime;
-        // MEMORY OPTIMIZATION: Limit channels array size to prevent huge memory usage
-        // Entity objects in ChannelInfo are extremely large - limit to 200 max
-        const MAX_CHANNELS_IN_RESULT = 200;
-        const limitedChannels = channels.slice(0, MAX_CHANNELS_IN_RESULT);
-        const limitedChannelIds = channelIds.slice(0, MAX_CHANNELS_IN_RESULT);
-        const limitedChannelUsernames = channelUsernames.slice(0, MAX_CHANNELS_IN_RESULT);
-        // Create result with readonly arrays for immutability
-        const result = {
-            totalProcessed,
-            totalChannels,
-            totalGroups,
-            totalSupergroups,
-            totalBroadcastChannels,
-            sendableChannels,
-            sendableGroups,
-            restrictedChannels,
-            channels: Object.freeze([...limitedChannels]),
-            channelIds: Object.freeze([...limitedChannelIds]),
-            channelUsernames: Object.freeze([...limitedChannelUsernames]),
-            executionTimeMs,
-            instanceId: this.instanceId,
-            instanceName: this.instanceName
-        };
-        // MEMORY OPTIMIZATION: Clear original arrays to help GC
-        channels.length = 0;
-        channelIds.length = 0;
-        channelUsernames.length = 0;
-        this.log('info', 'Channel info collection by ID completed', {
-            operation: 'getChannelInfoById',
-            targetIds,
-            foundCount: foundIds.size,
-            missingIds,
-            result: {
-                totalProcessed: result.totalProcessed,
-                totalChannels: result.totalChannels,
-                totalGroups: result.totalGroups,
-                sendableChannels: result.sendableChannels,
-                sendableGroups: result.sendableGroups,
-                executionTimeMs: result.executionTimeMs
-            }
-        });
-        // Log missing IDs as warning
-        if (missingIds.length > 0) {
-            this.log('debug', 'Some channel IDs were not found in dialogs', {
-                operation: 'getChannelInfoById',
-                missingIds,
-                foundIds: Array.from(foundIds)
-            });
-        }
-        return result;
+    getChannelInfoById(targetChannelIds, options = {}) {
+        return (0,_dialog_manager_channel_info__WEBPACK_IMPORTED_MODULE_16__.getChannelInfoById)(hostOf(this), targetChannelIds, options);
     }
     /**
      * Get DialogManager instance by ID
@@ -33865,40 +32912,7 @@ class DialogManager {
      * Get dialog count by type efficiently
      */
     getDialogCounts() {
-        const counts = {
-            total: 0,
-            personal: 0,
-            groups: 0,
-            channels: 0,
-            bots: 0,
-            unread: 0,
-            pinned: 0,
-            muted: 0
-        };
-        for (const dialog of this.dialogs.values()) {
-            counts.total++;
-            switch (dialog.type) {
-                case DialogType.PERSONAL:
-                    counts.personal++;
-                    break;
-                case DialogType.GROUP:
-                    counts.groups++;
-                    break;
-                case DialogType.CHANNEL:
-                    counts.channels++;
-                    break;
-                case DialogType.BOT:
-                    counts.bots++;
-                    break;
-            }
-            if (dialog.unreadCount > 0)
-                counts.unread++;
-            if (dialog.isPinned)
-                counts.pinned++;
-            if (dialog.isMuted)
-                counts.muted++;
-        }
-        return counts;
+        return (0,_dialog_manager_dialog_stats__WEBPACK_IMPORTED_MODULE_17__.getDialogCounts)(hostOf(this));
     }
     /**
      * Check if dialog manager is initialized
@@ -33910,39 +32924,13 @@ class DialogManager {
      * Get performance metrics for monitoring
      */
     getPerformanceMetrics() {
-        return {
-            instanceId: this.instanceId,
-            instanceName: this.instanceName,
-            dialogCount: this.dialogs.size,
-            queueSize: this.pendingUpdates.length,
-            lastSyncTime: this.lastSyncTime,
-            isInitializing: this.isInitializing,
-            memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024 // MB
-        };
+        return (0,_dialog_manager_dialog_stats__WEBPACK_IMPORTED_MODULE_17__.getPerformanceMetrics)(hostOf(this));
     }
     /**
      * Get health status of DialogManager
      */
     getHealthStatus() {
-        const issues = [];
-        const syncAgeMinutes = (Date.now() - this.lastSyncTime) / (1000 * 60);
-        if (!this.isInitialized) {
-            issues.push('Not initialized');
-        }
-        if (syncAgeMinutes > 60) {
-            issues.push(`Sync is ${Math.round(syncAgeMinutes)} minutes old`);
-        }
-        if (this.pendingUpdates.length > 100) {
-            issues.push(`Too many pending updates: ${this.pendingUpdates.length}`);
-        }
-        return {
-            isHealthy: issues.length === 0,
-            dialogCount: this.dialogs.size,
-            lastSyncTime: this.lastSyncTime,
-            syncAgeMinutes: Math.round(syncAgeMinutes),
-            pendingUpdates: this.pendingUpdates.length,
-            issues
-        };
+        return (0,_dialog_manager_dialog_stats__WEBPACK_IMPORTED_MODULE_17__.getHealthStatus)(hostOf(this));
     }
     /**
      * Static method to get aggregate metrics from all instances
@@ -34071,15 +33059,7 @@ class DialogManager {
      * Get memory usage statistics for monitoring
      */
     getMemoryStats() {
-        // Rough estimation: each dialog ~1KB, each update ~1KB
-        const estimatedMemoryMB = this.dialogs.size / 1024;
-        return {
-            dialogCount: this.dialogs.size,
-            updateQueueSize: this.pendingUpdates.length,
-            pendingCreations: 0,
-            activeLocks: this.dialogCreationLocks.size,
-            estimatedMemoryMB: Math.round(estimatedMemoryMB * 100) / 100
-        };
+        return (0,_dialog_manager_dialog_stats__WEBPACK_IMPORTED_MODULE_17__.getMemoryStats)(hostOf(this));
     }
     /**
      * Comprehensive cleanup for high-performance scenarios
@@ -34133,6 +33113,1606 @@ class DialogManager {
 }
 DialogManager.instanceCounter = 0;
 DialogManager.activeInstances = new Map();
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/channel-info.ts"
+/*!********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/channel-info.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   canSendMsgsToChannel: () => (/* binding */ canSendMsgsToChannel),
+/* harmony export */   getChannelInfo: () => (/* binding */ getChannelInfo),
+/* harmony export */   getChannelInfoById: () => (/* binding */ getChannelInfoById),
+/* harmony export */   isChannelTypeIncluded: () => (/* binding */ isChannelTypeIncluded)
+/* harmony export */ });
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/tl */ "telegram/tl");
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_tl__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/channel-live-facts */ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts");
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./types */ "../../packages/tg-dialogs/src/dialog-manager/types.ts");
+// DialogManager: channel/group info collection (getChannelInfo, getChannelInfoById).
+
+
+
+/**
+ * Strip the `-100` channel/supergroup prefix from a dialog id.
+ *
+ * ONE place for this inside tg-dialogs, so every comparison here keys ids the same way the rest of
+ * the platform does (`/^-100/` — see channel-state.normalizeChannelId, BasePromotionEngine,
+ * ReactionService, both dbservices).
+ *
+ * BUG THIS FIXES: six call sites used `/^-?100/` — with the minus OPTIONAL, which also strips a
+ * leading `100` from a BARE id. A real channel id like `1001234567` became `1234567`, so the same
+ * chat was keyed one way here and another way in the DB/Redis (split intelligence docs, per-account
+ * block sets and send counters). The surrounding comments all said "Remove -100 prefix", so the
+ * optional `-` was never intentional.
+ */
+function stripChannelPrefix(id) {
+    return String(id ?? '').replace(/^-100/, '');
+}
+async function getChannelInfo(host, options = {}) {
+    const startTime = Date.now();
+    // Ensure DialogManager is initialized
+    if (!host.isInitialized) {
+        host.log('debug', 'DialogManager not initialized, initializing now', { operation: 'getChannelInfo' });
+        await host.initialize();
+    }
+    // Apply default options with strict typing
+    const config = {
+        includeChannels: options.includeChannels ?? true,
+        includeGroups: options.includeGroups ?? true,
+        includeSupergroups: options.includeSupergroups ?? true,
+        includeBroadcastChannels: options.includeBroadcastChannels ?? true,
+        sendableOnly: options.sendableOnly ?? false,
+        includeRestricted: options.includeRestricted ?? false,
+        maxDialogs: options.maxDialogs ?? Number.MAX_SAFE_INTEGER,
+        includeIds: options.includeIds ?? true,
+        includeUsernames: options.includeUsernames ?? true
+    };
+    host.log('info', 'Starting channel info collection', { operation: 'getChannelInfo', config, totalDialogs: host.dialogs.size });
+    // Initialize counters and collections
+    const channels = [];
+    const channelIds = [];
+    const channelUsernames = [];
+    let totalProcessed = 0;
+    let totalChannels = 0;
+    let totalGroups = 0;
+    let totalSupergroups = 0;
+    let totalBroadcastChannels = 0;
+    let sendableChannels = 0;
+    let sendableGroups = 0;
+    let restrictedChannels = 0;
+    // Process dialogs efficiently using Map iterator
+    for (const [dialogId, dialogInfo] of host.dialogs) {
+        if (totalProcessed >= config.maxDialogs) {
+            break;
+        }
+        // Only process channel and group dialogs
+        if (dialogInfo.type !== _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.CHANNEL && dialogInfo.type !== _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP) {
+            continue;
+        }
+        totalProcessed++;
+        try {
+            // Get entity using getEntity method
+            const entity = await host.getEntity(dialogId);
+            if (!entity) {
+                host.log('debug', 'No entity found for dialog', { operation: 'getChannelInfo', dialogId, title: dialogInfo.title, type: dialogInfo.type });
+                continue;
+            }
+            // Ensure entity is a Channel (includes groups and supergroups)
+            if (!(entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel)) {
+                continue;
+            }
+            // Type-safe channel processing with strict null checks
+            const channel = entity;
+            const isGroup = channel.megagroup === true;
+            const isBroadcast = channel.broadcast === true;
+            const isChannel = !isGroup;
+            if (!host.isChannelTypeIncluded({ isBroadcast, isGroup }, config))
+                continue;
+            // Check sendability with comprehensive banned rights analysis
+            const defaultBannedRights = channel.defaultBannedRights;
+            const canSendMsgs = host.canSendMsgsToChannel(channel);
+            // Apply sendable filter
+            if (config.sendableOnly && !canSendMsgs)
+                continue;
+            // Apply restricted filter
+            if (!config.includeRestricted && (channel.restricted === true)) {
+                restrictedChannels++;
+                continue;
+            }
+            // Create comprehensive channel info with strict typing
+            const channelInfo = {
+                channelId: channel.id.toString(),
+                title: channel.title || 'Unknown Channel',
+                username: channel.username || null,
+                participantsCount: channel.participantsCount ?? null,
+                restricted: channel.restricted === true,
+                broadcast: isBroadcast,
+                megagroup: isGroup,
+                canSendMsgs,
+                sendMessages: defaultBannedRights?.sendMessages === true,
+                sendPlain: defaultBannedRights?.sendPlain === true,
+                accessHash: channel.accessHash?.toString(),
+            };
+            // Update counters
+            if (isChannel && !isGroup) {
+                totalChannels++;
+                if (isBroadcast)
+                    totalBroadcastChannels++;
+                if (canSendMsgs)
+                    sendableChannels++;
+            }
+            else if (isGroup) {
+                totalGroups++;
+                if (isGroup)
+                    totalSupergroups++;
+                if (canSendMsgs)
+                    sendableGroups++;
+            }
+            // Add to collections
+            channels.push(channelInfo);
+            if (config.includeIds && canSendMsgs) {
+                // Remove -100 prefix for compatibility with existing code
+                const cleanId = stripChannelPrefix(channelInfo.channelId);
+                channelIds.push(cleanId);
+            }
+            if (config.includeUsernames && channelInfo.username) {
+                channelUsernames.push(channelInfo.username);
+            }
+        }
+        catch (error) {
+            host.log('error', 'Error processing dialog for channel info', {
+                operation: 'getChannelInfo',
+                dialogId,
+                title: dialogInfo.title,
+                error: error instanceof Error ? error.message : String(error)
+            });
+            // Execute error callback if provided
+            host.executeCallback('onError', {
+                operation: 'getChannelInfo',
+                error,
+                instanceId: host.instanceId,
+                instanceName: host.instanceName
+            });
+        }
+    }
+    const executionTimeMs = Date.now() - startTime;
+    // MEMORY OPTIMIZATION: Limit channels array size to prevent huge memory usage
+    // Entity objects in ChannelInfo are extremely large - limit to 200 max
+    const MAX_CHANNELS_IN_RESULT = 400;
+    const limitedChannels = channels.slice(0, MAX_CHANNELS_IN_RESULT);
+    const limitedChannelIds = channelIds.slice(0, MAX_CHANNELS_IN_RESULT);
+    const limitedChannelUsernames = channelUsernames.slice(0, MAX_CHANNELS_IN_RESULT);
+    // Create result with readonly arrays for immutability
+    const result = {
+        totalProcessed,
+        totalChannels,
+        totalGroups,
+        totalSupergroups,
+        totalBroadcastChannels,
+        sendableChannels,
+        sendableGroups,
+        restrictedChannels,
+        channels: Object.freeze([...limitedChannels]),
+        channelIds: Object.freeze([...limitedChannelIds]),
+        channelUsernames: Object.freeze([...limitedChannelUsernames]),
+        executionTimeMs,
+        instanceId: host.instanceId,
+        instanceName: host.instanceName
+    };
+    // MEMORY OPTIMIZATION: Clear original arrays to help GC
+    channels.length = 0;
+    channelIds.length = 0;
+    channelUsernames.length = 0;
+    host.log('info', 'Channel info collection completed', {
+        operation: 'getChannelInfo',
+        result: {
+            totalProcessed: result.totalProcessed,
+            totalChannels: result.totalChannels,
+            totalGroups: result.totalGroups,
+            sendableChannels: result.sendableChannels,
+            sendableGroups: result.sendableGroups,
+            executionTimeMs: result.executionTimeMs
+        }
+    });
+    return result;
+}
+function canSendMsgsToChannel(channel) {
+    return (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.computeLiveCanSendMsgs)({
+        channelId: channel.id?.toString(),
+        broadcast: channel.broadcast === true,
+        restricted: channel.restricted === true,
+        left: channel.left === true,
+        defaultBannedRights: channel.defaultBannedRights,
+    });
+}
+function isChannelTypeIncluded(channelType, config) {
+    if (channelType.isGroup) {
+        return config.includeSupergroups || config.includeGroups;
+    }
+    if (channelType.isBroadcast) {
+        return config.includeBroadcastChannels;
+    }
+    return config.includeChannels;
+}
+async function getChannelInfoById(host, targetChannelIds, options = {}) {
+    const startTime = Date.now();
+    // Ensure DialogManager is initialized
+    if (!host.isInitialized) {
+        host.log('debug', 'DialogManager not initialized, initializing now', { operation: 'getChannelInfoById' });
+        await host.initialize();
+    }
+    // Normalize input to array
+    const targetIds = Array.isArray(targetChannelIds) ? targetChannelIds : [targetChannelIds];
+    // Normalize channel IDs (handle both with and without -100 prefix)
+    const normalizedTargetIds = new Set(targetIds.flatMap(id => {
+        const cleanId = stripChannelPrefix(id);
+        const withPrefix = `-100${cleanId}`;
+        const withoutPrefix = cleanId;
+        return [id, cleanId, withPrefix, withoutPrefix];
+    }));
+    host.log('info', 'Starting channel info collection by ID', {
+        operation: 'getChannelInfoById',
+        targetIds,
+        normalizedTargetIds: Array.from(normalizedTargetIds),
+        totalDialogs: host.dialogs.size
+    });
+    // Apply default options with strict typing
+    const config = {
+        includeChannels: options.includeChannels ?? true,
+        includeGroups: options.includeGroups ?? true,
+        includeSupergroups: options.includeSupergroups ?? true,
+        includeBroadcastChannels: options.includeBroadcastChannels ?? true,
+        sendableOnly: options.sendableOnly ?? false,
+        includeRestricted: options.includeRestricted ?? true,
+        includeIds: options.includeIds ?? true,
+        includeUsernames: options.includeUsernames ?? true
+    };
+    // Initialize counters and collections
+    const channels = [];
+    const channelIds = [];
+    const channelUsernames = [];
+    let totalProcessed = 0;
+    let totalChannels = 0;
+    let totalGroups = 0;
+    let totalSupergroups = 0;
+    let totalBroadcastChannels = 0;
+    let sendableChannels = 0;
+    let sendableGroups = 0;
+    let restrictedChannels = 0;
+    // Track found and missing IDs
+    const foundIds = new Set();
+    const missingIds = [];
+    // Process dialogs efficiently using Map iterator, but only for matching IDs
+    for (const [dialogId, dialogInfo] of host.dialogs) {
+        // Check if this dialog ID matches any of our target IDs
+        const matchesTarget = normalizedTargetIds.has(dialogId) ||
+            normalizedTargetIds.has(stripChannelPrefix(dialogId)) ||
+            normalizedTargetIds.has(`-100${dialogId}`) ||
+            normalizedTargetIds.has(`-100${dialogId.replace(/^-/, '')}`);
+        if (!matchesTarget) {
+            continue;
+        }
+        // Only process channel and group dialogs
+        if (dialogInfo.type !== _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.CHANNEL && dialogInfo.type !== _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP) {
+            continue;
+        }
+        totalProcessed++;
+        foundIds.add(dialogId);
+        try {
+            // Get entity using getEntity method
+            const entity = await host.getEntity(dialogId);
+            if (!entity) {
+                host.log('debug', 'No entity found for dialog', {
+                    operation: 'getChannelInfoById',
+                    dialogId,
+                    title: dialogInfo.title,
+                    type: dialogInfo.type
+                });
+                continue;
+            }
+            // Ensure entity is a Channel (includes groups and supergroups)
+            if (!(entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel)) {
+                continue;
+            }
+            // Type-safe channel processing with strict null checks
+            const channel = entity;
+            const isGroup = channel.megagroup === true;
+            const isBroadcast = channel.broadcast === true;
+            const isChannel = !isGroup;
+            if (!host.isChannelTypeIncluded({ isBroadcast, isGroup }, config))
+                continue;
+            // Check sendability with comprehensive banned rights analysis
+            const canSendMsgs = host.canSendMsgsToChannel(channel);
+            // Apply sendable filter
+            if (config.sendableOnly && !canSendMsgs)
+                continue;
+            // Apply restricted filter
+            if (!config.includeRestricted && (channel.restricted === true)) {
+                restrictedChannels++;
+                continue;
+            }
+            // Create comprehensive channel info with strict typing
+            const channelInfo = {
+                channelId: channel.id.toString(),
+                title: channel.title || 'Unknown Channel',
+                username: channel.username || null,
+                participantsCount: channel.participantsCount ?? null,
+                restricted: channel.restricted === true,
+                broadcast: isBroadcast,
+                megagroup: isGroup,
+                canSendMsgs,
+                sendMessages: channel.defaultBannedRights?.sendMessages === true,
+                sendPlain: channel.defaultBannedRights?.sendPlain === true,
+                accessHash: channel.accessHash?.toString()
+            };
+            // Update counters
+            if (isChannel && !isGroup) {
+                totalChannels++;
+                if (isBroadcast)
+                    totalBroadcastChannels++;
+                if (canSendMsgs)
+                    sendableChannels++;
+            }
+            else if (isGroup) {
+                totalGroups++;
+                if (isGroup)
+                    totalSupergroups++;
+                if (canSendMsgs)
+                    sendableGroups++;
+            }
+            // Add to collections
+            channels.push(channelInfo);
+            if (config.includeIds && canSendMsgs) {
+                // Remove -100 prefix for compatibility with existing code
+                const cleanId = stripChannelPrefix(channelInfo.channelId);
+                channelIds.push(cleanId);
+            }
+            if (config.includeUsernames && channelInfo.username) {
+                channelUsernames.push(channelInfo.username);
+            }
+        }
+        catch (error) {
+            host.log('error', 'Error processing dialog for channel info by ID', {
+                operation: 'getChannelInfoById',
+                dialogId,
+                title: dialogInfo.title,
+                error: error instanceof Error ? error.message : String(error)
+            });
+            // Execute error callback if provided
+            host.executeCallback('onError', {
+                operation: 'getChannelInfoById',
+                error,
+                instanceId: host.instanceId,
+                instanceName: host.instanceName
+            });
+        }
+    }
+    // Identify missing IDs
+    for (const targetId of targetIds) {
+        const found = Array.from(foundIds).some(foundId => foundId === targetId ||
+            stripChannelPrefix(foundId) === stripChannelPrefix(targetId) ||
+            foundId === `-100${targetId}` ||
+            foundId === `-100${targetId.replace(/^-/, '')}`);
+        if (!found) {
+            missingIds.push(targetId);
+        }
+    }
+    const executionTimeMs = Date.now() - startTime;
+    // MEMORY OPTIMIZATION: Limit channels array size to prevent huge memory usage
+    // Entity objects in ChannelInfo are extremely large - limit to 200 max
+    const MAX_CHANNELS_IN_RESULT = 200;
+    const limitedChannels = channels.slice(0, MAX_CHANNELS_IN_RESULT);
+    const limitedChannelIds = channelIds.slice(0, MAX_CHANNELS_IN_RESULT);
+    const limitedChannelUsernames = channelUsernames.slice(0, MAX_CHANNELS_IN_RESULT);
+    // Create result with readonly arrays for immutability
+    const result = {
+        totalProcessed,
+        totalChannels,
+        totalGroups,
+        totalSupergroups,
+        totalBroadcastChannels,
+        sendableChannels,
+        sendableGroups,
+        restrictedChannels,
+        channels: Object.freeze([...limitedChannels]),
+        channelIds: Object.freeze([...limitedChannelIds]),
+        channelUsernames: Object.freeze([...limitedChannelUsernames]),
+        executionTimeMs,
+        instanceId: host.instanceId,
+        instanceName: host.instanceName
+    };
+    // MEMORY OPTIMIZATION: Clear original arrays to help GC
+    channels.length = 0;
+    channelIds.length = 0;
+    channelUsernames.length = 0;
+    host.log('info', 'Channel info collection by ID completed', {
+        operation: 'getChannelInfoById',
+        targetIds,
+        foundCount: foundIds.size,
+        missingIds,
+        result: {
+            totalProcessed: result.totalProcessed,
+            totalChannels: result.totalChannels,
+            totalGroups: result.totalGroups,
+            sendableChannels: result.sendableChannels,
+            sendableGroups: result.sendableGroups,
+            executionTimeMs: result.executionTimeMs
+        }
+    });
+    // Log missing IDs as warning
+    if (missingIds.length > 0) {
+        host.log('debug', 'Some channel IDs were not found in dialogs', {
+            operation: 'getChannelInfoById',
+            missingIds,
+            foundIds: Array.from(foundIds)
+        });
+    }
+    return result;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/dialog-mapping.ts"
+/*!**********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/dialog-mapping.ts ***!
+  \**********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   createDialogInfoFromCustomDialog: () => (/* binding */ createDialogInfoFromCustomDialog),
+/* harmony export */   createDialogInfoFromEntity: () => (/* binding */ createDialogInfoFromEntity),
+/* harmony export */   createDialogInfoFromPeer: () => (/* binding */ createDialogInfoFromPeer),
+/* harmony export */   determineDialogType: () => (/* binding */ determineDialogType),
+/* harmony export */   getDialogIdFromCustomDialog: () => (/* binding */ getDialogIdFromCustomDialog),
+/* harmony export */   getPeerFromDialog: () => (/* binding */ getPeerFromDialog),
+/* harmony export */   getUserDisplayName: () => (/* binding */ getUserDisplayName),
+/* harmony export */   shouldUpdateDialog: () => (/* binding */ shouldUpdateDialog),
+/* harmony export */   shouldUpdateFromServer: () => (/* binding */ shouldUpdateFromServer),
+/* harmony export */   updateUnreadCount: () => (/* binding */ updateUnreadCount)
+/* harmony export */ });
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/tl */ "telegram/tl");
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_tl__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./types */ "../../packages/tg-dialogs/src/dialog-manager/types.ts");
+// DialogManager: Telegram dialog/peer/entity -> DialogInfo mapping and update predicates.
+
+
+
+function updateUnreadCount(currentCount, isIncoming) {
+    if (isIncoming) {
+        return currentCount + 1;
+    }
+    return currentCount;
+}
+function shouldUpdateDialog(messageTimestamp, messageId, dialog) {
+    return messageTimestamp > dialog.lastMessageTimestamp ||
+        (messageTimestamp === dialog.lastMessageTimestamp && messageId > dialog.lastMessageId);
+}
+function shouldUpdateFromServer(serverTimestamp, serverMessageId, localDialog) {
+    return serverTimestamp > localDialog.lastMessageTimestamp ||
+        (serverTimestamp === localDialog.lastMessageTimestamp &&
+            serverMessageId > localDialog.lastMessageId);
+}
+function createDialogInfoFromCustomDialog(host, dialog) {
+    try {
+        const dialogId = host.getDialogIdFromCustomDialog(dialog);
+        if (!dialogId)
+            return null;
+        // Use dialog properties directly - they're already available!
+        return {
+            id: dialogId,
+            type: host.determineDialogType(dialog),
+            title: dialog.title || dialog.name || "Unknown",
+            unreadCount: dialog.unreadCount || 0,
+            message: dialog.message || null,
+            lastMessageTimestamp: dialog.date * 1000, // Convert seconds to ms
+            lastMessageId: dialog.message?.id || 0,
+            isMuted: dialog.archived || false,
+            isArchived: dialog.archived || false,
+            // Read through `.dialog` — the raw Api.Dialog. GramJS's custom Dialog wrapper does
+            // not re-expose readInboxMaxId, so this was hardcoded 0 and the field was useless.
+            readInboxMaxId: dialog.dialog?.readInboxMaxId ?? 0,
+            isPinned: dialog.pinned || false,
+            peer: host.getPeerFromDialog(dialog)
+        };
+    }
+    catch (error) {
+        host.log('error', 'Error creating dialog info from custom dialog', { error: error instanceof Error ? error.message : String(error) });
+        return null;
+    }
+}
+function determineDialogType(dialog) {
+    if (dialog.isUser) {
+        const entity = dialog.entity;
+        return (entity && 'bot' in entity && entity.bot) ? _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.BOT : _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.PERSONAL;
+    }
+    else if (dialog.isGroup) {
+        return _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+    }
+    else if (dialog.isChannel) {
+        const entity = dialog.entity;
+        if (entity && 'broadcast' in entity && entity.broadcast) {
+            return _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.CHANNEL;
+        }
+        // Supergroups (megagroup=true) are GROUP type
+        if (entity && 'megagroup' in entity && entity.megagroup) {
+            return _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+        }
+        // Default for channels without broadcast/megagroup is GROUP
+        return _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+    }
+    return _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.PERSONAL;
+}
+function getPeerFromDialog(dialog) {
+    const entity = dialog.entity;
+    if (!entity || !('id' in entity)) {
+        throw new Error('Cannot extract peer from dialog: entity missing or invalid');
+    }
+    const entityId = big_integer__WEBPACK_IMPORTED_MODULE_1___default()(entity.id);
+    if (dialog.isUser) {
+        return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
+    }
+    else if (dialog.isGroup) {
+        return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat({ chatId: entityId });
+    }
+    else if (dialog.isChannel) {
+        return new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
+    }
+    throw new Error('Cannot extract peer from dialog: unknown dialog type');
+}
+function getDialogIdFromCustomDialog(host, dialog) {
+    try {
+        if (dialog.isUser && dialog.entity && 'id' in dialog.entity) {
+            return `${dialog.entity.id}`;
+        }
+        else if (dialog.isGroup && dialog.entity && 'id' in dialog.entity) {
+            return `${dialog.entity.id}`;
+        }
+        else if (dialog.isChannel && dialog.entity && 'id' in dialog.entity) {
+            return `${dialog.entity.id}`;
+        }
+        return null;
+    }
+    catch (error) {
+        host.log('error', 'Error getting dialog ID from custom dialog', { error: error instanceof Error ? error.message : String(error) });
+        return null;
+    }
+}
+function getUserDisplayName(user) {
+    if (user.firstName && user.lastName) {
+        return `${user.firstName} ${user.lastName}`;
+    }
+    else if (user.firstName) {
+        return user.firstName;
+    }
+    else if (user.lastName) {
+        return user.lastName;
+    }
+    else if (user.username) {
+        return `@${user.username}`;
+    }
+    else {
+        return "Unknown User";
+    }
+}
+function createDialogInfoFromPeer(peer, dialogId, timestamp) {
+    let type;
+    let title;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser) {
+        type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.PERSONAL;
+        title = `User ${dialogId}`;
+    }
+    else if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat) {
+        type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+        title = `Chat ${dialogId}`;
+    }
+    else if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel) {
+        type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+        title = `Channel ${dialogId}`;
+    }
+    else {
+        return undefined;
+    }
+    return {
+        id: dialogId,
+        type,
+        title,
+        unreadCount: 1,
+        lastMessageTimestamp: timestamp,
+        message: null,
+        lastMessageId: 0,
+        isMuted: false,
+        isArchived: false,
+        readInboxMaxId: 0,
+        isPinned: false,
+        peer,
+    };
+}
+function createDialogInfoFromEntity(host, entity, dialogId, timestamp) {
+    let type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.PERSONAL;
+    let title = "Unknown";
+    // Use instanceof checks first for more reliable type detection
+    if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.User) {
+        // User entities: check if bot, otherwise PERSONAL
+        if (entity.bot) {
+            type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.BOT;
+        }
+        else {
+            type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.PERSONAL;
+        }
+        title = host.getUserDisplayName(entity);
+    }
+    else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel) {
+        // Channel entities: check broadcast vs megagroup
+        if (entity.broadcast) {
+            type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.CHANNEL;
+        }
+        else {
+            type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP; // Supergroups are GROUP type
+        }
+        title = entity.title || "Unnamed Channel";
+    }
+    else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
+        // Chat entities are groups
+        type = _types__WEBPACK_IMPORTED_MODULE_2__.DialogType.GROUP;
+        title = entity.title || "Unnamed Group";
+    }
+    // Create peer from entity
+    const entityId = big_integer__WEBPACK_IMPORTED_MODULE_1___default()(entity.id);
+    let peer;
+    if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.User) {
+        peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser({ userId: entityId });
+    }
+    else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Chat) {
+        peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat({ chatId: entityId });
+    }
+    else if (entity instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.Channel) {
+        peer = new telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel({ channelId: entityId });
+    }
+    else {
+        return undefined;
+    }
+    return {
+        id: dialogId,
+        type,
+        title,
+        // Unread count is set to 1 for new dialogs created from incoming messages
+        // This is called from createDialogFromPeer which is used for new messages
+        // The unread count is properly adjusted in handleNewMessage when updating the dialog
+        unreadCount: 1,
+        lastMessageTimestamp: timestamp,
+        message: null,
+        lastMessageId: 0,
+        isMuted: false,
+        isArchived: false,
+        readInboxMaxId: 0,
+        isPinned: false,
+        peer
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/dialog-queries.ts"
+/*!**********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/dialog-queries.ts ***!
+  \**********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   filterDialogs: () => (/* binding */ filterDialogs),
+/* harmony export */   getAllDialogs: () => (/* binding */ getAllDialogs),
+/* harmony export */   getDialogsByTypes: () => (/* binding */ getDialogsByTypes),
+/* harmony export */   searchDialogs: () => (/* binding */ searchDialogs)
+/* harmony export */ });
+function getAllDialogs(host, limit, offset) {
+    if (!host.isInitialized) {
+        host.log('warn', 'getAllDialogs called before initialization');
+        return [];
+    }
+    // Use sorted array to maintain order
+    const sortedIds = host.sortedDialogIds;
+    const start = offset || 0;
+    const end = limit ? start + limit : undefined;
+    const idsToReturn = end !== undefined ? sortedIds.slice(start, end) : sortedIds.slice(start);
+    const result = [];
+    for (const id of idsToReturn) {
+        const dialog = host.dialogs.get(id);
+        if (dialog) {
+            result.push(dialog);
+        }
+    }
+    return result;
+}
+function filterDialogs(host, filter = {}) {
+    // Safety check: return empty array if not initialized
+    if (!host.isInitialized) {
+        host.log('error', 'filterDialogs called before initialization, returning empty array');
+        return [];
+    }
+    if (host.sortedDialogIds.length == 0) {
+        host.log('error', 'No dialogs found, returning empty array');
+        return [];
+    }
+    const results = [];
+    const maxResults = filter.limit || Number.MAX_SAFE_INTEGER;
+    const skipCount = filter.offset || 0;
+    let processedCount = 0;
+    let skippedCount = 0;
+    // Iterate over sorted array to maintain order
+    for (const id of host.sortedDialogIds) {
+        // Early exit if we have enough results
+        if (results.length >= maxResults) {
+            // host.log('error', `Reached max results, returning result array: ${results.length}`);
+            break;
+        }
+        ;
+        const dialog = host.dialogs.get(id);
+        if (!dialog) {
+            host.log('warn', `Dialog not found, skipping: ${id}`);
+            continue;
+        }
+        ;
+        // Apply filters with short-circuit evaluation
+        if (filter.type !== undefined && dialog.type !== filter.type)
+            continue;
+        if (filter.unreadOnly && dialog.unreadCount === 0)
+            continue;
+        if (filter.pinnedOnly && !dialog.isPinned)
+            continue;
+        if (filter.mutedOnly && !dialog.isMuted)
+            continue;
+        if (filter.excludeMuted && dialog.isMuted)
+            continue;
+        // Handle offset
+        if (skippedCount < skipCount) {
+            skippedCount++;
+            continue;
+        }
+        results.push(dialog);
+        processedCount++;
+    }
+    // host.log('info', `filterDialogs completed, returning ${results.length} results`);
+    return results;
+}
+function getDialogsByTypes(host, types, limit, offset) {
+    if (!host.isInitialized) {
+        host.log('warn', 'getDialogsByTypes called before initialization');
+        return [];
+    }
+    const allDialogs = host.getAllDialogs();
+    let filtered = allDialogs.filter(dialog => types.includes(dialog.type));
+    if (offset !== undefined || limit !== undefined) {
+        const start = offset || 0;
+        const end = limit ? start + limit : undefined;
+        filtered = filtered.slice(start, end);
+    }
+    host.log('debug', 'getDialogsByTypes', { found: filtered.length, types: types.join(', '), total: host.dialogs.size, limit: limit || 'none' });
+    return filtered;
+}
+function searchDialogs(host, query, options = {}) {
+    const { limit, offset, type, caseSensitive = false, exactMatch = false } = options;
+    let dialogs = host.getAllDialogs();
+    // Filter by type first if specified
+    if (type !== undefined) {
+        dialogs = dialogs.filter(dialog => dialog.type === type);
+    }
+    // Apply search query
+    const searchQuery = caseSensitive ? query : query.toLowerCase();
+    dialogs = dialogs.filter(dialog => {
+        const title = caseSensitive ? dialog.title : dialog.title.toLowerCase();
+        if (exactMatch) {
+            return title === searchQuery;
+        }
+        else {
+            return title.includes(searchQuery);
+        }
+    });
+    // Apply pagination
+    if (offset !== undefined || limit !== undefined) {
+        const start = offset || 0;
+        const end = limit ? start + limit : undefined;
+        dialogs = dialogs.slice(start, end);
+    }
+    return dialogs;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/dialog-stats.ts"
+/*!********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/dialog-stats.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getDialogCounts: () => (/* binding */ getDialogCounts),
+/* harmony export */   getHealthStatus: () => (/* binding */ getHealthStatus),
+/* harmony export */   getMemoryStats: () => (/* binding */ getMemoryStats),
+/* harmony export */   getPerformanceMetrics: () => (/* binding */ getPerformanceMetrics)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-dialogs/src/dialog-manager/types.ts");
+
+function getDialogCounts(host) {
+    const counts = {
+        total: 0,
+        personal: 0,
+        groups: 0,
+        channels: 0,
+        bots: 0,
+        unread: 0,
+        pinned: 0,
+        muted: 0
+    };
+    for (const dialog of host.dialogs.values()) {
+        counts.total++;
+        switch (dialog.type) {
+            case _types__WEBPACK_IMPORTED_MODULE_0__.DialogType.PERSONAL:
+                counts.personal++;
+                break;
+            case _types__WEBPACK_IMPORTED_MODULE_0__.DialogType.GROUP:
+                counts.groups++;
+                break;
+            case _types__WEBPACK_IMPORTED_MODULE_0__.DialogType.CHANNEL:
+                counts.channels++;
+                break;
+            case _types__WEBPACK_IMPORTED_MODULE_0__.DialogType.BOT:
+                counts.bots++;
+                break;
+        }
+        if (dialog.unreadCount > 0)
+            counts.unread++;
+        if (dialog.isPinned)
+            counts.pinned++;
+        if (dialog.isMuted)
+            counts.muted++;
+    }
+    return counts;
+}
+function getPerformanceMetrics(host) {
+    return {
+        instanceId: host.instanceId,
+        instanceName: host.instanceName,
+        dialogCount: host.dialogs.size,
+        queueSize: host.pendingUpdates.length,
+        lastSyncTime: host.lastSyncTime,
+        isInitializing: host.isInitializing,
+        memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024 // MB
+    };
+}
+function getHealthStatus(host) {
+    const issues = [];
+    const syncAgeMinutes = (Date.now() - host.lastSyncTime) / (1000 * 60);
+    if (!host.isInitialized) {
+        issues.push('Not initialized');
+    }
+    if (syncAgeMinutes > 60) {
+        issues.push(`Sync is ${Math.round(syncAgeMinutes)} minutes old`);
+    }
+    if (host.pendingUpdates.length > 100) {
+        issues.push(`Too many pending updates: ${host.pendingUpdates.length}`);
+    }
+    return {
+        isHealthy: issues.length === 0,
+        dialogCount: host.dialogs.size,
+        lastSyncTime: host.lastSyncTime,
+        syncAgeMinutes: Math.round(syncAgeMinutes),
+        pendingUpdates: host.pendingUpdates.length,
+        issues
+    };
+}
+function getMemoryStats(host) {
+    // Rough estimation: each dialog ~1KB, each update ~1KB
+    const estimatedMemoryMB = host.dialogs.size / 1024;
+    return {
+        dialogCount: host.dialogs.size,
+        updateQueueSize: host.pendingUpdates.length,
+        pendingCreations: 0,
+        activeLocks: host.dialogCreationLocks.size,
+        estimatedMemoryMB: Math.round(estimatedMemoryMB * 100) / 100
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/entity-lookup.ts"
+/*!*********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/entity-lookup.ts ***!
+  \*********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getEntity: () => (/* binding */ getEntity),
+/* harmony export */   getEntityForPeer: () => (/* binding */ getEntityForPeer),
+/* harmony export */   isExpectedMissingEntityError: () => (/* binding */ isExpectedMissingEntityError)
+/* harmony export */ });
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/tl */ "telegram/tl");
+/* harmony import */ var telegram_tl__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_tl__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./types */ "../../packages/tg-dialogs/src/dialog-manager/types.ts");
+// DialogManager: entity resolution for dialogs and peers (EntityCacheManager first).
+
+
+
+
+/**
+ * KIND-MARKED entity-cache key for a peer: user `X`, basic group `-X`, channel/supergroup `-100X`.
+ *
+ * This is Telegram's own "marked id" convention (the same one GramJS `utils.getPeerId` and our
+ * DeduplicatingSession use). It exists because the three kinds SHARE a numeric id-space — keying the
+ * entity cache by bare digits lets a channel be returned when a user with the same trailing digits
+ * is requested, which is precisely what EntityCacheManager's docblock forbids.
+ */
+function peerCacheKey(peer) {
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerUser)
+        return `${peer.userId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChat)
+        return `-${peer.chatId.toJSNumber()}`;
+    if (peer instanceof telegram_tl__WEBPACK_IMPORTED_MODULE_0__.Api.PeerChannel)
+        return `-100${peer.channelId.toJSNumber()}`;
+    return undefined;
+}
+function isExpectedMissingEntityError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // A dead/inaccessible channel is expected during dialog resolution — treat it as a
+    // benign miss (debug) rather than an error. CHAT_ID_INVALID / CHANNEL_INVALID /
+    // PEER_ID_INVALID are the Telegram-side equivalents of "entity not found": the channel
+    // was deleted, the account left it, or it never existed. Previously only the GramJS
+    // "Could not find the input entity" string was classified as expected, so these codes
+    // spammed error logs (~120 fleet-wide, same dead channels retried each sync cycle).
+    return (message.includes('Could not find the input entity') ||
+        message.includes('CHAT_ID_INVALID') ||
+        message.includes('CHANNEL_INVALID') ||
+        message.includes('PEER_ID_INVALID') ||
+        message.includes('CHANNEL_PRIVATE'));
+}
+async function getEntity(host, dialogId) {
+    if (!dialogId) {
+        return undefined;
+    }
+    const dialog = host.dialogs.get(dialogId);
+    if (!dialog) {
+        return undefined;
+    }
+    try {
+        let entity;
+        // Channels and supergroups use -100 prefix (standard Telegram format)
+        // Regular groups (legacy) do not use -100 prefix, but most modern groups are supergroups
+        if (dialog.type === _types__WEBPACK_IMPORTED_MODULE_3__.DialogType.CHANNEL || dialog.type === _types__WEBPACK_IMPORTED_MODULE_3__.DialogType.GROUP) {
+            // Try with -100 prefix first (works for channels and supergroups)
+            if (!dialogId.startsWith('-100')) {
+                const entityId = `-100${dialogId}`;
+                try {
+                    entity = await host.client.getEntity(entityId);
+                }
+                catch (error) {
+                    // If that fails, might be a regular group - try using peer object
+                    entity = await host.client.getEntity(dialog.peer);
+                }
+            }
+            else {
+                // Already has -100 prefix
+                entity = await host.client.getEntity(dialogId);
+            }
+        }
+        else {
+            // For users/bots, use peer object directly
+            entity = await host.client.getEntity(dialog.peer);
+        }
+        // Write-through: cache resolved entity into EntityCacheManager
+        if (entity) {
+            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().put(dialogId, entity);
+        }
+        return entity;
+    }
+    catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (host.isExpectedMissingEntityError(error)) {
+            host.log('debug', `DIALOG entity-miss | ${dialogId} | expected | ${errorMessage.slice(0, 160)}`);
+        }
+        else {
+            host.log('error', `DIALOG entity-error | ${dialogId} | ${errorMessage.slice(0, 160)}`);
+        }
+        return undefined;
+    }
+}
+async function getEntityForPeer(host, peer) {
+    try {
+        const peerId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_1__.getPeerDialogId)(peer);
+        // The ENTITY CACHE must be keyed by the KIND-MARKED id, not the bare digits that
+        // getPeerDialogId returns. Telegram's user / basic-group / channel id-spaces overlap, so
+        // user X, chat -X and channel -100X can share trailing digits; EntityCacheManager's own
+        // docblock states it "MUST NOT collapse them onto one key, or get() would return the
+        // wrong-kind (and wrong) entity". Caching under the bare id did exactly that — a channel
+        // stored at "1234567890" was returned for user 1234567890. Symptom: intermittent
+        // PEER_ID_INVALID / CHANNEL_INVALID, or a DM delivered to the wrong peer kind, that looks
+        // like Telegram flakiness. getPeerDialogId's bare form is still correct for the DIALOG map
+        // key (its other callers), so only the cache key is marked here.
+        const cacheKey = peerCacheKey(peer);
+        if (cacheKey) {
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        const entity = await host.client.getEntity(peer);
+        if (entity && cacheKey) {
+            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().put(cacheKey, entity);
+        }
+        return entity;
+    }
+    catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (host.isExpectedMissingEntityError(error)) {
+            host.log('debug', `DIALOG peer-miss | expected | ${errorMessage.slice(0, 160)}`);
+        }
+        else {
+            host.log('error', `DIALOG peer-error | ${errorMessage.slice(0, 160)}`);
+        }
+        return undefined;
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/read-status.ts"
+/*!*******************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/read-status.ts ***!
+  \*******************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   markAllAsRead: () => (/* binding */ markAllAsRead),
+/* harmony export */   markAsRead: () => (/* binding */ markAsRead),
+/* harmony export */   markMultipleAsRead: () => (/* binding */ markMultipleAsRead)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+
+
+async function markAsRead(host, dialogIdorMessage) {
+    let dialogId;
+    try {
+        if (typeof dialogIdorMessage === "string") {
+            dialogId = dialogIdorMessage;
+        }
+        else {
+            dialogId = (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_1__.getPeerDialogId)(dialogIdorMessage.peerId);
+            if (!dialogId) {
+                return;
+            }
+        }
+        if (!dialogId) {
+            return;
+        }
+        const dialog = host.dialogs.get(dialogId);
+        if (!dialog) {
+            // Dialog not in cache - skip marking as read
+            // GramJS markAsRead expects a peer object, not a string ID
+            // Marking unknown dialogs as read is not critical
+            host.log('debug', 'Skipping mark as read for unknown dialog', { dialogId });
+            return;
+        }
+        // Skip if already read
+        if (dialog.unreadCount === 0) {
+            try {
+                await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__.withTimeout)(() => host.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
+            }
+            catch (error) {
+                host.log('debug', 'Error marking already-read dialog as read', { dialogId, error: error instanceof Error ? error.message : String(error) });
+            }
+            return;
+        }
+        // Store the previous state for rollback if needed
+        const previousUnreadCount = dialog.unreadCount;
+        // OPTIMISTIC UPDATE: Mark as read locally first
+        dialog.unreadCount = 0;
+        try {
+            // Use GramJS high-level markAsRead method
+            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__.withTimeout)(() => host.client.markAsRead(dialog.peer), { timeout: 5000, errorMessage: "Mark as Read Timeout" });
+            // SUCCESS: Update was applied both locally and on server
+            const readContext = {
+                previousUnreadCount,
+                markedReadAt: Date.now(),
+                lastMessageId: dialog.lastMessageId,
+                instanceId: host.instanceId,
+                instanceName: host.instanceName
+            };
+            host.executeCallback('onDialogRead', dialogId, dialog, readContext);
+            // Update dialog immediately
+            host.updateDialog(dialogId, { unreadCount: 0 });
+        }
+        catch (serverError) {
+            // ROLLBACK: Restore previous state if server call failed
+            dialog.unreadCount = previousUnreadCount;
+            host.log('error', 'Failed to mark dialog as read on server', { dialogId, error: serverError instanceof Error ? serverError.message : String(serverError) });
+            throw serverError;
+        }
+    }
+    catch (error) {
+        host.log('error', 'Error marking dialog as read', { error: error instanceof Error ? error.message : String(error) });
+        // markAsRead is not critical, so transient failures are logged and dropped. But a PERMANENT
+        // error here (e.g. 420 FROZEN_METHOD_INVALID on messages.ReadHistory when the account is
+        // frozen) must still trigger the setup/swap flow — otherwise a frozen account runs silently
+        // because this was the only Telegram call it happened to make. handlePermanentDialogFailure
+        // no-ops for transient errors and escalates permanent ones; its re-throw (used to unwind
+        // in-flight fetch loops) is irrelevant here since callers treat markAsRead as fire-and-forget.
+        await host.handlePermanentDialogFailure(error, 'markAsRead').catch(() => { });
+    }
+}
+async function markMultipleAsRead(host, dialogIds, options = {}) {
+    const { continueOnError = true, maxConcurrent = 5 } = options;
+    const successful = [];
+    const failed = [];
+    // Process in batches to avoid overwhelming the API
+    for (let i = 0; i < dialogIds.length; i += maxConcurrent) {
+        const batch = dialogIds.slice(i, i + maxConcurrent);
+        const batchPromises = batch.map(async (dialogId) => {
+            try {
+                await host.markAsRead(dialogId);
+                successful.push(dialogId);
+            }
+            catch (error) {
+                failed.push({ dialogId, error });
+                if (!continueOnError) {
+                    throw error;
+                }
+            }
+        });
+        await Promise.allSettled(batchPromises);
+        // Small delay between batches
+        if (i + maxConcurrent < dialogIds.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    return { successful, failed };
+}
+async function markAllAsRead(host, options = {}) {
+    const unreadDialogs = host.getUnreadDialogs();
+    const dialogIds = unreadDialogs.map(d => d.id);
+    if (dialogIds.length === 0) {
+        host.log('info', 'No unread dialogs to mark as read');
+        return;
+    }
+    const { onProgress, maxConcurrent = 5 } = options;
+    let completed = 0;
+    host.log('info', 'Marking dialogs as read', { count: dialogIds.length });
+    const result = await host.markMultipleAsRead(dialogIds, {
+        continueOnError: true,
+        maxConcurrent
+    });
+    completed = result.successful.length;
+    onProgress?.(completed, dialogIds.length);
+    if (result.failed.length > 0) {
+        host.log('debug', 'Failed to mark some dialogs as read', { failedCount: result.failed.length });
+        result.failed.forEach(({ dialogId, error }) => {
+            host.log('error', 'Failed to mark dialog as read', { dialogId, error: error instanceof Error ? error.message : String(error) });
+        });
+    }
+    host.log('info', 'Successfully marked dialogs as read', { successful: result.successful.length, total: dialogIds.length });
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/server-sync.ts"
+/*!*******************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/server-sync.ts ***!
+  \*******************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   fetchDialogsFromServer: () => (/* binding */ fetchDialogsFromServer),
+/* harmony export */   performRefresh: () => (/* binding */ performRefresh),
+/* harmony export */   syncWithServer: () => (/* binding */ syncWithServer),
+/* harmony export */   updateDialogFromServerDialog: () => (/* binding */ updateDialogFromServerDialog)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
+
+
+async function syncWithServer(host) {
+    host.log('info', 'Starting periodic sync with server');
+    let updatedCount = 0;
+    let newCount = 0;
+    try {
+        // MEMORY FIX: Stop adding if we're at the limit
+        const maxDialogsToProcess = host.MAX_DIALOGS;
+        let processedCount = 0;
+        // Use iterDialogs - library handles pagination and rate limiting
+        for await (const dialog of host.client.iterDialogs({
+            limit: 500,
+            ignoreMigrated: true // Skip migrated chats (best practice)
+        })) {
+            // MEMORY FIX: Stop processing if we've reached the limit
+            if (host.dialogs.size >= maxDialogsToProcess && processedCount >= host.dialogs.size) {
+                host.log('debug', 'Dialog limit reached, stopping sync', {
+                    currentSize: host.dialogs.size,
+                    limit: maxDialogsToProcess
+                });
+                break;
+            }
+            const dialogId = host.getDialogIdFromCustomDialog(dialog);
+            if (!dialogId)
+                continue;
+            const existing = host.dialogs.get(dialogId);
+            if (existing) {
+                // Update existing with latest info from server
+                host.updateDialogFromServerDialog(existing, dialog);
+                updatedCount++;
+            }
+            else {
+                // Add new dialog - use dialog properties directly
+                const dialogInfo = host.createDialogInfoFromCustomDialog(dialog);
+                if (dialogInfo) {
+                    // MEMORY FIX: Enforce MAX_DIALOGS limit before setting
+                    if (host.dialogs.size >= host.MAX_DIALOGS) {
+                        // Remove oldest dialog to make room
+                        if (host.sortedDialogIds.length > 0) {
+                            const oldestId = host.sortedDialogIds[host.sortedDialogIds.length - 1];
+                            host.dialogs.delete(oldestId);
+                            host.removeFromSortedArray(oldestId);
+                            host.log('debug', 'Dialog limit reached, removed oldest dialog', {
+                                removedId: oldestId,
+                                limit: host.MAX_DIALOGS
+                            });
+                        }
+                    }
+                    host.dialogs.set(dialogId, dialogInfo);
+                    host.updateSortedArray(dialogId);
+                    newCount++;
+                }
+            }
+        }
+        host.lastSyncTime = Date.now();
+        host.lastPeriodicSync = Date.now();
+        host.log('info', 'Sync completed', { updated: updatedCount, new: newCount });
+    }
+    catch (error) {
+        host.log('error', 'Error during sync with server', { error: error instanceof Error ? error.message : String(error) });
+        throw error;
+    }
+}
+function updateDialogFromServerDialog(host, existing, serverDialog) {
+    // Update with latest server data
+    const serverTimestamp = serverDialog.date * 1000;
+    const serverMessageId = serverDialog.message?.id || 0;
+    const serverIsPinned = serverDialog.pinned || false;
+    const serverIsArchived = serverDialog.archived || false;
+    // BACKWARD COMPATIBILITY: isMuted has always been populated from `archived`, and the
+    // /dialogs route copies it into isArchived, so both fields have carried archive state.
+    // Existing clients read isMuted expecting exactly this, so its value is unchanged; the
+    // correctly-named isArchived is added alongside it.
+    const serverIsMuted = serverIsArchived;
+    // Position of the read boundary, for an accurate unread divider.
+    // readInboxMaxId lives on the RAW TL object (Api.Dialog), NOT on GramJS's custom Dialog
+    // wrapper — the wrapper only re-exposes unreadCount/archived/pinned/folderId/message.
+    // Reading it off the wrapper returned undefined, so the field shipped as 0 for every dialog
+    // (verified live: 25 dialogs, all 0, including one with unreadCount=1). The wrapper keeps
+    // the raw object on `.dialog`, so read through that and fall back to the wrapper in case a
+    // caller passes a raw Api.Dialog directly.
+    const rawDialog = serverDialog.dialog;
+    const serverReadInboxMaxId = rawDialog?.readInboxMaxId
+        ?? serverDialog.readInboxMaxId
+        ?? 0;
+    // Update if server has newer message data OR if pinned/muted/read status changed
+    const hasNewerMessage = host.shouldUpdateFromServer(serverTimestamp, serverMessageId, existing);
+    const pinnedStatusChanged = existing.isPinned !== serverIsPinned;
+    const mutedStatusChanged = existing.isMuted !== serverIsMuted;
+    const readStatusChanged = existing.readInboxMaxId !== serverReadInboxMaxId;
+    if (hasNewerMessage || pinnedStatusChanged || mutedStatusChanged || readStatusChanged) {
+        host.updateDialog(existing.id, {
+            lastMessageTimestamp: serverTimestamp,
+            lastMessageId: serverMessageId,
+            unreadCount: serverDialog.unreadCount || 0,
+            isMuted: serverIsMuted,
+            isArchived: serverIsArchived,
+            readInboxMaxId: serverReadInboxMaxId,
+            isPinned: serverIsPinned,
+            message: serverDialog.message || null
+        });
+    }
+}
+async function fetchDialogsFromServer(host, limit = 500) {
+    const tempDialogs = new Map();
+    let totalFetched = 0;
+    const batchSize = 100;
+    try {
+        host.log('info', 'Fetching dialogs from server', { target: limit });
+        // Using GramJS iterDialogs which handles pagination automatically
+        for await (const dialog of host.client.iterDialogs({
+            limit: limit,
+        })) {
+            try {
+                // Process each dialog with consistent method
+                const dialogInfo = host.createDialogInfoFromCustomDialog(dialog);
+                if (dialogInfo) {
+                    // Store in temporary map during fetch to prevent partial state exposure
+                    tempDialogs.set(dialogInfo.id, dialogInfo);
+                }
+                totalFetched++;
+                // Log progress every batch
+                if (totalFetched % batchSize === 0) {
+                    host.log('info', `Processed ${totalFetched}/${limit} dialogs`, { successfullyLoaded: tempDialogs.size });
+                }
+                // Break if we've successfully loaded enough dialogs OR reached fetch limit
+                // Continue fetching even if some dialogs fail to process
+                if (tempDialogs.size >= limit || totalFetched >= limit * 1.2) {
+                    host.log('info', 'Reached target', { loaded: tempDialogs.size, fetched: totalFetched });
+                    break;
+                }
+            }
+            catch (e) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(e, `Failed to retrieve dialog during fetch`);
+                // Continue processing even if one dialog fails
+            }
+        }
+        // Only return the map if we successfully fetched at least some dialogs
+        if (tempDialogs.size > 0) {
+            host.log('info', `Successfully fetched ${tempDialogs.size} dialogs from server`);
+            return tempDialogs;
+        }
+        else {
+            host.log('warn', 'No dialogs fetched from server');
+            return null;
+        }
+    }
+    catch (error) {
+        if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_1__.isTelegramRetryExhausted)(error) || (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_1__.isTelegramTransportUnavailable)(error)) {
+            // Telegram-side blip (ramya1 2026-10-15): the existing dialogs are kept and the next sync retries.
+            host.log('warn', 'Dialog fetch skipped (Telegram transient)', { error: error instanceof Error ? error.message : String(error) });
+            return null;
+        }
+        const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, 'Failed to fetch dialogs from server');
+        host.log('error', 'Error fetching dialogs from server', { error: error instanceof Error ? error.message : String(error) });
+        await host.handlePermanentDialogFailure(error, 'fetchDialogsFromServer', errorDetails);
+        return null;
+    }
+}
+async function performRefresh(host, force) {
+    if (host.isInitializing && !force) {
+        host.log('debug', 'Initialization in progress, skipping refresh');
+        return;
+    }
+    // Check cooldown period (unless forced)
+    if (!force && host.lastSyncTime > 0) {
+        const timeSinceLastRefresh = Date.now() - host.lastSyncTime;
+        const cooldownRemaining = host.REFRESH_COOLDOWN_MS - timeSinceLastRefresh;
+        if (cooldownRemaining > 0) {
+            const minutesRemaining = Math.ceil(cooldownRemaining / (60 * 1000));
+            host.log('debug', 'Refresh cooldown active, skipping', {
+                minutesRemaining,
+                timeSinceLastRefresh: Math.floor(timeSinceLastRefresh / 1000) + 's'
+            });
+            return;
+        }
+    }
+    // SAFETY: Preserve existing dialogs as backup
+    const currentSize = host.dialogs.size;
+    const backupDialogs = new Map(host.dialogs);
+    const backupSortedIds = [...host.sortedDialogIds];
+    try {
+        // Suspend real-time updates during refresh
+        host.suspendRealTimeUpdates();
+        host.isInitializing = true;
+        // Fetch dialogs into temporary map (doesn't modify existing dialogs)
+        const newDialogs = await host.fetchDialogsFromServer(500);
+        if (!newDialogs || newDialogs.size === 0) {
+            // Fetch failed - preserve existing dialogs
+            host.log('warn', 'Refresh failed: no dialogs fetched, preserving existing dialogs', {
+                preservedCount: currentSize
+            });
+            host.isInitializing = false;
+            host.resumeRealTimeUpdates();
+            return;
+        }
+        // SUCCESS: Only now do we replace existing dialogs
+        host.dialogs = newDialogs;
+        // Build sorted array from new dialogs
+        host.sortedDialogIds = Array.from(newDialogs.values())
+            .sort((a, b) => {
+            // Pinned dialogs first
+            if (a.isPinned !== b.isPinned) {
+                return a.isPinned ? -1 : 1;
+            }
+            // Then by timestamp (descending)
+            return b.lastMessageTimestamp - a.lastMessageTimestamp;
+        })
+            .map(dialog => dialog.id);
+        // Update sync time
+        host.lastSyncTime = Date.now();
+        // Mark as initialized if not already
+        if (!host.isInitialized) {
+            host.setupEventHandlers();
+            host.isInitialized = true;
+            host.startPeriodicSync();
+        }
+        // Resume real-time updates
+        host.isInitializing = false;
+        host.resumeRealTimeUpdates();
+        const newSize = host.dialogs.size;
+        host.log('info', 'Refresh completed successfully', { before: currentSize, after: newSize });
+    }
+    catch (error) {
+        // ROLLBACK: Restore backup dialogs on failure
+        host.log('error', 'Error during refresh, restoring existing dialogs', {
+            error: error instanceof Error ? error.message : String(error),
+            restoredCount: backupDialogs.size
+        });
+        host.dialogs = backupDialogs;
+        host.sortedDialogIds = backupSortedIds;
+        host.isInitializing = false;
+        host.resumeRealTimeUpdates();
+        await host.handlePermanentDialogFailure(error, 'refresh');
+        // If we had no dialogs to begin with, try a minimal recovery
+        if (backupDialogs.size === 0) {
+            try {
+                host.log('info', 'Attempting minimal recovery fetch');
+                const recoveryDialogs = await host.fetchDialogsFromServer(20);
+                if (recoveryDialogs && recoveryDialogs.size > 0) {
+                    host.dialogs = recoveryDialogs;
+                    host.sortedDialogIds = Array.from(recoveryDialogs.values())
+                        .sort((a, b) => {
+                        if (a.isPinned !== b.isPinned) {
+                            return a.isPinned ? -1 : 1;
+                        }
+                        return b.lastMessageTimestamp - a.lastMessageTimestamp;
+                    })
+                        .map(dialog => dialog.id);
+                    host.lastSyncTime = Date.now();
+                    if (!host.isInitialized) {
+                        host.setupEventHandlers();
+                        host.isInitialized = true;
+                        host.startPeriodicSync();
+                    }
+                    host.log('info', 'Minimal recovery successful', { recoveredCount: recoveryDialogs.size });
+                }
+                else {
+                    host.log('error', 'Minimal recovery fetch failed', { recoveredCount: recoveryDialogs?.size });
+                    return;
+                }
+            }
+            catch (recoveryError) {
+                host.log('error', 'Recovery fetch failed', { error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) });
+                // Re-throw original error, not recovery error
+                return;
+            }
+        }
+        else {
+            // We had dialogs, so just throw the error - dialogs are already restored
+            host.log('error', 'Recovery fetch failed', { error: error instanceof Error ? error.message : String(error) });
+            return;
+        }
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/sorted-dialogs.ts"
+/*!**********************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/sorted-dialogs.ts ***!
+  \**********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   findInsertIndex: () => (/* binding */ findInsertIndex),
+/* harmony export */   removeFromSortedArray: () => (/* binding */ removeFromSortedArray),
+/* harmony export */   updateSortedArray: () => (/* binding */ updateSortedArray)
+/* harmony export */ });
+function findInsertIndex(host, dialog) {
+    let left = 0;
+    let right = host.sortedDialogIds.length;
+    while (left < right) {
+        const mid = Math.floor((left + right) / 2);
+        const midDialog = host.dialogs.get(host.sortedDialogIds[mid]);
+        if (!midDialog) {
+            // Skip invalid entries
+            right = mid;
+            continue;
+        }
+        // Pinned dialogs come first
+        if (dialog.isPinned !== midDialog.isPinned) {
+            if (dialog.isPinned) {
+                right = mid; // Insert before unpinned
+            }
+            else {
+                left = mid + 1; // Insert after pinned
+            }
+            continue;
+        }
+        // Within same pinned group, sort by timestamp (descending)
+        if (midDialog.lastMessageTimestamp < dialog.lastMessageTimestamp) {
+            right = mid;
+        }
+        else {
+            left = mid + 1;
+        }
+    }
+    return left;
+}
+function updateSortedArray(host, dialogId) {
+    const dialog = host.dialogs.get(dialogId);
+    if (!dialog) {
+        return; // Dialog doesn't exist, nothing to update
+    }
+    // Remove if exists
+    const index = host.sortedDialogIds.indexOf(dialogId);
+    if (index !== -1) {
+        host.sortedDialogIds.splice(index, 1);
+    }
+    // MEMORY FIX: Enforce MAX_SORTED_DIALOG_IDS limit - remove oldest if exceeded
+    // sortedDialogIds is in descending order, so oldest are at the end
+    if (host.sortedDialogIds.length >= host.MAX_SORTED_DIALOG_IDS) {
+        const removedId = host.sortedDialogIds.pop(); // Remove oldest (last in array)
+        if (removedId && removedId !== dialogId) {
+            host.log('debug', `Sorted dialog IDs array full, removed oldest: ${removedId}`, {
+                arraySize: host.sortedDialogIds.length,
+                limit: host.MAX_SORTED_DIALOG_IDS
+            });
+        }
+    }
+    // Binary search and insert at correct position (respects pinned + timestamp)
+    const insertIndex = host.findInsertIndex(dialog);
+    host.sortedDialogIds.splice(insertIndex, 0, dialogId);
+}
+function removeFromSortedArray(host, dialogId) {
+    const index = host.sortedDialogIds.indexOf(dialogId);
+    if (index !== -1) {
+        host.sortedDialogIds.splice(index, 1);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-dialogs/src/dialog-manager/types.ts"
+/*!*************************************************************!*\
+  !*** ../../packages/tg-dialogs/src/dialog-manager/types.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DialogType: () => (/* binding */ DialogType)
+/* harmony export */ });
+/**
+ * Enum for dialog types
+ */
+const DialogType = Object.freeze({
+    PERSONAL: "personal",
+    GROUP: "group",
+    CHANNEL: "channel",
+    BOT: "bot"
+});
 
 
 /***/ },
@@ -43271,29 +43851,6 @@ class TokenBudget {
 
 /***/ },
 
-/***/ "./src/app.ts"
-/*!********************!*\
-  !*** ./src/app.ts ***!
-  \********************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   prcessID: () => (/* reexport safe */ _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_0__.prcessID),
-/* harmony export */   shutdown: () => (/* reexport safe */ _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_1__.shutdown)
-/* harmony export */ });
-/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./bootstrap/process-info */ "./src/bootstrap/process-info.ts");
-/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-// Compatibility surface. The bootstrap that lived here is in bootstrap/ (start.ts is the entry that main.ts
-// imports). event-handlers/ConnectionRetryService.ts (session code, unchanged) still imports these two names
-// from "../app"; both come from leaf modules, so that import no longer pulls the whole bootstrap into its graph.
-
-
-
-
-/***/ },
-
 /***/ "./src/bootstrap/app-notifications.ts"
 /*!********************************************!*\
   !*** ./src/bootstrap/app-notifications.ts ***!
@@ -43383,7 +43940,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../calls/call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
@@ -43395,7 +43952,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../jobs/job-manager */ "./src/jobs/job-manager.ts");
 /* harmony import */ var _http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../http/middlewares/rate-limiter */ "./src/http/middlewares/rate-limiter.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
 /* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
@@ -43498,7 +44055,7 @@ async function seedRestartSafeState() {
     // Greetings queued before a restart send through the live client once it is up.
     const liveClient = () => {
         try {
-            return _core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient();
+            return _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient();
         }
         catch {
             return null;
@@ -43524,7 +44081,7 @@ async function restoreCallStateAfterRestart() {
         // Registers the after-call restorer (initiateCall) before the restore reads the payloads.
         await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../calls/call-initiation */ "./src/calls/call-initiation.ts"));
         const { hasPendingPaidService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts"));
-        const callManager = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().callManager;
+        const callManager = _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().callManager;
         const restored = await callManager?.restorePersistedState?.({
             isEligible: async (chatId) => {
                 const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().read(chatId);
@@ -43804,12 +44361,12 @@ class ExpressServer {
      */
     async connectTelegramRuntime() {
         await seedRestartSafeState();
-        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().startTg();
+        await _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().startTg();
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(10000);
         await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__.runJobs)();
         const delayed = await (0,_jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_9__.startDelayedQueue)();
-        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_10__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.runOutboundRecord)(_core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
-        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_12__.pictureEventQueue.restore(_core_TelegramManager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
+        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_10__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.runOutboundRecord)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
+        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_12__.pictureEventQueue.restore(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
         if (delayed + outbound + pictures > 0)
             logger.log(`[BOOT] restored: delayed=${delayed} outbound=${outbound} pictures=${pictures}`);
         void restoreCallStateAfterRestart();
@@ -43862,8 +44419,8 @@ class ExpressServer {
                 logger.info(`✅ BOOT ready | ${process.env.clientId || "unknown-client"} | ${source}`);
             }
             catch (error) {
-                if ((0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.isPermanentFailureHandoffActive)()) {
-                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
+                if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.isPermanentFailureHandoffActive)()) {
+                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
                     throw error;
                 }
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error during Telegram connection bootstrap");
@@ -43947,7 +44504,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   cleanupGlobalResources: () => (/* binding */ cleanupGlobalResources)
 /* harmony export */ });
-/* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
+/* harmony import */ var _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/connection-retry */ "./src/telegram/connection-retry.ts");
 /* harmony import */ var _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/inbound/picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
 /* harmony import */ var _conversation_inbound_event_aggregation__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../conversation/inbound/event-aggregation */ "./src/conversation/inbound/event-aggregation.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -43965,7 +44522,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("ev
  */
 function cleanupGlobalResources() {
     // Clear retry interval and timeout
-    _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_0__.connectionRetryService.cleanup();
+    _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_0__.connectionRetryService.cleanup();
     // Clear pic events queue
     _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_1__.pictureEventQueue.clear();
     // Clear all event aggregation timeouts
@@ -44202,7 +44759,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   cleanupServerStartupInterval: () => (/* binding */ cleanupServerStartupInterval),
 /* harmony export */   main: () => (/* binding */ main)
 /* harmony export */ });
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -44225,7 +44782,7 @@ let expresApp;
 /** Maintenance restart: true when no in-house call is running (a restart would cut a paid show). */
 function noInHouseCallActive() {
     try {
-        return !_core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager?.hasActiveInHouseCalls?.();
+        return !_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager?.hasActiveInHouseCalls?.();
     }
     catch {
         return true;
@@ -44364,7 +44921,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shutdown: () => (/* binding */ shutdown)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _shutdown_signal__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 /* harmony import */ var _global_cleanup__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./global-cleanup */ "./src/bootstrap/global-cleanup.ts");
@@ -44382,7 +44939,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
 /* harmony import */ var _outbound_forward_unwanted__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../outbound/forward-unwanted */ "./src/outbound/forward-unwanted.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -44534,8 +45091,8 @@ async function handleError(err, context) {
             ],
             tags: ["mongo", "recovery"],
         }, "Failed to send Mongo restart notification");
-        const promotor = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist()
-            ? _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().promotorInstance
+        const promotor = _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist()
+            ? _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().promotorInstance
             : null;
         const shouldRestartPromotions = promotor?.isPromotionActive() ?? false;
         if (promotor) {
@@ -44565,8 +45122,8 @@ async function handleError(err, context) {
                     }
                     const promotionState = await db.readPromoteStatsTime();
                     const shouldStartPromotions = shouldRestartPromotions || promotionState?.isActive === true;
-                    if (shouldStartPromotions && _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist()) {
-                        const restartedPromotor = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().promotorInstance;
+                    if (shouldStartPromotions && _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist()) {
+                        const restartedPromotor = _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance().promotorInstance;
                         if (restartedPromotor) {
                             await restartedPromotor.startPromotion({ force: true });
                         }
@@ -44585,7 +45142,7 @@ async function handleError(err, context) {
         }, 15000);
         mongoReconnectTimeout.unref(); // Allow process to exit if this is the only pending timer
     }
-    await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.handlePermanentTelegramFailure)(err, "app.handleError");
+    await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.handlePermanentTelegramFailure)(err, "app.handleError");
     // Handle timeout error
     if (errorDetails.message.toLowerCase().includes("timeout")) {
         void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_25__.sendAppNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
@@ -44619,7 +45176,7 @@ async function cleanupResources(signal) {
         // resumes them, and nothing is sent after the flush (it would be sent again).
         _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_7__.outboundQueue.stop();
         await (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_6__.shutdownDurableQueues)(3000);
-        await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance();
+        await _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance();
         await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()?.closeConnection();
         await _tg_dialogs__WEBPACK_IMPORTED_MODULE_3__.DialogManager.cleanupAllInstances?.();
         await (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_5__.cleanup)?.();
@@ -44671,7 +45228,7 @@ async function cleanupResources(signal) {
 
 "use strict";
 __webpack_require__.r(__webpack_exports__);
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
@@ -44687,7 +45244,7 @@ __webpack_require__.r(__webpack_exports__);
 // module has loaded (as at the end of the old app.ts imports).
 
 // Feature code reaches TelegramManager through telegram/client-access (keeps it out of their import graph).
-(0,_telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.registerTelegramManager)(_core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager);
+(0,_telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.registerTelegramManager)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager);
 const require = /* createRequire() */ undefined;
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:app");
 // Initialize heapdump if available
@@ -45670,7 +46227,7 @@ class CallManager {
             // Switched off (e.g. config set off + restart): don't leave paid users able to ring us.
             if (!this.client)
                 return;
-            const { restoreCallPrivacyIfLeftOpen } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../modules/calls/inhouse/privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts"));
+            const { restoreCallPrivacyIfLeftOpen } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./inhouse/privacy-restore */ "./src/calls/inhouse/privacy-restore.ts"));
             await restoreCallPrivacyIfLeftOpen(this.client, (message) => logger.log(message));
             return;
         }
@@ -48196,7 +48753,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState),
 /* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _modules_calls_inhouse_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_21__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)
 /* harmony export */ });
@@ -48225,7 +48782,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
 /* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./switch */ "./src/calls/inhouse/switch.ts");
 /* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _modules_calls_inhouse_privacy_restore__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../../modules/calls/inhouse/privacy-restore */ "./src/modules/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
 
 
 
@@ -48326,7 +48883,7 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_modules_calls_inhouse_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
@@ -48378,7 +48935,7 @@ async function sendInHouseText(client, chatId, text, urgent) {
 function createInHouseCallService(client, hooks) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_modules_calls_inhouse_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -48520,6 +49077,58 @@ function usableUserRef(entity) {
     if (user?.className === 'User' && user.accessHash && !user.min)
         return { userId: user.id, accessHash: user.accessHash };
     return null;
+}
+
+
+/***/ },
+
+/***/ "./src/calls/inhouse/privacy-restore.ts"
+/*!**********************************************!*\
+  !*** ./src/calls/inhouse/privacy-restore.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   allowListStateFile: () => (/* binding */ allowListStateFile),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* binding */ restoreCallPrivacyIfLeftOpen),
+/* harmony export */   voiceProofStateFile: () => (/* binding */ voiceProofStateFile)
+/* harmony export */ });
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
+
+
+
+
+/** Where CallAllowList persists its write throttle; it exists only on accounts that ran in-house calls. */
+function allowListStateFile(env = process.env) {
+    return path__WEBPACK_IMPORTED_MODULE_1___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__.runtimeConfigCacheDir)(env), `call-allowlist-${env.clientId ?? 'unknown'}.json`);
+}
+/** Where the voice-proof caps (per user / per account / spacing / privacy cooldown) persist across restarts and swaps. */
+function voiceProofStateFile(env = process.env) {
+    return path__WEBPACK_IMPORTED_MODULE_1___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__.runtimeConfigCacheDir)(env), `voice-proof-${env.clientId ?? 'unknown'}.json`);
+}
+/**
+ * In-house calls are off at startup, but this account once ran them (its allow-list state file
+ * exists): if Telegram still lets paid users call, put calls back to Nobody, so they don't ring an
+ * account that no longer answers. Accounts that never ran in-house calls make no Telegram request.
+ */
+async function restoreCallPrivacyIfLeftOpen(client, log = () => undefined, env = process.env) {
+    if (!fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync(allowListStateFile(env)))
+        return false;
+    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall() }));
+    const allowed = (result.rules ?? []).some((rule) => rule instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PrivacyValueAllowUsers && rule.users.length > 0);
+    if (!allowed)
+        return false;
+    await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall(), rules: [new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyValueDisallowAll()] }));
+    log('[in-house-calls] switch is off: call privacy restored to Nobody');
+    return true;
 }
 
 
@@ -52413,12 +53022,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _respond_to_msgs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
-/* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
+/* harmony import */ var _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../telegram/connection-retry */ "./src/telegram/connection-retry.ts");
 /* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
 /* harmony import */ var _calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../calls/call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
 /* harmony import */ var _reply_switch__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../reply-switch */ "./src/conversation/reply-switch.ts");
 /* harmony import */ var _private_message_handler__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./private-message-handler */ "./src/conversation/inbound/private-message-handler.ts");
-/* harmony import */ var _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../event-handlers/SystemMessageHandler */ "./src/event-handlers/SystemMessageHandler.ts");
+/* harmony import */ var _system_message_handler__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 
 
@@ -52443,7 +53052,7 @@ async function handleEvents(event) {
         this.callManager.processQueue();
         if (!chatId)
             throw new Error("Incoming Telegram event is missing message.chatId");
-        _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_3__.connectionRetryService.markInboundActivity();
+        _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_3__.connectionRetryService.markInboundActivity();
         // The user wrote: if Telegram refused this chat (PEER_FLOOD), allow one fresh attempt again.
         if (event.isPrivate && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_9__.floodGate.clearRefused(chatId)) {
             logger.log(`[flood-gate] ${chatId} wrote again: refused chat re-opened for sending`);
@@ -52462,31 +53071,31 @@ async function handleEvents(event) {
         }
         // PRIORITY 2: Handle system commands (only for text-only messages)
         // Handle exit command
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.isExitCommand)(event)) {
+        if ((0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.isExitCommand)(event)) {
             logger.log(`[EDGE CASE] Exit command received from chatId: ${chatId}`);
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_4__.markInbound)(event, "handled", "exit-command", "command");
-            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handleExitCommand.call(this, event);
+            await _system_message_handler__WEBPACK_IMPORTED_MODULE_8__.handleExitCommand.call(this, event);
             return;
         }
         // Handle SpamBot messages
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.isSpamBotMessage)(chatId)) {
+        if ((0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.isSpamBotMessage)(chatId)) {
             logger.debug(`[SPECIAL CASE] SpamBot message received: ${event.message.text?.substring(0, 100)}`);
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_4__.markInbound)(event, "handled", "spambot-message", "system");
-            await _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handleSpamBotMessage.call(this, event);
+            await _system_message_handler__WEBPACK_IMPORTED_MODULE_8__.handleSpamBotMessage.call(this, event);
             return;
         }
         // Handle Telegram system messages
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.isTelegramSystemMessage)(chatId)) {
+        if ((0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.isTelegramSystemMessage)(chatId)) {
             logger.debug(`[SPECIAL CASE] Telegram system message received: ${event.message.text?.substring(0, 100)}`);
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_4__.markInbound)(event, "handled", "telegram-system-message", "system");
-            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handleTelegramSystemMessage)(event);
+            await (0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.handleTelegramSystemMessage)(event);
             return;
         }
         // Handle reset command
-        if ((0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.isResetCommand)(event)) {
+        if ((0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.isResetCommand)(event)) {
             logger.log(`[EDGE CASE] Reset command received from chatId: ${chatId}`);
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_4__.markInbound)(event, "handled", "reset-command", "command");
-            await (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_8__.handleResetCommand)(event);
+            await (0,_system_message_handler__WEBPACK_IMPORTED_MODULE_8__.handleResetCommand)(event);
             return;
         }
         // PRIORITY 3: Handle remaining private messages (text-only)
@@ -52919,6 +53528,413 @@ async function handlePrivateMessage(event) {
  */
 function shouldHandlePrivateMessage(event) {
     return event.isPrivate && _reply_switch__WEBPACK_IMPORTED_MODULE_3__.globalCanReply;
+}
+
+
+/***/ },
+
+/***/ "./src/conversation/inbound/system-message-handler.ts"
+/*!************************************************************!*\
+  !*** ./src/conversation/inbound/system-message-handler.ts ***!
+  \************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getExitTargets: () => (/* binding */ getExitTargets),
+/* harmony export */   handleExitCommand: () => (/* binding */ handleExitCommand),
+/* harmony export */   handleResetCommand: () => (/* binding */ handleResetCommand),
+/* harmony export */   handleSpamBotMessage: () => (/* binding */ handleSpamBotMessage),
+/* harmony export */   handleTelegramSystemMessage: () => (/* binding */ handleTelegramSystemMessage),
+/* harmony export */   isExitCommand: () => (/* binding */ isExitCommand),
+/* harmony export */   isResetCommand: () => (/* binding */ isResetCommand),
+/* harmony export */   isSpamBotMessage: () => (/* binding */ isSpamBotMessage),
+/* harmony export */   isTelegramSystemMessage: () => (/* binding */ isTelegramSystemMessage),
+/* harmony export */   noteOwnExitBroadcast: () => (/* binding */ noteOwnExitBroadcast),
+/* harmony export */   resetOwnExitBroadcast: () => (/* binding */ resetOwnExitBroadcast),
+/* harmony export */   runDeclinePasswordReset: () => (/* binding */ runDeclinePasswordReset)
+/* harmony export */ });
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/delete-messages */ "./src/telegram/delete-messages.ts");
+/* harmony import */ var _telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../telegram/session/remove-other-auths */ "./src/telegram/session/remove-other-auths.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__);
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _reply_switch__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../reply-switch */ "./src/conversation/reply-switch.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../telegram/setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram/spam-state */ "./src/telegram/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
+/**
+ * System Message Handler
+ * Handles system messages from Telegram (SpamBot, system notifications, etc.)
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:system-message-handler");
+// Constants for system message handling
+const SPAMBOT_CHAT_ID = "178220800";
+const TELEGRAM_SYSTEM_CHAT_ID = "777000";
+const RESET_COMMAND = "rstll";
+/**
+ * Persist the live daysLeft value to the per-client tgautClientStats row so the spam-limit
+ * signal is observable outside the in-memory globalState module. Fire-and-forget — never
+ * blocks/throws into the SystemMessageHandler call sites that set daysLeft.
+ */
+function persistTgautDaysLeft(daysLeft) {
+    _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
+        .updateTgautClientStat(daysLeft)
+        .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
+}
+/**
+ * Persist the SpamBot verdict on this account's bufferClients row (CMS reads spamStatus /
+ * limitedUntil) and remember it in-process for the promotion-health swap sizing. Fire-and-forget:
+ * never throws into the handler.
+ */
+function persistSpamStatus(mobile, spamStatus, limitedUntil) {
+    (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.setSpamState)(spamStatus, limitedUntil);
+    if (!mobile) {
+        logger.warn("Cannot persist spam status: account mobile is unknown");
+        return;
+    }
+    try {
+        _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
+            .recordSpamStatus(mobile, {
+            spamStatus,
+            limitedUntil,
+            spamCheckedAt: new Date(),
+            spamCheckSource: "tg-aut",
+        })
+            .then((recorded) => {
+            if (!recorded)
+                logger.warn(`Spam status '${spamStatus}' not recorded for ${mobile}: no bufferClients row or DB unavailable`);
+        })
+            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false));
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false);
+    }
+}
+/** Ask CMS to swap this client's account (archiveOld + formalities). Never throws. */
+async function requestSpamSwap(reason, days) {
+    try {
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
+        if (!runtimeBase) {
+            logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
+            return;
+        }
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.clampSwapRestDays)(days)}&formalities=true&reason=${encodeURIComponent(reason)}`;
+        const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout, process.env.clientId);
+        if (!setupResult.swapped) {
+            logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "SystemMessageHandler.requestSpamSwap", false);
+    }
+}
+const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+const PASSWORD_RESET_SLEEP_MS = 2000; // 2 seconds
+const HARSH_TRIGGER_DAYS = 5;
+/** Delayed record 'declinePasswordReset': the password-reset decline 5 min after a login code (survives a restart). */
+async function runDeclinePasswordReset(client, chatId) {
+    try {
+        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(client, chatId);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `handleTelegramSystemMessage.delayedDeclinePasswordReset.${chatId}`, false);
+    }
+}
+/**
+ * Healthy SpamBot replies are routine: one fleet table via the UMS digest. Limits stay individual.
+ * Probes are staggered per account, so the digest waits up to an hour instead of 4 min.
+ */
+function healthyDigest(mobile) {
+    return { key: "tg-aut-spambot-healthy", quietMs: 60 * 60 * 1000, row: { Mobile: String(mobile ?? "unknown") } };
+}
+async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, tags = ["system-message"], details, digest) {
+    try {
+        // clientId is added by the sender's prefix; don't repeat Client/Username on every message.
+        // Only the caller-supplied fields (the ones actually relevant to THIS event) are included.
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            severity,
+            title,
+            summary,
+            fields,
+            ...(details ? { details } : {}),
+            ...(digest ? { digest } : {}),
+            tags,
+        });
+        if (sent === false) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("System message notification returned false"), `SystemMessageHandler.notification.${context}`, false);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `SystemMessageHandler.notification.${context}`, false);
+    }
+}
+/**
+ * Handle exit command — must guarantee process exits
+ */
+async function handleExitCommand(event) {
+    logger.log(`EXITTING PROCESS!! request from received message`);
+    await notifySystemMessage("exit", "Exit command", "Exit requested via Telegram message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "exit"]);
+    try {
+        await this.destroy();
+    }
+    catch (error) {
+        logger.error("[EXIT] Error during destroy:", error);
+    }
+    // shutdown() calls process.exit(0) internally; catch in case it throws before that
+    try {
+        await (0,_bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_7__.shutdown)("Exit Request from Msg");
+    }
+    catch (error) {
+        logger.error("[EXIT] shutdown threw, forcing exit(1):", error);
+        process.exit(1);
+    }
+}
+/**
+ * Handle SpamBot messages
+ */
+async function handleSpamBotMessage(event) {
+    const spamBotText = event.message.text || "SpamBot sent an empty message";
+    logger.log("SpamBot:", spamBotText);
+    const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.claimSpamBotNotification)(this.mobile ?? process.env.mobile ?? "unknown", typeof event.message.id === "number" ? event.message.id : null);
+    const mobile = this.mobile ?? process.env.mobile;
+    switch ((0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.classifySpamBotMessage)(spamBotText)) {
+        case "released":
+            if (!(await handleAutomaticallyReleased(event, shouldNotify, mobile)) && shouldNotify) {
+                await notifyGenericSpamBotMessage(spamBotText);
+            }
+            return;
+        case "healthy":
+            persistSpamStatus(mobile, "free", null);
+            await handleGoodNews.call(this);
+            if (shouldNotify) {
+                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"], undefined, healthyDigest(mobile));
+            }
+            return;
+        case "harsh-warning":
+            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
+            persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
+            persistSpamStatus(mobile, "harsh", null);
+            if (shouldNotify) {
+                await notifySystemMessage("harsh-warning", "Harsh limit", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
+            }
+            await requestSpamSwap("SpamBot harsh limit (indefinite)", _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.HARSH_SWAP_DAYS);
+            return;
+        default:
+            if (shouldNotify)
+                await notifyGenericSpamBotMessage(spamBotText);
+    }
+}
+async function notifyGenericSpamBotMessage(text) {
+    const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.describeSpamBotReply)(text);
+    await notifySystemMessage("spambot", "SpamBot", "", [{ label: "Status", value: status.label, code: false }, ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : [])], status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot"], text, status.healthy ? healthyDigest(process.env.mobile) : undefined);
+}
+/**
+ * Handle automatically released message
+ */
+async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
+    try {
+        const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
+        if (!date) {
+            logger.warn("SpamBot release notice did not contain a parseable release date");
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
+            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            persistTgautDaysLeft(sanitized);
+            return false;
+        }
+        const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
+        if (!limitedUntil) {
+            logger.warn(`SpamBot release date "${date}" could not be parsed`);
+            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
+            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
+            persistTgautDaysLeft(sanitized);
+            return false;
+        }
+        const days = (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.daysUntil)(limitedUntil);
+        // A "limited until <date>" notice ALWAYS means the account is limited. getdaysLeft returns 0 for a
+        // today date and -1 for a past date; storing either raw would misclassify — 0 hit the pacing/cap
+        // split, and -1 collides with the healthy sentinel (marking a limited account HEALTHY). Sanitize to
+        // a value that is unambiguously limited (>= 1). Only an explicit "good news" writes -1.
+        const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
+        (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
+        persistTgautDaysLeft(storedDaysLeft);
+        persistSpamStatus(mobile, "limited", limitedUntil);
+        logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
+        if (shouldNotify) {
+            await notifySystemMessage("automatically-released", "Days left", "", [
+                { label: "Release date", value: date },
+                { label: "Days left", value: days },
+            ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
+        }
+        if (days >= _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP) {
+            logger.debug(`[EDGE CASE] Dated limit of ${days} days - requesting client swap`);
+            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.swapDaysForLimitedUntil)(limitedUntil));
+        }
+        else {
+            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP}`);
+        }
+        return true;
+    }
+    catch (error) {
+        logger.error(`[ERROR] Error handling automatically released message:`, error);
+        throw error;
+    }
+}
+/**
+ * Handle good news message
+ */
+async function handleGoodNews() {
+    const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
+    const userPromoteStats = await db.readPromoteStatsTime();
+    const lastUpdatedTimeStamp = userPromoteStats?.lastUpdatedTimeStamp ?? 0;
+    logger.log(`[SPECIAL CASE] Good news message received - isActive: ${userPromoteStats?.isActive}, lastUpdated: ${lastUpdatedTimeStamp || 'N/A'}`);
+    if (userPromoteStats?.isActive &&
+        (Date.now() - lastUpdatedTimeStamp) / (1000 * 60) > 12) {
+        logger.log(`[SPECIAL CASE] Triggering promotions - timeSinceLastUpdate: ${(Date.now() - lastUpdatedTimeStamp) / (1000 * 60)} minutes`);
+        await db.activatePromotions();
+        if (this.promotorInstance) {
+            await this.promotorInstance.startPromotion({ force: true });
+        }
+        else {
+            logger.warn(`[SPECIAL CASE] Promotion trigger skipped: promotor instance is not available`);
+        }
+    }
+    else {
+        const wasInactive = !userPromoteStats?.isActive;
+        logger.debug(`[EDGE CASE] Activating promotions directly - isActive: ${userPromoteStats?.isActive}, timeSinceLastUpdate: ${lastUpdatedTimeStamp ? (Date.now() - lastUpdatedTimeStamp) / (1000 * 60) : 'N/A'} minutes`);
+        await db.activatePromotions();
+        const shouldStartPromotions = wasInactive || !this.promotorInstance?.isPromotionActive();
+        if (shouldStartPromotions) {
+            if (this.promotorInstance) {
+                await this.promotorInstance.startPromotion({ force: true });
+            }
+            else {
+                logger.warn(`[SPECIAL CASE] Promotion activation completed but promotor instance is not available`);
+            }
+        }
+    }
+    (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(-1);
+    persistTgautDaysLeft(-1);
+    logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
+}
+/**
+ * Handle Telegram system messages
+ */
+async function handleTelegramSystemMessage(event) {
+    const text = event.message.text?.toLowerCase() ?? '';
+    if (text.includes("login code")) {
+        await (0,_telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__.removeOtherAuths)(event.client);
+        const chatId = event.message.chatId?.toString?.() ?? "unknown";
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_9__.scheduleDelayed)(chatId, "declinePasswordReset", {}, PASSWORD_RESET_DECLINE_DELAY_MS, `pwdecline::${chatId}::${event.message.id}`);
+    }
+    if (text.includes("request to reset account")) {
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(PASSWORD_RESET_SLEEP_MS);
+        try {
+            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(event.client);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error declining password reset");
+        }
+    }
+    await notifySystemMessage("telegram-system", "Telegram message", event.message.text || "Telegram sent an empty system message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, ["system-message", "telegram"]);
+}
+/**
+ * Handle reset command
+ */
+async function handleResetCommand(event) {
+    const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
+    const chatId = event.message.chatId.toString();
+    await db.delete(chatId);
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
+}
+/**
+ * Check if message is from SpamBot
+ */
+function isSpamBotMessage(chatId) {
+    return chatId === SPAMBOT_CHAT_ID;
+}
+/**
+ * Check if message is from Telegram system
+ */
+function isTelegramSystemMessage(chatId) {
+    return chatId === TELEGRAM_SYSTEM_CHAT_ID;
+}
+/**
+ * Check if message is exit command
+ */
+/**
+ * Values that must NEVER be used as an exit target. A misconfigured/absent env can leave
+ * process.env.username as the system user ("root") or a placeholder, which would make the
+ * exit command "exitroot" — matchable by any process and sent on every startup. Exit targets
+ * must be a real client identity (username/clientId), so we reject system/placeholder values
+ * and anything too short to be a real handle.
+ */
+const UNSAFE_EXIT_TARGETS = new Set(["null", "undefined", "root", "admin", "user", "test"]);
+const MIN_EXIT_TARGET_LEN = 3;
+function getExitTargets() {
+    return [process.env.username, process.env.clientId]
+        .map((v) => (v ?? "").trim())
+        .filter((v) => v.length >= MIN_EXIT_TARGET_LEN && !UNSAFE_EXIT_TARGETS.has(v.toLowerCase()));
+}
+/**
+ * This process's own pre-bootstrap "exit<target>" broadcast (ConnectTrigger) is meant for an OLDER instance. The new
+ * instance can receive it too once connected (prod 2026-10-16 shruthi1, a member of the CLIENT_UPDATES channel
+ * @clientupdates: its own broadcast arrived 24-46 s after boot and killed it ~58 times, 15:28-16:58 UTC). Matched by
+ * the exact message id the Bot API returned for our own send (no clocks): an older instance still exits on it.
+ */
+const ownExitMessageIds = new Set();
+function noteOwnExitBroadcast(messageIds) {
+    for (const id of messageIds)
+        ownExitMessageIds.add(id);
+}
+function resetOwnExitBroadcast() {
+    ownExitMessageIds.clear();
+}
+function isExitCommand(event) {
+    const text = event.message.text;
+    if (!text) {
+        return false;
+    }
+    if (!getExitTargets().some((target) => text === `exit${target}`))
+        return false;
+    if (ownExitMessageIds.has(Number(event.message.id))) {
+        logger.log(`[exit] ignoring ${text}: this process's own pre-bootstrap exit broadcast (msg ${event.message.id})`);
+        return false;
+    }
+    return true;
+}
+/**
+ * Check if message is reset command
+ */
+function isResetCommand(event) {
+    return event.message.text?.toLowerCase() === RESET_COMMAND;
 }
 
 
@@ -57732,7 +58748,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_objection_handling__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
 /* harmony import */ var _sender__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./sender */ "./src/conversation/sender.ts");
 /* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../calls/call-initiation */ "./src/calls/call-initiation.ts");
 /* harmony import */ var _respond_to_paid__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./respond-to-paid */ "./src/conversation/respond-to-paid.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
@@ -58089,7 +59105,7 @@ async function respondToMsgs(event, allMsg) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error);
                 // A permanent error while responding (frozen/revoked account) must trigger the swap;
                 // otherwise every inbound message is silently absorbed here. Self-filters + dedupes.
-                await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_10__.startNewUserProcess)(error, `respondToMsgs:${chatId}`);
+                await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_10__.startNewUserProcess)(error, `respondToMsgs:${chatId}`);
                 try {
                     let userDetail = (await db.read(chatId));
                     if (userDetail) {
@@ -58253,7 +59269,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
@@ -58337,7 +59353,7 @@ async function sendReaction(event, emoji) {
     catch (error) {
         // Reaction failures are non-critical and normally ignored, but a permanent error here
         // (frozen/revoked account) must still trigger the swap. Self-filters + dedupes.
-        void (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.startNewUserProcess)(error, 'inhandler:sendReaction');
+        void (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.startNewUserProcess)(error, 'inhandler:sendReaction');
     }
 }
 
@@ -60036,1497 +61052,6 @@ async function getDemoStats(isTemp, silent = false) {
 
 /***/ },
 
-/***/ "./src/core/TelegramManager.ts"
-/*!*************************************!*\
-  !*** ./src/core/TelegramManager.ts ***!
-  \*************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   TelegramManager: () => (/* binding */ TelegramManager)
-/* harmony export */ });
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/events */ "telegram/events");
-/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_events__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram/extensions/Logger */ "telegram/extensions/Logger");
-/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _sessions_DeduplicatingSession__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../sessions/DeduplicatingSession */ "./src/sessions/DeduplicatingSession.ts");
-/* harmony import */ var _telegram_mask_sensitive_words__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/mask-sensitive-words */ "./src/telegram/mask-sensitive-words.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/events/Raw */ "telegram/events/Raw");
-/* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__);
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _promotion__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../promotion */ "./src/promotion/index.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
-/* harmony import */ var _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/reactions/ReactionService */ "../../packages/tg-reactions/src/ReactionService.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _telegram_entity_cache__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../telegram/entity-cache */ "./src/telegram/entity-cache.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../conversation/respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../handlers/outhandler */ "./src/handlers/outhandler.ts");
-/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./permanent-failure */ "./src/core/permanent-failure/index.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
-
-
-
-
-
-
-
-
- // Added for handling undefined builders
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const require = /* createRequire() */ undefined;
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__.Logger("tg-aut:TelegramManager");
-async function sendTelegramManagerNotification(category, notification, context) {
-    try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.BotConfig.getInstance().sendMessage(category, notification);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.logUnsentNotification)(sent, "TelegramManager notification returned false", context);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, context, false);
-    }
-}
-const localEntityCacheHelpers = {
-    getPeerId(entity) {
-        const id = entity?.id ?? entity?.userId ?? entity?.chatId ?? entity?.channelId ?? entity?.peerId;
-        if (id == null) {
-            throw new Error("Entity does not include an id");
-        }
-        return { toString: () => String(id) };
-    },
-    getInputPeer(entity) {
-        return entity?.inputPeer ?? entity;
-    },
-    isArrayLike(value) {
-        return Array.isArray(value);
-    },
-};
-function resolveEntityCacheHelpers() {
-    try {
-        const { getPeerId, getInputPeer } = __webpack_require__(/*! telegram/Utils */ "telegram/Utils");
-        const { isArrayLike } = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-        if (typeof getPeerId === "function"
-            && typeof getInputPeer === "function"
-            && typeof isArrayLike === "function") {
-            return {
-                getPeerId(entity) {
-                    try {
-                        return getPeerId(entity);
-                    }
-                    catch {
-                        return localEntityCacheHelpers.getPeerId(entity);
-                    }
-                },
-                getInputPeer(entity) {
-                    try {
-                        return getInputPeer(entity) ?? localEntityCacheHelpers.getInputPeer(entity);
-                    }
-                    catch {
-                        return localEntityCacheHelpers.getInputPeer(entity);
-                    }
-                },
-                isArrayLike(value) {
-                    return isArrayLike(value) || localEntityCacheHelpers.isArrayLike(value);
-                },
-            };
-        }
-    }
-    catch (error) {
-        logger.debug("[EntityCache] Falling back to local entity-cache helpers", error instanceof Error ? error.message : String(error));
-    }
-    return localEntityCacheHelpers;
-}
-async function getCurrentProfilePhotoCount(client, mobile) {
-    try {
-        const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.photos.GetUserPhotos({ userId: 'me', offset: 0 }));
-        return Array.isArray(result?.photos) ? result.photos.length : 0;
-    }
-    catch (error) {
-        logger.warn(`[Persona] Failed to load current profile photo count for ${mobile}`, error instanceof Error ? error.message : String(error));
-        return 0;
-    }
-}
-function buildMirroredClientName(assignedFirstName, assignedLastName) {
-    return [assignedFirstName?.trim(), assignedLastName?.trim()]
-        .filter((part) => !!part)
-        .join(' ')
-        .trim();
-}
-async function triggerBufferProfilePhotoRefresh(client, mobile, clientId, profilePicsUpdatedAt, poolPhotoCount, assignedPhotoCount) {
-    if (poolPhotoCount < 2) {
-        logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: pool has fewer than 2 URLs`);
-        return;
-    }
-    if (assignedPhotoCount < 2) {
-        logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: assigned profile pic URLs are missing or too small`);
-        return;
-    }
-    logger.debug(`🧍 PERSONA photo-refresh gate | ${mobile} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(profilePicsUpdatedAt)} | assigned ${assignedPhotoCount} | pool ${poolPhotoCount}`);
-    const currentPhotoCount = await getCurrentProfilePhotoCount(client, mobile);
-    if (currentPhotoCount >= 2) {
-        logger.debug(`🧍 PERSONA photo-refresh skip | ${mobile} | telegram photos ${currentPhotoCount}`);
-        return;
-    }
-    const tgCmsBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_27__.getRuntimeConfigBaseOrNull)();
-    if (!tgCmsBase) {
-        logger.warn(`[Persona] Cannot trigger CMS profile pic refresh for ${mobile}: no CMS base URL configured`);
-        return;
-    }
-    logger.info(`🧍 PERSONA photo-refresh trigger | ${clientId} | ${mobile} | telegram ${currentPhotoCount} | pool ${poolPhotoCount}`);
-    const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__.fetchWithTimeout)(`${tgCmsBase}/bufferclients/profile-pics/refresh/${encodeURIComponent(mobile)}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__.getApiKey)(),
-        },
-        data: {},
-        timeout: 15000,
-    });
-    if (!response?.data) {
-        logger.warn(`🧍 PERSONA photo-refresh bad-response | ${clientId} | ${mobile}`);
-        return;
-    }
-    logger.info(`🧍 PERSONA photo-refresh done | ${clientId} | ${mobile} | refreshed ${response.data.refreshed ?? 'unknown'} | uploaded ${response.data.uploadedCount ?? 'unknown'}`);
-}
-// Entity cache constants moved to DeduplicatingSession and EntityCacheManager
-class TelegramManager {
-    constructor(mobile) {
-        this.client = null;
-        this.reactorInstance = null;
-        this.promotorInstance = null;
-        // Track handlers so we can remove them precisely on cleanup
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- GramJS event handlers have varying event types per builder
-        this.eventHandlers = [];
-        // Per-instance idempotency locks
-        this.starting = null;
-        this.cleaning = null;
-        this.started = false;
-        this.handlersRegistered = false;
-        this.destroyed = false;
-        // MEMORY FIX: Reuse DeduplicatingSession instance instead of creating new one each time
-        this.session = null;
-        // GC-reclaim support for the patched _entityCache.cacheMap: track per-entry last-seen
-        // timestamps and periodically sweep idle entries so they become collectable.
-        this.entityCacheSweeper = null;
-        this.entityCacheLastSeen = new Map();
-        this.rpcLivenessProbe = null;
-        this.lastRpcLivenessAt = null;
-        this.lastRpcLivenessError = null;
-        this.mobile = mobile || process.env.mobile;
-        this.clientId = process.env.clientId;
-        // MEMORY FIX: Strictly enforce single instance - check before registering
-        const existing = TelegramManager.activeInstances.get(this.mobile);
-        if (existing && existing !== this) {
-            // Another instance exists - this should not happen if getInstance() is used correctly
-            logger.error(`[${this.mobile}] CRITICAL: Attempted to create duplicate TelegramManager instance!`);
-            logger.error(`[${this.mobile}] Existing instance: started=${existing.started}, client=${existing.client !== null}`);
-            // Don't register this instance - throw error to prevent memory leak
-            throw new Error(`TelegramManager instance already exists for mobile: ${this.mobile}. Use getInstance() to get existing instance.`);
-        }
-        // Register this instance
-        TelegramManager.activeInstances.set(this.mobile, this);
-        logger.debug(`[${this.mobile}] TelegramManager instance registered (total: ${TelegramManager.activeInstances.size})`);
-    }
-    // ---------- Static helpers ----------
-    static getClient(mobile = process.env.mobile) {
-        const inst = TelegramManager.activeInstances.get(mobile);
-        if (inst?.client && !inst.destroyed)
-            return inst.client;
-        throw new Error(`No active client for mobile: ${mobile}`);
-    }
-    /**
-     * Check if an active client instance exists. Pure check with NO side effects.
-     * Use ensureConnected() if you need to reconnect.
-     */
-    static instanceExist(mobile = process.env.mobile) {
-        const inst = TelegramManager.activeInstances.get(mobile);
-        return !!(inst && !inst.destroyed && inst.client && inst.started);
-    }
-    /**
-     * Ensure the client is connected, reconnecting if needed.
-     * Separated from instanceExist() to avoid side effects in health checks.
-     */
-    static async ensureConnected(mobile = process.env.mobile) {
-        const inst = TelegramManager.activeInstances.get(mobile);
-        if (!inst?.client || inst.destroyed)
-            return false;
-        if (!inst.client.connected) {
-            try {
-                await inst.client.connect();
-            }
-            catch (error) {
-                logger.error(`[${mobile}] Failed to reconnect:`, error);
-                return false;
-            }
-        }
-        return true;
-    }
-    /** Rebuild a broken in-memory GramJS runtime without changing its saved session. */
-    static async recoverRuntime(mobile = process.env.mobile) {
-        if (TelegramManager.runtimeRecovery) {
-            return TelegramManager.runtimeRecovery;
-        }
-        const elapsedMs = TelegramManager.lastRuntimeRecoveryAt === null
-            ? null
-            : Date.now() - TelegramManager.lastRuntimeRecoveryAt;
-        if (elapsedMs !== null && elapsedMs < TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS) {
-            logger.warn(`[${mobile}] Skipping Telegram runtime recovery during cooldown`, {
-                remainingMs: TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS - elapsedMs,
-            });
-            return false;
-        }
-        TelegramManager.lastRuntimeRecoveryAt = Date.now();
-        TelegramManager.runtimeRecovery = (async () => {
-            try {
-                logger.warn(`[${mobile}] Rehydrating Telegram runtime after RPC liveness failure`);
-                await TelegramManager.deleteInstance(mobile);
-                const replacement = TelegramManager.getInstance(mobile);
-                await replacement.startTg();
-                await replacement.probeRpcLiveness();
-                logger.info(`[${mobile}] Telegram runtime rehydrated successfully`);
-                return true;
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${mobile}: Telegram runtime recovery failed`);
-                return false;
-            }
-            finally {
-                TelegramManager.runtimeRecovery = null;
-            }
-        })();
-        return TelegramManager.runtimeRecovery;
-    }
-    static getInstance(mobile = process.env.mobile) {
-        // MEMORY FIX: This service maintains only ONE mobile (from process.env.mobile)
-        // Enforce strict singleton - only ONE instance total should exist
-        const canonicalMobile = process.env.mobile;
-        // If different mobile is requested, warn and use canonical mobile
-        if (mobile !== canonicalMobile) {
-            logger.warn(`[${mobile}] Different mobile requested, but service only supports one mobile: ${canonicalMobile}. Using canonical mobile.`);
-            mobile = canonicalMobile;
-        }
-        // Check if any instance exists (should only be one)
-        if (TelegramManager.activeInstances.size > 0) {
-            // Get the instance for canonical mobile (should be the only one)
-            const existing = TelegramManager.activeInstances.get(canonicalMobile);
-            if (existing) {
-                // Verify the instance is still valid (not destroyed)
-                if (existing.destroyed) {
-                    // Destroyed instance - remove it and create new one
-                    logger.warn(`[${canonicalMobile}] Found destroyed TelegramManager instance, removing and creating new one`);
-                    TelegramManager.activeInstances.delete(canonicalMobile);
-                }
-                else {
-                    // Valid existing instance - return it
-                    return existing;
-                }
-            }
-            else {
-                // Instance exists for different mobile (shouldn't happen, but handle it)
-                const firstInstance = TelegramManager.activeInstances.values().next().value;
-                logger.error(`[${canonicalMobile}] CRITICAL: Instance exists for different mobile ${firstInstance.mobile}. This should not happen.`);
-                // Clean up the wrong instance and create correct one
-                TelegramManager.activeInstances.delete(firstInstance.mobile);
-                // Note: destroy() is async, but we can't await in static method - schedule cleanup
-                firstInstance.destroy().catch((err) => {
-                    logger.error(`[${canonicalMobile}] Error destroying wrong instance:`, err);
-                });
-            }
-        }
-        // Create new instance only if none exists or existing was stale
-        const newInstance = new TelegramManager(canonicalMobile);
-        logger.debug(`[${canonicalMobile}] Created TelegramManager instance (total active: ${TelegramManager.activeInstances.size})`);
-        // Ensure only one instance exists
-        if (TelegramManager.activeInstances.size > 1) {
-            logger.error(`[${canonicalMobile}] CRITICAL: Multiple instances detected (${TelegramManager.activeInstances.size}). This is a memory leak!`);
-        }
-        return newInstance;
-    }
-    static async deleteInstance(mobile = process.env.mobile) {
-        const inst = TelegramManager.activeInstances.get(mobile);
-        if (!inst) {
-            logger.debug(`[${mobile}] No TelegramManager instance found to delete`);
-            return false;
-        }
-        await inst.destroy();
-        // Note: destroy() now handles removal from activeInstances, but double-check
-        if (TelegramManager.activeInstances.has(mobile)) {
-            TelegramManager.activeInstances.delete(mobile);
-            logger.warn(`[${mobile}] Instance still in registry after destroy(), manually removed`);
-        }
-        logger.debug(`[${mobile}] TelegramManager instance deleted (remaining: ${TelegramManager.activeInstances.size})`);
-        return true;
-    }
-    /**
-     * MEMORY FIX: Clean up stale instances (instances that are destroyed but still in registry)
-     * Call this periodically to prevent memory leaks from stale instances
-     */
-    static cleanupStaleInstances() {
-        let cleanedCount = 0;
-        const mobilesToRemove = [];
-        for (const [mobile, instance] of TelegramManager.activeInstances.entries()) {
-            // Check if instance is stale (destroyed but still in registry)
-            if (instance.destroyed && instance.cleaning === null) {
-                mobilesToRemove.push(mobile);
-                cleanedCount++;
-            }
-        }
-        // Remove stale instances
-        for (const mobile of mobilesToRemove) {
-            TelegramManager.activeInstances.delete(mobile);
-            logger.warn(`[${mobile}] Removed stale TelegramManager instance from registry`);
-        }
-        if (cleanedCount > 0) {
-            logger.log(`Cleaned up ${cleanedCount} stale TelegramManager instance(s) (remaining: ${TelegramManager.activeInstances.size})`);
-        }
-        return cleanedCount;
-    }
-    ensureReactionService() {
-        if (this.reactorInstance) {
-            return true;
-        }
-        if (!this.client || !this.dialogManager) {
-            logger.warn(`[${this.mobile}] Cannot recreate ReactionService without active client and dialog manager`);
-            return false;
-        }
-        try {
-            this.reactorInstance = _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__.ReactionService.getOrCreate(this.client, this.dialogManager, {
-                instanceId: this.mobile,
-                instanceName: this.clientId,
-                store: _data_db__WEBPACK_IMPORTED_MODULE_14__.channelsStore,
-                onAccountError: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error, `Reactions:${this.clientId}`),
-                onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
-                // Per-mobile daily reaction analytics (best-effort). tg-aut previously left
-                // reactionStatsDaily empty — the collection was created but never written. Mirrors
-                // promote-clients: record success/failed/restricted/floods into reactionStatsDaily.
-                onReactionOutcome: (outcome) => {
-                    void _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().recordDailyReaction(this.mobile, {
-                        success: outcome === 'success' ? 1 : 0,
-                        failed: outcome === 'failed' ? 1 : 0,
-                        restricted: outcome === 'restricted' ? 1 : 0,
-                        floods: outcome === 'flood' ? 1 : 0,
-                    });
-                },
-            });
-            logger.warn(`[${this.mobile}] ReactionService recreated by health recovery`);
-            return true;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: ReactionService recovery failed`, false);
-            return false;
-        }
-    }
-    ensurePromotionEngine() {
-        if (this.promotorInstance) {
-            return true;
-        }
-        if (!this.client || !this.dialogManager) {
-            logger.warn(`[${this.mobile}] Cannot recreate PromotionEngine without active client and dialog manager`);
-            return false;
-        }
-        try {
-            this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
-                instanceId: this.mobile,
-                instanceName: this.clientId,
-                onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
-            });
-            logger.warn(`[${this.mobile}] PromotionEngine recreated by health recovery`);
-            return true;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: PromotionEngine recovery failed`, false);
-            return false;
-        }
-    }
-    /**
-     * MEMORY FIX: Get count of active instances (for debugging and monitoring)
-     */
-    static getInstanceCount() {
-        return TelegramManager.activeInstances.size;
-    }
-    /**
-     * MEMORY FIX: Get all active instance mobiles (for debugging)
-     */
-    static getActiveInstanceMobiles() {
-        return Array.from(TelegramManager.activeInstances.keys());
-    }
-    hasCompleteRuntimeWiring() {
-        return Boolean(this.client
-            && this.client.connected
-            && this.dialogManager
-            && this.callManager
-            && this.reactorInstance
-            && this.promotorInstance
-            && this.handlersRegistered);
-    }
-    // ---------- Lifecycle ----------
-    /**
-     * Start and connect the underlying GramJS client. Idempotent and race-safe.
-     */
-    async startTg() {
-        if (this.started) {
-            if (this.hasCompleteRuntimeWiring()) {
-                logger.warn(`${this.mobile}: TelegramManager instance already started, skipping start`);
-                return;
-            }
-            logger.warn(`${this.mobile}: TelegramManager marked started but runtime wiring is incomplete; repairing startup`);
-            this.started = false;
-        }
-        if (this.starting) {
-            logger.warn(`${this.mobile}: Another TelegramManager instance is already starting, skipping start`);
-            return this.starting;
-        }
-        // MEMORY FIX: Strictly enforce single instance - verify this is the registered instance
-        this.destroyed = false;
-        const registeredInstance = TelegramManager.activeInstances.get(this.mobile);
-        if (!registeredInstance) {
-            logger.error(`${this.mobile}: CRITICAL - This instance is not registered! Re-registering...`);
-            TelegramManager.activeInstances.set(this.mobile, this);
-        }
-        else if (registeredInstance !== this) {
-            logger.error(`${this.mobile}: CRITICAL - Instance mismatch! Another instance is registered.`);
-            logger.error(`${this.mobile}: This indicates a memory leak - multiple instances exist.`);
-            throw new Error(`TelegramManager instance mismatch for mobile ${this.mobile}. Another instance is registered.`);
-        }
-        // Prevent duplicate starts
-        if (registeredInstance && registeredInstance !== this && registeredInstance.started) {
-            logger.warn(`${this.mobile}: Another TelegramManager instance is already started, skipping start`);
-            return;
-        }
-        // MEMORY FIX: Check if child instances already exist - don't recreate them
-        // This prevents creating duplicate instances if startTg() is called multiple times
-        if (this.dialogManager || this.callManager || this.reactorInstance || this.promotorInstance) {
-            logger.warn(`${this.mobile}: startTg() called but child instances already exist! Reusing existing instances.`);
-            // Return only when the full runtime is already wired. Partial startup
-            // failures can leave a connected client with missing child services.
-            if (this.hasCompleteRuntimeWiring()) {
-                this.started = true;
-                return;
-            }
-            // If client doesn't exist but instances do, something is wrong - log warning but continue
-            logger.warn(`${this.mobile}: Child instances are partially initialized. Continuing with initialization to repair runtime wiring...`);
-            if (this.promotorInstance) {
-                await this.promotorInstance.stopPromotions().catch((error) => {
-                    logger.error(`${this.mobile}: Error stopping partial PromotionEngine during startup repair:`, error);
-                });
-                this.promotorInstance.cleanup();
-                this.promotorInstance = null;
-            }
-            await this.reactorInstance?.dispose();
-            this.reactorInstance = null;
-            if (this.dialogManager) {
-                try {
-                    this.dialogManager.cleanup();
-                }
-                catch (error) {
-                    logger.error(`${this.mobile}: Error cleaning partial DialogManager during startup repair:`, error);
-                }
-                this.dialogManager = undefined;
-            }
-            await this.callManager?.disposeInHouse?.().catch((error) => {
-                logger.error(`${this.mobile}: Error stopping partial in-house calls during startup repair:`, error);
-            });
-            this.callManager = undefined;
-            if (this.client) {
-                await this.cleanupClient();
-            }
-            this.handlersRegistered = false;
-        }
-        // Await any in-flight cleaning before starting
-        if (this.cleaning)
-            await this.cleaning;
-        this.starting = (async () => {
-            try {
-                const { apiId, apiHash, params: tgConfig } = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_8__.generateTGConfig)(this.mobile);
-                logger.log(`📱 TG init | ${this.clientId} | ${this.mobile}`);
-                logger.debug(`📱 TG config | ${this.clientId} | ${this.mobile} | api ${apiId} | device ${tgConfig.deviceModel || 'unknown'} | app ${tgConfig.appVersion || 'unknown'} | proxy ${tgConfig.proxy ? 'yes' : 'no'}`);
-                // MEMORY FIX: Reuse DeduplicatingSession instance instead of creating new one each time
-                if (!this.session) {
-                    this.session = new _sessions_DeduplicatingSession__WEBPACK_IMPORTED_MODULE_4__.DeduplicatingSession(process.env.session || "");
-                }
-                // NOTE: Session string should match the API ID it was created with. If not, GramJS will throw and we fall back to re-setup.
-                this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, tgConfig);
-                // DC override: only when explicitly requested (e.g. for IPv6 workaround)
-                // if (process.env.FORCE_DC5 === 'true') {
-                //     await this.client.session.setDC(5, '91.108.56.194', 80);
-                //     console.log('[TelegramManager] DC5 override applied (FORCE_DC5=true)');
-                // } else if (process.env.FORCE_DC5 !== undefined) {
-                //     console.warn('[TelegramManager] FORCE_DC5 is set but not "true", DC5 override NOT applied');
-                // }
-                this.client.setLogLevel(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__.LogLevel.ERROR);
-                await this.client.connect();
-                // Save session after successful connect (GramJS updates auth key & DC info)
-                // try {
-                //     const sessionString = this.session.save();
-                //     if (sessionString) {
-                //         process.env.session = sessionString;
-                //         logger.debug(`${this.mobile}: Session saved after connect`);
-                //     }
-                // } catch (sessionErr) {
-                //     logger.warn(`${this.mobile}: Failed to save session after connect:`, sessionErr);
-                // }
-                // Patch _entityCache.add() to use last-seen wins instead of first-seen wins
-                this.patchEntityCache();
-                // ToS safety: mask sensitive keywords in EVERY outgoing message/caption.
-                // Wrapping the client here is the single chokepoint — covers replier,
-                // outhandler, core/utils, CallManager, greetings, etc. without per-call edits.
-                (0,_telegram_mask_sensitive_words__WEBPACK_IMPORTED_MODULE_5__.patchOutgoingMask)(this.client);
-                await this.probeRpcLiveness();
-                // MEMORY FIX: Only create child instances if they don't already exist
-                // This prevents creating duplicate instances if startTg() is called multiple times
-                if (!this.dialogManager) {
-                    this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogManager.getOrCreate(this.client, {
-                        instanceId: this.clientId,
-                        instanceName: this.mobile,
-                        callbacks: {
-                            onIsPermanentError: (errorDetails) => (0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__["default"])(errorDetails),
-                            onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `DialogManager:${this.clientId}`),
-                        },
-                    });
-                    await this.dialogManager.initialize();
-                }
-                else {
-                    logger.debug(`${this.mobile}: DialogManager already exists, reusing existing instance`);
-                    // DialogManager.getOrCreate will handle client updates internally
-                    // Just ensure it's initialized
-                    try {
-                        await this.dialogManager.initialize();
-                    }
-                    catch (error) {
-                        // If already initialized, this might throw - that's okay
-                        logger.warn(`${this.mobile}: DialogManager re-initialize failed (continuing)`, error);
-                    }
-                }
-                if (!this.callManager) {
-                    this.callManager = new _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__.CallManager(this.client, {
-                        instanceId: this.mobile,
-                        instanceName: this.clientId,
-                    });
-                }
-                else {
-                    logger.debug(`${this.mobile}: CallManager already exists, reusing existing instance`);
-                }
-                // The constructor returns a cached instance per mobile that may hold a previous client.
-                await this.callManager.attachClient?.(this.client);
-                // In-house calls ON: answer eligible paid users who call this account.
-                void this.callManager.startInHouse?.().catch((error) => {
-                    logger.error(`${this.mobile}: in-house call startup failed:`, error);
-                });
-                const me = (await this.client.getMe());
-                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
-                await db.updateClient(this.clientId, { mobile: me?.phone, username: me?.username }); // Small sanity ping
-                // Persona verification and photo fallback run in background so startup is not blocked
-                void (async () => {
-                    try {
-                        logger.info(`🧍 PERSONA start | ${this.clientId} | ${this.mobile}`);
-                        const pool = await db.getBufferPersonaPool(this.clientId);
-                        if (pool && (pool.firstNames.length > 0 || pool.lastNames.length > 0 || pool.bios.length > 0 || pool.profilePics.length > 0)) {
-                            logger.debug(`🧍 PERSONA pool | ${this.clientId} | ${this.mobile} | first ${pool.firstNames.length} | last ${pool.lastNames.length} | bio ${pool.bios.length} | pics ${pool.profilePics.length}`);
-                            const activeMobile = me?.phone || this.mobile;
-                            const bufferDoc = await db.getBufferClientDoc(activeMobile);
-                            if (bufferDoc) {
-                                logger.debug(`🧍 PERSONA buffer-doc | ${this.clientId} | ${bufferDoc.mobile} | first ${!!bufferDoc.assignedFirstName} | last ${!!bufferDoc.assignedLastName} | bio ${!!bufferDoc.assignedBio} | pics ${bufferDoc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.profilePicsUpdatedAt)}`);
-                                const result = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__.verifyAndCorrectPersona)(this.client, bufferDoc.mobile, pool, {
-                                    mobile: bufferDoc.mobile,
-                                    assignedFirstName: bufferDoc.assignedFirstName || null,
-                                    assignedLastName: bufferDoc.assignedLastName || null,
-                                    assignedBio: bufferDoc.assignedBio || null,
-                                    assignedProfilePics: bufferDoc.assignedProfilePics || [],
-                                    nameBioUpdatedAt: bufferDoc.nameBioUpdatedAt || null,
-                                    profilePicsUpdatedAt: bufferDoc.profilePicsUpdatedAt || null,
-                                    privacyUpdatedAt: bufferDoc.privacyUpdatedAt || null,
-                                }, (mobile, update) => db.updateBufferClientAssignment(mobile, update), () => db.fetchExistingAssignments(this.clientId));
-                                if (result.workingName) {
-                                    process.env.name = result.workingName;
-                                }
-                                const latestBufferDoc = await db.getBufferClientDoc(bufferDoc.mobile);
-                                const mirroredClientName = buildMirroredClientName(latestBufferDoc?.assignedFirstName || bufferDoc.assignedFirstName || null, latestBufferDoc?.assignedLastName || bufferDoc.assignedLastName || null);
-                                if (mirroredClientName) {
-                                    await db.updateClient(this.clientId, { name: mirroredClientName });
-                                    logger.info(`🧍 PERSONA client-doc updated | ${this.clientId} | ${bufferDoc.mobile} | ${mirroredClientName}`);
-                                }
-                                else {
-                                    logger.debug(`🧍 PERSONA client-doc skip | ${this.clientId} | ${bufferDoc.mobile} | no assigned buffer name`);
-                                }
-                                const latestAssignedPhotoCount = (latestBufferDoc?.assignedProfilePics || bufferDoc.assignedProfilePics || []).length;
-                                await triggerBufferProfilePhotoRefresh(this.client, bufferDoc.mobile, this.clientId, latestBufferDoc?.profilePicsUpdatedAt || bufferDoc.profilePicsUpdatedAt || null, pool.profilePics.length, latestAssignedPhotoCount);
-                                const correctionParts = [
-                                    result.correctedName ? 'name' : '',
-                                    result.correctedLastName ? 'lastName' : '',
-                                    result.correctedBio ? 'bio' : '',
-                                    result.correctedPhotos ? 'photos' : '',
-                                ].filter(Boolean);
-                                const anyCorrected = correctionParts.length > 0;
-                                logger.log(`[Persona] Working name set to: ${result.workingName}${anyCorrected ? ` (corrections: ${correctionParts.join(', ')})` : ''}`);
-                            }
-                            else {
-                                logger.warn(`[Persona] Buffer client doc not found for ${activeMobile}, skipping verification`);
-                            }
-                        }
-                        else {
-                            logger.debug(`[Persona] No persona pool available for ${this.mobile}, skipping verification`);
-                        }
-                    }
-                    catch (err) {
-                        const msg = err instanceof Error ? err.message : String(err);
-                        logger.error(`[Persona] Verification failed for ${this.mobile}`, msg, err instanceof Error ? err.stack : undefined);
-                    }
-                })();
-                // Wire helpers dependent on an active client + dialog manager
-                // MEMORY FIX: Only create if they don't exist, use getOrCreate to prevent duplicates
-                const hadReactor = Boolean(this.reactorInstance);
-                if (!this.ensureReactionService()) {
-                    throw new Error(`${this.mobile}: Failed to initialize ReactionService`);
-                }
-                else if (hadReactor) {
-                    logger.debug(`${this.mobile}: ReactionService already exists, reusing existing instance`);
-                }
-                if (!this.promotorInstance) {
-                    if (!this.ensurePromotionEngine()) {
-                        throw new Error(`${this.mobile}: Failed to initialize PromotionEngine`);
-                    }
-                }
-                else {
-                    logger.warn(`${this.mobile}: PromotionEngine already exists during Telegram startup; rebuilding it with the active client`);
-                    await this.promotorInstance.stopPromotions().catch((error) => {
-                        logger.error(`${this.mobile}: Error stopping stale PromotionEngine:`, error);
-                    });
-                    await this.promotorInstance.cleanup();
-                    this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
-                        instanceId: this.mobile,
-                        instanceName: this.clientId,
-                        onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
-                    });
-                }
-                // Phone from Telegram is normally our own mobile, so it's redundant — only surface
-                // it when it actually differs (a mismatch is worth seeing).
-                const connectedPhone = me?.phone && me.phone !== this.mobile ? me.phone : null;
-                await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.CLIENT_UPDATES, {
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.SUCCESS,
-                    title: "TG connected",
-                    fields: [
-                        { label: "Mobile", value: this.mobile },
-                        ...(connectedPhone ? [{ label: "Phone", value: connectedPhone }] : []),
-                    ],
-                    // Sent on its own, not via the hourly digest: ops reads each connect as the restart signal.
-                    tags: ["tg-aut", "telegram-manager", "connected"],
-                }, `${this.mobile}: Failed to send connected notification`);
-                // Register handlers exactly once
-                if (!this.handlersRegistered) {
-                    this.registerHandler((event) => this.handleIncoming(event), new telegram_events__WEBPACK_IMPORTED_MODULE_1__.NewMessage({ incoming: true }));
-                    this.registerHandler((event) => this.handleOutgoing(event), new telegram_events__WEBPACK_IMPORTED_MODULE_1__.NewMessage({ outgoing: true }));
-                    // Call events may have their own builder. If CallManager internally filters, we can pass undefined here.
-                    this.registerHandler((event) => this.callManager.handlePhoneCallEvent(event), undefined);
-                    this.handlersRegistered = true;
-                }
-                void Promise.resolve((0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__.replier)()).catch((error) => {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.replierStartup");
-                });
-                this.started = true;
-                const setupClient = this.client;
-                void (0,_index__WEBPACK_IMPORTED_MODULE_20__.initSetup)(setupClient).catch((error) => {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.initSetup", false);
-                });
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in startTg");
-                let sideEffectError = null;
-                try {
-                    await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({
-                        key: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyKeyPhoneCall(),
-                        rules: [
-                            new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueDisallowAll()
-                        ],
-                    }));
-                }
-                catch (inner) {
-                    sideEffectError = inner;
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(inner, "Error while handling startTg failure side-effects");
-                    logger.warn(`[PermanentFailure] TelegramManager.startTg:${this.clientId}: side-effect privacy update failed`, {
-                        error: inner instanceof Error ? inner.message : String(inner),
-                    });
-                }
-                // Check original error first, then side-effect error (e.g. FROZEN_METHOD_INVALID
-                // from SetPrivacy reveals the account is frozen even when the original error was
-                // a non-permanent PEER_ID_INVALID from SendMessage)
-                const handled = await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `TelegramManager.startTg:${this.clientId}`);
-                if (!handled && sideEffectError) {
-                    await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(sideEffectError, `TelegramManager.startTg:${this.clientId}:side-effect`);
-                }
-                throw error; // surface to callers if needed
-            }
-            finally {
-                this.starting = null;
-            }
-        })();
-        return this.starting;
-    }
-    /** A read-only Telegram RPC is the only reliable proof that a connected client is usable. */
-    async probeRpcLiveness() {
-        if (!this.client?.connected) {
-            throw new Error("Telegram client is not connected");
-        }
-        const elapsedMs = this.lastRpcLivenessAt === null ? null : Date.now() - this.lastRpcLivenessAt;
-        if (elapsedMs !== null && elapsedMs < TelegramManager.RPC_LIVENESS_CACHE_MS) {
-            if (this.lastRpcLivenessError)
-                throw this.lastRpcLivenessError;
-            return;
-        }
-        if (this.rpcLivenessProbe)
-            return this.rpcLivenessProbe;
-        const client = this.client;
-        this.rpcLivenessProbe = Promise.resolve()
-            .then(() => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.updates.GetState()))
-            .then(() => {
-            this.lastRpcLivenessError = null;
-        })
-            .catch((error) => {
-            this.lastRpcLivenessError = error;
-            throw error;
-        })
-            .finally(() => {
-            this.lastRpcLivenessAt = Date.now();
-            this.rpcLivenessProbe = null;
-        });
-        return this.rpcLivenessProbe;
-    }
-    registerHandler(handler, // eslint-disable-next-line @typescript-eslint/no-explicit-any -- GramJS handlers vary by EventBuilder
-    filter) {
-        if (!this.client)
-            throw new Error("Client not initialized");
-        // Guard against accidental duplicate registrations (same function reference + same filter type)
-        const exists = this.eventHandlers.some(([f, h]) => h === handler && (!!f === !!filter));
-        if (exists)
-            return;
-        this.client.addEventHandler(handler, filter);
-        this.eventHandlers.push([filter, handler]);
-    }
-    async handleIncoming(event) {
-        return _index__WEBPACK_IMPORTED_MODULE_20__.handleEvents.call(this, event);
-    }
-    async handleOutgoing(event) {
-        return _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__.OutEventPrint.call(this, event);
-    }
-    /**
-     * Public teardown. Idempotent and race-safe.
-     */
-    async destroy() {
-        if (this.cleaning)
-            return this.cleaning;
-        // Await any in-flight starting before cleaning.
-        if (this.starting) {
-            await this.starting.catch((error) => {
-                logger.warn(`${this.mobile}: Startup failed before destruction; continuing cleanup`, {
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            });
-        }
-        this.cleaning = (async () => {
-            try {
-                const name = this.mobile || "unknown";
-                logger.log(`${name}: Disposing TelegramManager instance...`);
-                // Promotion work can still be using this Telegram client for a send or verification.
-                // Stop and await it before tearing the transport down.
-                if (this.promotorInstance) {
-                    await this.promotorInstance.stopPromotions().catch(err => {
-                        logger.error(`${name}: Error stopping promotions:`, err);
-                    });
-                    this.promotorInstance.cleanup();
-                }
-                await this.reactorInstance?.dispose();
-                // Hang up any in-house call before the transport goes away (never leave a call/session live).
-                await this.callManager?.disposeInHouse?.().catch((error) => {
-                    logger.error(`${name}: Error stopping in-house calls:`, error);
-                });
-                await this.cleanupClient();
-                // Cleanup DialogManager properly
-                if (this.dialogManager) {
-                    try {
-                        this.dialogManager.cleanup();
-                    }
-                    catch (error) {
-                        logger.error(`${name}: Error cleaning up DialogManager:`, error);
-                    }
-                }
-                this.reactorInstance = null;
-                this.promotorInstance = null;
-                this.dialogManager = undefined;
-                this.callManager = undefined;
-                this.started = false;
-                this.handlersRegistered = false;
-                this.destroyed = true;
-                // MEMORY FIX: Ensure instance is removed from registry to prevent stale instances
-                const stillRegistered = TelegramManager.activeInstances.get(this.mobile);
-                if (stillRegistered === this) {
-                    TelegramManager.activeInstances.delete(this.mobile);
-                    logger.log(`${name}: Instance removed from registry (remaining: ${TelegramManager.activeInstances.size})`);
-                }
-                else if (stillRegistered) {
-                    logger.warn(`${name}: WARNING - Another instance found in registry after cleanup! This indicates a leak.`);
-                    // Don't delete the other instance, just log the warning
-                }
-                else {
-                    logger.debug(`${name}: Instance was already removed from registry`);
-                }
-                logger.log(`${name}: Instance successfully destroyed.`);
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during instance destruction`);
-                logger.error(`${this.mobile}: Error during instance destruction:`, error);
-            }
-            finally {
-                this.cleaning = null;
-            }
-        })();
-        return this.cleaning;
-    }
-    /**
-     * Patch _entityCache.add() to use last-seen wins instead of first-seen wins.
-     * The default GramJS entityCache.add() skips entities that already exist (first-seen wins),
-     * which causes stale access hashes. This patch always overwrites with the latest data.
-     */
-    patchEntityCache() {
-        if (!this.client)
-            return;
-        try {
-            const entityCacheObj = this.client._entityCache;
-            if (!entityCacheObj?.cacheMap)
-                return;
-            const cacheMap = entityCacheObj.cacheMap;
-            const { getPeerId, getInputPeer, isArrayLike } = resolveEntityCacheHelpers();
-            const maxEntities = _telegram_entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_MAX;
-            // Replace the add method with last-seen wins + bounded LRU cap.
-            entityCacheObj.add = (entities) => {
-                const temp = [];
-                if (!isArrayLike(entities)) {
-                    if (entities != undefined && typeof entities === "object") {
-                        if ("chats" in entities)
-                            temp.push(...entities.chats);
-                        if ("users" in entities)
-                            temp.push(...entities.users);
-                        if ("user" in entities)
-                            temp.push(entities.user);
-                    }
-                    if (temp.length) {
-                        entities = temp;
-                    }
-                    else {
-                        return;
-                    }
-                }
-                for (const entity of entities) {
-                    try {
-                        const pid = getPeerId(entity);
-                        // Last-seen wins + LRU cap + age tracking (for idle sweep -> GC reclaim).
-                        (0,_telegram_entity_cache__WEBPACK_IMPORTED_MODULE_15__.boundedEntityCacheSet)(cacheMap, pid.toString(), getInputPeer(entity), maxEntities, this.entityCacheLastSeen, Date.now());
-                    }
-                    catch {
-                        // Skip invalid entities
-                    }
-                }
-            };
-            logger.debug(`${this.mobile}: Patched _entityCache.add() — last-seen wins, LRU cap ${maxEntities}`);
-            // Proactive age sweep so idle entries become GC-collectable (not just capped).
-            const idleMs = _telegram_entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_IDLE_MS;
-            const sweepMs = 5 * 60000; // sweep every 5 min
-            if (this.entityCacheSweeper)
-                clearInterval(this.entityCacheSweeper);
-            this.entityCacheSweeper = setInterval(() => {
-                try {
-                    const removed = (0,_telegram_entity_cache__WEBPACK_IMPORTED_MODULE_15__.sweepEntityCacheByAge)(cacheMap, this.entityCacheLastSeen, Date.now(), idleMs);
-                    if (removed > 0)
-                        logger.debug(`${this.mobile}: entity cache swept ${removed} idle entries (size ${cacheMap.size})`);
-                }
-                catch (err) {
-                    logger.debug(`${this.mobile}: entity cache sweep failed:`, err);
-                }
-            }, sweepMs);
-            this.entityCacheSweeper.unref?.();
-        }
-        catch (error) {
-            logger.debug(`${this.mobile}: Failed to patch _entityCache:`, error);
-        }
-    }
-    /**
-     * Internal cleanup for the GramJS client and handlers. Safe to call multiple times.
-     */
-    async cleanupClient() {
-        try {
-            // Stop the entity-cache age sweeper and drop its timestamps (no timer leak on swap).
-            if (this.entityCacheSweeper) {
-                clearInterval(this.entityCacheSweeper);
-                this.entityCacheSweeper = null;
-            }
-            this.entityCacheLastSeen.clear();
-            // Dispose application-level entity cache
-            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__.EntityCacheManager.getInstance().dispose();
-            if (!this.client)
-                return;
-            // Remove tracked event handlers
-            for (const [builder, handler] of this.eventHandlers) {
-                try {
-                    this.client.removeEventHandler(handler, builder ?? new telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__.Raw({}));
-                }
-                catch (error) {
-                    logger.debug(`Failed to remove event handler:`, error);
-                }
-            }
-            this.eventHandlers = [];
-            try {
-                await this.client?.destroy();
-                this.client._eventBuilders = [];
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(2000);
-                logger.log("Client Destroyed: ", this.mobile);
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
-            }
-            finally {
-                this.client._destroyed = true;
-                if (this.client._sender && typeof this.client._sender.disconnect === 'function') {
-                    await this.client._sender.disconnect();
-                }
-            }
-            this.client = null;
-            // MEMORY FIX: Clear session reference on cleanup
-            // Note: DeduplicatingSession doesn't need explicit disposal, but we clear the reference
-            this.session = null;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
-            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error);
-        }
-    }
-}
-// Global registry of active instances keyed by mobile
-TelegramManager.activeInstances = new Map();
-TelegramManager.runtimeRecovery = null;
-TelegramManager.lastRuntimeRecoveryAt = null;
-TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS = 20 * 60 * 1000;
-TelegramManager.RPC_LIVENESS_CACHE_MS = 60 * 1000;
-
-
-/***/ },
-
-/***/ "./src/core/permanent-failure/fingerprint.ts"
-/*!***************************************************!*\
-  !*** ./src/core/permanent-failure/fingerprint.ts ***!
-  \***************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   formatTelegramFingerprintSummary: () => (/* binding */ formatTelegramFingerprintSummary),
-/* harmony export */   loadTelegramFingerprintSummary: () => (/* binding */ loadTelegramFingerprintSummary)
-/* harmony export */ });
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-// Telegram fingerprint summary — used in permanent-failure alerts so operators can see the exact
-// api_id / device / proxy the dying account was running with. Kept separate from the handoff logic
-// so each file has one responsibility.
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:permanent-failure:fingerprint');
-function maskApiHash(apiHash) {
-    if (!apiHash)
-        return 'missing';
-    return apiHash.length <= 8 ? apiHash : `***${apiHash.slice(-8)}`;
-}
-function formatTelegramFingerprintSummary(fingerprint) {
-    if (!fingerprint)
-        return 'apiId=unknown | apiHash=unknown | device=unknown | system=unknown | app=unknown | lang=unknown';
-    return [
-        `apiId=${fingerprint.apiId}`,
-        `apiHash=${fingerprint.apiHashSuffix}`,
-        `device=${fingerprint.deviceModel || 'unknown'}`,
-        `system=${fingerprint.systemVersion || 'unknown'}`,
-        `app=${fingerprint.appVersion || 'unknown'}`,
-        `langPack=${fingerprint.langPack || 'unknown'}`,
-        `lang=${fingerprint.langCode || 'unknown'}`,
-        `systemLang=${fingerprint.systemLangCode || 'unknown'}`,
-        `proxy=${fingerprint.proxy || 'none'}`,
-    ].join(' | ');
-}
-async function loadTelegramFingerprintSummary(mobile) {
-    if (!mobile)
-        return null;
-    try {
-        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_0__.generateTGConfig)(mobile);
-        const params = config.params;
-        const proxy = params.proxy;
-        return {
-            apiId: config.apiId,
-            apiHashSuffix: maskApiHash(config.apiHash),
-            deviceModel: typeof params.deviceModel === 'string' ? params.deviceModel : undefined,
-            systemVersion: typeof params.systemVersion === 'string' ? params.systemVersion : undefined,
-            appVersion: typeof params.appVersion === 'string' ? params.appVersion : undefined,
-            langPack: typeof params.langPack === 'string' ? params.langPack : undefined,
-            langCode: typeof params.langCode === 'string' ? params.langCode : undefined,
-            systemLangCode: typeof params.systemLangCode === 'string' ? params.systemLangCode : undefined,
-            proxy: proxy?.ip && proxy?.port ? `${proxy.ip}:${proxy.port}` : undefined,
-        };
-    }
-    catch (error) {
-        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${mobile}`, {
-            error: error instanceof Error ? error.message : String(error),
-        });
-        return null;
-    }
-}
-
-
-/***/ },
-
-/***/ "./src/core/permanent-failure/handoff.ts"
-/*!***********************************************!*\
-  !*** ./src/core/permanent-failure/handoff.ts ***!
-  \***********************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* binding */ HANDOFF_MAX_FAILURES),
-/* harmony export */   getPermanentFailureHandoffContext: () => (/* binding */ getPermanentFailureHandoffContext),
-/* harmony export */   handlePermanentTelegramFailure: () => (/* binding */ handlePermanentTelegramFailure),
-/* harmony export */   isPermanentFailureHandoffActive: () => (/* binding */ isPermanentFailureHandoffActive),
-/* harmony export */   resetPermanentFailureHandoff: () => (/* binding */ resetPermanentFailureHandoff),
-/* harmony export */   startNewUserProcess: () => (/* binding */ startNewUserProcess)
-/* harmony export */ });
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./fingerprint */ "./src/core/permanent-failure/fingerprint.ts");
-/* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../setup-client */ "./src/core/setup-client.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-// Permanent-failure handoff. When Telegram returns a permanent error (FROZEN_METHOD_INVALID,
-// SESSION_REVOKED, AUTH_KEY_*, USER_DEACTIVATED), the affected mobile is dead. We hand off to the
-// CMS setupClient endpoint (which swaps in a fresh buffer account) and then shut this process down
-// so PM2 restarts it with the new session. Every trigger is self-filtering (no-op on non-permanent
-// errors) and deduped via a process-wide mutex, so it is safe to call from any catch block.
-//
-// This module is intentionally free of any import back into app.ts — it raises SIGTERM for the
-// graceful restart instead of importing app.ts's shutdown() — so catch sites across the app can
-// import it with static imports without dragging in the heavy app graph (which previously caused a
-// core/utils <-> app.ts cycle).
-
-
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:permanent-failure:handoff');
-const POST_SETUPCLIENT_SHUTDOWN_DELAY_MS = 60000;
-let isNewUserProcessRunning = 0;
-/**
- * Owner rule (2026-10-11): a handoff that fails (CMS down, no swap) is retried with doubling gaps
- * (1, 2, 4, 8, 16 min) and abandoned after HANDOFF_MAX_FAILURES, instead of a CRITICAL alert plus a
- * setupClient call every 60 s for as long as the dead account keeps erroring. A restart re-arms it.
- */
-const HANDOFF_RETRY_BASE_MS = 60000;
-const HANDOFF_MAX_FAILURES = 5;
-let failedHandoffs = 0;
-function noteHandoffFailure(context) {
-    failedHandoffs++;
-    if (failedHandoffs === HANDOFF_MAX_FAILURES) {
-        logger.error(`[PermanentFailure] ${context}: setupClient handoff failed ${failedHandoffs} times; giving up until the process restarts`);
-    }
-}
-/** Test hook: forget handoff attempts in this process. */
-function resetPermanentFailureHandoff() {
-    isNewUserProcessRunning = 0;
-    failedHandoffs = 0;
-    permanentFailureHandoffInProgress = false;
-    permanentFailureHandoffContext = null;
-}
-let permanentFailureHandoffInProgress = false;
-let permanentFailureHandoffContext = null;
-function isPermanentFailureHandoffActive() {
-    return permanentFailureHandoffInProgress;
-}
-function getPermanentFailureHandoffContext() {
-    return permanentFailureHandoffContext;
-}
-async function sendPermanentFailureNotification(category, notification, context) {
-    try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(category, notification);
-        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, 'Permanent-failure notification returned false', context);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, context, false);
-        return false;
-    }
-}
-async function handlePermanentTelegramFailure(error, context = 'runtime') {
-    if (error?.__setupHandled) {
-        logger.info(`[PermanentFailure] ${context}: setup flow already handled for this error`);
-        return true;
-    }
-    if (permanentFailureHandoffInProgress) {
-        logger.info(`[PermanentFailure] ${context}: setupClient handoff already in progress`, {
-            activeContext: permanentFailureHandoffContext,
-        });
-        return true;
-    }
-    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, '', false);
-    const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError)(error);
-    const errorMessage = parsed.type === 'AUTH_ERROR' ? parsed.code : parsed.type === 'UNKNOWN' ? parsed.message : parsed.type;
-    if (!(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__["default"])(errorDetails) || errorMessage === 'INPUT_USER_DEACTIVATED') {
-        logger.debug(`[PermanentFailure] ${context} | non-permanent | ${errorMessage} | ${String(errorDetails.message).slice(0, 160)}`);
-        return false;
-    }
-    logger.error(`[PermanentFailure] ${context}: classified as permanent, triggering setup flow`, {
-        errorMessage,
-        message: errorDetails.message,
-    });
-    await startNewUserProcess(error, context);
-    return true;
-}
-async function startNewUserProcess(error, context = 'runtime') {
-    if (error?.__setupHandled) {
-        logger.info(`[PermanentFailure] ${context}: new user process already handled for this error`);
-        return;
-    }
-    if (permanentFailureHandoffInProgress) {
-        logger.info(`[PermanentFailure] ${context}: setupClient handoff already active, skipping duplicate trigger`, {
-            activeContext: permanentFailureHandoffContext,
-        });
-        if (typeof error === 'object' && error !== null) {
-            error.__setupHandled = true;
-        }
-        return;
-    }
-    if (typeof error === 'object' && error !== null) {
-        error.__setupHandled = true;
-    }
-    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, '', false);
-    const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError)(error);
-    const errorMessage = parsed.type === 'AUTH_ERROR' ? parsed.code : parsed.type === 'UNKNOWN' ? parsed.message : parsed.type;
-    if (!(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__["default"])(errorDetails) || errorMessage === 'INPUT_USER_DEACTIVATED') {
-        logger.debug(`[PermanentFailure] ${context} | skip-new-user | non-permanent | ${errorMessage} | ${String(errorDetails.message).slice(0, 160)}`);
-        return;
-    }
-    if (failedHandoffs >= HANDOFF_MAX_FAILURES) {
-        logger.debug(`[PermanentFailure] ${context}: handoff abandoned after ${failedHandoffs} failures, skipping`);
-        return;
-    }
-    if (isNewUserProcessRunning >= Date.now() - HANDOFF_RETRY_BASE_MS * 2 ** failedHandoffs) {
-        logger.warn(`[PermanentFailure] ${context}: setup flow already triggered recently, skipping duplicate handoff`, {
-            errorMessage,
-            mobile: process.env.mobile,
-        });
-        return;
-    }
-    isNewUserProcessRunning = Date.now();
-    permanentFailureHandoffInProgress = true;
-    permanentFailureHandoffContext = context;
-    try {
-        const fingerprint = await (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.loadTelegramFingerprintSummary)(process.env.mobile);
-        const fingerprintSummary = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.formatTelegramFingerprintSummary)(fingerprint);
-        logger.error(`[PermanentFailure] ${context}: starting setupClient handoff`, {
-            errorMessage,
-            mobile: process.env.mobile,
-            clientId: process.env.clientId,
-            permanentReplacement: true,
-            fingerprint,
-        });
-        await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
-            title: 'Auth failed',
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
-            summary: 'A tg-aut mobile hit a permanent Telegram failure and is being handed off to setupClient.',
-            fields: [
-                { label: 'Mobile', value: process.env.mobile || 'unknown' },
-                { label: 'Context', value: context },
-                { label: 'Error', value: errorMessage, code: false },
-            ],
-            details: fingerprintSummary,
-            tags: ['tg-aut', 'telegram', 'permanent-failure', 'setup-client'],
-        }, `TgAutPermanentFailure.notification.permanentFailure.${process.env.mobile || 'unknown'}`);
-        if (errorMessage === 'AUTH_KEY_DUPLICATED') {
-            await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
-                title: 'Key duplicated',
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
-                summary: 'Telegram reported AUTH_KEY_DUPLICATED during tg-aut runtime.',
-                fields: [
-                    { label: 'Mobile', value: process.env.mobile || 'unknown' },
-                    { label: 'Context', value: context },
-                ],
-                tags: ['tg-aut', 'telegram', 'auth-key-duplicated'],
-            }, `TgAutPermanentFailure.notification.authKeyDuplicated.${process.env.mobile || 'unknown'}`);
-        }
-        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_6__.getRuntimeConfigBaseOrNull)();
-        if (!runtimeBase) {
-            logger.error(`[PermanentFailure] ${context}: cannot trigger setupClient because runtime config base is missing`);
-            noteHandoffFailure(context);
-            permanentFailureHandoffInProgress = false;
-            permanentFailureHandoffContext = null;
-            return;
-        }
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=false&formalities=false&reason=${encodeURIComponent(errorMessage)}`;
-        logger.info(`[PermanentFailure] ${context}: calling setupClient`, {
-            url,
-            clientId: process.env.clientId,
-            reason: errorMessage,
-            permanentReplacement: true,
-        });
-        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
-        if (!setupResult.swapped) {
-            throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
-        }
-        logger.info(`[PermanentFailure] ${context}: setupClient handoff completed, waiting before shutdown`, {
-            delayMs: POST_SETUPCLIENT_SHUTDOWN_DELAY_MS,
-            clientId: process.env.clientId,
-        });
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(POST_SETUPCLIENT_SHUTDOWN_DELAY_MS);
-        // Trigger a graceful shutdown so PM2 restarts the process and it re-fetches env (new
-        // session/mobile) from the CMS. We raise SIGTERM instead of importing app.ts's shutdown() —
-        // that import would recreate the core <-> app cycle. app.ts's SIGTERM handler runs the full
-        // async cleanupResources (state save, DB close, client disconnect) before exiting.
-        logger.info(`[PermanentFailure] ${context}: post-handoff wait finished, raising SIGTERM for graceful restart`);
-        process.kill(process.pid, 'SIGTERM');
-    }
-    catch (err) {
-        noteHandoffFailure(context);
-        permanentFailureHandoffInProgress = false;
-        permanentFailureHandoffContext = null;
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(err, 'Error during new user process');
-        logger.error(`[PermanentFailure] ${context}: setupClient handoff failed`, err instanceof Error ? err.message : String(err));
-    }
-}
-
-
-/***/ },
-
-/***/ "./src/core/permanent-failure/index.ts"
-/*!*********************************************!*\
-  !*** ./src/core/permanent-failure/index.ts ***!
-  \*********************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_MAX_FAILURES),
-/* harmony export */   getPermanentFailureHandoffContext: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.getPermanentFailureHandoffContext),
-/* harmony export */   handlePermanentTelegramFailure: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.handlePermanentTelegramFailure),
-/* harmony export */   isPermanentFailureHandoffActive: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.isPermanentFailureHandoffActive),
-/* harmony export */   resetPermanentFailureHandoff: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.resetPermanentFailureHandoff),
-/* harmony export */   startNewUserProcess: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.startNewUserProcess)
-/* harmony export */ });
-/* harmony import */ var _handoff__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./handoff */ "./src/core/permanent-failure/handoff.ts");
-// Permanent-failure handling: when Telegram permanently kills a mobile (FROZEN, SESSION_REVOKED,
-// AUTH_KEY_*, USER_DEACTIVATED), hand off to the CMS setupClient endpoint and gracefully restart so
-// PM2 brings the process back with a fresh session. Fully independent of app.ts (no import cycle);
-// catch sites across the app import these with static imports.
-
-
-
-/***/ },
-
-/***/ "./src/core/setup-client.ts"
-/*!**********************************!*\
-  !*** ./src/core/setup-client.ts ***!
-  \**********************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
-/* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
-/* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
-/* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
-/* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
-/* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
-/* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff)
-/* harmony export */ });
-const VALID_STATUSES = new Set([
-    'swapped',
-    'disabled',
-    'cooldown',
-    'client_not_found',
-    'no_candidate',
-    'failed',
-]);
-/** After a no_candidate answer, further swap requests are suppressed this long. */
-const SETUP_CLIENT_BACKOFF_MS = 2 * 60 * 60 * 1000;
-/**
- * Shorter backoff when CMS still has unprobed candidates: probed limited accounts drop out of its
- * next scan, so a retry makes progress through the list.
- */
-const SETUP_CLIENT_PENDING_BACKOFF_MS = 15 * 60 * 1000;
-/** After a successful swap the process is about to be restarted by CMS; don't ask again meanwhile. */
-const SETUP_CLIENT_POST_SWAP_MS = 5 * 60 * 1000;
-/**
- * Owner rule (2026-10-11): a request that fails (CMS 'failed', disabled, client_not_found, a throw)
- * backs off 15, 30, 60, 120 min and stops after SETUP_CLIENT_MAX_FAILURES in a row, until the process
- * restarts. It used to be re-asked every health cycle (10 min) forever.
- */
-const SETUP_CLIENT_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
-const SETUP_CLIENT_MAX_FAILURES = 5;
-let swapSuppressedUntil = 0;
-let inFlight = null;
-let consecutiveFailures = 0;
-function resetSetupClientBackoff() {
-    swapSuppressedUntil = 0;
-    inFlight = null;
-    consecutiveFailures = 0;
-}
-function noteSetupFailure() {
-    consecutiveFailures++;
-    swapSuppressedUntil = consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES
-        ? Number.POSITIVE_INFINITY
-        : Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
-}
-/**
- * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
- * no_candidate result, requests from any trigger are answered locally for SETUP_CLIENT_BACKOFF_MS (15 min when CMS reports moreCandidatesPending)
- * so a no_candidate pool is not re-asked every health cycle.
- */
-async function requestClientSetup(url, request, expectedClientId, options = {}) {
-    const bypass = options.bypassBackoff === true;
-    const startedAt = Date.now();
-    if (!bypass && startedAt < swapSuppressedUntil) {
-        const remainingMs = swapSuppressedUntil - startedAt;
-        return {
-            status: 'cooldown',
-            swapped: false,
-            clientId: expectedClientId ?? '',
-            message: Number.isFinite(remainingMs)
-                ? `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
-                : `setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`,
-            cooldownRemainingMs: remainingMs,
-            suppressedLocally: true,
-        };
-    }
-    if (bypass)
-        return requestClientSetupUnguarded(url, request, expectedClientId);
-    // Coalesce concurrent triggers (e.g. a SpamBot reply and a health pass) into one CMS request.
-    if (inFlight)
-        return inFlight;
-    const pending = requestClientSetupUnguarded(url, request, expectedClientId)
-        .then((result) => {
-        // Only "nothing swappable" backs off for long. CMS's own short cooldown or a transient
-        // 'failed' must not block a genuine rotation for hours.
-        if (result.swapped) {
-            consecutiveFailures = 0;
-            swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
-        }
-        else if (result.status === 'no_candidate') {
-            consecutiveFailures = 0;
-            swapSuppressedUntil = Date.now()
-                + (result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS);
-        }
-        else if (result.status === 'cooldown') {
-            // CMS's own cooldown: wait exactly that long, not a failure.
-            if (result.cooldownRemainingMs && result.cooldownRemainingMs > 0)
-                swapSuppressedUntil = Date.now() + result.cooldownRemainingMs;
-        }
-        else {
-            noteSetupFailure();
-        }
-        return result;
-    }, (error) => {
-        noteSetupFailure();
-        throw error;
-    })
-        .finally(() => {
-        if (inFlight === pending)
-            inFlight = null;
-    });
-    inFlight = pending;
-    return pending;
-}
-async function requestClientSetupUnguarded(url, request, expectedClientId) {
-    const response = await request(url);
-    if (!response) {
-        throw new Error('setupClient request failed without a response');
-    }
-    const data = response.data;
-    const statusMatchesSwap = data?.status === 'swapped' ? data.swapped === true : data?.swapped === false;
-    const clientIdIsValid = typeof data?.clientId === 'string'
-        && data.clientId.trim().length > 0
-        && (!expectedClientId || data.clientId === expectedClientId);
-    const messageIsValid = typeof data?.message === 'string' && data.message.trim().length > 0;
-    const swappedMobilesAreValid = data?.swapped !== true || (typeof data.existingMobile === 'string'
-        && data.existingMobile.trim().length > 0
-        && typeof data.newMobile === 'string'
-        && data.newMobile.trim().length > 0
-        && data.existingMobile !== data.newMobile);
-    const cooldownIsValid = data?.cooldownRemainingMs === undefined || (typeof data.cooldownRemainingMs === 'number'
-        && Number.isFinite(data.cooldownRemainingMs)
-        && data.cooldownRemainingMs >= 0);
-    const retirementIsValid = data?.existingRetired === undefined || typeof data.existingRetired === 'boolean';
-    const futureFallbackIsValid = data?.usedFutureAvailableFallback === undefined
-        || typeof data.usedFutureAvailableFallback === 'boolean';
-    const pendingIsValid = data?.moreCandidatesPending === undefined || typeof data.moreCandidatesPending === 'boolean';
-    if (!data ||
-        typeof data !== 'object' ||
-        typeof data.status !== 'string' ||
-        !VALID_STATUSES.has(data.status) ||
-        typeof data.swapped !== 'boolean' ||
-        !statusMatchesSwap ||
-        !clientIdIsValid ||
-        !messageIsValid ||
-        !swappedMobilesAreValid ||
-        !cooldownIsValid ||
-        !retirementIsValid ||
-        !futureFallbackIsValid ||
-        !pendingIsValid) {
-        throw new Error('setupClient returned an invalid response contract');
-    }
-    return data;
-}
-
-
-/***/ },
-
 /***/ "./src/data/db.ts"
 /*!************************!*\
   !*** ./src/data/db.ts ***!
@@ -63052,773 +62577,6 @@ function compareDiagnostics(diag1, diag2) {
 
 /***/ },
 
-/***/ "./src/event-handlers/ConnectionRetryService.ts"
-/*!******************************************************!*\
-  !*** ./src/event-handlers/ConnectionRetryService.ts ***!
-  \******************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   connectionRetryService: () => (/* binding */ connectionRetryService)
-/* harmony export */ });
-/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _app__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../app */ "./src/app.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../bootstrap/leader-election */ "./src/bootstrap/leader-election.ts");
-/**
- * Connection Retry Service
- *
- * Health model:
- *   - Telegram transport health is determined by the manager and GramJS client connection state.
- *   - recentInboundActivity is an observability signal set by handleEvents() on each incoming
- *     Telegram message. A quiet account is normal and is never, by itself, a reconnect reason.
- *   - Each tick resets recentInboundActivity after observing it so health output can report recent
- *     traffic, but retry/shutdown budgets are consumed only while the Telegram transport is absent
- *     or disconnected.
- *
- * Tick loop (every TICK_MS after INITIAL_DELAY_MS):
- *   1. Record whether inbound activity occurred for observability.
- *   2. If Telegram transport is present and connected, clear any retry budget and leave it alone.
- *   3. If the manager/client is absent or disconnected, attempt a reconnect without touching an
- *      already-connected client. Only this path consumes the bounded retry budget.
- *   4. After MAX_FAILURES genuine transport failures, notify the coordinator and shut down.
- */
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:connection-retry-service");
-// ─── Configuration ──────────────────────────────────────────────────────────
-const TICK_MS = 120000; // 2 minutes between health checks
-const INITIAL_DELAY_MS = 20000; // 20 seconds before first check
-const MAX_FAILURES = 5; // consecutive unhealthy ticks before shutdown
-const PROCESS_ID_TIMEOUT_MS = 15000;
-function readConnectionState() {
-    const instanceExists = _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist();
-    const inst = instanceExists ? _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance() : null;
-    return {
-        instanceExists,
-        clientConnected: inst?.client?.connected ?? false,
-        mongoConnected: _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()?.isConnected ?? false,
-    };
-}
-function fmtState(state, recentInboundActivity) {
-    return `recentInboundActivity=${recentInboundActivity} instance=${state.instanceExists} tg=${state.clientConnected} mongo=${state.mongoConnected}`;
-}
-function connectionStateFields(state, recentInboundActivity) {
-    return [
-        { label: "Recent inbound", value: recentInboundActivity },
-        { label: "Instance exists", value: state.instanceExists },
-        { label: "Telegram connected", value: state.clientConnected },
-        { label: "Mongo connected", value: state.mongoConnected },
-    ];
-}
-// ─── Service ────────────────────────────────────────────────────────────────
-class ConnectionRetryService {
-    constructor() {
-        this.consecutiveFailures = 0;
-        this.startupAttempts = 0;
-        this.connectionBootstrapAttempts = 0;
-        this.tickInterval = null;
-        this.startupTimeout = null;
-        this.schedulerActive = false;
-        this.tickInFlight = false;
-        this.recentInboundActivity = false;
-        this.hasEverObservedInboundActivity = false;
-    }
-    // ── Public API ────────────────────────────────────────────────────────────
-    hasRecentInboundActivity() {
-        return this.recentInboundActivity;
-    }
-    /** Called by handleEvents() on every incoming TG message */
-    markInboundActivity() {
-        if (!this.recentInboundActivity) {
-            logger.debug(`[HEALTH] recentInboundActivity: false -> true (incoming message observed)`);
-        }
-        this.resetRetryBudgets("inbound activity observed");
-        this.recentInboundActivity = true;
-        this.hasEverObservedInboundActivity = true;
-    }
-    getRetryTime() {
-        return this.consecutiveFailures;
-    }
-    hasExhaustedBootstrapAttempts() {
-        return this.connectionBootstrapAttempts >= MAX_FAILURES;
-    }
-    getDiagnostics() {
-        return {
-            initialized: Boolean(this.startupTimeout || this.tickInterval),
-            recentInboundActivity: this.recentInboundActivity,
-            hasEverObservedInboundActivity: this.hasEverObservedInboundActivity,
-            consecutiveFailures: this.consecutiveFailures,
-            startupAttempts: this.startupAttempts,
-            connectionBootstrapAttempts: this.connectionBootstrapAttempts,
-            maxFailures: MAX_FAILURES,
-            tickMs: TICK_MS,
-            initialDelayMs: INITIAL_DELAY_MS,
-        };
-    }
-    reserveConnectionBootstrapAttempt(source) {
-        if (this.connectionBootstrapAttempts >= MAX_FAILURES) {
-            logger.error(`[HEALTH] Blocking connection bootstrap for ${source}: retry budget exhausted (${this.connectionBootstrapAttempts}/${MAX_FAILURES})`);
-            return {
-                allowed: false,
-                attempt: this.connectionBootstrapAttempts,
-                max: MAX_FAILURES,
-            };
-        }
-        this.connectionBootstrapAttempts += 1;
-        logger.warn(`[HEALTH] Reserved connection bootstrap attempt ${this.connectionBootstrapAttempts}/${MAX_FAILURES} for ${source}`);
-        return {
-            allowed: true,
-            attempt: this.connectionBootstrapAttempts,
-            max: MAX_FAILURES,
-        };
-    }
-    initialize() {
-        this.cleanup();
-        this.schedulerActive = true;
-        this.startupTimeout = setTimeout(() => {
-            this.startupTimeout = null;
-            return this.runScheduledTick()
-                .catch((error) => {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.startupTick", false);
-                logger.error(`[HEALTH] Startup tick error:`, error);
-            })
-                .finally(() => {
-                if (!this.schedulerActive || this.tickInterval)
-                    return;
-                this.tickInterval = setInterval(() => {
-                    this.runScheduledTick().catch((error) => {
-                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.intervalTick", false);
-                        logger.error(`[HEALTH] Unhandled tick error:`, error);
-                    });
-                }, TICK_MS);
-            });
-        }, INITIAL_DELAY_MS);
-    }
-    cleanup() {
-        this.schedulerActive = false;
-        if (this.startupTimeout) {
-            clearTimeout(this.startupTimeout);
-            this.startupTimeout = null;
-        }
-        if (this.tickInterval) {
-            clearInterval(this.tickInterval);
-            this.tickInterval = null;
-        }
-        this.tickInFlight = false;
-    }
-    // ── Core tick ─────────────────────────────────────────────────────────────
-    async runScheduledTick() {
-        if (this.tickInFlight) {
-            logger.warn(`[HEALTH] Scheduled retry tick skipped: previous tick still in progress`);
-            return;
-        }
-        this.tickInFlight = true;
-        try {
-            await this.tick();
-        }
-        finally {
-            this.tickInFlight = false;
-        }
-    }
-    async tick() {
-        try {
-            const state = readConnectionState();
-            const sawInboundActivity = this.recentInboundActivity;
-            this.recentInboundActivity = false;
-            if (state.instanceExists && state.clientConnected) {
-                // Inbound silence is normal for a quiet account. Never disconnect a healthy Telegram
-                // transport just because no user happened to message during this two-minute window.
-                if (sawInboundActivity && this.consecutiveFailures > 0) {
-                    logger.log(`[HEALTH] Recovered after ${this.consecutiveFailures} transport failures`);
-                    await this.notify(`Recovered after ${this.consecutiveFailures} transport failures`);
-                }
-                this.resetRetryBudgets(sawInboundActivity ? "inbound activity observed" : "Telegram transport is connected");
-                await this.pingUptime();
-            }
-            else {
-                if (await this.onTransportUnavailable(state))
-                    return;
-            }
-            await this.checkLeader();
-        }
-        catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            logger.error(`[HEALTH] Tick crashed: ${msg}`);
-            await this.notify(`CRITICAL - Health tick crashed: ${msg}`);
-            this.cleanup();
-            await this.requestShutdown(`Health tick crash: ${msg}`);
-        }
-    }
-    // ── Unhealthy: Telegram manager/client is absent or disconnected ───────────
-    async onTransportUnavailable(state) {
-        const startup = !this.hasEverObservedInboundActivity;
-        const failures = startup
-            ? ++this.startupAttempts
-            : ++this.consecutiveFailures;
-        logger.warn(`[HEALTH] Telegram transport unavailable (${failures}/${MAX_FAILURES}) — ${fmtState(state, false)}`);
-        // Try reconnect only when the transport is actually absent/disconnected. Deliberately do not
-        // disconnect first: a client that reports connected is handled by the healthy branch above.
-        if (state.instanceExists) {
-            try {
-                const reconnected = await _core_TelegramManager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.ensureConnected();
-                if (reconnected) {
-                    logger.log(`[HEALTH] Telegram transport restored`);
-                    this.resetRetryBudgets("Telegram reconnect succeeded");
-                    await this.notify("Telegram transport restored");
-                    await this.pingUptime();
-                    return false;
-                }
-                logger.warn(`[HEALTH] Reconnect failed`);
-            }
-            catch (error) {
-                logger.error(`[HEALTH] Reconnect error:`, error);
-            }
-        }
-        // Check if this process was replaced by a newer one
-        if (!state.clientConnected) {
-            const replaced = await this.checkProcessValidity();
-            if (replaced)
-                return true; // shutdown already called
-        }
-        // Notify on every genuine transport failure.
-        await this.notify(`Telegram transport unavailable (${failures}/${MAX_FAILURES})`);
-        // Give up after MAX_FAILURES genuine transport failures. A successful reconnect returned
-        // above after resetting the budget, so the counter can never exceed its documented bound.
-        if (failures >= MAX_FAILURES) {
-            logger.error(`[HEALTH] ${MAX_FAILURES} Telegram transport failures — shutting down`);
-            await this.notify(`Shutting down after ${MAX_FAILURES} Telegram transport failures`);
-            try {
-                await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().closeConnection();
-            }
-            catch { /* best effort */ }
-            this.cleanup();
-            await this.requestShutdown("Health check: max Telegram transport failures exceeded");
-            return true;
-        }
-        await this.pingUptime();
-        return false;
-    }
-    // ── Coordinator notification ─────────────────────────────────────────────
-    async checkProcessValidity() {
-        try {
-            logger.debug(`[HEALTH] Notifying coordinator that inbound activity is missing`, {
-                processId: _app__WEBPACK_IMPORTED_MODULE_5__.prcessID,
-                clientId: process.env.clientId,
-            });
-            await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`${process.env.uptimebot}/tgclientoff/${_app__WEBPACK_IMPORTED_MODULE_5__.prcessID}?clientId=${process.env.clientId}`);
-        }
-        catch (error) {
-            logger.warn(`[HEALTH] tgclientoff notification failed (non-fatal):`, error);
-        }
-        return false;
-    }
-    // ── Helpers ───────────────────────────────────────────────────────────────
-    async pingUptime() {
-        try {
-            await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`${process.env.uptimebot}/receive?clientId=${process.env.clientId?.toLowerCase()}`, {});
-        }
-        catch (error) {
-            logger.warn(`[HEALTH] Uptime ping failed (non-fatal):`, error);
-        }
-    }
-    async notify(message) {
-        try {
-            let state;
-            try {
-                state = readConnectionState();
-            }
-            catch {
-                state = {
-                    instanceExists: false,
-                    clientConnected: false,
-                    mongoConnected: false,
-                };
-            }
-            const severity = message.includes("CRITICAL") || message.includes("Shutting down")
-                ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL
-                : message.includes("Recovered") || message.includes("Reconnected")
-                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS
-                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING;
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                severity,
-                title: "Retry health",
-                summary: message,
-                fields: [
-                    { label: "ProcessId", value: _app__WEBPACK_IMPORTED_MODULE_5__.prcessID },
-                    { label: "Failures", value: `${this.consecutiveFailures}/${MAX_FAILURES}` },
-                    ...connectionStateFields(state, this.recentInboundActivity),
-                ],
-                tags: ["connection-retry", "health"],
-            });
-            if (!(0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Connection retry notification returned false", "ConnectionRetryService.notification")) {
-                logger.warn(`[HEALTH] Failed to send notification: ${message}`);
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.notification", false);
-            logger.warn(`[HEALTH] Failed to send notification: ${message}`);
-        }
-    }
-    async checkLeader() {
-        try {
-            await _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_7__.LeaderElectionService.getInstance().checkLeaderStatus();
-        }
-        catch (error) {
-            logger.warn("[HEALTH] Leader check failed:", error);
-        }
-    }
-    async requestShutdown(reason) {
-        try {
-            await (0,_app__WEBPACK_IMPORTED_MODULE_5__.shutdown)(reason);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.shutdown", false);
-            logger.error(`[HEALTH] Shutdown request failed:`, error);
-        }
-    }
-    resetRetryBudgets(reason) {
-        if (this.consecutiveFailures === 0 &&
-            this.startupAttempts === 0 &&
-            this.connectionBootstrapAttempts === 0) {
-            return;
-        }
-        logger.info(`[HEALTH] Resetting retry budgets`, {
-            reason,
-            consecutiveFailures: this.consecutiveFailures,
-            startupAttempts: this.startupAttempts,
-            connectionBootstrapAttempts: this.connectionBootstrapAttempts,
-        });
-        this.consecutiveFailures = 0;
-        this.startupAttempts = 0;
-        this.connectionBootstrapAttempts = 0;
-    }
-}
-// Singleton instance
-const connectionRetryService = new ConnectionRetryService();
-
-
-/***/ },
-
-/***/ "./src/event-handlers/SystemMessageHandler.ts"
-/*!****************************************************!*\
-  !*** ./src/event-handlers/SystemMessageHandler.ts ***!
-  \****************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   getExitTargets: () => (/* binding */ getExitTargets),
-/* harmony export */   handleExitCommand: () => (/* binding */ handleExitCommand),
-/* harmony export */   handleResetCommand: () => (/* binding */ handleResetCommand),
-/* harmony export */   handleSpamBotMessage: () => (/* binding */ handleSpamBotMessage),
-/* harmony export */   handleTelegramSystemMessage: () => (/* binding */ handleTelegramSystemMessage),
-/* harmony export */   isExitCommand: () => (/* binding */ isExitCommand),
-/* harmony export */   isResetCommand: () => (/* binding */ isResetCommand),
-/* harmony export */   isSpamBotMessage: () => (/* binding */ isSpamBotMessage),
-/* harmony export */   isTelegramSystemMessage: () => (/* binding */ isTelegramSystemMessage),
-/* harmony export */   noteOwnExitBroadcast: () => (/* binding */ noteOwnExitBroadcast),
-/* harmony export */   resetOwnExitBroadcast: () => (/* binding */ resetOwnExitBroadcast),
-/* harmony export */   runDeclinePasswordReset: () => (/* binding */ runDeclinePasswordReset)
-/* harmony export */ });
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/delete-messages */ "./src/telegram/delete-messages.ts");
-/* harmony import */ var _telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/session/remove-other-auths */ "./src/telegram/session/remove-other-auths.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__);
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../conversation/reply-switch */ "./src/conversation/reply-switch.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _core_setup_client__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../core/setup-client */ "./src/core/setup-client.ts");
-/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
-/**
- * System Message Handler
- * Handles system messages from Telegram (SpamBot, system notifications, etc.)
- */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:system-message-handler");
-// Constants for system message handling
-const SPAMBOT_CHAT_ID = "178220800";
-const TELEGRAM_SYSTEM_CHAT_ID = "777000";
-const RESET_COMMAND = "rstll";
-/**
- * Persist the live daysLeft value to the per-client tgautClientStats row so the spam-limit
- * signal is observable outside the in-memory globalState module. Fire-and-forget — never
- * blocks/throws into the SystemMessageHandler call sites that set daysLeft.
- */
-function persistTgautDaysLeft(daysLeft) {
-    _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
-        .updateTgautClientStat(daysLeft)
-        .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
-}
-/**
- * Persist the SpamBot verdict on this account's bufferClients row (CMS reads spamStatus /
- * limitedUntil) and remember it in-process for the promotion-health swap sizing. Fire-and-forget:
- * never throws into the handler.
- */
-function persistSpamStatus(mobile, spamStatus, limitedUntil) {
-    (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.setSpamState)(spamStatus, limitedUntil);
-    if (!mobile) {
-        logger.warn("Cannot persist spam status: account mobile is unknown");
-        return;
-    }
-    try {
-        _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
-            .recordSpamStatus(mobile, {
-            spamStatus,
-            limitedUntil,
-            spamCheckedAt: new Date(),
-            spamCheckSource: "tg-aut",
-        })
-            .then((recorded) => {
-            if (!recorded)
-                logger.warn(`Spam status '${spamStatus}' not recorded for ${mobile}: no bufferClients row or DB unavailable`);
-        })
-            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false));
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false);
-    }
-}
-/** Ask CMS to swap this client's account (archiveOld + formalities). Never throws. */
-async function requestSpamSwap(reason, days) {
-    try {
-        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
-        if (!runtimeBase) {
-            logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
-            return;
-        }
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.clampSwapRestDays)(days)}&formalities=true&reason=${encodeURIComponent(reason)}`;
-        const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout, process.env.clientId);
-        if (!setupResult.swapped) {
-            logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
-        }
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "SystemMessageHandler.requestSpamSwap", false);
-    }
-}
-const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
-const PASSWORD_RESET_SLEEP_MS = 2000; // 2 seconds
-const HARSH_TRIGGER_DAYS = 5;
-/** Delayed record 'declinePasswordReset': the password-reset decline 5 min after a login code (survives a restart). */
-async function runDeclinePasswordReset(client, chatId) {
-    try {
-        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(client, chatId);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `handleTelegramSystemMessage.delayedDeclinePasswordReset.${chatId}`, false);
-    }
-}
-/**
- * Healthy SpamBot replies are routine: one fleet table via the UMS digest. Limits stay individual.
- * Probes are staggered per account, so the digest waits up to an hour instead of 4 min.
- */
-function healthyDigest(mobile) {
-    return { key: "tg-aut-spambot-healthy", quietMs: 60 * 60 * 1000, row: { Mobile: String(mobile ?? "unknown") } };
-}
-async function notifySystemMessage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, tags = ["system-message"], details, digest) {
-    try {
-        // clientId is added by the sender's prefix; don't repeat Client/Username on every message.
-        // Only the caller-supplied fields (the ones actually relevant to THIS event) are included.
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            severity,
-            title,
-            summary,
-            fields,
-            ...(details ? { details } : {}),
-            ...(digest ? { digest } : {}),
-            tags,
-        });
-        if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(new Error("System message notification returned false"), `SystemMessageHandler.notification.${context}`, false);
-        }
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `SystemMessageHandler.notification.${context}`, false);
-    }
-}
-/**
- * Handle exit command — must guarantee process exits
- */
-async function handleExitCommand(event) {
-    logger.log(`EXITTING PROCESS!! request from received message`);
-    await notifySystemMessage("exit", "Exit command", "Exit requested via Telegram message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "exit"]);
-    try {
-        await this.destroy();
-    }
-    catch (error) {
-        logger.error("[EXIT] Error during destroy:", error);
-    }
-    // shutdown() calls process.exit(0) internally; catch in case it throws before that
-    try {
-        await (0,_bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_7__.shutdown)("Exit Request from Msg");
-    }
-    catch (error) {
-        logger.error("[EXIT] shutdown threw, forcing exit(1):", error);
-        process.exit(1);
-    }
-}
-/**
- * Handle SpamBot messages
- */
-async function handleSpamBotMessage(event) {
-    const spamBotText = event.message.text || "SpamBot sent an empty message";
-    logger.log("SpamBot:", spamBotText);
-    const shouldNotify = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.claimSpamBotNotification)(this.mobile ?? process.env.mobile ?? "unknown", typeof event.message.id === "number" ? event.message.id : null);
-    const mobile = this.mobile ?? process.env.mobile;
-    switch ((0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.classifySpamBotMessage)(spamBotText)) {
-        case "released":
-            if (!(await handleAutomaticallyReleased(event, shouldNotify, mobile)) && shouldNotify) {
-                await notifyGenericSpamBotMessage(spamBotText);
-            }
-            return;
-        case "healthy":
-            persistSpamStatus(mobile, "free", null);
-            await handleGoodNews.call(this);
-            if (shouldNotify) {
-                await notifySystemMessage("good-news", "Account healthy", "SpamBot reported good news for this account.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS, ["system-message", "spambot", "healthy"], undefined, healthyDigest(mobile));
-            }
-            return;
-        case "harsh-warning":
-            (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
-            persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
-            persistSpamStatus(mobile, "harsh", null);
-            if (shouldNotify) {
-                await notifySystemMessage("harsh-warning", "Harsh limit", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
-            }
-            await requestSpamSwap("SpamBot harsh limit (indefinite)", _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.HARSH_SWAP_DAYS);
-            return;
-        default:
-            if (shouldNotify)
-                await notifyGenericSpamBotMessage(spamBotText);
-    }
-}
-async function notifyGenericSpamBotMessage(text) {
-    const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.describeSpamBotReply)(text);
-    await notifySystemMessage("spambot", "SpamBot", "", [{ label: "Status", value: status.label, code: false }, ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : [])], status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot"], text, status.healthy ? healthyDigest(process.env.mobile) : undefined);
-}
-/**
- * Handle automatically released message
- */
-async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
-    try {
-        const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
-        if (!date) {
-            logger.warn("SpamBot release notice did not contain a parseable release date");
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
-            persistTgautDaysLeft(sanitized);
-            return false;
-        }
-        const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
-        if (!limitedUntil) {
-            logger.warn(`SpamBot release date "${date}" could not be parsed`);
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
-            persistTgautDaysLeft(sanitized);
-            return false;
-        }
-        const days = (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.daysUntil)(limitedUntil);
-        // A "limited until <date>" notice ALWAYS means the account is limited. getdaysLeft returns 0 for a
-        // today date and -1 for a past date; storing either raw would misclassify — 0 hit the pacing/cap
-        // split, and -1 collides with the healthy sentinel (marking a limited account HEALTHY). Sanitize to
-        // a value that is unambiguously limited (>= 1). Only an explicit "good news" writes -1.
-        const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
-        (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
-        persistTgautDaysLeft(storedDaysLeft);
-        persistSpamStatus(mobile, "limited", limitedUntil);
-        logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
-        if (shouldNotify) {
-            await notifySystemMessage("automatically-released", "Days left", "", [
-                { label: "Release date", value: date },
-                { label: "Days left", value: days },
-            ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
-        }
-        if (days >= _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP) {
-            logger.debug(`[EDGE CASE] Dated limit of ${days} days - requesting client swap`);
-            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.swapDaysForLimitedUntil)(limitedUntil));
-        }
-        else {
-            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP}`);
-        }
-        return true;
-    }
-    catch (error) {
-        logger.error(`[ERROR] Error handling automatically released message:`, error);
-        throw error;
-    }
-}
-/**
- * Handle good news message
- */
-async function handleGoodNews() {
-    const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    const userPromoteStats = await db.readPromoteStatsTime();
-    const lastUpdatedTimeStamp = userPromoteStats?.lastUpdatedTimeStamp ?? 0;
-    logger.log(`[SPECIAL CASE] Good news message received - isActive: ${userPromoteStats?.isActive}, lastUpdated: ${lastUpdatedTimeStamp || 'N/A'}`);
-    if (userPromoteStats?.isActive &&
-        (Date.now() - lastUpdatedTimeStamp) / (1000 * 60) > 12) {
-        logger.log(`[SPECIAL CASE] Triggering promotions - timeSinceLastUpdate: ${(Date.now() - lastUpdatedTimeStamp) / (1000 * 60)} minutes`);
-        await db.activatePromotions();
-        if (this.promotorInstance) {
-            await this.promotorInstance.startPromotion({ force: true });
-        }
-        else {
-            logger.warn(`[SPECIAL CASE] Promotion trigger skipped: promotor instance is not available`);
-        }
-    }
-    else {
-        const wasInactive = !userPromoteStats?.isActive;
-        logger.debug(`[EDGE CASE] Activating promotions directly - isActive: ${userPromoteStats?.isActive}, timeSinceLastUpdate: ${lastUpdatedTimeStamp ? (Date.now() - lastUpdatedTimeStamp) / (1000 * 60) : 'N/A'} minutes`);
-        await db.activatePromotions();
-        const shouldStartPromotions = wasInactive || !this.promotorInstance?.isPromotionActive();
-        if (shouldStartPromotions) {
-            if (this.promotorInstance) {
-                await this.promotorInstance.startPromotion({ force: true });
-            }
-            else {
-                logger.warn(`[SPECIAL CASE] Promotion activation completed but promotor instance is not available`);
-            }
-        }
-    }
-    (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(-1);
-    persistTgautDaysLeft(-1);
-    logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
-}
-/**
- * Handle Telegram system messages
- */
-async function handleTelegramSystemMessage(event) {
-    const text = event.message.text?.toLowerCase() ?? '';
-    if (text.includes("login code")) {
-        await (0,_telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__.removeOtherAuths)(event.client);
-        const chatId = event.message.chatId?.toString?.() ?? "unknown";
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_9__.scheduleDelayed)(chatId, "declinePasswordReset", {}, PASSWORD_RESET_DECLINE_DELAY_MS, `pwdecline::${chatId}::${event.message.id}`);
-    }
-    if (text.includes("request to reset account")) {
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(PASSWORD_RESET_SLEEP_MS);
-        try {
-            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(event.client);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error declining password reset");
-        }
-    }
-    await notifySystemMessage("telegram-system", "Telegram message", event.message.text || "Telegram sent an empty system message", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.INFO, ["system-message", "telegram"]);
-}
-/**
- * Handle reset command
- */
-async function handleResetCommand(event) {
-    const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    const chatId = event.message.chatId.toString();
-    await db.delete(chatId);
-    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
-}
-/**
- * Check if message is from SpamBot
- */
-function isSpamBotMessage(chatId) {
-    return chatId === SPAMBOT_CHAT_ID;
-}
-/**
- * Check if message is from Telegram system
- */
-function isTelegramSystemMessage(chatId) {
-    return chatId === TELEGRAM_SYSTEM_CHAT_ID;
-}
-/**
- * Check if message is exit command
- */
-/**
- * Values that must NEVER be used as an exit target. A misconfigured/absent env can leave
- * process.env.username as the system user ("root") or a placeholder, which would make the
- * exit command "exitroot" — matchable by any process and sent on every startup. Exit targets
- * must be a real client identity (username/clientId), so we reject system/placeholder values
- * and anything too short to be a real handle.
- */
-const UNSAFE_EXIT_TARGETS = new Set(["null", "undefined", "root", "admin", "user", "test"]);
-const MIN_EXIT_TARGET_LEN = 3;
-function getExitTargets() {
-    return [process.env.username, process.env.clientId]
-        .map((v) => (v ?? "").trim())
-        .filter((v) => v.length >= MIN_EXIT_TARGET_LEN && !UNSAFE_EXIT_TARGETS.has(v.toLowerCase()));
-}
-/**
- * This process's own pre-bootstrap "exit<target>" broadcast (ConnectTrigger) is meant for an OLDER instance. The new
- * instance can receive it too once connected (prod 2026-10-16 shruthi1, a member of the CLIENT_UPDATES channel
- * @clientupdates: its own broadcast arrived 24-46 s after boot and killed it ~58 times, 15:28-16:58 UTC). Matched by
- * the exact message id the Bot API returned for our own send (no clocks): an older instance still exits on it.
- */
-const ownExitMessageIds = new Set();
-function noteOwnExitBroadcast(messageIds) {
-    for (const id of messageIds)
-        ownExitMessageIds.add(id);
-}
-function resetOwnExitBroadcast() {
-    ownExitMessageIds.clear();
-}
-function isExitCommand(event) {
-    const text = event.message.text;
-    if (!text) {
-        return false;
-    }
-    if (!getExitTargets().some((target) => text === `exit${target}`))
-        return false;
-    if (ownExitMessageIds.has(Number(event.message.id))) {
-        logger.log(`[exit] ignoring ${text}: this process's own pre-bootstrap exit broadcast (msg ${event.message.id})`);
-        return false;
-    }
-    return true;
-}
-/**
- * Check if message is reset command
- */
-function isResetCommand(event) {
-    return event.message.text?.toLowerCase() === RESET_COMMAND;
-}
-
-
-/***/ },
-
 /***/ "./src/greetings/generate-greeting.ts"
 /*!********************************************!*\
   !*** ./src/greetings/generate-greeting.ts ***!
@@ -64657,7 +63415,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/delete-messages */ "./src/telegram/delete-messages.ts");
 /* harmony import */ var _channels_channel_ops__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../channels/channel-ops */ "./src/channels/channel-ops.ts");
 /* harmony import */ var _outbound_campaigns_respond_to_paid_people__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../outbound/campaigns/respond-to-paid-people */ "./src/outbound/campaigns/respond-to-paid-people.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram/file-sender */ "./src/telegram/file-sender.ts");
 /* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../calls */ "./src/calls/index.ts");
@@ -65183,7 +63941,7 @@ async function OutEventPrint(event) {
             logger.error(e);
             // A permanent error during a paid-user reply (frozen/revoked account) must trigger the
             // swap rather than being silently logged. Self-filtering + deduped.
-            await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_11__.startNewUserProcess)(e, 'outhandler:paid');
+            await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_11__.startNewUserProcess)(e, 'outhandler:paid');
         }
     }
 }
@@ -65321,7 +64079,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
 /* harmony import */ var _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../bootstrap/leader-election */ "./src/bootstrap/leader-election.ts");
-/* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
+/* harmony import */ var _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/connection-retry */ "./src/telegram/connection-retry.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -65539,7 +64297,7 @@ async function collectLeaderHealth() {
 }
 async function collectConnectionRetryHealth() {
     try {
-        const diagnostics = _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_5__.connectionRetryService.getDiagnostics();
+        const diagnostics = _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_5__.connectionRetryService.getDiagnostics();
         const attempts = Math.max(diagnostics.consecutiveFailures, diagnostics.startupAttempts, diagnostics.connectionBootstrapAttempts);
         let status = "healthy";
         const issues = [];
@@ -69926,11 +68684,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_client_init__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./telegram/client-init */ "./src/telegram/client-init.ts");
 /* harmony import */ var _conversation_inbound_inbound_event_router__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./conversation/inbound/inbound-event-router */ "./src/conversation/inbound/inbound-event-router.ts");
 /* harmony import */ var _bootstrap_dotenv__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./bootstrap/dotenv */ "./src/bootstrap/dotenv.ts");
-/* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
+/* harmony import */ var _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./telegram/connection-retry */ "./src/telegram/connection-retry.ts");
 /**
  * Inbound entry points of the Telegram client.
  *
- * core/TelegramManager.ts (session code, unchanged) imports handleEvents and initSetup from here, so this
+ * telegram/telegram-manager.ts (session code, unchanged) imports handleEvents and initSetup from here, so this
  * module stays at this path. The code lives in:
  *   telegram/client-init.ts                       initSetup (file sender client + default channel joins)
  *   conversation/inbound/inbound-event-router.ts  handleEvents (routes each incoming event to its handler)
@@ -69947,7 +68705,7 @@ __webpack_require__.r(__webpack_exports__);
  */
 function initializeIndexServices(options = {}) {
     const configureEnvironment = options.configureEnvironment ?? _bootstrap_dotenv__WEBPACK_IMPORTED_MODULE_2__.configureDotenv;
-    const retryService = options.retryService ?? _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_3__.connectionRetryService;
+    const retryService = options.retryService ?? _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_3__.connectionRetryService;
     configureEnvironment();
     retryService.initialize();
 }
@@ -69983,7 +68741,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../conversation/failed-message-followup */ "./src/conversation/failed-message-followup.ts");
 /* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /* harmony import */ var _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../routes/telegram.routes */ "./src/routes/telegram.routes.ts");
-/* harmony import */ var _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../event-handlers/SystemMessageHandler */ "./src/event-handlers/SystemMessageHandler.ts");
+/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
 /* harmony import */ var _delayed__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./delayed */ "./src/jobs/delayed.ts");
@@ -70030,7 +68788,7 @@ async function runDelayedRecord(record) {
         case "failedMsg": return (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_10__.runFailedMsgFollowup)(liveClient(), chatId, args);
         case "greetingVoice": return (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_11__.runGreetingVoice)(liveClient(), chatId);
         case "vcLink": return (0,_routes_telegram_routes__WEBPACK_IMPORTED_MODULE_12__.runVcLinkFollowup)(liveClient(), chatId);
-        case "declinePasswordReset": return (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_13__.runDeclinePasswordReset)(liveClient(), chatId);
+        case "declinePasswordReset": return (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_13__.runDeclinePasswordReset)(liveClient(), chatId);
         case "textedClientLimit": return (0,_data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.runTextedClientLimit)(chatId);
         case "callRequeue": return (0,_calls_call_manager__WEBPACK_IMPORTED_MODULE_15__.runCallRequeue)(chatId);
         default:
@@ -70137,7 +68895,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _core_setup_client__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../core/setup-client */ "./src/core/setup-client.ts");
+/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../telegram/setup-client */ "./src/telegram/setup-client.ts");
 /* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
 /* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 
@@ -70773,7 +69531,7 @@ class JobManager {
                 }
                 const reason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}`;
                 const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(reason)}`;
-                const setupResult = await (0,_core_setup_client__WEBPACK_IMPORTED_MODULE_26__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__.fetchWithTimeout, process.env.clientId);
+                const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_26__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__.fetchWithTimeout, process.env.clientId);
                 // Alert only when a rotation request actually went out: while backed off this ran every 10 min.
                 if (!setupResult.suppressedLocally)
                     await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
@@ -71782,58 +70540,6 @@ async function downloadProfilePic(client, index) {
     catch (err) {
         logger.error("Error:", err);
     }
-}
-
-
-/***/ },
-
-/***/ "./src/modules/calls/inhouse/privacy-restore.ts"
-/*!******************************************************!*\
-  !*** ./src/modules/calls/inhouse/privacy-restore.ts ***!
-  \******************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   allowListStateFile: () => (/* binding */ allowListStateFile),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* binding */ restoreCallPrivacyIfLeftOpen),
-/* harmony export */   voiceProofStateFile: () => (/* binding */ voiceProofStateFile)
-/* harmony export */ });
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
-
-
-
-
-/** Where CallAllowList persists its write throttle; it exists only on accounts that ran in-house calls. */
-function allowListStateFile(env = process.env) {
-    return path__WEBPACK_IMPORTED_MODULE_1___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__.runtimeConfigCacheDir)(env), `call-allowlist-${env.clientId ?? 'unknown'}.json`);
-}
-/** Where the voice-proof caps (per user / per account / spacing / privacy cooldown) persist across restarts and swaps. */
-function voiceProofStateFile(env = process.env) {
-    return path__WEBPACK_IMPORTED_MODULE_1___default().join((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_3__.runtimeConfigCacheDir)(env), `voice-proof-${env.clientId ?? 'unknown'}.json`);
-}
-/**
- * In-house calls are off at startup, but this account once ran them (its allow-list state file
- * exists): if Telegram still lets paid users call, put calls back to Nobody, so they don't ring an
- * account that no longer answers. Accounts that never ran in-house calls make no Telegram request.
- */
-async function restoreCallPrivacyIfLeftOpen(client, log = () => undefined, env = process.env) {
-    if (!fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync(allowListStateFile(env)))
-        return false;
-    const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.GetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall() }));
-    const allowed = (result.rules ?? []).some((rule) => rule instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.PrivacyValueAllowUsers && rule.users.length > 0);
-    if (!allowed)
-        return false;
-    await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyKeyPhoneCall(), rules: [new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputPrivacyValueDisallowAll()] }));
-    log('[in-house-calls] switch is off: call privacy restored to Nobody');
-    return true;
 }
 
 
@@ -84872,7 +83578,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _conversation_message_stats__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../conversation/message-stats */ "./src/conversation/message-stats.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../conversation/reply-switch */ "./src/conversation/reply-switch.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
@@ -85153,7 +83859,7 @@ class Replier {
                     // A permanent failure (frozen/revoked account) would otherwise requeue and hot-loop
                     // forever with no handoff. startNewUserProcess self-filters (no-op unless permanent)
                     // and dedupes, so it is safe to call on every reply error.
-                    await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, `Replier:${replyObj.chatId}`);
+                    await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, `Replier:${replyObj.chatId}`);
                     // Only reconnect on network-related errors, not logic errors
                     const errMsg = error instanceof Error ? error.message : String(error);
                     const isNetworkError = errMsg.includes('TIMEOUT') ||
@@ -85271,7 +83977,7 @@ class Replier {
                     // A non-flood error reaching here may be permanent (frozen/revoked account).
                     // startNewUserProcess self-filters to permanent-only and dedupes; fire-and-forget
                     // since this handler is synchronous.
-                    void (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, 'Replier:floodHandler');
+                    void (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, 'Replier:floodHandler');
                 }
                 break;
         }
@@ -86126,15 +84832,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_13___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_13__);
 /* harmony import */ var _http_express_server_access__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../http/express-server-access */ "./src/http/express-server-access.ts");
 /* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-/* harmony import */ var _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../event-handlers/ConnectionRetryService */ "./src/event-handlers/ConnectionRetryService.ts");
+/* harmony import */ var _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../telegram/connection-retry */ "./src/telegram/connection-retry.ts");
 /* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
 /* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
 /* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../event-handlers/SystemMessageHandler */ "./src/event-handlers/SystemMessageHandler.ts");
+/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
 
 
 
@@ -86331,7 +85037,7 @@ async function sendReplierToggleResponse(req, res, enabled) {
     }
 }
 async function sendPreBootstrapExitFallback() {
-    const exitTargets = (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_24__.getExitTargets)();
+    const exitTargets = (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__.getExitTargets)();
     if (exitTargets.length === 0) {
         logger.warn("[ConnectTrigger] No valid exit fallback targets configured (username/clientId missing or unsafe e.g. 'root'); skipping pre-bootstrap exit notification");
         return;
@@ -86347,7 +85053,7 @@ async function sendPreBootstrapExitFallback() {
         await sendConnectTriggerNotification(message, `Error sending pre-bootstrap exit fallback notification for ${target}`, { literal: true, onSent: (id) => ownMessageIds.push(id) });
     }
     // This process must not obey the broadcast it just sent (it is for an older instance).
-    (0,_event_handlers_SystemMessageHandler__WEBPACK_IMPORTED_MODULE_24__.noteOwnExitBroadcast)(ownMessageIds);
+    (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__.noteOwnExitBroadcast)(ownMessageIds);
     logger.info("[ConnectTrigger] Waiting briefly after exit fallback broadcast before bootstrap", {
         delayMs: PRE_BOOTSTRAP_EXIT_FALLBACK_DELAY_MS,
         clientId: process.env.clientId,
@@ -86431,8 +85137,8 @@ router.get("/trytoconnect/:num", _http_middlewares_leader_middleware__WEBPACK_IM
             res.status(400).json({ error: "Invalid process id" });
             return;
         }
-        if ((0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.isPermanentFailureHandoffActive)()) {
-            const activeContext = (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.getPermanentFailureHandoffContext)();
+        if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.isPermanentFailureHandoffActive)()) {
+            const activeContext = (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.getPermanentFailureHandoffContext)();
             logger.warn(`[ConnectTrigger] Rejecting trytoconnect because permanent-failure handoff is already active`, {
                 processId: localProcessId,
                 clientId: process.env.clientId,
@@ -86463,7 +85169,7 @@ router.get("/trytoconnect/:num", _http_middlewares_leader_middleware__WEBPACK_IM
             return;
         }
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_13__.sleep)(300);
-        if (_event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_16__.connectionRetryService.hasRecentInboundActivity()) {
+        if (_telegram_connection_retry__WEBPACK_IMPORTED_MODULE_16__.connectionRetryService.hasRecentInboundActivity()) {
             logger.info(`[ConnectTrigger] Skipping bootstrap because inbound activity is already flowing`, {
                 processId: localProcessId,
             });
@@ -86482,7 +85188,7 @@ router.get("/trytoconnect/:num", _http_middlewares_leader_middleware__WEBPACK_IM
             res.status(202).json({ message: "Connection bootstrap already in progress" });
             return;
         }
-        const reservedAttempt = _event_handlers_ConnectionRetryService__WEBPACK_IMPORTED_MODULE_16__.connectionRetryService.reserveConnectionBootstrapAttempt(`trytoconnect:${requestedProcessId}`);
+        const reservedAttempt = _telegram_connection_retry__WEBPACK_IMPORTED_MODULE_16__.connectionRetryService.reserveConnectionBootstrapAttempt(`trytoconnect:${requestedProcessId}`);
         if (!reservedAttempt.allowed) {
             const message = `${process.env.clientId.toUpperCase()}: bootstrap retry budget exhausted (${reservedAttempt.attempt}/${reservedAttempt.max}) for process ${localProcessId}. Shutting down.`;
             logger.error(`[ConnectTrigger] ${message}`);
@@ -86527,8 +85233,8 @@ router.get("/trytoconnect/:num", _http_middlewares_leader_middleware__WEBPACK_IM
         if (res.headersSent) {
             return;
         }
-        if ((0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.isPermanentFailureHandoffActive)()) {
-            const activeContext = (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.getPermanentFailureHandoffContext)();
+        if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.isPermanentFailureHandoffActive)()) {
+            const activeContext = (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__.getPermanentFailureHandoffContext)();
             logger.warn(`[ConnectTrigger] Bootstrap aborted because permanent-failure handoff is active`, {
                 processId: localProcessId,
                 clientId: process.env.clientId,
@@ -94630,199 +93336,6 @@ class CloudinaryService {
 
 /***/ },
 
-/***/ "./src/sessions/DeduplicatingSession.ts"
-/*!**********************************************!*\
-  !*** ./src/sessions/DeduplicatingSession.ts ***!
-  \**********************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DeduplicatingSession: () => (/* binding */ DeduplicatingSession)
-/* harmony export */ });
-/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
-/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_sessions__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/**
- * DeduplicatingSession
- *
- * Extends StringSession to fix the unbounded growth bug in MemorySession._entities.
- * The base class uses a Set<tuple[]> which never deduplicates because Set uses
- * reference equality on arrays. This class uses a Map keyed by marked peer ID
- * for O(1) dedup and lookup, with LRU eviction to bound memory.
- *
- * HOT PATH NOTE: processEntities() is called on every GramJS API response/update
- * (hundreds of times per minute). All operations here must be O(1) or amortized O(1).
- * The _entities Set is synced lazily (only when phone/username/name lookups happen)
- * to avoid O(n) rebuilds on every call.
- */
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("DeduplicatingSession");
-const MAX_ENTITIES = 5000;
-class DeduplicatingSession extends telegram_sessions__WEBPACK_IMPORTED_MODULE_0__.StringSession {
-    constructor(session) {
-        super(session);
-        /**
-         * Map from stringified marked peer ID to LRU entry.
-         * Replaces the buggy Set<tuple[]> in MemorySession for deduplication.
-         */
-        this._entitiesMap = new Map();
-        /**
-         * Dirty flag: when true, _entities Set needs to be rebuilt from _entitiesMap
-         * before any phone/username/name lookup. Avoids O(n) rebuild on every processEntities.
-         */
-        this._setDirty = false;
-    }
-    /**
-     * Override processEntities to use Map-based deduplication.
-     * Called by GramJS on every API response/update — must be fast.
-     *
-     * O(k) where k = number of entities in this response (typically 1-5).
-     * Eviction is amortized O(1) per insert since we only evict excess.
-     */
-    processEntities(tlo) {
-        const rows = this._entitiesToRows(tlo);
-        if (!rows || rows.length === 0)
-            return;
-        const now = Date.now();
-        for (const row of rows) {
-            const key = String(row[0]); // markedId as string key
-            // Last-seen wins: reuse existing object to reduce GC pressure on hot path
-            const existing = this._entitiesMap.get(key);
-            if (existing) {
-                existing.row = row;
-                existing.accessedAt = now;
-            }
-            else {
-                this._entitiesMap.set(key, { row: row, accessedAt: now });
-            }
-        }
-        // Mark Set as needing rebuild (lazy sync)
-        this._setDirty = true;
-        // LRU eviction if over capacity — O(n) scan, only when actually over
-        if (this._entitiesMap.size > MAX_ENTITIES) {
-            this.evictOldest(this._entitiesMap.size - MAX_ENTITIES);
-        }
-    }
-    /**
-     * Override getEntityRowsById for O(1) lookup instead of O(n) Set iteration.
-     */
-    getEntityRowsById(id, exact = true) {
-        if (exact) {
-            const key = String(id);
-            const entry = this._entitiesMap.get(key);
-            if (entry) {
-                entry.accessedAt = Date.now();
-                return [entry.row[0], entry.row[1]];
-            }
-            return undefined;
-        }
-        // Non-exact: try all peer type variants (same logic as base class)
-        // require() calls are cached by Node.js after first invocation
-        try {
-            const { utils } = __webpack_require__(/*! telegram */ "telegram");
-            const { Api } = __webpack_require__(/*! telegram/tl */ "telegram/tl");
-            const { returnBigInt } = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-            const ids = [
-                utils.getPeerId(new Api.PeerUser({ userId: returnBigInt(id) })),
-                utils.getPeerId(new Api.PeerChat({ chatId: returnBigInt(id) })),
-                utils.getPeerId(new Api.PeerChannel({ channelId: returnBigInt(id) })),
-            ];
-            for (const candidateId of ids) {
-                const key = String(candidateId);
-                const entry = this._entitiesMap.get(key);
-                if (entry) {
-                    entry.accessedAt = Date.now();
-                    return [entry.row[0], entry.row[1]];
-                }
-            }
-        }
-        catch {
-            // Fall through to undefined
-        }
-        return undefined;
-    }
-    /**
-     * Override getEntityRowsByPhone — lazy-sync before iterating Set.
-     * Called rarely (only for phone-based entity lookups).
-     */
-    getEntityRowsByPhone(phone) {
-        this.ensureSetSynced();
-        return super.getEntityRowsByPhone(phone);
-    }
-    /**
-     * Override getEntityRowsByUsername — lazy-sync before iterating Set.
-     * Called rarely (only for username-based entity lookups).
-     */
-    getEntityRowsByUsername(username) {
-        this.ensureSetSynced();
-        return super.getEntityRowsByUsername(username);
-    }
-    /**
-     * Override getEntityRowsByName — lazy-sync before iterating Set.
-     * Called rarely (only for name-based entity lookups).
-     */
-    getEntityRowsByName(name) {
-        this.ensureSetSynced();
-        return super.getEntityRowsByName(name);
-    }
-    /**
-     * Evict the N least-recently-accessed entries.
-     * Uses O(n) scan instead of O(n log n) sort — called infrequently
-     * since processEntities typically adds 1-5 entities per call.
-     */
-    evictOldest(count) {
-        if (count <= 0)
-            return;
-        // For small eviction counts (typical case: 1-5), repeated min-scan
-        // is faster than a full sort since we avoid the sort overhead.
-        for (let evicted = 0; evicted < count; evicted++) {
-            let oldestKey = null;
-            let oldestTime = Infinity;
-            for (const [key, entry] of this._entitiesMap) {
-                if (entry.accessedAt < oldestTime) {
-                    oldestTime = entry.accessedAt;
-                    oldestKey = key;
-                }
-            }
-            if (oldestKey) {
-                this._entitiesMap.delete(oldestKey);
-            }
-            else {
-                break;
-            }
-        }
-        logger.debug(`[DeduplicatingSession] Evicted ${count} oldest entities (remaining: ${this._entitiesMap.size})`);
-    }
-    /**
-     * Rebuild _entities Set from Map values only when dirty.
-     * Called lazily before phone/username/name lookups (rare path).
-     */
-    ensureSetSynced() {
-        if (!this._setDirty)
-            return;
-        this._entities.clear();
-        for (const entry of this._entitiesMap.values()) {
-            this._entities.add(entry.row);
-        }
-        this._setDirty = false;
-    }
-    /**
-     * Get stats about the deduplicating session cache.
-     */
-    getStats() {
-        return {
-            entityCount: this._entitiesMap.size,
-            maxEntities: MAX_ENTITIES,
-        };
-    }
-}
-
-
-/***/ },
-
 /***/ "./src/shared/core-notification.ts"
 /*!*****************************************!*\
   !*** ./src/shared/core-notification.ts ***!
@@ -95315,7 +93828,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _client_access__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
@@ -95347,7 +93860,7 @@ async function deleteChat(chatId) {
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to delete dialog");
-        await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:deleteChat');
+        await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:deleteChat');
         return false;
     }
 }
@@ -95374,7 +93887,7 @@ async function blockUser(chatId) {
             return true;
         }
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to block user");
-        await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:blockUser');
+        await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:blockUser');
         return false;
     }
 }
@@ -95393,7 +93906,7 @@ async function unblockUser(chatId) {
             return true;
         }
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failed to unblock user");
-        await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:unblockUser');
+        await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_5__.startNewUserProcess)(error, 'telegramUtils:unblockUser');
         return false;
     }
 }
@@ -95796,7 +94309,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _tg_core_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
 /* harmony import */ var _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../conversation/reply-switch */ "./src/conversation/reply-switch.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 
 
 
@@ -95838,7 +94351,7 @@ async function checktghealth(client, mobile = process.env.mobile, force = false)
     return (0,_tg_core_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_1__.checktghealth)(client, mobile, force, {
         store: daysLeftStore,
         throttle: redisThrottle,
-        onPermanentFailure: (error) => (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)(error),
+        onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)(error),
     });
 }
 /**
@@ -95914,6 +94427,561 @@ const DEFAULT_CHANNELS = "@clientupdates|@miscmessages|@unwantedupdates1";
 async function initSetup(client) {
     _file_sender__WEBPACK_IMPORTED_MODULE_0__.fileSender.setClient(client);
     await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_1__.joinChannels)(client, DEFAULT_CHANNELS, false);
+}
+
+
+/***/ },
+
+/***/ "./src/telegram/connection-retry.ts"
+/*!******************************************!*\
+  !*** ./src/telegram/connection-retry.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   connectionRetryService: () => (/* binding */ connectionRetryService)
+/* harmony export */ });
+/* harmony import */ var _telegram_manager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./telegram-manager */ "./src/telegram/telegram-manager.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../bootstrap/leader-election */ "./src/bootstrap/leader-election.ts");
+/**
+ * Connection Retry Service
+ *
+ * Health model:
+ *   - Telegram transport health is determined by the manager and GramJS client connection state.
+ *   - recentInboundActivity is an observability signal set by handleEvents() on each incoming
+ *     Telegram message. A quiet account is normal and is never, by itself, a reconnect reason.
+ *   - Each tick resets recentInboundActivity after observing it so health output can report recent
+ *     traffic, but retry/shutdown budgets are consumed only while the Telegram transport is absent
+ *     or disconnected.
+ *
+ * Tick loop (every TICK_MS after INITIAL_DELAY_MS):
+ *   1. Record whether inbound activity occurred for observability.
+ *   2. If Telegram transport is present and connected, clear any retry budget and leave it alone.
+ *   3. If the manager/client is absent or disconnected, attempt a reconnect without touching an
+ *      already-connected client. Only this path consumes the bounded retry budget.
+ *   4. After MAX_FAILURES genuine transport failures, notify the coordinator and shut down.
+ */
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:connection-retry-service");
+// ─── Configuration ──────────────────────────────────────────────────────────
+const TICK_MS = 120000; // 2 minutes between health checks
+const INITIAL_DELAY_MS = 20000; // 20 seconds before first check
+const MAX_FAILURES = 5; // consecutive unhealthy ticks before shutdown
+const PROCESS_ID_TIMEOUT_MS = 15000;
+function readConnectionState() {
+    const instanceExists = _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist();
+    const inst = instanceExists ? _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance() : null;
+    return {
+        instanceExists,
+        clientConnected: inst?.client?.connected ?? false,
+        mongoConnected: _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance()?.isConnected ?? false,
+    };
+}
+function fmtState(state, recentInboundActivity) {
+    return `recentInboundActivity=${recentInboundActivity} instance=${state.instanceExists} tg=${state.clientConnected} mongo=${state.mongoConnected}`;
+}
+function connectionStateFields(state, recentInboundActivity) {
+    return [
+        { label: "Recent inbound", value: recentInboundActivity },
+        { label: "Instance exists", value: state.instanceExists },
+        { label: "Telegram connected", value: state.clientConnected },
+        { label: "Mongo connected", value: state.mongoConnected },
+    ];
+}
+// ─── Service ────────────────────────────────────────────────────────────────
+class ConnectionRetryService {
+    constructor() {
+        this.consecutiveFailures = 0;
+        this.startupAttempts = 0;
+        this.connectionBootstrapAttempts = 0;
+        this.tickInterval = null;
+        this.startupTimeout = null;
+        this.schedulerActive = false;
+        this.tickInFlight = false;
+        this.recentInboundActivity = false;
+        this.hasEverObservedInboundActivity = false;
+    }
+    // ── Public API ────────────────────────────────────────────────────────────
+    hasRecentInboundActivity() {
+        return this.recentInboundActivity;
+    }
+    /** Called by handleEvents() on every incoming TG message */
+    markInboundActivity() {
+        if (!this.recentInboundActivity) {
+            logger.debug(`[HEALTH] recentInboundActivity: false -> true (incoming message observed)`);
+        }
+        this.resetRetryBudgets("inbound activity observed");
+        this.recentInboundActivity = true;
+        this.hasEverObservedInboundActivity = true;
+    }
+    getRetryTime() {
+        return this.consecutiveFailures;
+    }
+    hasExhaustedBootstrapAttempts() {
+        return this.connectionBootstrapAttempts >= MAX_FAILURES;
+    }
+    getDiagnostics() {
+        return {
+            initialized: Boolean(this.startupTimeout || this.tickInterval),
+            recentInboundActivity: this.recentInboundActivity,
+            hasEverObservedInboundActivity: this.hasEverObservedInboundActivity,
+            consecutiveFailures: this.consecutiveFailures,
+            startupAttempts: this.startupAttempts,
+            connectionBootstrapAttempts: this.connectionBootstrapAttempts,
+            maxFailures: MAX_FAILURES,
+            tickMs: TICK_MS,
+            initialDelayMs: INITIAL_DELAY_MS,
+        };
+    }
+    reserveConnectionBootstrapAttempt(source) {
+        if (this.connectionBootstrapAttempts >= MAX_FAILURES) {
+            logger.error(`[HEALTH] Blocking connection bootstrap for ${source}: retry budget exhausted (${this.connectionBootstrapAttempts}/${MAX_FAILURES})`);
+            return {
+                allowed: false,
+                attempt: this.connectionBootstrapAttempts,
+                max: MAX_FAILURES,
+            };
+        }
+        this.connectionBootstrapAttempts += 1;
+        logger.warn(`[HEALTH] Reserved connection bootstrap attempt ${this.connectionBootstrapAttempts}/${MAX_FAILURES} for ${source}`);
+        return {
+            allowed: true,
+            attempt: this.connectionBootstrapAttempts,
+            max: MAX_FAILURES,
+        };
+    }
+    initialize() {
+        this.cleanup();
+        this.schedulerActive = true;
+        this.startupTimeout = setTimeout(() => {
+            this.startupTimeout = null;
+            return this.runScheduledTick()
+                .catch((error) => {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.startupTick", false);
+                logger.error(`[HEALTH] Startup tick error:`, error);
+            })
+                .finally(() => {
+                if (!this.schedulerActive || this.tickInterval)
+                    return;
+                this.tickInterval = setInterval(() => {
+                    this.runScheduledTick().catch((error) => {
+                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.intervalTick", false);
+                        logger.error(`[HEALTH] Unhandled tick error:`, error);
+                    });
+                }, TICK_MS);
+            });
+        }, INITIAL_DELAY_MS);
+    }
+    cleanup() {
+        this.schedulerActive = false;
+        if (this.startupTimeout) {
+            clearTimeout(this.startupTimeout);
+            this.startupTimeout = null;
+        }
+        if (this.tickInterval) {
+            clearInterval(this.tickInterval);
+            this.tickInterval = null;
+        }
+        this.tickInFlight = false;
+    }
+    // ── Core tick ─────────────────────────────────────────────────────────────
+    async runScheduledTick() {
+        if (this.tickInFlight) {
+            logger.warn(`[HEALTH] Scheduled retry tick skipped: previous tick still in progress`);
+            return;
+        }
+        this.tickInFlight = true;
+        try {
+            await this.tick();
+        }
+        finally {
+            this.tickInFlight = false;
+        }
+    }
+    async tick() {
+        try {
+            const state = readConnectionState();
+            const sawInboundActivity = this.recentInboundActivity;
+            this.recentInboundActivity = false;
+            if (state.instanceExists && state.clientConnected) {
+                // Inbound silence is normal for a quiet account. Never disconnect a healthy Telegram
+                // transport just because no user happened to message during this two-minute window.
+                if (sawInboundActivity && this.consecutiveFailures > 0) {
+                    logger.log(`[HEALTH] Recovered after ${this.consecutiveFailures} transport failures`);
+                    await this.notify(`Recovered after ${this.consecutiveFailures} transport failures`);
+                }
+                this.resetRetryBudgets(sawInboundActivity ? "inbound activity observed" : "Telegram transport is connected");
+                await this.pingUptime();
+            }
+            else {
+                if (await this.onTransportUnavailable(state))
+                    return;
+            }
+            await this.checkLeader();
+        }
+        catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            logger.error(`[HEALTH] Tick crashed: ${msg}`);
+            await this.notify(`CRITICAL - Health tick crashed: ${msg}`);
+            this.cleanup();
+            await this.requestShutdown(`Health tick crash: ${msg}`);
+        }
+    }
+    // ── Unhealthy: Telegram manager/client is absent or disconnected ───────────
+    async onTransportUnavailable(state) {
+        const startup = !this.hasEverObservedInboundActivity;
+        const failures = startup
+            ? ++this.startupAttempts
+            : ++this.consecutiveFailures;
+        logger.warn(`[HEALTH] Telegram transport unavailable (${failures}/${MAX_FAILURES}) — ${fmtState(state, false)}`);
+        // Try reconnect only when the transport is actually absent/disconnected. Deliberately do not
+        // disconnect first: a client that reports connected is handled by the healthy branch above.
+        if (state.instanceExists) {
+            try {
+                const reconnected = await _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.ensureConnected();
+                if (reconnected) {
+                    logger.log(`[HEALTH] Telegram transport restored`);
+                    this.resetRetryBudgets("Telegram reconnect succeeded");
+                    await this.notify("Telegram transport restored");
+                    await this.pingUptime();
+                    return false;
+                }
+                logger.warn(`[HEALTH] Reconnect failed`);
+            }
+            catch (error) {
+                logger.error(`[HEALTH] Reconnect error:`, error);
+            }
+        }
+        // Check if this process was replaced by a newer one
+        if (!state.clientConnected) {
+            const replaced = await this.checkProcessValidity();
+            if (replaced)
+                return true; // shutdown already called
+        }
+        // Notify on every genuine transport failure.
+        await this.notify(`Telegram transport unavailable (${failures}/${MAX_FAILURES})`);
+        // Give up after MAX_FAILURES genuine transport failures. A successful reconnect returned
+        // above after resetting the budget, so the counter can never exceed its documented bound.
+        if (failures >= MAX_FAILURES) {
+            logger.error(`[HEALTH] ${MAX_FAILURES} Telegram transport failures — shutting down`);
+            await this.notify(`Shutting down after ${MAX_FAILURES} Telegram transport failures`);
+            try {
+                await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().closeConnection();
+            }
+            catch { /* best effort */ }
+            this.cleanup();
+            await this.requestShutdown("Health check: max Telegram transport failures exceeded");
+            return true;
+        }
+        await this.pingUptime();
+        return false;
+    }
+    // ── Coordinator notification ─────────────────────────────────────────────
+    async checkProcessValidity() {
+        try {
+            logger.debug(`[HEALTH] Notifying coordinator that inbound activity is missing`, {
+                processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.prcessID,
+                clientId: process.env.clientId,
+            });
+            await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`${process.env.uptimebot}/tgclientoff/${_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.prcessID}?clientId=${process.env.clientId}`);
+        }
+        catch (error) {
+            logger.warn(`[HEALTH] tgclientoff notification failed (non-fatal):`, error);
+        }
+        return false;
+    }
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    async pingUptime() {
+        try {
+            await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`${process.env.uptimebot}/receive?clientId=${process.env.clientId?.toLowerCase()}`, {});
+        }
+        catch (error) {
+            logger.warn(`[HEALTH] Uptime ping failed (non-fatal):`, error);
+        }
+    }
+    async notify(message) {
+        try {
+            let state;
+            try {
+                state = readConnectionState();
+            }
+            catch {
+                state = {
+                    instanceExists: false,
+                    clientConnected: false,
+                    mongoConnected: false,
+                };
+            }
+            const severity = message.includes("CRITICAL") || message.includes("Shutting down")
+                ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL
+                : message.includes("Recovered") || message.includes("Reconnected")
+                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.SUCCESS
+                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING;
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity,
+                title: "Retry health",
+                summary: message,
+                fields: [
+                    { label: "ProcessId", value: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.prcessID },
+                    { label: "Failures", value: `${this.consecutiveFailures}/${MAX_FAILURES}` },
+                    ...connectionStateFields(state, this.recentInboundActivity),
+                ],
+                tags: ["connection-retry", "health"],
+            });
+            if (!(0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Connection retry notification returned false", "ConnectionRetryService.notification")) {
+                logger.warn(`[HEALTH] Failed to send notification: ${message}`);
+            }
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.notification", false);
+            logger.warn(`[HEALTH] Failed to send notification: ${message}`);
+        }
+    }
+    async checkLeader() {
+        try {
+            await _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_8__.LeaderElectionService.getInstance().checkLeaderStatus();
+        }
+        catch (error) {
+            logger.warn("[HEALTH] Leader check failed:", error);
+        }
+    }
+    async requestShutdown(reason) {
+        try {
+            await (0,_bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_6__.shutdown)(reason);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.shutdown", false);
+            logger.error(`[HEALTH] Shutdown request failed:`, error);
+        }
+    }
+    resetRetryBudgets(reason) {
+        if (this.consecutiveFailures === 0 &&
+            this.startupAttempts === 0 &&
+            this.connectionBootstrapAttempts === 0) {
+            return;
+        }
+        logger.info(`[HEALTH] Resetting retry budgets`, {
+            reason,
+            consecutiveFailures: this.consecutiveFailures,
+            startupAttempts: this.startupAttempts,
+            connectionBootstrapAttempts: this.connectionBootstrapAttempts,
+        });
+        this.consecutiveFailures = 0;
+        this.startupAttempts = 0;
+        this.connectionBootstrapAttempts = 0;
+    }
+}
+// Singleton instance
+const connectionRetryService = new ConnectionRetryService();
+
+
+/***/ },
+
+/***/ "./src/telegram/deduplicating-session.ts"
+/*!***********************************************!*\
+  !*** ./src/telegram/deduplicating-session.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DeduplicatingSession: () => (/* binding */ DeduplicatingSession)
+/* harmony export */ });
+/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
+/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_sessions__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * DeduplicatingSession
+ *
+ * Extends StringSession to fix the unbounded growth bug in MemorySession._entities.
+ * The base class uses a Set<tuple[]> which never deduplicates because Set uses
+ * reference equality on arrays. This class uses a Map keyed by marked peer ID
+ * for O(1) dedup and lookup, with LRU eviction to bound memory.
+ *
+ * HOT PATH NOTE: processEntities() is called on every GramJS API response/update
+ * (hundreds of times per minute). All operations here must be O(1) or amortized O(1).
+ * The _entities Set is synced lazily (only when phone/username/name lookups happen)
+ * to avoid O(n) rebuilds on every call.
+ */
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("DeduplicatingSession");
+const MAX_ENTITIES = 5000;
+class DeduplicatingSession extends telegram_sessions__WEBPACK_IMPORTED_MODULE_0__.StringSession {
+    constructor(session) {
+        super(session);
+        /**
+         * Map from stringified marked peer ID to LRU entry.
+         * Replaces the buggy Set<tuple[]> in MemorySession for deduplication.
+         */
+        this._entitiesMap = new Map();
+        /**
+         * Dirty flag: when true, _entities Set needs to be rebuilt from _entitiesMap
+         * before any phone/username/name lookup. Avoids O(n) rebuild on every processEntities.
+         */
+        this._setDirty = false;
+    }
+    /**
+     * Override processEntities to use Map-based deduplication.
+     * Called by GramJS on every API response/update — must be fast.
+     *
+     * O(k) where k = number of entities in this response (typically 1-5).
+     * Eviction is amortized O(1) per insert since we only evict excess.
+     */
+    processEntities(tlo) {
+        const rows = this._entitiesToRows(tlo);
+        if (!rows || rows.length === 0)
+            return;
+        const now = Date.now();
+        for (const row of rows) {
+            const key = String(row[0]); // markedId as string key
+            // Last-seen wins: reuse existing object to reduce GC pressure on hot path
+            const existing = this._entitiesMap.get(key);
+            if (existing) {
+                existing.row = row;
+                existing.accessedAt = now;
+            }
+            else {
+                this._entitiesMap.set(key, { row: row, accessedAt: now });
+            }
+        }
+        // Mark Set as needing rebuild (lazy sync)
+        this._setDirty = true;
+        // LRU eviction if over capacity — O(n) scan, only when actually over
+        if (this._entitiesMap.size > MAX_ENTITIES) {
+            this.evictOldest(this._entitiesMap.size - MAX_ENTITIES);
+        }
+    }
+    /**
+     * Override getEntityRowsById for O(1) lookup instead of O(n) Set iteration.
+     */
+    getEntityRowsById(id, exact = true) {
+        if (exact) {
+            const key = String(id);
+            const entry = this._entitiesMap.get(key);
+            if (entry) {
+                entry.accessedAt = Date.now();
+                return [entry.row[0], entry.row[1]];
+            }
+            return undefined;
+        }
+        // Non-exact: try all peer type variants (same logic as base class)
+        // require() calls are cached by Node.js after first invocation
+        try {
+            const { utils } = __webpack_require__(/*! telegram */ "telegram");
+            const { Api } = __webpack_require__(/*! telegram/tl */ "telegram/tl");
+            const { returnBigInt } = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+            const ids = [
+                utils.getPeerId(new Api.PeerUser({ userId: returnBigInt(id) })),
+                utils.getPeerId(new Api.PeerChat({ chatId: returnBigInt(id) })),
+                utils.getPeerId(new Api.PeerChannel({ channelId: returnBigInt(id) })),
+            ];
+            for (const candidateId of ids) {
+                const key = String(candidateId);
+                const entry = this._entitiesMap.get(key);
+                if (entry) {
+                    entry.accessedAt = Date.now();
+                    return [entry.row[0], entry.row[1]];
+                }
+            }
+        }
+        catch {
+            // Fall through to undefined
+        }
+        return undefined;
+    }
+    /**
+     * Override getEntityRowsByPhone — lazy-sync before iterating Set.
+     * Called rarely (only for phone-based entity lookups).
+     */
+    getEntityRowsByPhone(phone) {
+        this.ensureSetSynced();
+        return super.getEntityRowsByPhone(phone);
+    }
+    /**
+     * Override getEntityRowsByUsername — lazy-sync before iterating Set.
+     * Called rarely (only for username-based entity lookups).
+     */
+    getEntityRowsByUsername(username) {
+        this.ensureSetSynced();
+        return super.getEntityRowsByUsername(username);
+    }
+    /**
+     * Override getEntityRowsByName — lazy-sync before iterating Set.
+     * Called rarely (only for name-based entity lookups).
+     */
+    getEntityRowsByName(name) {
+        this.ensureSetSynced();
+        return super.getEntityRowsByName(name);
+    }
+    /**
+     * Evict the N least-recently-accessed entries.
+     * Uses O(n) scan instead of O(n log n) sort — called infrequently
+     * since processEntities typically adds 1-5 entities per call.
+     */
+    evictOldest(count) {
+        if (count <= 0)
+            return;
+        // For small eviction counts (typical case: 1-5), repeated min-scan
+        // is faster than a full sort since we avoid the sort overhead.
+        for (let evicted = 0; evicted < count; evicted++) {
+            let oldestKey = null;
+            let oldestTime = Infinity;
+            for (const [key, entry] of this._entitiesMap) {
+                if (entry.accessedAt < oldestTime) {
+                    oldestTime = entry.accessedAt;
+                    oldestKey = key;
+                }
+            }
+            if (oldestKey) {
+                this._entitiesMap.delete(oldestKey);
+            }
+            else {
+                break;
+            }
+        }
+        logger.debug(`[DeduplicatingSession] Evicted ${count} oldest entities (remaining: ${this._entitiesMap.size})`);
+    }
+    /**
+     * Rebuild _entities Set from Map values only when dirty.
+     * Called lazily before phone/username/name lookups (rare path).
+     */
+    ensureSetSynced() {
+        if (!this._setDirty)
+            return;
+        this._entities.clear();
+        for (const entry of this._entitiesMap.values()) {
+            this._entities.add(entry.row);
+        }
+        this._setDirty = false;
+    }
+    /**
+     * Get stats about the deduplicating session cache.
+     */
+    getStats() {
+        return {
+            entityCount: this._entitiesMap.size,
+            maxEntities: MAX_ENTITIES,
+        };
+    }
 }
 
 
@@ -96648,7 +95716,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _conversation_message_stats__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../conversation/message-stats */ "./src/conversation/message-stats.ts");
-/* harmony import */ var _core_permanent_failure__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../core/permanent-failure */ "./src/core/permanent-failure/index.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _bot_detection__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./bot-detection */ "./src/telegram/bot-detection.ts");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram */ "telegram");
@@ -96910,7 +95978,7 @@ async function MarkAsRead(client, markAll, first = []) {
                     logger.warn(`PEER_FLOOD in MarkAsRead — local markAsRead backoff set for ${Math.ceil(haltMs / 1000)}s; promotion flood gate unchanged`);
                     break; // Stop processing more chats
                 }
-                await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_4__.startNewUserProcess)(err);
+                await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_4__.startNewUserProcess)(err);
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(err, "Error handling chat");
                 await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(3000);
             }
@@ -96919,7 +95987,7 @@ async function MarkAsRead(client, markAll, first = []) {
     }
     catch (err) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(err, "Error during MarkAsRead");
-        await (0,_core_permanent_failure__WEBPACK_IMPORTED_MODULE_4__.startNewUserProcess)(err);
+        await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_4__.startNewUserProcess)(err);
     }
 }
 
@@ -97220,6 +96288,331 @@ function patchOutgoingMask(client) {
 
 /***/ },
 
+/***/ "./src/telegram/permanent-failure/fingerprint.ts"
+/*!*******************************************************!*\
+  !*** ./src/telegram/permanent-failure/fingerprint.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   formatTelegramFingerprintSummary: () => (/* binding */ formatTelegramFingerprintSummary),
+/* harmony export */   loadTelegramFingerprintSummary: () => (/* binding */ loadTelegramFingerprintSummary)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+// Telegram fingerprint summary — used in permanent-failure alerts so operators can see the exact
+// api_id / device / proxy the dying account was running with. Kept separate from the handoff logic
+// so each file has one responsibility.
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:permanent-failure:fingerprint');
+function maskApiHash(apiHash) {
+    if (!apiHash)
+        return 'missing';
+    return apiHash.length <= 8 ? apiHash : `***${apiHash.slice(-8)}`;
+}
+function formatTelegramFingerprintSummary(fingerprint) {
+    if (!fingerprint)
+        return 'apiId=unknown | apiHash=unknown | device=unknown | system=unknown | app=unknown | lang=unknown';
+    return [
+        `apiId=${fingerprint.apiId}`,
+        `apiHash=${fingerprint.apiHashSuffix}`,
+        `device=${fingerprint.deviceModel || 'unknown'}`,
+        `system=${fingerprint.systemVersion || 'unknown'}`,
+        `app=${fingerprint.appVersion || 'unknown'}`,
+        `langPack=${fingerprint.langPack || 'unknown'}`,
+        `lang=${fingerprint.langCode || 'unknown'}`,
+        `systemLang=${fingerprint.systemLangCode || 'unknown'}`,
+        `proxy=${fingerprint.proxy || 'none'}`,
+    ].join(' | ');
+}
+async function loadTelegramFingerprintSummary(mobile) {
+    if (!mobile)
+        return null;
+    try {
+        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_0__.generateTGConfig)(mobile);
+        const params = config.params;
+        const proxy = params.proxy;
+        return {
+            apiId: config.apiId,
+            apiHashSuffix: maskApiHash(config.apiHash),
+            deviceModel: typeof params.deviceModel === 'string' ? params.deviceModel : undefined,
+            systemVersion: typeof params.systemVersion === 'string' ? params.systemVersion : undefined,
+            appVersion: typeof params.appVersion === 'string' ? params.appVersion : undefined,
+            langPack: typeof params.langPack === 'string' ? params.langPack : undefined,
+            langCode: typeof params.langCode === 'string' ? params.langCode : undefined,
+            systemLangCode: typeof params.systemLangCode === 'string' ? params.systemLangCode : undefined,
+            proxy: proxy?.ip && proxy?.port ? `${proxy.ip}:${proxy.port}` : undefined,
+        };
+    }
+    catch (error) {
+        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${mobile}`, {
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/telegram/permanent-failure/handoff.ts"
+/*!***************************************************!*\
+  !*** ./src/telegram/permanent-failure/handoff.ts ***!
+  \***************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* binding */ HANDOFF_MAX_FAILURES),
+/* harmony export */   getPermanentFailureHandoffContext: () => (/* binding */ getPermanentFailureHandoffContext),
+/* harmony export */   handlePermanentTelegramFailure: () => (/* binding */ handlePermanentTelegramFailure),
+/* harmony export */   isPermanentFailureHandoffActive: () => (/* binding */ isPermanentFailureHandoffActive),
+/* harmony export */   resetPermanentFailureHandoff: () => (/* binding */ resetPermanentFailureHandoff),
+/* harmony export */   startNewUserProcess: () => (/* binding */ startNewUserProcess)
+/* harmony export */ });
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./fingerprint */ "./src/telegram/permanent-failure/fingerprint.ts");
+/* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+// Permanent-failure handoff. When Telegram returns a permanent error (FROZEN_METHOD_INVALID,
+// SESSION_REVOKED, AUTH_KEY_*, USER_DEACTIVATED), the affected mobile is dead. We hand off to the
+// CMS setupClient endpoint (which swaps in a fresh buffer account) and then shut this process down
+// so PM2 restarts it with the new session. Every trigger is self-filtering (no-op on non-permanent
+// errors) and deduped via a process-wide mutex, so it is safe to call from any catch block.
+//
+// This module is intentionally free of any import back into app.ts — it raises SIGTERM for the
+// graceful restart instead of importing app.ts's shutdown() — so catch sites across the app can
+// import it with static imports without dragging in the heavy app graph (which previously caused a
+// core/utils <-> app.ts cycle).
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:permanent-failure:handoff');
+const POST_SETUPCLIENT_SHUTDOWN_DELAY_MS = 60000;
+let isNewUserProcessRunning = 0;
+/**
+ * Owner rule (2026-10-11): a handoff that fails (CMS down, no swap) is retried with doubling gaps
+ * (1, 2, 4, 8, 16 min) and abandoned after HANDOFF_MAX_FAILURES, instead of a CRITICAL alert plus a
+ * setupClient call every 60 s for as long as the dead account keeps erroring. A restart re-arms it.
+ */
+const HANDOFF_RETRY_BASE_MS = 60000;
+const HANDOFF_MAX_FAILURES = 5;
+let failedHandoffs = 0;
+function noteHandoffFailure(context) {
+    failedHandoffs++;
+    if (failedHandoffs === HANDOFF_MAX_FAILURES) {
+        logger.error(`[PermanentFailure] ${context}: setupClient handoff failed ${failedHandoffs} times; giving up until the process restarts`);
+    }
+}
+/** Test hook: forget handoff attempts in this process. */
+function resetPermanentFailureHandoff() {
+    isNewUserProcessRunning = 0;
+    failedHandoffs = 0;
+    permanentFailureHandoffInProgress = false;
+    permanentFailureHandoffContext = null;
+}
+let permanentFailureHandoffInProgress = false;
+let permanentFailureHandoffContext = null;
+function isPermanentFailureHandoffActive() {
+    return permanentFailureHandoffInProgress;
+}
+function getPermanentFailureHandoffContext() {
+    return permanentFailureHandoffContext;
+}
+async function sendPermanentFailureNotification(category, notification, context) {
+    try {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().sendMessage(category, notification);
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, 'Permanent-failure notification returned false', context);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, context, false);
+        return false;
+    }
+}
+async function handlePermanentTelegramFailure(error, context = 'runtime') {
+    if (error?.__setupHandled) {
+        logger.info(`[PermanentFailure] ${context}: setup flow already handled for this error`);
+        return true;
+    }
+    if (permanentFailureHandoffInProgress) {
+        logger.info(`[PermanentFailure] ${context}: setupClient handoff already in progress`, {
+            activeContext: permanentFailureHandoffContext,
+        });
+        return true;
+    }
+    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, '', false);
+    const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError)(error);
+    const errorMessage = parsed.type === 'AUTH_ERROR' ? parsed.code : parsed.type === 'UNKNOWN' ? parsed.message : parsed.type;
+    if (!(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__["default"])(errorDetails) || errorMessage === 'INPUT_USER_DEACTIVATED') {
+        logger.debug(`[PermanentFailure] ${context} | non-permanent | ${errorMessage} | ${String(errorDetails.message).slice(0, 160)}`);
+        return false;
+    }
+    logger.error(`[PermanentFailure] ${context}: classified as permanent, triggering setup flow`, {
+        errorMessage,
+        message: errorDetails.message,
+    });
+    await startNewUserProcess(error, context);
+    return true;
+}
+async function startNewUserProcess(error, context = 'runtime') {
+    if (error?.__setupHandled) {
+        logger.info(`[PermanentFailure] ${context}: new user process already handled for this error`);
+        return;
+    }
+    if (permanentFailureHandoffInProgress) {
+        logger.info(`[PermanentFailure] ${context}: setupClient handoff already active, skipping duplicate trigger`, {
+            activeContext: permanentFailureHandoffContext,
+        });
+        if (typeof error === 'object' && error !== null) {
+            error.__setupHandled = true;
+        }
+        return;
+    }
+    if (typeof error === 'object' && error !== null) {
+        error.__setupHandled = true;
+    }
+    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, '', false);
+    const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError)(error);
+    const errorMessage = parsed.type === 'AUTH_ERROR' ? parsed.code : parsed.type === 'UNKNOWN' ? parsed.message : parsed.type;
+    if (!(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__["default"])(errorDetails) || errorMessage === 'INPUT_USER_DEACTIVATED') {
+        logger.debug(`[PermanentFailure] ${context} | skip-new-user | non-permanent | ${errorMessage} | ${String(errorDetails.message).slice(0, 160)}`);
+        return;
+    }
+    if (failedHandoffs >= HANDOFF_MAX_FAILURES) {
+        logger.debug(`[PermanentFailure] ${context}: handoff abandoned after ${failedHandoffs} failures, skipping`);
+        return;
+    }
+    if (isNewUserProcessRunning >= Date.now() - HANDOFF_RETRY_BASE_MS * 2 ** failedHandoffs) {
+        logger.warn(`[PermanentFailure] ${context}: setup flow already triggered recently, skipping duplicate handoff`, {
+            errorMessage,
+            mobile: process.env.mobile,
+        });
+        return;
+    }
+    isNewUserProcessRunning = Date.now();
+    permanentFailureHandoffInProgress = true;
+    permanentFailureHandoffContext = context;
+    try {
+        const fingerprint = await (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.loadTelegramFingerprintSummary)(process.env.mobile);
+        const fingerprintSummary = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.formatTelegramFingerprintSummary)(fingerprint);
+        logger.error(`[PermanentFailure] ${context}: starting setupClient handoff`, {
+            errorMessage,
+            mobile: process.env.mobile,
+            clientId: process.env.clientId,
+            permanentReplacement: true,
+            fingerprint,
+        });
+        await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
+            title: 'Auth failed',
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
+            summary: 'A tg-aut mobile hit a permanent Telegram failure and is being handed off to setupClient.',
+            fields: [
+                { label: 'Mobile', value: process.env.mobile || 'unknown' },
+                { label: 'Context', value: context },
+                { label: 'Error', value: errorMessage, code: false },
+            ],
+            details: fingerprintSummary,
+            tags: ['tg-aut', 'telegram', 'permanent-failure', 'setup-client'],
+        }, `TgAutPermanentFailure.notification.permanentFailure.${process.env.mobile || 'unknown'}`);
+        if (errorMessage === 'AUTH_KEY_DUPLICATED') {
+            await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
+                title: 'Key duplicated',
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
+                summary: 'Telegram reported AUTH_KEY_DUPLICATED during tg-aut runtime.',
+                fields: [
+                    { label: 'Mobile', value: process.env.mobile || 'unknown' },
+                    { label: 'Context', value: context },
+                ],
+                tags: ['tg-aut', 'telegram', 'auth-key-duplicated'],
+            }, `TgAutPermanentFailure.notification.authKeyDuplicated.${process.env.mobile || 'unknown'}`);
+        }
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_6__.getRuntimeConfigBaseOrNull)();
+        if (!runtimeBase) {
+            logger.error(`[PermanentFailure] ${context}: cannot trigger setupClient because runtime config base is missing`);
+            noteHandoffFailure(context);
+            permanentFailureHandoffInProgress = false;
+            permanentFailureHandoffContext = null;
+            return;
+        }
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=false&formalities=false&reason=${encodeURIComponent(errorMessage)}`;
+        logger.info(`[PermanentFailure] ${context}: calling setupClient`, {
+            url,
+            clientId: process.env.clientId,
+            reason: errorMessage,
+            permanentReplacement: true,
+        });
+        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
+        if (!setupResult.swapped) {
+            throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
+        }
+        logger.info(`[PermanentFailure] ${context}: setupClient handoff completed, waiting before shutdown`, {
+            delayMs: POST_SETUPCLIENT_SHUTDOWN_DELAY_MS,
+            clientId: process.env.clientId,
+        });
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(POST_SETUPCLIENT_SHUTDOWN_DELAY_MS);
+        // Trigger a graceful shutdown so PM2 restarts the process and it re-fetches env (new
+        // session/mobile) from the CMS. We raise SIGTERM instead of importing app.ts's shutdown() —
+        // that import would recreate the core <-> app cycle. app.ts's SIGTERM handler runs the full
+        // async cleanupResources (state save, DB close, client disconnect) before exiting.
+        logger.info(`[PermanentFailure] ${context}: post-handoff wait finished, raising SIGTERM for graceful restart`);
+        process.kill(process.pid, 'SIGTERM');
+    }
+    catch (err) {
+        noteHandoffFailure(context);
+        permanentFailureHandoffInProgress = false;
+        permanentFailureHandoffContext = null;
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(err, 'Error during new user process');
+        logger.error(`[PermanentFailure] ${context}: setupClient handoff failed`, err instanceof Error ? err.message : String(err));
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/telegram/permanent-failure/index.ts"
+/*!*************************************************!*\
+  !*** ./src/telegram/permanent-failure/index.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HANDOFF_MAX_FAILURES: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_MAX_FAILURES),
+/* harmony export */   getPermanentFailureHandoffContext: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.getPermanentFailureHandoffContext),
+/* harmony export */   handlePermanentTelegramFailure: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.handlePermanentTelegramFailure),
+/* harmony export */   isPermanentFailureHandoffActive: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.isPermanentFailureHandoffActive),
+/* harmony export */   resetPermanentFailureHandoff: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.resetPermanentFailureHandoff),
+/* harmony export */   startNewUserProcess: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_0__.startNewUserProcess)
+/* harmony export */ });
+/* harmony import */ var _handoff__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./handoff */ "./src/telegram/permanent-failure/handoff.ts");
+// Permanent-failure handling: when Telegram permanently kills a mobile (FROZEN, SESSION_REVOKED,
+// AUTH_KEY_*, USER_DEACTIVATED), hand off to the CMS setupClient endpoint and gracefully restart so
+// PM2 brings the process back with a fresh session. Fully independent of app.ts (no import cycle);
+// catch sites across the app import these with static imports.
+
+
+
+/***/ },
+
 /***/ "./src/telegram/resolve-peer.ts"
 /*!**************************************!*\
   !*** ./src/telegram/resolve-peer.ts ***!
@@ -97445,6 +96838,164 @@ function isAuthMine(auth) {
 
 /***/ },
 
+/***/ "./src/telegram/setup-client.ts"
+/*!**************************************!*\
+  !*** ./src/telegram/setup-client.ts ***!
+  \**************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
+/* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
+/* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
+/* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff)
+/* harmony export */ });
+const VALID_STATUSES = new Set([
+    'swapped',
+    'disabled',
+    'cooldown',
+    'client_not_found',
+    'no_candidate',
+    'failed',
+]);
+/** After a no_candidate answer, further swap requests are suppressed this long. */
+const SETUP_CLIENT_BACKOFF_MS = 2 * 60 * 60 * 1000;
+/**
+ * Shorter backoff when CMS still has unprobed candidates: probed limited accounts drop out of its
+ * next scan, so a retry makes progress through the list.
+ */
+const SETUP_CLIENT_PENDING_BACKOFF_MS = 15 * 60 * 1000;
+/** After a successful swap the process is about to be restarted by CMS; don't ask again meanwhile. */
+const SETUP_CLIENT_POST_SWAP_MS = 5 * 60 * 1000;
+/**
+ * Owner rule (2026-10-11): a request that fails (CMS 'failed', disabled, client_not_found, a throw)
+ * backs off 15, 30, 60, 120 min and stops after SETUP_CLIENT_MAX_FAILURES in a row, until the process
+ * restarts. It used to be re-asked every health cycle (10 min) forever.
+ */
+const SETUP_CLIENT_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
+const SETUP_CLIENT_MAX_FAILURES = 5;
+let swapSuppressedUntil = 0;
+let inFlight = null;
+let consecutiveFailures = 0;
+function resetSetupClientBackoff() {
+    swapSuppressedUntil = 0;
+    inFlight = null;
+    consecutiveFailures = 0;
+}
+function noteSetupFailure() {
+    consecutiveFailures++;
+    swapSuppressedUntil = consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES
+        ? Number.POSITIVE_INFINITY
+        : Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
+}
+/**
+ * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
+ * no_candidate result, requests from any trigger are answered locally for SETUP_CLIENT_BACKOFF_MS (15 min when CMS reports moreCandidatesPending)
+ * so a no_candidate pool is not re-asked every health cycle.
+ */
+async function requestClientSetup(url, request, expectedClientId, options = {}) {
+    const bypass = options.bypassBackoff === true;
+    const startedAt = Date.now();
+    if (!bypass && startedAt < swapSuppressedUntil) {
+        const remainingMs = swapSuppressedUntil - startedAt;
+        return {
+            status: 'cooldown',
+            swapped: false,
+            clientId: expectedClientId ?? '',
+            message: Number.isFinite(remainingMs)
+                ? `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
+                : `setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`,
+            cooldownRemainingMs: remainingMs,
+            suppressedLocally: true,
+        };
+    }
+    if (bypass)
+        return requestClientSetupUnguarded(url, request, expectedClientId);
+    // Coalesce concurrent triggers (e.g. a SpamBot reply and a health pass) into one CMS request.
+    if (inFlight)
+        return inFlight;
+    const pending = requestClientSetupUnguarded(url, request, expectedClientId)
+        .then((result) => {
+        // Only "nothing swappable" backs off for long. CMS's own short cooldown or a transient
+        // 'failed' must not block a genuine rotation for hours.
+        if (result.swapped) {
+            consecutiveFailures = 0;
+            swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
+        }
+        else if (result.status === 'no_candidate') {
+            consecutiveFailures = 0;
+            swapSuppressedUntil = Date.now()
+                + (result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS);
+        }
+        else if (result.status === 'cooldown') {
+            // CMS's own cooldown: wait exactly that long, not a failure.
+            if (result.cooldownRemainingMs && result.cooldownRemainingMs > 0)
+                swapSuppressedUntil = Date.now() + result.cooldownRemainingMs;
+        }
+        else {
+            noteSetupFailure();
+        }
+        return result;
+    }, (error) => {
+        noteSetupFailure();
+        throw error;
+    })
+        .finally(() => {
+        if (inFlight === pending)
+            inFlight = null;
+    });
+    inFlight = pending;
+    return pending;
+}
+async function requestClientSetupUnguarded(url, request, expectedClientId) {
+    const response = await request(url);
+    if (!response) {
+        throw new Error('setupClient request failed without a response');
+    }
+    const data = response.data;
+    const statusMatchesSwap = data?.status === 'swapped' ? data.swapped === true : data?.swapped === false;
+    const clientIdIsValid = typeof data?.clientId === 'string'
+        && data.clientId.trim().length > 0
+        && (!expectedClientId || data.clientId === expectedClientId);
+    const messageIsValid = typeof data?.message === 'string' && data.message.trim().length > 0;
+    const swappedMobilesAreValid = data?.swapped !== true || (typeof data.existingMobile === 'string'
+        && data.existingMobile.trim().length > 0
+        && typeof data.newMobile === 'string'
+        && data.newMobile.trim().length > 0
+        && data.existingMobile !== data.newMobile);
+    const cooldownIsValid = data?.cooldownRemainingMs === undefined || (typeof data.cooldownRemainingMs === 'number'
+        && Number.isFinite(data.cooldownRemainingMs)
+        && data.cooldownRemainingMs >= 0);
+    const retirementIsValid = data?.existingRetired === undefined || typeof data.existingRetired === 'boolean';
+    const futureFallbackIsValid = data?.usedFutureAvailableFallback === undefined
+        || typeof data.usedFutureAvailableFallback === 'boolean';
+    const pendingIsValid = data?.moreCandidatesPending === undefined || typeof data.moreCandidatesPending === 'boolean';
+    if (!data ||
+        typeof data !== 'object' ||
+        typeof data.status !== 'string' ||
+        !VALID_STATUSES.has(data.status) ||
+        typeof data.swapped !== 'boolean' ||
+        !statusMatchesSwap ||
+        !clientIdIsValid ||
+        !messageIsValid ||
+        !swappedMobilesAreValid ||
+        !cooldownIsValid ||
+        !retirementIsValid ||
+        !futureFallbackIsValid ||
+        !pendingIsValid) {
+        throw new Error('setupClient returned an invalid response contract');
+    }
+    return data;
+}
+
+
+/***/ },
+
 /***/ "./src/telegram/spam-state.ts"
 /*!************************************!*\
   !*** ./src/telegram/spam-state.ts ***!
@@ -97514,6 +97065,1014 @@ function swapDaysForCurrentSpamState(now = Date.now()) {
     }
     return clampSwapRestDays(DEFAULT_SWAP_DAYS);
 }
+
+
+/***/ },
+
+/***/ "./src/telegram/telegram-manager.ts"
+/*!******************************************!*\
+  !*** ./src/telegram/telegram-manager.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TelegramManager: () => (/* binding */ TelegramManager)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/events */ "telegram/events");
+/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_events__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram/extensions/Logger */ "telegram/extensions/Logger");
+/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _deduplicating_session__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./deduplicating-session */ "./src/telegram/deduplicating-session.ts");
+/* harmony import */ var _mask_sensitive_words__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./mask-sensitive-words */ "./src/telegram/mask-sensitive-words.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/events/Raw */ "telegram/events/Raw");
+/* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__);
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _promotion__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../promotion */ "./src/promotion/index.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
+/* harmony import */ var _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/reactions/ReactionService */ "../../packages/tg-reactions/src/ReactionService.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
+/* harmony import */ var _entity_cache__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./entity-cache */ "./src/telegram/entity-cache.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../conversation/respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../handlers/outhandler */ "./src/handlers/outhandler.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+
+
+
+
+
+
+
+
+ // Added for handling undefined builders
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const require = /* createRequire() */ undefined;
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__.Logger("tg-aut:TelegramManager");
+async function sendTelegramManagerNotification(category, notification, context) {
+    try {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.BotConfig.getInstance().sendMessage(category, notification);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.logUnsentNotification)(sent, "TelegramManager notification returned false", context);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, context, false);
+    }
+}
+const localEntityCacheHelpers = {
+    getPeerId(entity) {
+        const id = entity?.id ?? entity?.userId ?? entity?.chatId ?? entity?.channelId ?? entity?.peerId;
+        if (id == null) {
+            throw new Error("Entity does not include an id");
+        }
+        return { toString: () => String(id) };
+    },
+    getInputPeer(entity) {
+        return entity?.inputPeer ?? entity;
+    },
+    isArrayLike(value) {
+        return Array.isArray(value);
+    },
+};
+function resolveEntityCacheHelpers() {
+    try {
+        const { getPeerId, getInputPeer } = __webpack_require__(/*! telegram/Utils */ "telegram/Utils");
+        const { isArrayLike } = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+        if (typeof getPeerId === "function"
+            && typeof getInputPeer === "function"
+            && typeof isArrayLike === "function") {
+            return {
+                getPeerId(entity) {
+                    try {
+                        return getPeerId(entity);
+                    }
+                    catch {
+                        return localEntityCacheHelpers.getPeerId(entity);
+                    }
+                },
+                getInputPeer(entity) {
+                    try {
+                        return getInputPeer(entity) ?? localEntityCacheHelpers.getInputPeer(entity);
+                    }
+                    catch {
+                        return localEntityCacheHelpers.getInputPeer(entity);
+                    }
+                },
+                isArrayLike(value) {
+                    return isArrayLike(value) || localEntityCacheHelpers.isArrayLike(value);
+                },
+            };
+        }
+    }
+    catch (error) {
+        logger.debug("[EntityCache] Falling back to local entity-cache helpers", error instanceof Error ? error.message : String(error));
+    }
+    return localEntityCacheHelpers;
+}
+async function getCurrentProfilePhotoCount(client, mobile) {
+    try {
+        const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.photos.GetUserPhotos({ userId: 'me', offset: 0 }));
+        return Array.isArray(result?.photos) ? result.photos.length : 0;
+    }
+    catch (error) {
+        logger.warn(`[Persona] Failed to load current profile photo count for ${mobile}`, error instanceof Error ? error.message : String(error));
+        return 0;
+    }
+}
+function buildMirroredClientName(assignedFirstName, assignedLastName) {
+    return [assignedFirstName?.trim(), assignedLastName?.trim()]
+        .filter((part) => !!part)
+        .join(' ')
+        .trim();
+}
+async function triggerBufferProfilePhotoRefresh(client, mobile, clientId, profilePicsUpdatedAt, poolPhotoCount, assignedPhotoCount) {
+    if (poolPhotoCount < 2) {
+        logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: pool has fewer than 2 URLs`);
+        return;
+    }
+    if (assignedPhotoCount < 2) {
+        logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: assigned profile pic URLs are missing or too small`);
+        return;
+    }
+    logger.debug(`🧍 PERSONA photo-refresh gate | ${mobile} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(profilePicsUpdatedAt)} | assigned ${assignedPhotoCount} | pool ${poolPhotoCount}`);
+    const currentPhotoCount = await getCurrentProfilePhotoCount(client, mobile);
+    if (currentPhotoCount >= 2) {
+        logger.debug(`🧍 PERSONA photo-refresh skip | ${mobile} | telegram photos ${currentPhotoCount}`);
+        return;
+    }
+    const tgCmsBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_27__.getRuntimeConfigBaseOrNull)();
+    if (!tgCmsBase) {
+        logger.warn(`[Persona] Cannot trigger CMS profile pic refresh for ${mobile}: no CMS base URL configured`);
+        return;
+    }
+    logger.info(`🧍 PERSONA photo-refresh trigger | ${clientId} | ${mobile} | telegram ${currentPhotoCount} | pool ${poolPhotoCount}`);
+    const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__.fetchWithTimeout)(`${tgCmsBase}/bufferclients/profile-pics/refresh/${encodeURIComponent(mobile)}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__.getApiKey)(),
+        },
+        data: {},
+        timeout: 15000,
+    });
+    if (!response?.data) {
+        logger.warn(`🧍 PERSONA photo-refresh bad-response | ${clientId} | ${mobile}`);
+        return;
+    }
+    logger.info(`🧍 PERSONA photo-refresh done | ${clientId} | ${mobile} | refreshed ${response.data.refreshed ?? 'unknown'} | uploaded ${response.data.uploadedCount ?? 'unknown'}`);
+}
+// Entity cache constants moved to DeduplicatingSession and EntityCacheManager
+class TelegramManager {
+    constructor(mobile) {
+        this.client = null;
+        this.reactorInstance = null;
+        this.promotorInstance = null;
+        // Track handlers so we can remove them precisely on cleanup
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- GramJS event handlers have varying event types per builder
+        this.eventHandlers = [];
+        // Per-instance idempotency locks
+        this.starting = null;
+        this.cleaning = null;
+        this.started = false;
+        this.handlersRegistered = false;
+        this.destroyed = false;
+        // MEMORY FIX: Reuse DeduplicatingSession instance instead of creating new one each time
+        this.session = null;
+        // GC-reclaim support for the patched _entityCache.cacheMap: track per-entry last-seen
+        // timestamps and periodically sweep idle entries so they become collectable.
+        this.entityCacheSweeper = null;
+        this.entityCacheLastSeen = new Map();
+        this.rpcLivenessProbe = null;
+        this.lastRpcLivenessAt = null;
+        this.lastRpcLivenessError = null;
+        this.mobile = mobile || process.env.mobile;
+        this.clientId = process.env.clientId;
+        // MEMORY FIX: Strictly enforce single instance - check before registering
+        const existing = TelegramManager.activeInstances.get(this.mobile);
+        if (existing && existing !== this) {
+            // Another instance exists - this should not happen if getInstance() is used correctly
+            logger.error(`[${this.mobile}] CRITICAL: Attempted to create duplicate TelegramManager instance!`);
+            logger.error(`[${this.mobile}] Existing instance: started=${existing.started}, client=${existing.client !== null}`);
+            // Don't register this instance - throw error to prevent memory leak
+            throw new Error(`TelegramManager instance already exists for mobile: ${this.mobile}. Use getInstance() to get existing instance.`);
+        }
+        // Register this instance
+        TelegramManager.activeInstances.set(this.mobile, this);
+        logger.debug(`[${this.mobile}] TelegramManager instance registered (total: ${TelegramManager.activeInstances.size})`);
+    }
+    // ---------- Static helpers ----------
+    static getClient(mobile = process.env.mobile) {
+        const inst = TelegramManager.activeInstances.get(mobile);
+        if (inst?.client && !inst.destroyed)
+            return inst.client;
+        throw new Error(`No active client for mobile: ${mobile}`);
+    }
+    /**
+     * Check if an active client instance exists. Pure check with NO side effects.
+     * Use ensureConnected() if you need to reconnect.
+     */
+    static instanceExist(mobile = process.env.mobile) {
+        const inst = TelegramManager.activeInstances.get(mobile);
+        return !!(inst && !inst.destroyed && inst.client && inst.started);
+    }
+    /**
+     * Ensure the client is connected, reconnecting if needed.
+     * Separated from instanceExist() to avoid side effects in health checks.
+     */
+    static async ensureConnected(mobile = process.env.mobile) {
+        const inst = TelegramManager.activeInstances.get(mobile);
+        if (!inst?.client || inst.destroyed)
+            return false;
+        if (!inst.client.connected) {
+            try {
+                await inst.client.connect();
+            }
+            catch (error) {
+                logger.error(`[${mobile}] Failed to reconnect:`, error);
+                return false;
+            }
+        }
+        return true;
+    }
+    /** Rebuild a broken in-memory GramJS runtime without changing its saved session. */
+    static async recoverRuntime(mobile = process.env.mobile) {
+        if (TelegramManager.runtimeRecovery) {
+            return TelegramManager.runtimeRecovery;
+        }
+        const elapsedMs = TelegramManager.lastRuntimeRecoveryAt === null
+            ? null
+            : Date.now() - TelegramManager.lastRuntimeRecoveryAt;
+        if (elapsedMs !== null && elapsedMs < TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS) {
+            logger.warn(`[${mobile}] Skipping Telegram runtime recovery during cooldown`, {
+                remainingMs: TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS - elapsedMs,
+            });
+            return false;
+        }
+        TelegramManager.lastRuntimeRecoveryAt = Date.now();
+        TelegramManager.runtimeRecovery = (async () => {
+            try {
+                logger.warn(`[${mobile}] Rehydrating Telegram runtime after RPC liveness failure`);
+                await TelegramManager.deleteInstance(mobile);
+                const replacement = TelegramManager.getInstance(mobile);
+                await replacement.startTg();
+                await replacement.probeRpcLiveness();
+                logger.info(`[${mobile}] Telegram runtime rehydrated successfully`);
+                return true;
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${mobile}: Telegram runtime recovery failed`);
+                return false;
+            }
+            finally {
+                TelegramManager.runtimeRecovery = null;
+            }
+        })();
+        return TelegramManager.runtimeRecovery;
+    }
+    static getInstance(mobile = process.env.mobile) {
+        // MEMORY FIX: This service maintains only ONE mobile (from process.env.mobile)
+        // Enforce strict singleton - only ONE instance total should exist
+        const canonicalMobile = process.env.mobile;
+        // If different mobile is requested, warn and use canonical mobile
+        if (mobile !== canonicalMobile) {
+            logger.warn(`[${mobile}] Different mobile requested, but service only supports one mobile: ${canonicalMobile}. Using canonical mobile.`);
+            mobile = canonicalMobile;
+        }
+        // Check if any instance exists (should only be one)
+        if (TelegramManager.activeInstances.size > 0) {
+            // Get the instance for canonical mobile (should be the only one)
+            const existing = TelegramManager.activeInstances.get(canonicalMobile);
+            if (existing) {
+                // Verify the instance is still valid (not destroyed)
+                if (existing.destroyed) {
+                    // Destroyed instance - remove it and create new one
+                    logger.warn(`[${canonicalMobile}] Found destroyed TelegramManager instance, removing and creating new one`);
+                    TelegramManager.activeInstances.delete(canonicalMobile);
+                }
+                else {
+                    // Valid existing instance - return it
+                    return existing;
+                }
+            }
+            else {
+                // Instance exists for different mobile (shouldn't happen, but handle it)
+                const firstInstance = TelegramManager.activeInstances.values().next().value;
+                logger.error(`[${canonicalMobile}] CRITICAL: Instance exists for different mobile ${firstInstance.mobile}. This should not happen.`);
+                // Clean up the wrong instance and create correct one
+                TelegramManager.activeInstances.delete(firstInstance.mobile);
+                // Note: destroy() is async, but we can't await in static method - schedule cleanup
+                firstInstance.destroy().catch((err) => {
+                    logger.error(`[${canonicalMobile}] Error destroying wrong instance:`, err);
+                });
+            }
+        }
+        // Create new instance only if none exists or existing was stale
+        const newInstance = new TelegramManager(canonicalMobile);
+        logger.debug(`[${canonicalMobile}] Created TelegramManager instance (total active: ${TelegramManager.activeInstances.size})`);
+        // Ensure only one instance exists
+        if (TelegramManager.activeInstances.size > 1) {
+            logger.error(`[${canonicalMobile}] CRITICAL: Multiple instances detected (${TelegramManager.activeInstances.size}). This is a memory leak!`);
+        }
+        return newInstance;
+    }
+    static async deleteInstance(mobile = process.env.mobile) {
+        const inst = TelegramManager.activeInstances.get(mobile);
+        if (!inst) {
+            logger.debug(`[${mobile}] No TelegramManager instance found to delete`);
+            return false;
+        }
+        await inst.destroy();
+        // Note: destroy() now handles removal from activeInstances, but double-check
+        if (TelegramManager.activeInstances.has(mobile)) {
+            TelegramManager.activeInstances.delete(mobile);
+            logger.warn(`[${mobile}] Instance still in registry after destroy(), manually removed`);
+        }
+        logger.debug(`[${mobile}] TelegramManager instance deleted (remaining: ${TelegramManager.activeInstances.size})`);
+        return true;
+    }
+    /**
+     * MEMORY FIX: Clean up stale instances (instances that are destroyed but still in registry)
+     * Call this periodically to prevent memory leaks from stale instances
+     */
+    static cleanupStaleInstances() {
+        let cleanedCount = 0;
+        const mobilesToRemove = [];
+        for (const [mobile, instance] of TelegramManager.activeInstances.entries()) {
+            // Check if instance is stale (destroyed but still in registry)
+            if (instance.destroyed && instance.cleaning === null) {
+                mobilesToRemove.push(mobile);
+                cleanedCount++;
+            }
+        }
+        // Remove stale instances
+        for (const mobile of mobilesToRemove) {
+            TelegramManager.activeInstances.delete(mobile);
+            logger.warn(`[${mobile}] Removed stale TelegramManager instance from registry`);
+        }
+        if (cleanedCount > 0) {
+            logger.log(`Cleaned up ${cleanedCount} stale TelegramManager instance(s) (remaining: ${TelegramManager.activeInstances.size})`);
+        }
+        return cleanedCount;
+    }
+    ensureReactionService() {
+        if (this.reactorInstance) {
+            return true;
+        }
+        if (!this.client || !this.dialogManager) {
+            logger.warn(`[${this.mobile}] Cannot recreate ReactionService without active client and dialog manager`);
+            return false;
+        }
+        try {
+            this.reactorInstance = _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__.ReactionService.getOrCreate(this.client, this.dialogManager, {
+                instanceId: this.mobile,
+                instanceName: this.clientId,
+                store: _data_db__WEBPACK_IMPORTED_MODULE_14__.channelsStore,
+                onAccountError: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error, `Reactions:${this.clientId}`),
+                onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
+                // Per-mobile daily reaction analytics (best-effort). tg-aut previously left
+                // reactionStatsDaily empty — the collection was created but never written. Mirrors
+                // promote-clients: record success/failed/restricted/floods into reactionStatsDaily.
+                onReactionOutcome: (outcome) => {
+                    void _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().recordDailyReaction(this.mobile, {
+                        success: outcome === 'success' ? 1 : 0,
+                        failed: outcome === 'failed' ? 1 : 0,
+                        restricted: outcome === 'restricted' ? 1 : 0,
+                        floods: outcome === 'flood' ? 1 : 0,
+                    });
+                },
+            });
+            logger.warn(`[${this.mobile}] ReactionService recreated by health recovery`);
+            return true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: ReactionService recovery failed`, false);
+            return false;
+        }
+    }
+    ensurePromotionEngine() {
+        if (this.promotorInstance) {
+            return true;
+        }
+        if (!this.client || !this.dialogManager) {
+            logger.warn(`[${this.mobile}] Cannot recreate PromotionEngine without active client and dialog manager`);
+            return false;
+        }
+        try {
+            this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
+                instanceId: this.mobile,
+                instanceName: this.clientId,
+                onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
+            });
+            logger.warn(`[${this.mobile}] PromotionEngine recreated by health recovery`);
+            return true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: PromotionEngine recovery failed`, false);
+            return false;
+        }
+    }
+    /**
+     * MEMORY FIX: Get count of active instances (for debugging and monitoring)
+     */
+    static getInstanceCount() {
+        return TelegramManager.activeInstances.size;
+    }
+    /**
+     * MEMORY FIX: Get all active instance mobiles (for debugging)
+     */
+    static getActiveInstanceMobiles() {
+        return Array.from(TelegramManager.activeInstances.keys());
+    }
+    hasCompleteRuntimeWiring() {
+        return Boolean(this.client
+            && this.client.connected
+            && this.dialogManager
+            && this.callManager
+            && this.reactorInstance
+            && this.promotorInstance
+            && this.handlersRegistered);
+    }
+    // ---------- Lifecycle ----------
+    /**
+     * Start and connect the underlying GramJS client. Idempotent and race-safe.
+     */
+    async startTg() {
+        if (this.started) {
+            if (this.hasCompleteRuntimeWiring()) {
+                logger.warn(`${this.mobile}: TelegramManager instance already started, skipping start`);
+                return;
+            }
+            logger.warn(`${this.mobile}: TelegramManager marked started but runtime wiring is incomplete; repairing startup`);
+            this.started = false;
+        }
+        if (this.starting) {
+            logger.warn(`${this.mobile}: Another TelegramManager instance is already starting, skipping start`);
+            return this.starting;
+        }
+        // MEMORY FIX: Strictly enforce single instance - verify this is the registered instance
+        this.destroyed = false;
+        const registeredInstance = TelegramManager.activeInstances.get(this.mobile);
+        if (!registeredInstance) {
+            logger.error(`${this.mobile}: CRITICAL - This instance is not registered! Re-registering...`);
+            TelegramManager.activeInstances.set(this.mobile, this);
+        }
+        else if (registeredInstance !== this) {
+            logger.error(`${this.mobile}: CRITICAL - Instance mismatch! Another instance is registered.`);
+            logger.error(`${this.mobile}: This indicates a memory leak - multiple instances exist.`);
+            throw new Error(`TelegramManager instance mismatch for mobile ${this.mobile}. Another instance is registered.`);
+        }
+        // Prevent duplicate starts
+        if (registeredInstance && registeredInstance !== this && registeredInstance.started) {
+            logger.warn(`${this.mobile}: Another TelegramManager instance is already started, skipping start`);
+            return;
+        }
+        // MEMORY FIX: Check if child instances already exist - don't recreate them
+        // This prevents creating duplicate instances if startTg() is called multiple times
+        if (this.dialogManager || this.callManager || this.reactorInstance || this.promotorInstance) {
+            logger.warn(`${this.mobile}: startTg() called but child instances already exist! Reusing existing instances.`);
+            // Return only when the full runtime is already wired. Partial startup
+            // failures can leave a connected client with missing child services.
+            if (this.hasCompleteRuntimeWiring()) {
+                this.started = true;
+                return;
+            }
+            // If client doesn't exist but instances do, something is wrong - log warning but continue
+            logger.warn(`${this.mobile}: Child instances are partially initialized. Continuing with initialization to repair runtime wiring...`);
+            if (this.promotorInstance) {
+                await this.promotorInstance.stopPromotions().catch((error) => {
+                    logger.error(`${this.mobile}: Error stopping partial PromotionEngine during startup repair:`, error);
+                });
+                this.promotorInstance.cleanup();
+                this.promotorInstance = null;
+            }
+            await this.reactorInstance?.dispose();
+            this.reactorInstance = null;
+            if (this.dialogManager) {
+                try {
+                    this.dialogManager.cleanup();
+                }
+                catch (error) {
+                    logger.error(`${this.mobile}: Error cleaning partial DialogManager during startup repair:`, error);
+                }
+                this.dialogManager = undefined;
+            }
+            await this.callManager?.disposeInHouse?.().catch((error) => {
+                logger.error(`${this.mobile}: Error stopping partial in-house calls during startup repair:`, error);
+            });
+            this.callManager = undefined;
+            if (this.client) {
+                await this.cleanupClient();
+            }
+            this.handlersRegistered = false;
+        }
+        // Await any in-flight cleaning before starting
+        if (this.cleaning)
+            await this.cleaning;
+        this.starting = (async () => {
+            try {
+                const { apiId, apiHash, params: tgConfig } = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_8__.generateTGConfig)(this.mobile);
+                logger.log(`📱 TG init | ${this.clientId} | ${this.mobile}`);
+                logger.debug(`📱 TG config | ${this.clientId} | ${this.mobile} | api ${apiId} | device ${tgConfig.deviceModel || 'unknown'} | app ${tgConfig.appVersion || 'unknown'} | proxy ${tgConfig.proxy ? 'yes' : 'no'}`);
+                // MEMORY FIX: Reuse DeduplicatingSession instance instead of creating new one each time
+                if (!this.session) {
+                    this.session = new _deduplicating_session__WEBPACK_IMPORTED_MODULE_4__.DeduplicatingSession(process.env.session || "");
+                }
+                // NOTE: Session string should match the API ID it was created with. If not, GramJS will throw and we fall back to re-setup.
+                this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, tgConfig);
+                // DC override: only when explicitly requested (e.g. for IPv6 workaround)
+                // if (process.env.FORCE_DC5 === 'true') {
+                //     await this.client.session.setDC(5, '91.108.56.194', 80);
+                //     console.log('[TelegramManager] DC5 override applied (FORCE_DC5=true)');
+                // } else if (process.env.FORCE_DC5 !== undefined) {
+                //     console.warn('[TelegramManager] FORCE_DC5 is set but not "true", DC5 override NOT applied');
+                // }
+                this.client.setLogLevel(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__.LogLevel.ERROR);
+                await this.client.connect();
+                // Save session after successful connect (GramJS updates auth key & DC info)
+                // try {
+                //     const sessionString = this.session.save();
+                //     if (sessionString) {
+                //         process.env.session = sessionString;
+                //         logger.debug(`${this.mobile}: Session saved after connect`);
+                //     }
+                // } catch (sessionErr) {
+                //     logger.warn(`${this.mobile}: Failed to save session after connect:`, sessionErr);
+                // }
+                // Patch _entityCache.add() to use last-seen wins instead of first-seen wins
+                this.patchEntityCache();
+                // ToS safety: mask sensitive keywords in EVERY outgoing message/caption.
+                // Wrapping the client here is the single chokepoint — covers replier,
+                // outhandler, core/utils, CallManager, greetings, etc. without per-call edits.
+                (0,_mask_sensitive_words__WEBPACK_IMPORTED_MODULE_5__.patchOutgoingMask)(this.client);
+                await this.probeRpcLiveness();
+                // MEMORY FIX: Only create child instances if they don't already exist
+                // This prevents creating duplicate instances if startTg() is called multiple times
+                if (!this.dialogManager) {
+                    this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogManager.getOrCreate(this.client, {
+                        instanceId: this.clientId,
+                        instanceName: this.mobile,
+                        callbacks: {
+                            onIsPermanentError: (errorDetails) => (0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__["default"])(errorDetails),
+                            onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `DialogManager:${this.clientId}`),
+                        },
+                    });
+                    await this.dialogManager.initialize();
+                }
+                else {
+                    logger.debug(`${this.mobile}: DialogManager already exists, reusing existing instance`);
+                    // DialogManager.getOrCreate will handle client updates internally
+                    // Just ensure it's initialized
+                    try {
+                        await this.dialogManager.initialize();
+                    }
+                    catch (error) {
+                        // If already initialized, this might throw - that's okay
+                        logger.warn(`${this.mobile}: DialogManager re-initialize failed (continuing)`, error);
+                    }
+                }
+                if (!this.callManager) {
+                    this.callManager = new _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__.CallManager(this.client, {
+                        instanceId: this.mobile,
+                        instanceName: this.clientId,
+                    });
+                }
+                else {
+                    logger.debug(`${this.mobile}: CallManager already exists, reusing existing instance`);
+                }
+                // The constructor returns a cached instance per mobile that may hold a previous client.
+                await this.callManager.attachClient?.(this.client);
+                // In-house calls ON: answer eligible paid users who call this account.
+                void this.callManager.startInHouse?.().catch((error) => {
+                    logger.error(`${this.mobile}: in-house call startup failed:`, error);
+                });
+                const me = (await this.client.getMe());
+                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
+                await db.updateClient(this.clientId, { mobile: me?.phone, username: me?.username }); // Small sanity ping
+                // Persona verification and photo fallback run in background so startup is not blocked
+                void (async () => {
+                    try {
+                        logger.info(`🧍 PERSONA start | ${this.clientId} | ${this.mobile}`);
+                        const pool = await db.getBufferPersonaPool(this.clientId);
+                        if (pool && (pool.firstNames.length > 0 || pool.lastNames.length > 0 || pool.bios.length > 0 || pool.profilePics.length > 0)) {
+                            logger.debug(`🧍 PERSONA pool | ${this.clientId} | ${this.mobile} | first ${pool.firstNames.length} | last ${pool.lastNames.length} | bio ${pool.bios.length} | pics ${pool.profilePics.length}`);
+                            const activeMobile = me?.phone || this.mobile;
+                            const bufferDoc = await db.getBufferClientDoc(activeMobile);
+                            if (bufferDoc) {
+                                logger.debug(`🧍 PERSONA buffer-doc | ${this.clientId} | ${bufferDoc.mobile} | first ${!!bufferDoc.assignedFirstName} | last ${!!bufferDoc.assignedLastName} | bio ${!!bufferDoc.assignedBio} | pics ${bufferDoc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.profilePicsUpdatedAt)}`);
+                                const result = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__.verifyAndCorrectPersona)(this.client, bufferDoc.mobile, pool, {
+                                    mobile: bufferDoc.mobile,
+                                    assignedFirstName: bufferDoc.assignedFirstName || null,
+                                    assignedLastName: bufferDoc.assignedLastName || null,
+                                    assignedBio: bufferDoc.assignedBio || null,
+                                    assignedProfilePics: bufferDoc.assignedProfilePics || [],
+                                    nameBioUpdatedAt: bufferDoc.nameBioUpdatedAt || null,
+                                    profilePicsUpdatedAt: bufferDoc.profilePicsUpdatedAt || null,
+                                    privacyUpdatedAt: bufferDoc.privacyUpdatedAt || null,
+                                }, (mobile, update) => db.updateBufferClientAssignment(mobile, update), () => db.fetchExistingAssignments(this.clientId));
+                                if (result.workingName) {
+                                    process.env.name = result.workingName;
+                                }
+                                const latestBufferDoc = await db.getBufferClientDoc(bufferDoc.mobile);
+                                const mirroredClientName = buildMirroredClientName(latestBufferDoc?.assignedFirstName || bufferDoc.assignedFirstName || null, latestBufferDoc?.assignedLastName || bufferDoc.assignedLastName || null);
+                                if (mirroredClientName) {
+                                    await db.updateClient(this.clientId, { name: mirroredClientName });
+                                    logger.info(`🧍 PERSONA client-doc updated | ${this.clientId} | ${bufferDoc.mobile} | ${mirroredClientName}`);
+                                }
+                                else {
+                                    logger.debug(`🧍 PERSONA client-doc skip | ${this.clientId} | ${bufferDoc.mobile} | no assigned buffer name`);
+                                }
+                                const latestAssignedPhotoCount = (latestBufferDoc?.assignedProfilePics || bufferDoc.assignedProfilePics || []).length;
+                                await triggerBufferProfilePhotoRefresh(this.client, bufferDoc.mobile, this.clientId, latestBufferDoc?.profilePicsUpdatedAt || bufferDoc.profilePicsUpdatedAt || null, pool.profilePics.length, latestAssignedPhotoCount);
+                                const correctionParts = [
+                                    result.correctedName ? 'name' : '',
+                                    result.correctedLastName ? 'lastName' : '',
+                                    result.correctedBio ? 'bio' : '',
+                                    result.correctedPhotos ? 'photos' : '',
+                                ].filter(Boolean);
+                                const anyCorrected = correctionParts.length > 0;
+                                logger.log(`[Persona] Working name set to: ${result.workingName}${anyCorrected ? ` (corrections: ${correctionParts.join(', ')})` : ''}`);
+                            }
+                            else {
+                                logger.warn(`[Persona] Buffer client doc not found for ${activeMobile}, skipping verification`);
+                            }
+                        }
+                        else {
+                            logger.debug(`[Persona] No persona pool available for ${this.mobile}, skipping verification`);
+                        }
+                    }
+                    catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        logger.error(`[Persona] Verification failed for ${this.mobile}`, msg, err instanceof Error ? err.stack : undefined);
+                    }
+                })();
+                // Wire helpers dependent on an active client + dialog manager
+                // MEMORY FIX: Only create if they don't exist, use getOrCreate to prevent duplicates
+                const hadReactor = Boolean(this.reactorInstance);
+                if (!this.ensureReactionService()) {
+                    throw new Error(`${this.mobile}: Failed to initialize ReactionService`);
+                }
+                else if (hadReactor) {
+                    logger.debug(`${this.mobile}: ReactionService already exists, reusing existing instance`);
+                }
+                if (!this.promotorInstance) {
+                    if (!this.ensurePromotionEngine()) {
+                        throw new Error(`${this.mobile}: Failed to initialize PromotionEngine`);
+                    }
+                }
+                else {
+                    logger.warn(`${this.mobile}: PromotionEngine already exists during Telegram startup; rebuilding it with the active client`);
+                    await this.promotorInstance.stopPromotions().catch((error) => {
+                        logger.error(`${this.mobile}: Error stopping stale PromotionEngine:`, error);
+                    });
+                    await this.promotorInstance.cleanup();
+                    this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
+                        instanceId: this.mobile,
+                        instanceName: this.clientId,
+                        onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
+                    });
+                }
+                // Phone from Telegram is normally our own mobile, so it's redundant — only surface
+                // it when it actually differs (a mismatch is worth seeing).
+                const connectedPhone = me?.phone && me.phone !== this.mobile ? me.phone : null;
+                await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.CLIENT_UPDATES, {
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.SUCCESS,
+                    title: "TG connected",
+                    fields: [
+                        { label: "Mobile", value: this.mobile },
+                        ...(connectedPhone ? [{ label: "Phone", value: connectedPhone }] : []),
+                    ],
+                    // Sent on its own, not via the hourly digest: ops reads each connect as the restart signal.
+                    tags: ["tg-aut", "telegram-manager", "connected"],
+                }, `${this.mobile}: Failed to send connected notification`);
+                // Register handlers exactly once
+                if (!this.handlersRegistered) {
+                    this.registerHandler((event) => this.handleIncoming(event), new telegram_events__WEBPACK_IMPORTED_MODULE_1__.NewMessage({ incoming: true }));
+                    this.registerHandler((event) => this.handleOutgoing(event), new telegram_events__WEBPACK_IMPORTED_MODULE_1__.NewMessage({ outgoing: true }));
+                    // Call events may have their own builder. If CallManager internally filters, we can pass undefined here.
+                    this.registerHandler((event) => this.callManager.handlePhoneCallEvent(event), undefined);
+                    this.handlersRegistered = true;
+                }
+                void Promise.resolve((0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__.replier)()).catch((error) => {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.replierStartup");
+                });
+                this.started = true;
+                const setupClient = this.client;
+                void (0,_index__WEBPACK_IMPORTED_MODULE_20__.initSetup)(setupClient).catch((error) => {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.initSetup", false);
+                });
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in startTg");
+                let sideEffectError = null;
+                try {
+                    await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({
+                        key: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyKeyPhoneCall(),
+                        rules: [
+                            new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueDisallowAll()
+                        ],
+                    }));
+                }
+                catch (inner) {
+                    sideEffectError = inner;
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(inner, "Error while handling startTg failure side-effects");
+                    logger.warn(`[PermanentFailure] TelegramManager.startTg:${this.clientId}: side-effect privacy update failed`, {
+                        error: inner instanceof Error ? inner.message : String(inner),
+                    });
+                }
+                // Check original error first, then side-effect error (e.g. FROZEN_METHOD_INVALID
+                // from SetPrivacy reveals the account is frozen even when the original error was
+                // a non-permanent PEER_ID_INVALID from SendMessage)
+                const handled = await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `TelegramManager.startTg:${this.clientId}`);
+                if (!handled && sideEffectError) {
+                    await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(sideEffectError, `TelegramManager.startTg:${this.clientId}:side-effect`);
+                }
+                throw error; // surface to callers if needed
+            }
+            finally {
+                this.starting = null;
+            }
+        })();
+        return this.starting;
+    }
+    /** A read-only Telegram RPC is the only reliable proof that a connected client is usable. */
+    async probeRpcLiveness() {
+        if (!this.client?.connected) {
+            throw new Error("Telegram client is not connected");
+        }
+        const elapsedMs = this.lastRpcLivenessAt === null ? null : Date.now() - this.lastRpcLivenessAt;
+        if (elapsedMs !== null && elapsedMs < TelegramManager.RPC_LIVENESS_CACHE_MS) {
+            if (this.lastRpcLivenessError)
+                throw this.lastRpcLivenessError;
+            return;
+        }
+        if (this.rpcLivenessProbe)
+            return this.rpcLivenessProbe;
+        const client = this.client;
+        this.rpcLivenessProbe = Promise.resolve()
+            .then(() => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.updates.GetState()))
+            .then(() => {
+            this.lastRpcLivenessError = null;
+        })
+            .catch((error) => {
+            this.lastRpcLivenessError = error;
+            throw error;
+        })
+            .finally(() => {
+            this.lastRpcLivenessAt = Date.now();
+            this.rpcLivenessProbe = null;
+        });
+        return this.rpcLivenessProbe;
+    }
+    registerHandler(handler, // eslint-disable-next-line @typescript-eslint/no-explicit-any -- GramJS handlers vary by EventBuilder
+    filter) {
+        if (!this.client)
+            throw new Error("Client not initialized");
+        // Guard against accidental duplicate registrations (same function reference + same filter type)
+        const exists = this.eventHandlers.some(([f, h]) => h === handler && (!!f === !!filter));
+        if (exists)
+            return;
+        this.client.addEventHandler(handler, filter);
+        this.eventHandlers.push([filter, handler]);
+    }
+    async handleIncoming(event) {
+        return _index__WEBPACK_IMPORTED_MODULE_20__.handleEvents.call(this, event);
+    }
+    async handleOutgoing(event) {
+        return _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__.OutEventPrint.call(this, event);
+    }
+    /**
+     * Public teardown. Idempotent and race-safe.
+     */
+    async destroy() {
+        if (this.cleaning)
+            return this.cleaning;
+        // Await any in-flight starting before cleaning.
+        if (this.starting) {
+            await this.starting.catch((error) => {
+                logger.warn(`${this.mobile}: Startup failed before destruction; continuing cleanup`, {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }
+        this.cleaning = (async () => {
+            try {
+                const name = this.mobile || "unknown";
+                logger.log(`${name}: Disposing TelegramManager instance...`);
+                // Promotion work can still be using this Telegram client for a send or verification.
+                // Stop and await it before tearing the transport down.
+                if (this.promotorInstance) {
+                    await this.promotorInstance.stopPromotions().catch(err => {
+                        logger.error(`${name}: Error stopping promotions:`, err);
+                    });
+                    this.promotorInstance.cleanup();
+                }
+                await this.reactorInstance?.dispose();
+                // Hang up any in-house call before the transport goes away (never leave a call/session live).
+                await this.callManager?.disposeInHouse?.().catch((error) => {
+                    logger.error(`${name}: Error stopping in-house calls:`, error);
+                });
+                await this.cleanupClient();
+                // Cleanup DialogManager properly
+                if (this.dialogManager) {
+                    try {
+                        this.dialogManager.cleanup();
+                    }
+                    catch (error) {
+                        logger.error(`${name}: Error cleaning up DialogManager:`, error);
+                    }
+                }
+                this.reactorInstance = null;
+                this.promotorInstance = null;
+                this.dialogManager = undefined;
+                this.callManager = undefined;
+                this.started = false;
+                this.handlersRegistered = false;
+                this.destroyed = true;
+                // MEMORY FIX: Ensure instance is removed from registry to prevent stale instances
+                const stillRegistered = TelegramManager.activeInstances.get(this.mobile);
+                if (stillRegistered === this) {
+                    TelegramManager.activeInstances.delete(this.mobile);
+                    logger.log(`${name}: Instance removed from registry (remaining: ${TelegramManager.activeInstances.size})`);
+                }
+                else if (stillRegistered) {
+                    logger.warn(`${name}: WARNING - Another instance found in registry after cleanup! This indicates a leak.`);
+                    // Don't delete the other instance, just log the warning
+                }
+                else {
+                    logger.debug(`${name}: Instance was already removed from registry`);
+                }
+                logger.log(`${name}: Instance successfully destroyed.`);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during instance destruction`);
+                logger.error(`${this.mobile}: Error during instance destruction:`, error);
+            }
+            finally {
+                this.cleaning = null;
+            }
+        })();
+        return this.cleaning;
+    }
+    /**
+     * Patch _entityCache.add() to use last-seen wins instead of first-seen wins.
+     * The default GramJS entityCache.add() skips entities that already exist (first-seen wins),
+     * which causes stale access hashes. This patch always overwrites with the latest data.
+     */
+    patchEntityCache() {
+        if (!this.client)
+            return;
+        try {
+            const entityCacheObj = this.client._entityCache;
+            if (!entityCacheObj?.cacheMap)
+                return;
+            const cacheMap = entityCacheObj.cacheMap;
+            const { getPeerId, getInputPeer, isArrayLike } = resolveEntityCacheHelpers();
+            const maxEntities = _entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_MAX;
+            // Replace the add method with last-seen wins + bounded LRU cap.
+            entityCacheObj.add = (entities) => {
+                const temp = [];
+                if (!isArrayLike(entities)) {
+                    if (entities != undefined && typeof entities === "object") {
+                        if ("chats" in entities)
+                            temp.push(...entities.chats);
+                        if ("users" in entities)
+                            temp.push(...entities.users);
+                        if ("user" in entities)
+                            temp.push(entities.user);
+                    }
+                    if (temp.length) {
+                        entities = temp;
+                    }
+                    else {
+                        return;
+                    }
+                }
+                for (const entity of entities) {
+                    try {
+                        const pid = getPeerId(entity);
+                        // Last-seen wins + LRU cap + age tracking (for idle sweep -> GC reclaim).
+                        (0,_entity_cache__WEBPACK_IMPORTED_MODULE_15__.boundedEntityCacheSet)(cacheMap, pid.toString(), getInputPeer(entity), maxEntities, this.entityCacheLastSeen, Date.now());
+                    }
+                    catch {
+                        // Skip invalid entities
+                    }
+                }
+            };
+            logger.debug(`${this.mobile}: Patched _entityCache.add() — last-seen wins, LRU cap ${maxEntities}`);
+            // Proactive age sweep so idle entries become GC-collectable (not just capped).
+            const idleMs = _entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_IDLE_MS;
+            const sweepMs = 5 * 60000; // sweep every 5 min
+            if (this.entityCacheSweeper)
+                clearInterval(this.entityCacheSweeper);
+            this.entityCacheSweeper = setInterval(() => {
+                try {
+                    const removed = (0,_entity_cache__WEBPACK_IMPORTED_MODULE_15__.sweepEntityCacheByAge)(cacheMap, this.entityCacheLastSeen, Date.now(), idleMs);
+                    if (removed > 0)
+                        logger.debug(`${this.mobile}: entity cache swept ${removed} idle entries (size ${cacheMap.size})`);
+                }
+                catch (err) {
+                    logger.debug(`${this.mobile}: entity cache sweep failed:`, err);
+                }
+            }, sweepMs);
+            this.entityCacheSweeper.unref?.();
+        }
+        catch (error) {
+            logger.debug(`${this.mobile}: Failed to patch _entityCache:`, error);
+        }
+    }
+    /**
+     * Internal cleanup for the GramJS client and handlers. Safe to call multiple times.
+     */
+    async cleanupClient() {
+        try {
+            // Stop the entity-cache age sweeper and drop its timestamps (no timer leak on swap).
+            if (this.entityCacheSweeper) {
+                clearInterval(this.entityCacheSweeper);
+                this.entityCacheSweeper = null;
+            }
+            this.entityCacheLastSeen.clear();
+            // Dispose application-level entity cache
+            _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_6__.EntityCacheManager.getInstance().dispose();
+            if (!this.client)
+                return;
+            // Remove tracked event handlers
+            for (const [builder, handler] of this.eventHandlers) {
+                try {
+                    this.client.removeEventHandler(handler, builder ?? new telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__.Raw({}));
+                }
+                catch (error) {
+                    logger.debug(`Failed to remove event handler:`, error);
+                }
+            }
+            this.eventHandlers = [];
+            try {
+                await this.client?.destroy();
+                this.client._eventBuilders = [];
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(2000);
+                logger.log("Client Destroyed: ", this.mobile);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
+            }
+            finally {
+                this.client._destroyed = true;
+                if (this.client._sender && typeof this.client._sender.disconnect === 'function') {
+                    await this.client._sender.disconnect();
+                }
+            }
+            this.client = null;
+            // MEMORY FIX: Clear session reference on cleanup
+            // Note: DeduplicatingSession doesn't need explicit disposal, but we clear the reference
+            this.session = null;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
+            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error);
+        }
+    }
+}
+// Global registry of active instances keyed by mobile
+TelegramManager.activeInstances = new Map();
+TelegramManager.runtimeRecovery = null;
+TelegramManager.lastRuntimeRecoveryAt = null;
+TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS = 20 * 60 * 1000;
+TelegramManager.RPC_LIVENESS_CACHE_MS = 60 * 1000;
 
 
 /***/ },
