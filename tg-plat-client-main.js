@@ -53647,6 +53647,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEFAULT_PICTURE_CONCURRENCY: () => (/* binding */ DEFAULT_PICTURE_CONCURRENCY),
 /* harmony export */   MAX_HELD_EVENTS: () => (/* binding */ MAX_HELD_EVENTS),
+/* harmony export */   MAX_STUCK: () => (/* binding */ MAX_STUCK),
 /* harmony export */   MAX_WAITING: () => (/* binding */ MAX_WAITING),
 /* harmony export */   pictureConcurrency: () => (/* binding */ pictureConcurrency),
 /* harmony export */   pictureEventQueue: () => (/* binding */ pictureEventQueue),
@@ -53668,8 +53669,10 @@ __webpack_require__.r(__webpack_exports__);
  * burst of screenshots can wait minutes. (The old 60 s age drop was a 2026-01 "MEMORY FIX" against pile-up while
  * processing was stuck; that purpose is now kept by the held-event bound below and the stuck-slot release.)
  *
- * Stuck: an analysis still running after stuckAfterMs() frees its slot (log + ops notice); it keeps running and its picture
- * stays backed up until it settles.
+ * Stuck: an analysis still running after stuckAfterMs() frees its slot for OTHER chats (log + ops notice); it keeps running,
+ * its chat's next picture waits for it, and its picture stays backed up until it settles. At most MAX_STUCK analyses are
+ * released this way; beyond that a stuck analysis keeps its slot (error log + ops notice), so analyses in flight (each
+ * holding its photo bytes) stay bounded at pictureConcurrency() + MAX_STUCK.
  *
  * Restart safety: each picture is backed up as {chatId, msgId} (`tgaut::q::pictures::{clientId}::{mobile}`) from enqueue
  * until it is handled (analysed and answered, or failed and deleted); at boot the message is re-read from Telegram and
@@ -53694,6 +53697,8 @@ const MAX_HELD_EVENTS = 50;
 const MAX_WAITING = 500;
 const DEFAULT_PICTURE_CONCURRENCY = 3;
 const MAX_PICTURE_CONCURRENCY = 10;
+/** Stuck analyses whose slot may be freed; further stuck ones keep their slot. */
+const MAX_STUCK = 3;
 const STUCK_MARGIN_MS = 60000;
 const PARK_NOTICE_EVERY_MS = 10 * 60000;
 const PICTURE_BACKUP_TTL_MS = 60 * 60000;
@@ -53744,7 +53749,7 @@ class PictureEventQueue {
             this.pump();
         });
     }
-    /** Starts waiting pictures while a slot is free, taking the oldest picture of a chat that has none running. */
+    /** Starts waiting pictures while a slot is free, taking the oldest picture of a chat that has none running (or stuck). */
     pump() {
         const limit = pictureConcurrency();
         while (this.running.size < limit) {
@@ -53756,7 +53761,7 @@ class PictureEventQueue {
         }
     }
     chatBusy(chatId) {
-        for (const slot of this.running)
+        for (const slot of [...this.running, ...this.stuck])
             if (slot.chatId === chatId)
                 return true;
         return false;
@@ -53784,13 +53789,22 @@ class PictureEventQueue {
         }
     }
     markStuck(slot, limitMs) {
-        if (!this.running.delete(slot))
+        if (!this.running.has(slot))
             return;
+        if (this.stuck.size >= MAX_STUCK) {
+            logger.error(`[PICTURE QUEUE] analysis for ${slot.chatId} still running after ${Math.round(limitMs / 1000)} s and ${this.stuck.size} are already stuck: slot kept (running: ${this.running.size}, waiting: ${this.picEventsQueue.length})`);
+            void (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_5__.notifyChat)(slot.chatId, {
+                title: "Picture analysis stuck",
+                summary: `Still running after ${Math.round(limitMs / 1000)} s with ${this.stuck.size} other analyses stuck: its slot is kept, so the queue runs slower. It is answered if it finishes.`,
+            });
+            return;
+        }
+        this.running.delete(slot);
         this.stuck.add(slot);
         logger.warn(`[PICTURE QUEUE] analysis for ${slot.chatId} still running after ${Math.round(limitMs / 1000)} s: treated as stuck, slot freed (picture stays backed up until it finishes; stuck now: ${this.stuck.size})`);
         void (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_5__.notifyChat)(slot.chatId, {
             title: "Picture analysis stuck",
-            summary: `Still running after ${Math.round(limitMs / 1000)} s; the next picture was started. It is answered if it finishes.`,
+            summary: `Still running after ${Math.round(limitMs / 1000)} s; the next picture of another chat was started. It is answered if it finishes.`,
         });
         this.pump();
     }
@@ -57127,6 +57141,15 @@ function showDeliveredRecently(chatId) {
 }
 // Waiting for / asking where the call is: never a complaint about the last call (payment words are checked too).
 const WAITING_FOR_CALL = ['waiting', 'why no call', 'why not call', 'not coming', 'not calling', 'kab', 'where', 'nahi aaya', 'nhi aaya', 'nahi aya', 'nhi aya', 'nahi aayi', 'nhi aayi'];
+// Short waiting/payment tokens matched as whole words ("pay" also as a word start: paying, paytm): a substring match took
+// "worst"/"first" for 'rs' and "want" for 'ant'. Digits may touch them ("150rs").
+const SHORT_WAITING_TOKENS = ['rs', 'ant', 'amt', 'pay', 'kab', 'where'];
+const SHORT_WAITING_WORD = /(?<![a-z])(?:rs|ant|amt|kab|where|pay[a-z]*)(?![a-z])/i;
+/** waitingForCall with the short tokens as whole words (see SHORT_WAITING_WORD). */
+function waitingForCallWords(text, paymentWords) {
+    const long = [...paymentWords, 'paid', ...WAITING_FOR_CALL].filter((term) => !SHORT_WAITING_TOKENS.includes(term));
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, long) || SHORT_WAITING_WORD.test(text);
+}
 // "in this price what's the mins?" / "is price me kitne min": minutes for the price already paid, not a price question.
 const MINUTES_FOR_THIS_PRICE = /\b(?:this|that|same)\s+(?:price|amount|rate)\b|\b(?:is|iss|isi)\s+(?:price|amount|rate)\s+(?:me|mein|mai|mei|main|pe|par)\b/;
 /**
@@ -57527,7 +57550,7 @@ const paidPatterns = [
             // next call, not a bare minutes message about the last one: never callOverMessages. Leave it to the patterns
             // below (payment claim, waiting/busy replies). A duration question ("kab tak call hoga?") still gets its tier
             // answer; one that states the minutes already waited ("10 min ho gaye call kab?") is waiting, not a question.
-            if (minutesAfterShow && waitingForCall && (intent !== 'question' || durationMinutes !== -1)) {
+            if (minutesAfterShow && waitingForCallWords(text, PAYMENT_ARRAY) && (intent !== 'question' || durationMinutes !== -1)) {
                 return false;
             }
             if (!minutesAfterShow && !minutesForPrice && isDurationExcluded(text) && !typoTolerantDurationQuestion) {
@@ -69066,6 +69089,11 @@ async function replyToNonPaymentPicture(event, chatId, imageDetails) {
         _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.incrementInvalidPhotoCount(chatId);
     }
 }
+/** When the picture reached Telegram (message date, seconds), never later than now; now when the date is missing. */
+function pictureArrivalMs(event, nowMs = Date.now()) {
+    const seconds = Number(event.message?.date);
+    return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, nowMs) : nowMs;
+}
 async function processImage(event) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     // Set once a payment's credit is claimed; undone if the credit then throws (the payer's retry must not be a "repeat").
@@ -69229,19 +69257,30 @@ async function processImage(event) {
                                 if (amount > 11) {
                                     const didPayOthers = await flagCrossClientPayment(chatId, db, text, broadcastName, blockedAnswering);
                                     const { payAmount } = userDetails;
-                                    const isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__["default"])(imageDetails.time, userDetails);
+                                    // Every recency rule is judged at the picture's arrival, not at the end of a queue wait + analysis
+                                    // (minutes): a restart re-analysis then reaches the same verdict (-> claim 'again', "Dupe ignored").
+                                    const arrivalMs = pictureArrivalMs(event);
+                                    // The time-zone move only for a payment to our UPI id (owner 2026-10-21); a served UTR / file is never
+                                    // credited whatever its time (the gate's repeat check runs before the credit rules).
+                                    const payeeOurs = (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.checkPayeeUpi)(imageDetails.payeeUpiId, ownVpas().map((v) => v.split("&")[0])) === "own";
+                                    let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs });
                                     // The gate (repeat / fake-edited / old-time / credit claim) runs around handleMyPayment; when it
                                     // handled the screenshot it has already replied and nothing below runs.
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails);
                                     // A PhonePe transaction id carries the real payment moment; it beats a missing or edited printed time.
-                                    const paymentMs = (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.phonePeTxnTimeMs)(imageDetails.text)
-                                        ?? (isWithinPastTenMinutesImage.isValid ? (isWithinPastTenMinutesImage.paymentMs ?? null) : null);
+                                    const paymentMsOf = (check) => (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.phonePeTxnTimeMs)(imageDetails.text) ?? (check.isValid ? (check.paymentMs ?? null) : null);
+                                    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMsOf(isWithinPastTenMinutesImage)));
+                                    if (!session && isWithinPastTenMinutesImage.timezoneShiftMin !== undefined) {
+                                        // No store: whether the UTR / file was already credited is unknown, so the time is judged as read.
+                                        logger.warn(`[ProcessImage] ${chatId}: payment gate unavailable, time-zone move not applied`);
+                                        isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__["default"])(imageDetails.time, userDetails, arrivalMs);
+                                    }
                                     const judged = await flow.judge({
-                                        session: await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs)),
+                                        session,
                                         canReply: userDetails.canReply,
                                         check: isWithinPastTenMinutesImage,
-                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_29__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers),
-                                        nowMs: Date.now(),
+                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_29__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers, arrivalMs),
+                                        nowMs: arrivalMs,
                                     });
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
@@ -79041,6 +79080,8 @@ function resetPaymentChatGuard() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TIMEZONE_OFFSETS_MIN: () => (/* binding */ TIMEZONE_OFFSETS_MIN),
+/* harmony export */   callTimeAsOf: () => (/* binding */ callTimeAsOf),
 /* harmony export */   "default": () => (/* binding */ isRecentValidPayment),
 /* harmony export */   parsePaymentTime: () => (/* binding */ parsePaymentTime),
 /* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime)
@@ -79072,6 +79113,33 @@ const IST_DATE = { day: "2-digit", month: "2-digit", year: "numeric", timeZone: 
 const FUTURE_SKEW_MS = 15 * MINUTE_MS;
 /** How many days a future date may be moved back when its clock is right (a misread day, e.g. "21st Oct 26" read as 26 Oct). */
 const MAX_DATE_SHIFT_DAYS = 31;
+/**
+ * A phone set to another time zone prints its own wall clock: the minutes that clock differs from IST (negative =
+ * behind IST) for the zones payers use. A payment time that is not fresh but is fresh under the normal rules once moved
+ * by one of these is moved by it (ramya1 1913384761 2026-10-21: 22:34 on a UTC+4 phone, sent 00:05 IST). Owner
+ * (2026-10-21): only for a payment to our UPI id whose UTR / file was never credited (the caller decides).
+ */
+const TIMEZONE_OFFSETS_MIN = [
+    -30, // UTC+5: Pakistan
+    -60, // UTC+4:30: Afghanistan
+    -90, // UTC+4: UAE, Oman (Gulf)
+    -120, // UTC+3:30: Iran
+    -150, // UTC+3: Saudi Arabia, Qatar, Kuwait, Bahrain, Iraq, East Africa
+    -210, // UTC+2: Eastern Europe winter, Egypt, South Africa; Central Europe summer
+    -270, // UTC+1: Central Europe winter, West Africa; UK summer
+    -330, // UTC+0: UK winter, Ghana, Iceland
+    -510, // UTC-3: Brazil, Argentina; Atlantic Canada summer
+    -570, // UTC-4: US / Canada Eastern summer; Atlantic winter
+    -630, // UTC-5: US / Canada Eastern winter; Central summer
+    -690, // UTC-6: US / Canada Central winter; Mountain summer
+    -750, // UTC-7: US / Canada Mountain winter; Pacific summer
+    -810, // UTC-8: US / Canada Pacific winter
+    15, // UTC+5:45: Nepal
+    30, // UTC+6: Bangladesh
+    60, // UTC+6:30: Myanmar
+    90, // UTC+7: Thailand, Vietnam, Indonesia (west)
+    150, // UTC+8: Singapore, Malaysia, Philippines, China
+];
 const INVALID = Object.freeze({ isValid: false, result: false });
 /** A provider payment time string as a Date, or null when unparseable. No year handling. */
 function parseRawPaymentTime(input) {
@@ -79102,6 +79170,39 @@ function parsePaymentTime(input, now = new Date()) {
     }
     return date;
 }
+/** A time up to FUTURE_SKEW_MS ahead of `nowMs` is the phone's clock running fast: judged as `nowMs`. */
+function skewToNow(paymentMs, nowMs) {
+    return paymentMs > nowMs && paymentMs - nowMs <= FUTURE_SKEW_MS ? nowMs : paymentMs;
+}
+/**
+ * The user's last call as it stood when the picture arrived: a call started after `atMs` (e.g. the call this very
+ * payment bought, seen when a restart analyses the picture again) is not "the last call" for this picture, so it
+ * counts as no call (0). An unset callTime stays unset.
+ */
+function callTimeAsOf(callTime, atMs) {
+    return typeof callTime === "number" && callTime > atMs ? 0 : callTime;
+}
+/**
+ * A time off by a time-zone gap (TIMEZONE_OFFSETS_MIN): the gap whose move makes it fresh under the normal rules (the
+ * window, or up to FUTURE_SKEW_MS ahead), the closest to now when two do.
+ */
+function correctTimezoneOffset(paymentMs, nowMs, inWindow) {
+    let best = null;
+    for (const offsetMin of TIMEZONE_OFFSETS_MIN) {
+        const moved = paymentMs - offsetMin * MINUTE_MS;
+        const distance = Math.abs(moved - nowMs);
+        if (inWindow(skewToNow(moved, nowMs)) && (!best || distance < best.distance))
+            best = { offsetMin, distance };
+    }
+    if (!best)
+        return null;
+    const gap = `${best.offsetMin < 0 ? "-" : "+"}${Math.floor(Math.abs(best.offsetMin) / 60)}:${String(Math.abs(best.offsetMin) % 60).padStart(2, "0")}`;
+    return {
+        paymentMs: skewToNow(paymentMs - best.offsetMin * MINUTE_MS, nowMs),
+        offsetMin: best.offsetMin,
+        description: `input time ${gap} h off IST (phone in another time zone), moved by ${-best.offsetMin} min`,
+    };
+}
 /** A time ~12 h ahead (PM read as AM) or ~12 h behind (AM read as PM), moved back by 12 h. */
 function correctAmPmMisread(paymentMs, nowMs) {
     if (paymentMs > nowMs) {
@@ -79124,7 +79225,7 @@ function correctFutureDateMisread(paymentMs, nowMs, inWindow) {
     const days = Math.round((paymentMs - nowMs) / DAY_MS);
     if (days < 1 || days > MAX_DATE_SHIFT_DAYS)
         return null;
-    const shifted = paymentMs - days * DAY_MS;
+    const shifted = skewToNow(paymentMs - days * DAY_MS, nowMs);
     return inWindow(shifted) ? { paymentMs: shifted, description: `input date ${days} day(s) in the future with a matching clock, moved back ${days} day(s)` } : null;
 }
 function istLabel(date) {
@@ -79146,23 +79247,28 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
 }
 /**
  * Is the screenshot's payment time recent? Within 10 minutes, or 5 when the user's last call was in the
- * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and corrected first (ops are told).
+ * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and, with `timezoneShift`, one off by a time-zone
+ * gap as a phone in another zone (TIMEZONE_OFFSETS_MIN), and corrected first (ops are told). `timezoneShift` only for a
+ * payment to our UPI id whose UTR / file was never credited (owner 2026-10-21; processImage decides).
+ *
+ * `atMs`: when the picture arrived (Telegram message date), not when its analysis finished: queue waits and the
+ * vision chain can take minutes, and a restart analyses a picture again later. Defaults to now.
  */
-function isRecentValidPayment(input, userDetails) {
+function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) {
     try {
         if (!input || typeof input !== "string" || input.trim() === "") {
             notifyPaymentTime("invalidInput", "Time empty", undefined, [{ label: "Input", value: String(input) }]);
             return { ...INVALID };
         }
         const trimmedInput = input.trim();
-        const now = new Date();
+        const now = new Date(atMs);
         const parsed = parsePaymentTime(trimmedInput, now);
         if (!parsed) {
             notifyPaymentTime("invalidIso", "Time unparseable", undefined, [{ label: "Input", value: trimmedInput }]);
             return { ...INVALID };
         }
         const nowMs = now.getTime();
-        const lastCallTime = userDetails.callTime || 0;
+        const lastCallTime = callTimeAsOf(userDetails.callTime, nowMs) || 0;
         const afterCall = lastCallTime > 0 && nowMs - lastCallTime <= WINDOW_MS;
         const windowMs = afterCall ? WINDOW_AFTER_CALL_MS : WINDOW_MS;
         const windowLabel = afterCall ? "5 minutes" : "10 minutes";
@@ -79170,17 +79276,24 @@ function isRecentValidPayment(input, userDetails) {
         const report = (ms) => `${istLabel(now)} vs ${istLabel(new Date(ms))} (checking within ${windowLabel})`;
         let paymentMs = parsed.getTime();
         let time = report(paymentMs);
+        let timezoneShiftMin;
         if (paymentMs > nowMs && paymentMs - nowMs <= FUTURE_SKEW_MS) {
             logger.log(`[payment-time] input="${trimmedInput}" ${((paymentMs - nowMs) / MINUTE_MS).toFixed(2)} min ahead: phone clock skew, judged as now`);
             paymentMs = nowMs;
         }
         else if (!inWindow(paymentMs)) {
             const amPm = correctAmPmMisread(paymentMs, nowMs);
-            const corrected = amPm ?? correctFutureDateMisread(paymentMs, nowMs, inWindow);
+            const zone = amPm || !opts.timezoneShift ? null : correctTimezoneOffset(paymentMs, nowMs, inWindow);
+            const corrected = amPm ?? zone ?? correctFutureDateMisread(paymentMs, nowMs, inWindow);
             if (corrected) {
-                paymentMs = corrected.paymentMs;
+                // A corrected time a few minutes ahead is the same fast phone clock as above: judged as now.
+                paymentMs = skewToNow(corrected.paymentMs, nowMs);
                 time = report(paymentMs);
-                notifyPaymentTime(amPm ? "timeAdjustment" : "dateAdjustment", amPm ? "Time adjusted" : "Date adjusted", corrected.description, [{ label: "Input", value: trimmedInput }, { label: "Window", value: windowLabel }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, time);
+                if (zone) {
+                    timezoneShiftMin = -zone.offsetMin;
+                    logger.log(`[payment-time] input="${trimmedInput}" ${zone.description} | ${time}`);
+                }
+                notifyPaymentTime(amPm ? "timeAdjustment" : zone ? "timezoneAdjustment" : "dateAdjustment", amPm ? "Time adjusted" : zone ? "Timezone adjusted" : "Date adjusted", corrected.description, [{ label: "Input", value: trimmedInput }, { label: "Window", value: windowLabel }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, time);
             }
         }
         if (paymentMs > nowMs) {
@@ -79191,7 +79304,7 @@ function isRecentValidPayment(input, userDetails) {
         }
         const result = inWindow(paymentMs);
         logger.log(`[payment-time] input="${trimmedInput}" paymentAgeMin=${((nowMs - paymentMs) / MINUTE_MS).toFixed(2)} window=${windowLabel} lastCallAgoMin=${lastCallTime > 0 ? ((nowMs - lastCallTime) / MINUTE_MS).toFixed(2) : "N/A"} result=${result} | ${time}`);
-        return { isValid: true, result, time, paymentMs };
+        return { isValid: true, result, time, paymentMs, ...(timezoneShiftMin !== undefined ? { timezoneShiftMin } : {}) };
     }
     catch (error) {
         notifyPaymentTime("validationError", "Time check failed", undefined, [{ label: "Input", value: String(input) }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error).message);
@@ -80044,11 +80157,12 @@ function sameAmount(a, b) {
     return a === b || withoutGlyph(a) === b || a === withoutGlyph(b) || withoutGlyph(a) === withoutGlyph(b);
 }
 /**
- * Judge a screenshot against every CREDITED screenshot that shares its file, UTR or picture.
+ * Judge a screenshot against every CREDITED screenshot that shares its file, UTR or picture, and against this chat's
+ * own recently credited screenshots (`chatServed`).
  * Repeat beats edited beats clear. A near picture alone is never a repeat (two genuine receipts from one app look
  * alike); it is "edited" only when the numbers changed AND the new screenshot has no fresh real reference (isRealReference).
  */
-function classifyAgainstServed(facts, matches) {
+function classifyAgainstServed(facts, matches, chatServed = []) {
     let edited = null;
     for (const m of matches) {
         const row = m.doc;
@@ -80090,6 +80204,16 @@ function classifyAgainstServed(facts, matches) {
         const numbersChanged = !sameAmount(row.amount, facts.amount) || (!!facts.utr && !!rowUtr && facts.utr !== rowUtr);
         if (numbersChanged && !freshReference && !otherPayment)
             edited ?? (edited = { kind: 'edited', reason: 'EDITED_PICTURE', matched: row });
+    }
+    // A different screenshot of a payment this chat was already credited for: neither shows a UTR, same amount, both
+    // payment times readable and agreeing (owner 2026-10-21). A UTR on either side decides by the UTR rule above.
+    for (const row of chatServed) {
+        if (!sameChat(facts, row) || row.telegramMsgId === facts.msgId || facts.utr || normalizeUtr(row.utr))
+            continue;
+        const theirTime = rowTimeMs(row);
+        if (sameAmount(row.amount, facts.amount) && theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
+            return { kind: 'repeat', by: 'time', sameChat: true, matched: row };
+        }
     }
     return edited ?? { kind: 'clear' };
 }
@@ -80188,7 +80312,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', race: 'payment' };
+const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', time: 'amount + time (no UTR)', race: 'payment' };
 /** proof-check BLOCK reasons that rest on text printed on the screenshot (not on model judgement). */
 const TEXT_PROVEN_BLOCKS = new Set(['DISCLAIMER_LONG', 'DISCLAIMER_SHORT', 'BLOCKLIST_A', 'AI_WATERMARK']);
 /**
@@ -80308,6 +80432,12 @@ class PaymentFlow {
         await this.io.reply(this.pick(_proof_check_messages__WEBPACK_IMPORTED_MODULE_2__.OLD_PAYMENT_MESSAGES));
         await this.io.notifyOps({ title: 'Repeat payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
     }
+    /** Owner (2026-10-21): a payment already credited in ANOTHER chat / persona is not ours: no credit, no block. */
+    async notMine(chatId, by, where) {
+        this.io.warn(`[payment-gate] payment credited elsewhere for ${chatId} (by ${by}, ${where}): not my payment, not crediting`);
+        await this.io.reply(_messages__WEBPACK_IMPORTED_MODULE_1__.NOT_MY_PAYMENT_MESSAGE);
+        await this.io.notifyOps({ title: 'Not my payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
+    }
     /**
      * The credit decision for a payment screenshot to us: the gate around `creditRules` (handleMyPayment).
      * `handled` = the gate already replied (repeat, fake/edited, old-time request, lost credit race): no credit.
@@ -80324,7 +80454,10 @@ class PaymentFlow {
             return { handled: true };
         }
         if (session && gate.kind === 'repeat') {
-            await this.repeat(session.facts.chatId, gate.by, gate.sameChat ? 'already credited in this chat' : `already credited in ${gate.matched.profile}/${gate.matched.chatId}`);
+            if (gate.sameChat)
+                await this.repeat(session.facts.chatId, gate.by, 'already credited in this chat');
+            else
+                await this.notMine(session.facts.chatId, gate.by, `already credited in ${gate.matched.profile}/${gate.matched.chatId}`);
             return { handled: true };
         }
         if (session && gate.kind === 'edited') {
@@ -80359,7 +80492,12 @@ class PaymentFlow {
                     await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
                     return { handled: true };
                 }
-                if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
+                // Only where the credit rules needed a recent time: the ones that accept at any time (own name, no videos
+                // yet, ₹200+) credited old times before this hold existed and still do. Repeats were stopped above.
+                if (verdict.anyTime && (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
+                    this.io.log(`[payment-gate] ${f.chatId}: old payment time (${check.time ?? ''}) but the credit rules accept it at any time: crediting`);
+                }
+                else if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
                     const answered = await session.answeredOldTimeAsk();
                     if (answered && (await session.resolve(answered))) {
                         // Second, different screenshot after the request: credit by the normal rules, never ask twice.
@@ -80379,8 +80517,14 @@ class PaymentFlow {
         if (verdict.isvalid && session) {
             const claim = await session.claim();
             if (claim === 'lost') {
-                if (!blocked)
-                    await this.repeat(session.facts.chatId, 'race', 'credited by another chat/persona at the same moment');
+                if (!blocked) {
+                    // The winner's row is served now: re-check to tell another chat/persona from this one.
+                    const winner = await session.check();
+                    if (winner.kind === 'repeat' && !winner.sameChat)
+                        await this.notMine(session.facts.chatId, 'race', `credited in ${winner.matched.profile}/${winner.matched.chatId} at the same moment`);
+                    else
+                        await this.repeat(session.facts.chatId, 'race', 'credited at the same moment');
+                }
                 return { handled: true };
             }
             if (claim === 'again') {
@@ -80439,6 +80583,8 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:proof-gate');
 /** A payment reply must not wait on a slow database. */
 const STORE_TIMEOUT_MS = 4000;
+/** This chat's newest rows scanned for a credited screenshot of the same payment (no UTR on either). */
+const CHAT_SERVED_SCAN = 20;
 function withTimeout(work, ms, fallback, what) {
     let timer;
     return Promise.race([
@@ -80463,11 +80609,14 @@ class GateSession {
     /** Repeat / edited against credited rows, else whether it answers an open request, else clear. Fails open to clear. */
     async check() {
         const f = this.facts;
-        const served = await this.bound(this.store.servedCandidates({
-            chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
-            ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
-        }), null, 'servedCandidates');
-        const verdict = served ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served) : { kind: 'clear' };
+        const [served, chatServed] = await Promise.all([
+            this.bound(this.store.servedCandidates({
+                chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
+                ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
+            }), null, 'servedCandidates'),
+            this.chatServed(),
+        ]);
+        const verdict = served || chatServed.length > 0 ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served ?? [], chatServed) : { kind: 'clear' };
         if (verdict.kind !== 'clear')
             return verdict;
         const open = await this.openAsks();
@@ -80480,6 +80629,17 @@ class GateSession {
         if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) && open.some((r) => r.telegramMsgId !== f.msgId && ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now) || (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now))))
             return { kind: 'needs-real-page' };
         return verdict;
+    }
+    /**
+     * This chat's own credited rows, for a different screenshot of a credited payment that neither shows a UTR
+     * (classifyAgainstServed). Read only when that rule can apply: no UTR, payment time readable. [] on failure.
+     */
+    async chatServed() {
+        const f = this.facts;
+        if (f.utr || f.timeMs === null || !this.store.recentForChat)
+            return [];
+        const rows = await this.bound(this.store.recentForChat(f.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
+        return rows.filter((r) => !!r.servedAt && r.profile === f.profile && r.telegramMsgId !== f.msgId);
     }
     /** Open requests of this chat (answer window), newest first; [] on failure. */
     async openAsks() {
@@ -80635,9 +80795,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FRAUD_REMINDER_MESSAGES: () => (/* binding */ FRAUD_REMINDER_MESSAGES),
 /* harmony export */   FRAUD_WARNING_MESSAGES: () => (/* binding */ FRAUD_WARNING_MESSAGES),
 /* harmony export */   FUTURE_TIME_ASK_MESSAGES: () => (/* binding */ FUTURE_TIME_ASK_MESSAGES),
+/* harmony export */   NOT_MY_PAYMENT_MESSAGE: () => (/* binding */ NOT_MY_PAYMENT_MESSAGE),
 /* harmony export */   OLD_TIME_ASK_MESSAGES: () => (/* binding */ OLD_TIME_ASK_MESSAGES),
 /* harmony export */   PAYMENT_ASK_REPEAT_MESSAGES: () => (/* binding */ PAYMENT_ASK_REPEAT_MESSAGES)
 /* harmony export */ });
+/** A payment to someone else, or one already credited in another chat / persona (screenshot/helpers.ts otherClient). */
+const NOT_MY_PAYMENT_MESSAGE = "**This is not my Payment!!\nBye!!**";
 /** Owner (2026-10-13): fake / edited screenshots get a rude reply; genuine-looking doubts stay polite. */
 const FRAUD_WARNING_MESSAGES = [
     "Ye edited hai na? 😒\nOpen your payment app History, tap the payment and send me that page. 15 mins, else I'm blocking you",
@@ -80884,6 +81047,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _proof_gate_messages__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../proof-gate/messages */ "./src/payments/proof-gate/messages.ts");
+
 
 
 
@@ -80954,7 +81119,7 @@ const PAYMENT_MSG = {
     callOver: "**Your Call is Over Baby!!**\nPay again if u want more**",
     suspiciousOld: `It is Old Payment!!\n\n**Pay me Now Again!!**\nSend me Latest Screenshot Babyy!!`,
     suspiciousNotMine: `Seems its Not my Payment!!\n\nSend me Full Screenshot of **My Payment** with **Payment Time** also, I will verify!!`,
-    otherClient: "**This is not my Payment!!\nBye!!**",
+    otherClient: _proof_gate_messages__WEBPACK_IMPORTED_MODULE_10__.NOT_MY_PAYMENT_MESSAGE,
 };
 /** Ops notice title per reject reply: says why, so "Not my payment" is only used for a payment to someone else. */
 const REJECT_TITLE = {
@@ -80975,8 +81140,9 @@ const reject = (reason, title = REJECT_TITLE[reason]) => ({ isvalid: false, msg:
  *  - our persona name on it: accept, no time check
  *  - another client's name on it (and not ours): reject, limit the user 30 min
  *  - no known name: judged by the payment time (see judgeRecentTime / judgeUnreadableTime / judgePaidToOthers)
+ * `atMs`: when the picture arrived (pass the same moment as to isRecentValidPayment). Defaults to now.
  */
-async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutesImage, didPaidToOthers) {
+async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutesImage, didPaidToOthers, atMs = Date.now()) {
     const text = `${imageDetails.payeeName} ${imageDetails.payerName} ${imageDetails.text}`.toLowerCase();
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
     const otherclients = db.getClientFirstNames();
@@ -80990,7 +81156,7 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     logger.log(`ENTRY | chatId=${chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} isWithin10minValid=${isWithinPastTenMinutesImage.isValid} isWithin10minResult=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
     if (myNameExists) {
         logger.log(`SCENARIO: My name in payment | ACCEPT (no time check) | chatId=${chatId}`);
-        return accept();
+        return { ...accept(), anyTime: true };
     }
     if (othersNameExists) {
         logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${chatId}`);
@@ -80999,15 +81165,23 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
         return reject("otherClient");
     }
     logger.log(`SCENARIO: No known names in payment | validating time & didPaidToOthers | chatId=${chatId}`);
-    const ctx = { image: imageDetails, user: userDetails, check: isWithinPastTenMinutesImage, videoCount };
+    const ctx = { image: imageDetails, user: userDetails, check: isWithinPastTenMinutesImage, videoCount, atMs };
     if (didPaidToOthers)
         return judgePaidToOthers(ctx);
-    return isWithinPastTenMinutesImage.result ? judgeRecentTime(ctx) : judgeUnreadableTime(ctx);
+    const verdict = isWithinPastTenMinutesImage.result ? judgeRecentTime(ctx) : judgeUnreadableTime(ctx);
+    // judgeUnreadableTime accepts these at any time (rules unchanged since before the 2026-10-13 proof gate), so an old
+    // payment time must not hold them either (ramya1 1913384761 2026-10-21: ₹50, no videos, asked for a details page).
+    return verdict.isvalid && acceptsAnyTime(imageDetails, videoCount) ? { ...verdict, anyTime: true } : verdict;
+}
+/** No known name, not paid to others: accepted whatever the time (judgeUnreadableTime's first rule). */
+function acceptsAnyTime(image, videoCount) {
+    // Written as the negation on purpose: a missing/NaN amount is accepted (same as judgeUnreadableTime).
+    return !(videoCount > 0 && image.amount < NO_TIME_CHECK_AMOUNT);
 }
 /** No known name, the time is inside the window: accept unless the time contradicts the user's last call. */
-function judgeRecentTime({ image, user, check, videoCount }) {
+function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
-    const now = new Date();
+    const now = new Date(atMs);
     const nowMs = now.getTime();
     // Judge the moment the time-window check accepted (incl. its AM/PM correction); re-parsing the raw time
     // dropped that correction and could reject the payment it had just accepted.
@@ -81016,7 +81190,7 @@ function judgeRecentTime({ image, user, check, videoCount }) {
     const ageMins = (age / MINUTE_MS).toFixed(2);
     const notFuture = paymentMs <= nowMs;
     // callTime may be unset: every comparison with it is then false, on purpose (kept as written).
-    const callTime = user.callTime;
+    const callTime = (0,_payment_time__WEBPACK_IMPORTED_MODULE_9__.callTimeAsOf)(user.callTime, nowMs);
     const callTimeAgoMins = callTime ? ((nowMs - callTime) / MINUTE_MS).toFixed(2) : "N/A";
     logger.log(`Sub-scenario: isWithin10min=true | timeDiff=${age}ms (${ageMins} mins ago) callTimeAgo=${callTimeAgoMins} mins paymentUTC<=now=${notFuture} callTime<paymentTime=${callTime < paymentMs}`);
     if (age <= ACCEPT_WITHIN_MS && notFuture && callTime < paymentMs) {
@@ -81024,8 +81198,8 @@ function judgeRecentTime({ image, user, check, videoCount }) {
         return accept();
     }
     const leniencyVideos = videoCount < LENIENT_VIDEO_COUNT;
-    const callOver5MinsAgo = callTime < Date.now() - CALL_GAP_MS;
-    const callWithin5Mins = callTime >= Date.now() - CALL_GAP_MS;
+    const callOver5MinsAgo = callTime < nowMs - CALL_GAP_MS;
+    const callWithin5Mins = callTime >= nowMs - CALL_GAP_MS;
     if (leniencyVideos && callOver5MinsAgo) {
         logger.log(`SCENARIO: No known names + time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
         return accept();
@@ -81042,12 +81216,11 @@ function judgeRecentTime({ image, user, check, videoCount }) {
     return reject("oldPayment");
 }
 /** No known name, the time is outside the window or unreadable. */
-function judgeUnreadableTime({ image, user, check, videoCount }) {
+function judgeUnreadableTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
-    const callOver5MinsAgo = user.callTime < Date.now() - CALL_GAP_MS;
+    const callOver5MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_9__.callTimeAsOf)(user.callTime, atMs) < atMs - CALL_GAP_MS;
     logger.log(`Sub-scenario: isWithin10min=false | videos=${videoCount} amount=${image.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${check.isValid}`);
-    // Written as the negation on purpose: a missing/NaN amount must take this accept branch.
-    if (!(videoCount > 0 && image.amount < NO_TIME_CHECK_AMOUNT)) {
+    if (acceptsAnyTime(image, videoCount)) {
         logger.log(`SCENARIO: No known names + time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
         return accept();
     }
@@ -81064,9 +81237,9 @@ function judgeUnreadableTime({ image, user, check, videoCount }) {
     return reject("timeUnclear", check.misread ? MISREAD_TITLE : REJECT_TITLE.timeUnclear);
 }
 /** No known name and the screenshot shows a payment to someone else too: needs a recent time and no call in the last 3 min. */
-async function judgePaidToOthers({ user, check }) {
+async function judgePaidToOthers({ user, check, atMs }) {
     const chatId = user.chatId;
-    const callOver3MinsAgo = user.callTime < Date.now() - PAID_OTHERS_CALL_GAP_MS;
+    const callOver3MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_9__.callTimeAsOf)(user.callTime, atMs) < atMs - PAID_OTHERS_CALL_GAP_MS;
     logger.log(`Sub-scenario: didPaidToOthers=true | isWithin10min=${check.result} callOver3MinsAgo=${callOver3MinsAgo}`);
     if (check.result && callOver3MinsAgo) {
         logger.log(`SCENARIO: No known names + paid to others + time recent + call over 3mins | ACCEPT | chatId=${chatId}`);
@@ -81408,12 +81581,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   parseImage: () => (/* binding */ parseImage)
 /* harmony export */ });
 /* harmony import */ var _upi__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../upi */ "./src/payments/upi.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:parse-image");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:parse-image");
 function parseImage(imageData) {
     const paymentRelated = isPaymentRelated(imageData) || isPayment((imageData.text || '').toLowerCase());
     const sanitizedData = {
@@ -81442,9 +81617,11 @@ const getupiKeys = () => {
         return [];
     }
 };
+/** This client's own payee ids (clients doc qrId / gpayId), local part: not always in the shared /upi-ids list. */
+const clientUpiKeys = () => (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.clientUpiIds)().map(upiId => upiId.split('@')[0]).filter(Boolean);
 function isPaymentMine(imageData) {
-    const keywordsToCheck = [...getupiKeys(), 'lakshmi', 'lk pvt', 'shetty', 'setti', 'ravva', 'reddy g', 'ddy girl', "paidgirl", "redgir", "137045557", "8000073302", '210249262', "bharatpemerchant", "shetty", "community", "0851610820", 'girls', 'community'];
-    return imageData.wordCount >= 2 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(`${imageData.payeeName} ${imageData.payerName} ${imageData.text}`, keywordsToCheck);
+    const keywordsToCheck = [...getupiKeys(), ...clientUpiKeys(), 'lakshmi', 'lk pvt', 'shetty', 'setti', 'ravva', 'reddy g', 'ddy girl', "paidgirl", "redgir", "137045557", "8000073302", '210249262', "bharatpemerchant", "shetty", "community", "0851610820", 'girls', 'community'];
+    return imageData.wordCount >= 2 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(`${imageData.payeeName} ${imageData.payerName} ${imageData.text}`, keywordsToCheck);
 }
 function isFailedPayment(imageData) {
     return imageData.isFailed;
@@ -81453,13 +81630,13 @@ function isValidPayment(imageData) {
     const text = imageData.text || '';
     // A screen that still has its pay button is never finished, whatever the model says (fallback models call
     // "Proceed To Pay" a success). On such a screen only success words in the text count.
-    const isUnsubmittedPayScreen = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+    const isUnsubmittedPayScreen = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
         'proceed to pay', 'add a message', 'enter upi pin', 'enter your upi pin', 'swipe to pay', 'slide to pay',
     ]);
     const modelSuccess = imageData.isSuccess && !isUnsubmittedPayScreen;
     const hasSuccessSignal = modelSuccess ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paid successfully', 'payment successful', 'transaction successful', 'successful', 'completed', 'payment took', 'debited', 'credited', 'pay again']);
-    const hasReferenceSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['transaction id', 'transaction no', 'transaction number', 'utr', 'ref no', 'reference no', 'reference number', 'rrn']);
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid successfully', 'payment successful', 'transaction successful', 'successful', 'completed', 'payment took', 'debited', 'credited', 'pay again']);
+    const hasReferenceSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['transaction id', 'transaction no', 'transaction number', 'utr', 'ref no', 'reference no', 'reference number', 'rrn']);
     const hasAmountSignal = imageData.amount > 0 || /(?:₹|rs\.?|inr)\s*\d{1,5}|\b\d{2,5}\s*(?:rs|rupees?|₹)\b/i.test(text);
     const hasKnownPayeeSignal = isPaymentMine(imageData);
     const strongEvidenceCount = [
@@ -81470,7 +81647,7 @@ function isValidPayment(imageData) {
     ].filter(Boolean).length;
     const hasStrongCompletionEvidence = (hasSuccessSignal && (hasReferenceSignal || hasAmountSignal || hasKnownPayeeSignal)) ||
         (modelSuccess && imageData.isFinished && strongEvidenceCount >= 2);
-    const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+    const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
         'failed to connect', 'fazlu rehman',
         'genuine paid girl', 'call just',
         'google ads', 'googleads',
@@ -81484,15 +81661,15 @@ function isValidPayment(imageData) {
     // "interactions" marks stats/ads pages, but GPay's chat-thread view of a paid payment says "Your interactions
     // with <payee> will appear here" (meghana1 chat 8784226986, 2026-10-14): void it only without a completed
     // payment to our payee.
-    const hasInteractionsText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['interactions']);
-    const hasPrePaymentPrompt = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [
+    const hasInteractionsText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['interactions']);
+    const hasPrePaymentPrompt = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
         'pay secure', 'pay securely', 'select payment method',
         'unable to process', 'sending money', 'add upi', 'try after',
         'payable', "on tapping", "debit from", 'scan the qr',
         "on pressing", "on clicking",
     ]);
-    const hasPendingOrProcessText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['paying', 'proceed', 'process', 'pending']);
-    const hasEnterAmountText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['enter amount']);
+    const hasPendingOrProcessText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paying', 'proceed', 'process', 'pending']);
+    const hasEnterAmountText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['enter amount']);
     if (hasPrePaymentPrompt) {
         logger.debug(`[ImagePayment] Pre-payment prompt present; strongEvidence=${strongEvidenceCount}, success=${hasSuccessSignal}, ref=${hasReferenceSignal}, amount=${hasAmountSignal}, payee=${hasKnownPayeeSignal}`);
     }
@@ -81503,7 +81680,7 @@ function isValidPayment(imageData) {
         (!hasPrePaymentPrompt || hasStrongCompletionEvidence) &&
         (!hasPendingOrProcessText || (hasPendingOrProcessText && hasStrongCompletionEvidence)) &&
         (!hasEnterAmountText ||
-            (hasEnterAmountText && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.containsAll)(text, ['banking', 'joined', 'pay', 'request']) && hasStrongCompletionEvidence));
+            (hasEnterAmountText && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.containsAll)(text, ['banking', 'joined', 'pay', 'request']) && hasStrongCompletionEvidence));
 }
 function isPaymentRelated(imageData) {
     return imageData.isPayment;
@@ -81511,7 +81688,7 @@ function isPaymentRelated(imageData) {
 function isPayment(textLower) {
     const keywordsToCheck = ["reddy", "paidgirl", 'amount', "ravva", 'balance', "failed", "shetty", "community", "lakshmi", "0851610820",
         'payment', 'successful', 'payment', 'girls', 'shetty', 'lk pvt', '8000073302', 'community', "137045557", '210249262', 'paytmqr6m66o9@ptys', 'success', 'paid', 'phonepe', 'transaction', 'sent secure', 'transfer', 'paytm', 'bhim', ...getupiKeys()];
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(textLower, keywordsToCheck) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(textLower, ['failed to connect', 'fazlu rehman', 'genuine paid girl']);
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(textLower, keywordsToCheck) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(textLower, ['failed to connect', 'fazlu rehman', 'genuine paid girl']);
 }
 function isLocalFailed(imageData) {
     const invalidKeywords = ["failed", "pending", 'not enough', 'will be refund',
@@ -81520,8 +81697,8 @@ function isLocalFailed(imageData) {
         "demo video", , "technical", "server", "blocked", "not debited", "glitch", "unavailable",
         "try a", "after sometime", "not been debited", "exceeded", "refund"];
     const text = imageData.text.toLowerCase();
-    return ((((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, invalidKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['to connect', 'make paytm your default']))
-        || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['process']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['successful', 'completed', 'finished']))));
+    return ((((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, invalidKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['to connect', 'make paytm your default']))
+        || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['process']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['successful', 'completed', 'finished']))));
 }
 
 
