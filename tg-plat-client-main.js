@@ -15615,9 +15615,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT: () => (/* binding */ DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT),
 /* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* binding */ PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   classifyTelegramChannelError: () => (/* binding */ classifyTelegramChannelError),
-/* harmony export */   computeLiveCanSendMsgs: () => (/* binding */ computeLiveCanSendMsgs),
+/* harmony export */   computeLiveCanSendMsgs: () => (/* reexport safe */ _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.computeLiveCanSendMsgs),
 /* harmony export */   deriveSharedChannelVerdict: () => (/* binding */ deriveSharedChannelVerdict),
-/* harmony export */   deriveTelegramChannelLiveFacts: () => (/* binding */ deriveTelegramChannelLiveFacts),
+/* harmony export */   deriveTelegramChannelLiveFacts: () => (/* reexport safe */ _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.deriveTelegramChannelLiveFacts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* binding */ evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* binding */ evaluateChannelSendability),
 /* harmony export */   getChannelDocStaleness: () => (/* binding */ getChannelDocStaleness),
@@ -15626,7 +15626,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isUsableChannelIdForSend: () => (/* binding */ isUsableChannelIdForSend),
 /* harmony export */   mergeHydratedChannelFacts: () => (/* binding */ mergeHydratedChannelFacts),
 /* harmony export */   mergeLiveChannelDocument: () => (/* binding */ mergeLiveChannelDocument),
-/* harmony export */   normalizeChannelId: () => (/* binding */ normalizeChannelId),
+/* harmony export */   normalizeChannelId: () => (/* reexport safe */ _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId),
 /* harmony export */   participantsCountRecentlyChecked: () => (/* binding */ participantsCountRecentlyChecked),
 /* harmony export */   resolveChannelHydrationNeed: () => (/* binding */ resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* binding */ resolvePromotionFailureAction),
@@ -15634,6 +15634,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   toLiveChannelObservation: () => (/* binding */ toLiveChannelObservation)
 /* harmony export */ });
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/channel-live-facts */ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts");
+
+
+// Live facts + normalizer moved to @tg/core (so @tg/dialogs need not depend on this package).
+// Re-exported so the @tg/channel-state API is unchanged.
 
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS = 30;
 const DEFAULT_CHANNEL_DOC_STALE_AFTER_MS = DEFAULT_CHANNEL_DOC_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
@@ -15667,26 +15672,6 @@ const DEFAULT_CRITICAL_FIELDS = [
     'megagroup',
 ];
 /**
- * TRANSFORM-ONLY channelId normalizer: trims, strips a `-100` channel prefix, then any bare
- * leading `-`. It does NOT validate — `"0"`, `"-1000"`, `"12.5"` and `"abc"` are returned as-is
- * (`"0"`, `"0"`, `"12.5"`, `"abc"`), and nullish input yields `''`.
- *
- * ⚠️ There is a SECOND, differently-behaved function with the SAME NAME in this package:
- * `channel-message-promotions/utils/channel-id.ts` VALIDATES and returns `string | null`
- * (`"0"` / `"-1000"` / `12.5` → `null`). Which one you get depends purely on the import path, so
- * check the import before relying on the return contract.
- *
- * Use THIS one to derive a storage/lookup KEY (it always yields a string), and pair it with
- * `isUsableActiveChannelId` from @tg/core when the value is about to be written — activeChannels
- * writes are upserts, so an unusable key mints a junk document. Both apps' dbservices do exactly
- * that pairing.
- */
-function normalizeChannelId(input) {
-    if (input === null || input === undefined)
-        return '';
-    return String(input).trim().replace(/^-100/, '').replace(/^-/, '');
-}
-/**
  * Does this channelId denote a real, usable channel? Normalizes first, then requires a plain
  * positive integer — so `"0"`, `"-1000"` (which normalizes to `"0"`), `""`, `"abc"` and `"12.5"`
  * are all rejected.
@@ -15696,26 +15681,11 @@ function normalizeChannelId(input) {
  * there. Defined locally rather than imported to keep this module dependency-free.
  */
 function isUsableChannelIdForSend(input) {
-    const normalized = normalizeChannelId(input);
+    const normalized = (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(input);
     return normalized.length > 0 && normalized !== '0' && /^\d+$/.test(normalized);
 }
-function deriveTelegramChannelLiveFacts(entity) {
-    const sendMessages = entity.sendMessages === true || entity.defaultBannedRights?.sendMessages === true;
-    const sendPlain = entity.sendPlain === true || entity.defaultBannedRights?.sendPlain === true;
-    return {
-        ...entity,
-        channelId: normalizeChannelId(entity.channelId),
-        broadcast: entity.broadcast === true,
-        restricted: entity.restricted === true,
-        left: entity.left === true,
-        private: entity.private === true,
-        forbidden: entity.forbidden === true,
-        sendMessages,
-        sendPlain,
-    };
-}
 function evaluateChannelSendability(input) {
-    const facts = deriveTelegramChannelLiveFacts(input);
+    const facts = (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.deriveTelegramChannelLiveFacts)(input);
     // Must VALIDATE, not merely normalize. normalizeChannelId is transform-only, so "0" normalizes to
     // the string "0" and "-1000" also normalizes to "0" — both TRUTHY, so a plain `!normalizeChannelId(x)`
     // let a bogus id through this gate and reported it sendable. That also disagreed with
@@ -15742,16 +15712,6 @@ function evaluateChannelSendability(input) {
     if (input.canSendMsgs === false)
         return blocked('canSendMsgs_false', facts);
     return { canSend: true, reason: null, sendMessages: false, sendPlain: false };
-}
-function computeLiveCanSendMsgs(input) {
-    const facts = deriveTelegramChannelLiveFacts(input);
-    return !facts.broadcast
-        && !facts.restricted
-        && !facts.left
-        && !facts.private
-        && !facts.forbidden
-        && !facts.sendMessages
-        && !facts.sendPlain;
 }
 function getChannelDocStaleness(doc, policy = {}) {
     if (!doc) {
@@ -15827,9 +15787,9 @@ function shouldHydrateBeforeFinalReject(doc, policy = {}) {
     return stale.stale;
 }
 function deriveSharedChannelVerdict(input) {
-    const facts = deriveTelegramChannelLiveFacts(input);
+    const facts = (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.deriveTelegramChannelLiveFacts)(input);
     const accountScoped = facts.private === true || facts.left === true;
-    const accountCanSendMsgs = computeLiveCanSendMsgs(facts);
+    const accountCanSendMsgs = (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.computeLiveCanSendMsgs)(facts);
     if (accountScoped) {
         return { accountScoped, accountCanSendMsgs, sharedCanSendMsgs: null, reason: 'account_scoped' };
     }
@@ -15841,7 +15801,7 @@ function deriveSharedChannelVerdict(input) {
     };
 }
 function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
-    const liveFacts = deriveTelegramChannelLiveFacts(liveFactsInput);
+    const liveFacts = (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.deriveTelegramChannelLiveFacts)(liveFactsInput);
     // Only an OPERATOR ban (banned + bannedAt, stamped by the CMS operator path) is durable. A
     // `banned`/`forbidden` without that provenance came from one account's view (legacy writes,
     // ChannelForbidden) and is superseded by this live observation.
@@ -15863,7 +15823,7 @@ function mergeHydratedChannelFacts(existing, liveFactsInput, now = Date.now()) {
         || existing?.private === true);
     const sendability = evaluateChannelSendability({ ...liveFacts, banned, forbidden });
     const patch = {
-        channelId: normalizeChannelId(liveFacts.channelId),
+        channelId: (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(liveFacts.channelId),
         title: liveFacts.title ?? existing?.title ?? null,
         username: liveFacts.username ?? existing?.username ?? null,
         participantsCount: safeNumber(liveFacts.participantsCount, existing?.participantsCount ?? 0),
@@ -16310,7 +16270,7 @@ function toLiveChannelObservation(info) {
         ? deriveSharedChannelVerdict(info)
         : { sharedCanSendMsgs: info.canSendMsgs === true ? true : null, reason: info.canSendMsgs === true ? 'live_sendable' : 'account_scoped' };
     return {
-        channelId: normalizeChannelId(info.channelId),
+        channelId: (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(info.channelId),
         title: info.title ?? null,
         username: info.username ?? null,
         participantsCount: info.participantsCount ?? null,
@@ -18728,6 +18688,74 @@ class RedisWrites extends KeyedBackup {
     send(build, slots) {
         return this.write(build, slots);
     }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts"
+/*!***********************************************************************!*\
+  !*** ../../packages/tg-core/src/telegram-utils/channel-live-facts.ts ***!
+  \***********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   computeLiveCanSendMsgs: () => (/* binding */ computeLiveCanSendMsgs),
+/* harmony export */   deriveTelegramChannelLiveFacts: () => (/* binding */ deriveTelegramChannelLiveFacts),
+/* harmony export */   normalizeChannelId: () => (/* binding */ normalizeChannelId)
+/* harmony export */ });
+/**
+ * Live Telegram channel facts and the "can this account send here right now" verdict.
+ *
+ * Pure, dependency-free. Lives in @tg/core so both @tg/dialogs and @tg/channel-state can use it
+ * without depending on each other; @tg/channel-state re-exports everything here unchanged.
+ */
+/**
+ * TRANSFORM-ONLY channelId normalizer: trims, strips a `-100` channel prefix, then any bare
+ * leading `-`. It does NOT validate — `"0"`, `"-1000"`, `"12.5"` and `"abc"` are returned as-is
+ * (`"0"`, `"0"`, `"12.5"`, `"abc"`), and nullish input yields `''`.
+ *
+ * ⚠️ There is a SECOND, differently-behaved function with the SAME NAME in @tg/channel-state:
+ * `channel-message-promotions/utils/channel-id.ts` VALIDATES and returns `string | null`
+ * (`"0"` / `"-1000"` / `12.5` → `null`). Which one you get depends purely on the import path, so
+ * check the import before relying on the return contract.
+ *
+ * Use THIS one to derive a storage/lookup KEY (it always yields a string), and pair it with
+ * `isUsableActiveChannelId` from @tg/core when the value is about to be written — activeChannels
+ * writes are upserts, so an unusable key mints a junk document. Both apps' dbservices do exactly
+ * that pairing.
+ */
+function normalizeChannelId(input) {
+    if (input === null || input === undefined)
+        return '';
+    return String(input).trim().replace(/^-100/, '').replace(/^-/, '');
+}
+function deriveTelegramChannelLiveFacts(entity) {
+    const sendMessages = entity.sendMessages === true || entity.defaultBannedRights?.sendMessages === true;
+    const sendPlain = entity.sendPlain === true || entity.defaultBannedRights?.sendPlain === true;
+    return {
+        ...entity,
+        channelId: normalizeChannelId(entity.channelId),
+        broadcast: entity.broadcast === true,
+        restricted: entity.restricted === true,
+        left: entity.left === true,
+        private: entity.private === true,
+        forbidden: entity.forbidden === true,
+        sendMessages,
+        sendPlain,
+    };
+}
+function computeLiveCanSendMsgs(input) {
+    const facts = deriveTelegramChannelLiveFacts(input);
+    return !facts.broadcast
+        && !facts.restricted
+        && !facts.left
+        && !facts.private
+        && !facts.forbidden
+        && !facts.sendMessages
+        && !facts.sendPlain;
 }
 
 
@@ -31494,7 +31522,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/telegram-utils/channel-live-facts */ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts");
 
 
 
@@ -33553,7 +33581,7 @@ class DialogManager {
      * @returns boolean indicating if messages can be sent
      */
     canSendMsgsToChannel(channel) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)({
+        return (0,_tg_core_telegram_utils_channel_live_facts__WEBPACK_IMPORTED_MODULE_10__.computeLiveCanSendMsgs)({
             channelId: channel.id?.toString(),
             broadcast: channel.broadcast === true,
             restricted: channel.restricted === true,
