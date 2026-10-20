@@ -40614,32 +40614,839 @@ async function setTyping(client, entityLike) {
 
 /***/ },
 
-/***/ "./src/server/routes.ts"
-/*!******************************!*\
-  !*** ./src/server/routes.ts ***!
-  \******************************/
+/***/ "./src/server/route-handlers/client-handlers.ts"
+/*!******************************************************!*\
+  !*** ./src/server/route-handlers/client-handlers.ts ***!
+  \******************************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   configureRoutes: () => (/* binding */ configureRoutes)
+/* harmony export */   handleGetClients: () => (/* binding */ handleGetClients),
+/* harmony export */   handleGetMobileStats: () => (/* binding */ handleGetMobileStats),
+/* harmony export */   handleGetPreviousMsgs: () => (/* binding */ handleGetPreviousMsgs),
+/* harmony export */   handleGetTotalAvailableClients: () => (/* binding */ handleGetTotalAvailableClients),
+/* harmony export */   handleUpdatePrivacy: () => (/* binding */ handleUpdatePrivacy),
+/* harmony export */   handleUpdateProfilePics: () => (/* binding */ handleUpdateProfilePics)
+/* harmony export */ });
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../core/Telegram.service */ "./src/core/Telegram.service.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../data/db */ "./src/data/db.ts");
+/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("routes");
+const handleGetClients = async (req, res) => {
+    const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+    res.json(await appService.getPromoteClientStats());
+};
+const handleGetPreviousMsgs = async (req, res) => {
+    const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+    res.json(await appService.getPreviousSuccessMessages());
+};
+const handleGetTotalAvailableClients = async (req, res) => {
+    try {
+        if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.isInstanceExist()) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendDatabaseUnavailable)(req, res, "total-available-clients");
+            return;
+        }
+        const totalStats = (await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.getTotalAvailablePromoteClients()) ?? (0,_tg_db__WEBPACK_IMPORTED_MODULE_5__.emptyPromoteAvailability)();
+        logger.info('📊 /getTotalAvailableClients - Response:', {
+            totalClients: totalStats.totalClients,
+            totalChannels: totalStats.totalChannels,
+            uniqueClientIds: totalStats.uniqueClientIdsCount,
+            avgChannels: totalStats.avgChannels,
+            timestamp: new Date().toISOString()
+        });
+        res.json({
+            success: true,
+            data: totalStats,
+            timestamp: new Date().toISOString()
+        });
+    }
+    catch (error) {
+        logger.error('❌ /getTotalAvailableClients - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting total available clients");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendHealthRouteFailure)(req, res, error, {
+            operation: "total-available-clients",
+            component: "database.mongo",
+            owner: "database",
+            summary: "Total available client stats failed",
+            errorText: "Failed to get total available clients",
+            action: "manual",
+        });
+    }
+};
+const handleUpdatePrivacy = async (req, res) => {
+    try {
+        logger.warn('Deprecated manual maintenance route called: /updatePrivacy');
+        res.status(410).json({
+            message: "Deprecated route",
+            detail: "Privacy maintenance is owned by the runtime persona flow. Manual bulk update is disabled.",
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error Executing updatePrivacy");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendHealthRouteFailure)(req, res, error, {
+            operation: "deprecated-privacy-maintenance",
+            component: "service.health",
+            owner: "system",
+            summary: "Deprecated privacy maintenance route failed",
+            errorText: "Failed to report deprecated privacy maintenance route",
+            action: "manual",
+        });
+    }
+};
+const handleUpdateProfilePics = async (req, res) => {
+    try {
+        logger.warn('Deprecated manual maintenance route called: /updateProfilePics');
+        res.status(410).json({
+            message: "Deprecated route",
+            detail: "Profile picture maintenance is owned by assigned persona state and CMS fallback. Manual bulk update is disabled.",
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error Executing updateProfilePics");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendHealthRouteFailure)(req, res, error, {
+            operation: "deprecated-profile-picture-maintenance",
+            component: "service.health",
+            owner: "system",
+            summary: "Deprecated profile picture maintenance route failed",
+            errorText: "Failed to report deprecated profile picture maintenance route",
+            action: "manual",
+        });
+    }
+};
+const handleGetMobileStats = async (req, res) => {
+    try {
+        const telegramService = _core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__.TelegramService.getInstance();
+        res.json(telegramService.getMobileStats());
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error Executing getMobileStats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendHealthRouteFailure)(req, res, error, {
+            operation: "mobile-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "Mobile stats route failed",
+            errorText: "Failed to get mobile stats",
+            action: "recover",
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/health-handlers.ts"
+/*!******************************************************!*\
+  !*** ./src/server/route-handlers/health-handlers.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleChecktghealth: () => (/* binding */ handleChecktghealth),
+/* harmony export */   handleHealthCheck: () => (/* binding */ handleHealthCheck),
+/* harmony export */   handleHealthMobile: () => (/* binding */ handleHealthMobile),
+/* harmony export */   handleRoot: () => (/* binding */ handleRoot),
+/* harmony export */   handleTgHealth: () => (/* binding */ handleTgHealth),
+/* harmony export */   sendPromoteHealthDetails: () => (/* binding */ sendPromoteHealthDetails),
+/* harmony export */   sendPromoteLiveness: () => (/* binding */ sendPromoteLiveness),
+/* harmony export */   sendPromoteReadiness: () => (/* binding */ sendPromoteReadiness)
+/* harmony export */ });
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../core/Telegram.service */ "./src/core/Telegram.service.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("routes");
+function sendPromoteLiveness(res) {
+    res.status(200).json({
+        service: "promote-clients",
+        status: "alive",
+        clientId: process.env.clientId,
+        uptime: Math.round(process.uptime()),
+        ts: Date.now(),
+    });
+}
+async function sendPromoteReadiness(req, res) {
+    try {
+        const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)((0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req));
+        res.status((0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.promoteReadinessHttpStatus)(health)).json(health);
+    }
+    catch (error) {
+        logger.error('Promote readiness snapshot failed', error);
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: "service.health",
+            owner: "system",
+            summary: "Failed to get promote readiness status",
+            error,
+            action: "manual",
+        });
+        res.status(evidence.statusCode).json(evidence.health);
+    }
+}
+async function sendPromoteHealthDetails(req, res) {
+    try {
+        const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)((0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req));
+        res.status(200).json(health);
+    }
+    catch (error) {
+        logger.error('Promote health details snapshot failed', error);
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: "service.health",
+            owner: "system",
+            summary: "Failed to get promote health details",
+            error,
+            action: "manual",
+        });
+        res.status(evidence.statusCode).json(evidence.health);
+    }
+}
+const handleRoot = (req, res) => {
+    res.send("Hello World");
+};
+const handleChecktghealth = async (req, res) => {
+    const mobile = String(req.query.mobile ?? '').trim();
+    if (!mobile) {
+        res.status(400).json({
+            operation: 'manual-telegram-health-check',
+            readOnly: false,
+            success: false,
+            status: 'invalid_request',
+            activeProbeStatus: 'skipped',
+            error: 'mobile query parameter is required',
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+        });
+        return;
+    }
+    const telegramManager = _core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__.TelegramService.getInstance().getClient(mobile);
+    const client = telegramManager?.client;
+    if (!client?.connected) {
+        const error = new Error('Telegram client is not connected');
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: `telegram.connection.${mobile}`,
+            owner: 'telegram',
+            summary: 'Manual Telegram health check could not reach the client',
+            error,
+            action: 'manual',
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: 'manual-telegram-health-check',
+            readOnly: false,
+            error: error.message,
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: { status: 'unavailable', activeProbeStatus: 'skipped', mobile },
+        });
+        return;
+    }
+    try {
+        const spamBot = await (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_6__.runManualSpamBotProbe)(mobile, client);
+        res.status(200).json({
+            operation: 'manual-telegram-health-check',
+            readOnly: false,
+            success: true,
+            status: 'sent',
+            activeProbeStatus: 'sent',
+            mobile,
+            spamBot: {
+                latestReply: spamBot.latestReply,
+                replyIsFresh: spamBot.replyIsFresh,
+            },
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `routes.checktghealth.${mobile}`, false);
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: `telegram.connection.${mobile}`,
+            owner: 'telegram',
+            summary: 'Manual Telegram health check failed',
+            error,
+            action: 'manual',
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: 'manual-telegram-health-check',
+            readOnly: false,
+            error: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.promoteRouteHealthErrorMessage)(error),
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: { status: 'failed', activeProbeStatus: 'failed', mobile },
+        });
+    }
+};
+const handleHealthMobile = async (req, res) => {
+    try {
+        const mobile = String(req.params.mobile ?? '').trim();
+        const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)((0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req));
+        const checks = health.checks.filter((check) => check.component.endsWith(`.${mobile}`));
+        const statusCode = (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.promoteMobileReadinessHttpStatus)(health.checks, mobile);
+        const unhealthy = statusCode === 503;
+        const degraded = !unhealthy && checks.some((check) => check.status === 'degraded');
+        res.status(statusCode).json({
+            service: health.service,
+            mobile,
+            status: unhealthy ? 'unhealthy' : degraded ? 'degraded' : 'healthy',
+            readOnly: true,
+            checks,
+            requestId: health.requestId,
+            generatedAt: health.generatedAt,
+        });
+    }
+    catch (error) {
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendHealthRouteFailure)(req, res, error, {
+            operation: 'mobile-health',
+            component: 'service.health',
+            owner: 'system',
+            summary: 'Mobile health lookup failed',
+            errorText: 'Failed to get mobile health',
+            action: 'manual',
+        });
+    }
+};
+const handleTgHealth = async (req, res) => {
+    try {
+        const healthStatus = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)((0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req));
+        const statusCode = (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.promoteReadinessHttpStatus)(healthStatus);
+        logger.info(`/tg-health - Status: ${healthStatus.status}, Code: ${statusCode}`, {
+            activeClients: healthStatus.metadata?.activeClients,
+            checks: healthStatus.summary,
+            issueCount: healthStatus.issues.length,
+            timestamp: healthStatus.generatedAt,
+        });
+        res.status(statusCode).json(healthStatus);
+    }
+    catch (error) {
+        logger.error('❌ /tg-health - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting health status");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: "service.health",
+            owner: "system",
+            summary: "Failed to get health status",
+            error,
+            action: "manual",
+        });
+        res.status(evidence.statusCode).json(evidence.health);
+    }
+};
+const handleHealthCheck = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const forceRecovery = req.query?.force === 'true' || req.body?.force === true;
+        let beforeStats = null;
+        let preCheckError = null;
+        let postCheckError = null;
+        try {
+            beforeStats = await appService.getDetailedStats();
+        }
+        catch (error) {
+            preCheckError = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.promoteRouteHealthErrorMessage)(error);
+            logger.warn('🏥 /health/check - Pre-check detailed stats failed; falling back to canonical health snapshot', { error: preCheckError });
+        }
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)(beforeStats ? { detailedStats: beforeStats } : undefined);
+        let beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_3__.createHealthRecoveryPlan)(beforeHealth);
+        if (forceRecovery) {
+            beforeRecoveryPlan = (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.withManualForceAction)(beforeRecoveryPlan, "Forced recovery requested", preCheckError ?? undefined);
+        }
+        logger.info('🏥 /health/check - Starting health check:', {
+            beforeHeapUsed: beforeStats?.memory?.current?.heapUsed ? beforeStats.memory.current.heapUsed + 'MB' : null,
+            beforeActiveClients: beforeStats?.activeClients ?? null,
+            actionableIssues: beforeRecoveryPlan.actions.length,
+            forceRecovery,
+            timestamp: new Date().toISOString()
+        });
+        const shouldRunRecovery = beforeRecoveryPlan.hasActions || forceRecovery;
+        if (shouldRunRecovery) {
+            await appService.performHealthCheck(beforeRecoveryPlan);
+        }
+        else {
+            logger.info('✅ /health/check - No recovery actions required');
+        }
+        let afterStats = null;
+        try {
+            afterStats = await appService.getDetailedStats();
+        }
+        catch (error) {
+            postCheckError = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.promoteRouteHealthErrorMessage)(error);
+            logger.warn('🏥 /health/check - Post-check detailed stats failed after recovery attempt', { error: postCheckError });
+        }
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)(afterStats ? { detailedStats: afterStats } : undefined);
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_3__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_3__.healthHttpStatus)(afterHealth);
+        const success = statusCode === 200;
+        let message = "No recovery actions were required, but service health is not ready";
+        if (success) {
+            message = shouldRunRecovery ? "Health check completed" : "No recovery actions required";
+        }
+        else if (shouldRunRecovery) {
+            message = "Health check completed but service health is still not ready";
+        }
+        const response = {
+            operation: "manual-recovery",
+            readOnly: false,
+            success,
+            message,
+            skipped: !shouldRunRecovery,
+            force: forceRecovery,
+            recoveryPlan,
+            beforeRecoveryPlan,
+            beforeHealth,
+            afterHealth,
+            preCheckError,
+            postCheckError,
+            before: beforeStats?.memory?.current ?? null,
+            after: afterStats?.memory?.current ?? null,
+            activeClients: afterStats?.activeClients ?? beforeHealth.metadata?.activeClients ?? null,
+            activeMobiles: afterStats?.activeMobiles ?? beforeHealth.metadata?.activeMobiles ?? [],
+            timestamp: new Date().toISOString()
+        };
+        logger.info('✅ /health/check - Health check completed:', {
+            beforeHeapUsed: beforeStats?.memory?.current?.heapUsed ? beforeStats.memory.current.heapUsed + 'MB' : null,
+            afterHeapUsed: afterStats?.memory?.current?.heapUsed ? afterStats.memory.current.heapUsed + 'MB' : null,
+            activeClients: response.activeClients,
+            activeMobiles: Array.isArray(response.activeMobiles) ? response.activeMobiles.length : 0,
+            recoveryRan: shouldRunRecovery,
+            actionableIssues: beforeRecoveryPlan.actions.length,
+            memoryChange: beforeStats?.memory?.current?.heapUsed && afterStats?.memory?.current?.heapUsed
+                ? (parseFloat(afterStats.memory.current.heapUsed) - parseFloat(beforeStats.memory.current.heapUsed)).toFixed(2) + 'MB'
+                : null,
+            preCheckError,
+            postCheckError,
+            timestamp: response.timestamp
+        });
+        res.status(statusCode).json(response);
+    }
+    catch (error) {
+        logger.error('❌ /health/check - Error during health check:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error during health check");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component: "service.health",
+            owner: "system",
+            summary: "Manual health check failed",
+            error,
+            action: "manual",
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: "manual-recovery",
+            readOnly: false,
+            error: "Health check failed",
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.promoteRouteHealthErrorMessage)(error),
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: { timestamp: new Date().toISOString() },
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/inactive-scraper-handlers.ts"
+/*!****************************************************************!*\
+  !*** ./src/server/route-handlers/inactive-scraper-handlers.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleInactiveScraperStart: () => (/* binding */ handleInactiveScraperStart),
+/* harmony export */   handleInactiveScraperStatus: () => (/* binding */ handleInactiveScraperStatus),
+/* harmony export */   handleInactiveScraperStop: () => (/* binding */ handleInactiveScraperStop),
+/* harmony export */   handleInactiveScraperTrigger: () => (/* binding */ handleInactiveScraperTrigger)
+/* harmony export */ });
+/* harmony import */ var _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/inactive-mobile-scraper */ "./src/core/inactive-mobile-scraper.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("routes");
+const handleInactiveScraperStatus = async (req, res) => {
+    try {
+        const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_0__.InactiveMobileScraper.getInstance();
+        const status = scraper.getStatus();
+        logger.info('📊 /inactive-scraper/status - Status requested:', status);
+        res.json({
+            success: true,
+            status,
+            timestamp: new Date().toISOString()
+        });
+    }
+    catch (error) {
+        logger.error('❌ /inactive-scraper/status - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting inactive scraper status");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
+            operation: "inactive-scraper-status",
+            component: "service.health",
+            owner: "system",
+            summary: "Inactive scraper status route failed",
+            errorText: "Failed to get scraper status",
+            action: "manual",
+        });
+    }
+};
+const handleInactiveScraperStart = async (req, res) => {
+    try {
+        const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_0__.InactiveMobileScraper.getInstance();
+        scraper.startHourlyScraping();
+        logger.info('🚀 /inactive-scraper/start - Hourly scraping started');
+        res.json({
+            success: true,
+            message: "Hourly scraping started",
+            timestamp: new Date().toISOString()
+        });
+    }
+    catch (error) {
+        logger.error('❌ /inactive-scraper/start - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error starting inactive scraper");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
+            operation: "inactive-scraper-start",
+            component: "service.health",
+            owner: "system",
+            summary: "Inactive scraper start failed",
+            errorText: "Failed to start scraper",
+            action: "manual",
+            readOnly: false,
+        });
+    }
+};
+const handleInactiveScraperStop = async (req, res) => {
+    try {
+        const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_0__.InactiveMobileScraper.getInstance();
+        scraper.stopHourlyScraping();
+        logger.info('🛑 /inactive-scraper/stop - Hourly scraping stopped');
+        res.json({
+            success: true,
+            message: "Hourly scraping stopped",
+            timestamp: new Date().toISOString()
+        });
+    }
+    catch (error) {
+        logger.error('❌ /inactive-scraper/stop - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error stopping inactive scraper");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
+            operation: "inactive-scraper-stop",
+            component: "service.health",
+            owner: "system",
+            summary: "Inactive scraper stop failed",
+            errorText: "Failed to stop scraper",
+            action: "manual",
+            readOnly: false,
+        });
+    }
+};
+const handleInactiveScraperTrigger = async (req, res) => {
+    try {
+        const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_0__.InactiveMobileScraper.getInstance();
+        await scraper.triggerManualProcessing();
+        logger.info('🔧 /inactive-scraper/trigger - Manual processing completed');
+        res.json({
+            success: true,
+            message: "Manual processing completed",
+            timestamp: new Date().toISOString()
+        });
+    }
+    catch (error) {
+        logger.error('❌ /inactive-scraper/trigger - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error triggering manual processing");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
+            operation: "inactive-scraper-trigger",
+            component: "service.health",
+            owner: "system",
+            summary: "Inactive scraper manual trigger failed",
+            errorText: "Failed to trigger manual processing",
+            action: "manual",
+            readOnly: false,
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/maintenance-handlers.ts"
+/*!***********************************************************!*\
+  !*** ./src/server/route-handlers/maintenance-handlers.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleDebugTimers: () => (/* binding */ handleDebugTimers),
+/* harmony export */   handleMemoryCleanup: () => (/* binding */ handleMemoryCleanup),
+/* harmony export */   handleResourcesOptimize: () => (/* binding */ handleResourcesOptimize)
+/* harmony export */ });
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("routes");
+const handleMemoryCleanup = async (req, res) => {
+    try {
+        const { MemoryCleanupService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts"));
+        const memoryService = MemoryCleanupService.getInstance();
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildPromoteHealthSnapshot)();
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.findHealthCheck)(beforeHealth, "memory.heap");
+        const beforeStats = memoryService.getCurrentMemoryStats();
+        logger.info('🧹 /memory/cleanup - Before cleanup:', {
+            heapUsed: beforeStats.heapUsed + 'MB',
+            rss: beforeStats.rss + 'MB',
+            timestamp: new Date().toISOString()
+        });
+        memoryService.forceCleanup();
+        // Wait a moment for cleanup to take effect
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const afterStats = memoryService.getCurrentMemoryStats();
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildPromoteHealthSnapshot)();
+        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.findHealthCheck)(afterHealth, "memory.heap");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.healthEvidenceStatus)(afterHealth, afterCheck);
+        const success = statusCode === 200;
+        const response = {
+            operation: "memory-cleanup",
+            readOnly: false,
+            success,
+            message: success
+                ? "Memory cleanup completed"
+                : "Memory cleanup completed but memory health is still not ready",
+            recoveryPlan,
+            beforeRecoveryPlan,
+            beforeHealth,
+            afterHealth,
+            beforeCheck,
+            afterCheck,
+            before: beforeStats,
+            after: afterStats,
+            timestamp: new Date().toISOString()
+        };
+        logger.info('✅ /memory/cleanup - After cleanup:', {
+            heapUsedBefore: beforeStats.heapUsed + 'MB',
+            heapUsedAfter: afterStats.heapUsed + 'MB',
+            rssBefore: beforeStats.rss + 'MB',
+            rssAfter: afterStats.rss + 'MB',
+            heapReduction: (parseFloat(beforeStats.heapUsed) - parseFloat(afterStats.heapUsed)).toFixed(2) + 'MB',
+            timestamp: response.timestamp
+        });
+        res.status(statusCode).json(response);
+    }
+    catch (error) {
+        logger.error('❌ /memory/cleanup - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error during memory cleanup");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.requestIdOf)(req),
+            component: "memory.heap",
+            owner: "memory",
+            summary: "Manual memory cleanup failed",
+            error,
+            action: "manual",
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: "memory-cleanup",
+            readOnly: false,
+            error: "Failed to perform memory cleanup",
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.promoteRouteHealthErrorMessage)(error),
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: { timestamp: new Date().toISOString() },
+        });
+    }
+};
+const handleResourcesOptimize = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const mobileManager = appService.mobileManager;
+        const beforeStats = await appService.getDetailedStats();
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildPromoteHealthSnapshot)({ detailedStats: beforeStats });
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.createHealthRecoveryPlan)(beforeHealth);
+        logger.info('🔧 /resources/optimize - Before optimization:', {
+            heapUsed: beforeStats.memory.current.heapUsed + 'MB',
+            clientMapSize: beforeStats.resources.clientMapSize,
+            managerMapSize: beforeStats.resources.managerMapSize,
+            orphanedManagers: beforeStats.resources.orphanedManagers,
+            missingManagers: beforeStats.resources.missingManagers,
+            timestamp: new Date().toISOString()
+        });
+        // Trigger memory optimization
+        if (mobileManager && typeof mobileManager.optimizeMemory === 'function') {
+            mobileManager.optimizeMemory();
+        }
+        // Force memory cleanup
+        const { MemoryCleanupService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts"));
+        const memoryService = MemoryCleanupService.getInstance();
+        memoryService.forceCleanup();
+        // Wait for optimization to take effect
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const afterStats = await appService.getDetailedStats();
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildPromoteHealthSnapshot)({ detailedStats: afterStats });
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.healthHttpStatus)(afterHealth);
+        const success = statusCode === 200;
+        const response = {
+            operation: "resource-optimization",
+            readOnly: false,
+            success,
+            message: success
+                ? "Resource optimization completed"
+                : "Resource optimization completed but service health is still not ready",
+            recoveryPlan,
+            beforeRecoveryPlan,
+            beforeHealth,
+            afterHealth,
+            before: {
+                memory: beforeStats.memory.current,
+                resources: beforeStats.resources
+            },
+            after: {
+                memory: afterStats.memory.current,
+                resources: afterStats.resources
+            },
+            timestamp: new Date().toISOString()
+        };
+        logger.info('✅ /resources/optimize - After optimization:', {
+            heapUsedBefore: beforeStats.memory.current.heapUsed + 'MB',
+            heapUsedAfter: afterStats.memory.current.heapUsed + 'MB',
+            orphanedManagersBefore: beforeStats.resources.orphanedManagers,
+            orphanedManagersAfter: afterStats.resources.orphanedManagers,
+            managerMapSizeBefore: beforeStats.resources.managerMapSize,
+            managerMapSizeAfter: afterStats.resources.managerMapSize,
+            heapReduction: (parseFloat(beforeStats.memory.current.heapUsed) - parseFloat(afterStats.memory.current.heapUsed)).toFixed(2) + 'MB',
+            timestamp: response.timestamp
+        });
+        res.status(statusCode).json(response);
+    }
+    catch (error) {
+        logger.error('❌ /resources/optimize - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error during resource optimization");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.requestIdOf)(req),
+            component: "service.health",
+            owner: "system",
+            summary: "Resource optimization failed",
+            error,
+            action: "manual",
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: "resource-optimization",
+            readOnly: false,
+            error: "Failed to optimize resources",
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.promoteRouteHealthErrorMessage)(error),
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: { timestamp: new Date().toISOString() },
+        });
+    }
+};
+const handleDebugTimers = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const mobileManager = appService.mobileManager;
+        let timerInfo = {
+            totalManagers: 0,
+            managersWithTimers: 0,
+            totalTimers: 0,
+            managerDetails: []
+        };
+        const response = {
+            ...timerInfo,
+            timestamp: new Date().toISOString()
+        };
+        logger.info('🐛 /debug/timers - Timer analysis:', {
+            totalManagers: timerInfo.totalManagers,
+            managersWithTimers: timerInfo.managersWithTimers,
+            totalTimers: timerInfo.totalTimers,
+            potential_leaks: timerInfo.totalTimers > 0 ? 'Detected' : 'None',
+            details: timerInfo.managerDetails,
+            timestamp: response.timestamp
+        });
+        res.json(response);
+    }
+    catch (error) {
+        logger.error('❌ /debug/timers - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting timer debug info");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendHealthRouteFailure)(req, res, error, {
+            operation: "debug-timers",
+            component: "service.health",
+            owner: "system",
+            summary: "Timer debug route failed",
+            errorText: "Failed to get timer information",
+            action: "manual",
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/process-handlers.ts"
+/*!*******************************************************!*\
+  !*** ./src/server/route-handlers/process-handlers.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   exitAfterResponse: () => (/* binding */ exitAfterResponse),
+/* harmony export */   findClientRestartCheck: () => (/* binding */ findClientRestartCheck),
+/* harmony export */   handleExec: () => (/* binding */ handleExec),
+/* harmony export */   handleExit: () => (/* binding */ handleExit),
+/* harmony export */   handleGetProcessId: () => (/* binding */ handleGetProcessId),
+/* harmony export */   handleIp: () => (/* binding */ handleIp),
+/* harmony export */   handleRestart: () => (/* binding */ handleRestart)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/app-service */ "./src/core/app-service.ts");
-/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/Telegram.service */ "./src/core/Telegram.service.ts");
-/* harmony import */ var _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/inactive-mobile-scraper */ "./src/core/inactive-mobile-scraper.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../jobs/stats-notifications */ "./src/jobs/stats-notifications.ts");
-/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
 
 
 
@@ -40649,13 +41456,144 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("routes");
+function findClientRestartCheck(snapshot, clientId) {
+    return (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(snapshot, `telegram.connection.${clientId}`)
+        ?? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(snapshot, "telegram.manager-map")
+        ?? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(snapshot, "telegram.managers");
+}
+const handleIp = async (req, res) => {
+    res.send(await (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_3__.getPublicIP)());
+};
+const handleGetProcessId = async (req, res) => {
+    res.json({ ProcessId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_3__.prcessID.toString() });
+};
+const handleExit = (req, res, next) => {
+    res.send("App Exits in 2 seconds");
+    next();
+};
+const exitAfterResponse = () => {
+    setTimeout(async () => {
+        logger.info("Received Exit Request, Exiting Now");
+        try {
+            await _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance().gracefulShutdown("Route /exit request");
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error during /exit graceful shutdown");
+        }
+        process.exit(1);
+    }, 2000);
+};
+const handleExec = async (req, res) => {
+    let cmd = req.params.cmd;
+    logger.info(`executing: `, cmd);
+    try {
+        const result = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)(cmd).toString();
+        logger.info(result);
+        res.send(result);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error Executing /exec/:cmd");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendHealthRouteFailure)(req, res, error, {
+            operation: "exec-command",
+            component: "service.health",
+            owner: "system",
+            summary: "Manual command execution failed",
+            errorText: "Failed to execute command",
+            action: "manual",
+            readOnly: false,
+        });
+    }
+};
+const handleRestart = async (req, res) => {
+    const clientId = String(req.params.clientId ?? "").trim();
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_5__.buildPromoteHealthSnapshot)();
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeCheck = findClientRestartCheck(beforeHealth, clientId);
+        const result = await appService.restartClient(clientId);
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_5__.buildPromoteHealthSnapshot)();
+        const afterCheck = findClientRestartCheck(afterHealth, clientId);
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = result.success
+            ? (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.healthEvidenceStatus)(afterHealth, afterCheck)
+            : 503;
+        const success = result.success && statusCode === 200;
+        if (res.headersSent) {
+            return;
+        }
+        res.status(statusCode).json({
+            operation: "client-restart",
+            readOnly: false,
+            ...result,
+            success,
+            message: success
+                ? result.message
+                : result.success
+                    ? "Client restart was initiated but canonical client health is still unhealthy"
+                    : result.message,
+            restartResult: result,
+            recoveryPlan,
+            beforeRecoveryPlan,
+            beforeHealth,
+            afterHealth,
+            beforeCheck,
+            afterCheck,
+            timestamp: new Date().toISOString(),
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error restarting promote client");
+        const component = clientId ? `telegram.connection.${clientId}` : "telegram.managers";
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createPromoteRouteComponentFailureEvidence)({
+            requestId: (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.requestIdOf)(req),
+            component,
+            owner: component === "telegram.managers" ? "connection" : "telegram",
+            summary: "Manual promote client restart failed",
+            error,
+            action: "manual",
+        });
+        (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.sendPromoteRouteHealthFailureResponse)(res, {
+            operation: "client-restart",
+            readOnly: false,
+            error: "Failed to restart promote client",
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.promoteRouteHealthErrorMessage)(error),
+            evidence,
+            requestId: evidence.health.requestId,
+            extra: {
+                skipped: false,
+                reason: "restart-failed",
+                mobile: clientId,
+                timestamp: new Date().toISOString(),
+            },
+        });
+    }
+};
 
 
+/***/ },
+
+/***/ "./src/server/route-handlers/route-responses.ts"
+/*!******************************************************!*\
+  !*** ./src/server/route-handlers/route-responses.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MANUAL_FORCE_COMPONENT: () => (/* binding */ MANUAL_FORCE_COMPONENT),
+/* harmony export */   createManualForceAction: () => (/* binding */ createManualForceAction),
+/* harmony export */   healthEvidenceStatus: () => (/* binding */ healthEvidenceStatus),
+/* harmony export */   requestIdOf: () => (/* binding */ requestIdOf),
+/* harmony export */   sendDatabaseUnavailable: () => (/* binding */ sendDatabaseUnavailable),
+/* harmony export */   sendHealthRouteFailure: () => (/* binding */ sendHealthRouteFailure),
+/* harmony export */   withManualForceAction: () => (/* binding */ withManualForceAction)
+/* harmony export */ });
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
 
 
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("routes");
 const MANUAL_FORCE_COMPONENT = "manual.force";
 function createManualForceAction(summary, issue) {
     return {
@@ -40682,21 +41620,16 @@ function withManualForceAction(recoveryPlan, summary, issue) {
         actions,
     };
 }
-function findClientRestartCheck(snapshot, clientId) {
-    return (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(snapshot, `telegram.connection.${clientId}`)
-        ?? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(snapshot, "telegram.manager-map")
-        ?? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(snapshot, "telegram.managers");
-}
-function healthEvidenceStatus(snapshot, check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(snapshot, "service.health")) {
-    return check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthCheckHttpStatus)(check) : (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthHttpStatus)(snapshot);
+function healthEvidenceStatus(snapshot, check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.findHealthCheck)(snapshot, "service.health")) {
+    return check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.healthCheckHttpStatus)(check) : (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.healthHttpStatus)(snapshot);
 }
 function requestIdOf(req) {
     const requestId = req.requestId;
     return typeof requestId === "string" ? requestId : undefined;
 }
 async function sendDatabaseUnavailable(req, res, operation) {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.buildPromoteRouteComponentEvidence)("database.mongo", requestIdOf(req));
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.buildPromoteRouteComponentEvidence)("database.mongo", requestIdOf(req));
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendPromoteRouteHealthFailureResponse)(res, {
         operation,
         readOnly: true,
         error: "Database instance not available",
@@ -40705,56 +41638,11 @@ async function sendDatabaseUnavailable(req, res, operation) {
         extra: { timestamp: new Date().toISOString() },
     });
 }
-function sendPromoteLiveness(res) {
-    res.status(200).json({
-        service: "promote-clients",
-        status: "alive",
-        clientId: process.env.clientId,
-        uptime: Math.round(process.uptime()),
-        ts: Date.now(),
-    });
-}
-async function sendPromoteReadiness(req, res) {
-    try {
-        const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(requestIdOf(req));
-        res.status((0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.promoteReadinessHttpStatus)(health)).json(health);
-    }
-    catch (error) {
-        logger.error('Promote readiness snapshot failed', error);
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-            requestId: requestIdOf(req),
-            component: "service.health",
-            owner: "system",
-            summary: "Failed to get promote readiness status",
-            error,
-            action: "manual",
-        });
-        res.status(evidence.statusCode).json(evidence.health);
-    }
-}
-async function sendPromoteHealthDetails(req, res) {
-    try {
-        const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(requestIdOf(req));
-        res.status(200).json(health);
-    }
-    catch (error) {
-        logger.error('Promote health details snapshot failed', error);
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-            requestId: requestIdOf(req),
-            component: "service.health",
-            owner: "system",
-            summary: "Failed to get promote health details",
-            error,
-            action: "manual",
-        });
-        res.status(evidence.statusCode).json(evidence.health);
-    }
-}
 function sendHealthRouteFailure(req, res, error, options) {
     if (res.headersSent) {
         return;
     }
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createPromoteRouteComponentFailureEvidence)({
         requestId: requestIdOf(req),
         component: options.component,
         owner: options.owner,
@@ -40762,16 +41650,214 @@ function sendHealthRouteFailure(req, res, error, options) {
         error,
         action: options.action,
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendPromoteRouteHealthFailureResponse)(res, {
         operation: options.operation,
         readOnly: options.readOnly ?? true,
         error: options.errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.promoteRouteHealthErrorMessage)(error),
         evidence,
         requestId: evidence.health.requestId,
         extra: { timestamp: new Date().toISOString() },
     });
 }
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/stats-handlers.ts"
+/*!*****************************************************!*\
+  !*** ./src/server/route-handlers/stats-handlers.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleGetPromotionRuntimeStats: () => (/* binding */ handleGetPromotionRuntimeStats),
+/* harmony export */   handleGetstats: () => (/* binding */ handleGetstats),
+/* harmony export */   handleStatsDetailed: () => (/* binding */ handleStatsDetailed),
+/* harmony export */   handleStatsMemory: () => (/* binding */ handleStatsMemory),
+/* harmony export */   handleStatsSystem: () => (/* binding */ handleStatsSystem)
+/* harmony export */ });
+/* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
+/* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../core/Telegram.service */ "./src/core/Telegram.service.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../jobs/stats-notifications */ "./src/jobs/stats-notifications.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("routes");
+const handleGetstats = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const stats = await appService.getDailyStats();
+        await (0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_3__.sendPromoteStatsNotification)((0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_3__.buildDailyStatsNotification)(stats, 'route'), "Daily stats notification failed");
+        res.json(stats);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting daily stats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+            operation: "daily-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "Daily stats retrieval failed",
+            errorText: "Failed to get daily stats",
+            action: "recover",
+        });
+    }
+};
+const handleStatsDetailed = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const detailedStats = await appService.getDetailedStats();
+        // Import heapdump service for enhanced memory stats
+        const { HeapdumpService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../diagnostics/heapdump-service */ "./src/diagnostics/heapdump-service.ts"));
+        const heapdumpService = HeapdumpService.getInstance();
+        const enhancedMemoryStats = heapdumpService.getDetailedMemoryStats();
+        const response = {
+            success: true,
+            data: {
+                ...detailedStats,
+                memory: {
+                    ...detailedStats.memory,
+                    enhanced: enhancedMemoryStats
+                },
+                process: {
+                    pid: process.pid,
+                    uptime: process.uptime(),
+                    nodeVersion: process.version,
+                    platform: process.platform,
+                    arch: process.arch
+                }
+            },
+            timestamp: new Date().toISOString()
+        };
+        logger.info('📊 /stats/detailed - Response:', {
+            activeClients: detailedStats.activeClients,
+            memoryHeapUsed: enhancedMemoryStats.current.heapUsed,
+            memoryRSS: enhancedMemoryStats.current.rss,
+            heapUsedPercent: enhancedMemoryStats.percentages.heapUsedPercent + '%',
+            orphanedManagers: detailedStats.resources.orphanedManagers,
+            timestamp: response.timestamp
+        });
+        await (0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_3__.sendPromoteStatsNotification)((0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_3__.buildDetailedStatsNotification)(detailedStats, enhancedMemoryStats, 'route'), "Detailed stats notification failed");
+        res.json(response);
+    }
+    catch (error) {
+        logger.error('❌ /stats/detailed - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting detailed stats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+            operation: "detailed-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "Detailed stats retrieval failed",
+            errorText: "Failed to get detailed stats",
+            action: "recover",
+        });
+    }
+};
+const handleStatsMemory = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const detailedStats = await appService.getDetailedStats();
+        const response = {
+            memory: detailedStats.memory,
+            resources: detailedStats.resources,
+            timestamp: new Date().toISOString()
+        };
+        logger.info('🧠 /stats/memory - Response:', {
+            heapUsed: detailedStats.memory.current.heapUsed + 'MB',
+            heapTotal: detailedStats.memory.current.heapTotal + 'MB',
+            rss: detailedStats.memory.current.rss + 'MB',
+            clientMapSize: detailedStats.resources.clientMapSize,
+            managerMapSize: detailedStats.resources.managerMapSize,
+            orphanedManagers: detailedStats.resources.orphanedManagers,
+            timestamp: response.timestamp
+        });
+        res.json(response);
+    }
+    catch (error) {
+        logger.error('❌ /stats/memory - Error:', error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting memory stats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+            operation: "memory-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "Memory stats retrieval failed",
+            errorText: "Failed to get memory stats",
+            action: "recover",
+        });
+    }
+};
+const handleStatsSystem = async (req, res) => {
+    try {
+        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_0__.AppService.getInstance();
+        const basicStats = appService.getStats();
+        res.json({
+            ...basicStats,
+            serverTime: new Date().toISOString(),
+            processUptime: process.uptime(),
+            nodeVersion: process.version
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error getting system stats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+            operation: "system-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "System stats retrieval failed",
+            errorText: "Failed to get system stats",
+            action: "recover",
+        });
+    }
+};
+const handleGetPromotionRuntimeStats = async (req, res) => {
+    try {
+        res.json(_core_Telegram_service__WEBPACK_IMPORTED_MODULE_1__.TelegramService.getInstance().getPromotionRuntimeStats());
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error executing getPromotionRuntimeStats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+            operation: "promotion-runtime-stats",
+            component: "service.stats",
+            owner: "system",
+            summary: "Promotion runtime stats route failed",
+            errorText: "Failed to get promotion runtime stats",
+            action: "recover",
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/server/routes.ts"
+/*!******************************!*\
+  !*** ./src/server/routes.ts ***!
+  \******************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   configureRoutes: () => (/* binding */ configureRoutes)
+/* harmony export */ });
+/* harmony import */ var _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./route-handlers/health-handlers */ "./src/server/route-handlers/health-handlers.ts");
+/* harmony import */ var _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./route-handlers/process-handlers */ "./src/server/route-handlers/process-handlers.ts");
+/* harmony import */ var _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./route-handlers/client-handlers */ "./src/server/route-handlers/client-handlers.ts");
+/* harmony import */ var _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./route-handlers/stats-handlers */ "./src/server/route-handlers/stats-handlers.ts");
+/* harmony import */ var _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./route-handlers/maintenance-handlers */ "./src/server/route-handlers/maintenance-handlers.ts");
+/* harmony import */ var _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-handlers/inactive-scraper-handlers */ "./src/server/route-handlers/inactive-scraper-handlers.ts");
+
+
+
+
+
+
 /**
  * Configure all API routes
  *
@@ -40803,895 +41889,46 @@ function sendHealthRouteFailure(req, res, error, options) {
  */
 function configureRoutes(app) {
     // Basic route
-    app.get('/', (req, res) => {
-        res.send("Hello World");
-    });
-    app.get('/health/live', (_req, res) => sendPromoteLiveness(res));
-    app.get('/health', sendPromoteReadiness);
-    app.get('/health/ready', sendPromoteReadiness);
-    app.get('/health/details', sendPromoteHealthDetails);
-    app.get('/health/full', sendPromoteHealthDetails);
-    app.get('/checktghealth', async (req, res) => {
-        const mobile = String(req.query.mobile ?? '').trim();
-        if (!mobile) {
-            res.status(400).json({
-                operation: 'manual-telegram-health-check',
-                readOnly: false,
-                success: false,
-                status: 'invalid_request',
-                activeProbeStatus: 'skipped',
-                error: 'mobile query parameter is required',
-                requestId: requestIdOf(req),
-            });
-            return;
-        }
-        const telegramManager = _core_Telegram_service__WEBPACK_IMPORTED_MODULE_2__.TelegramService.getInstance().getClient(mobile);
-        const client = telegramManager?.client;
-        if (!client?.connected) {
-            const error = new Error('Telegram client is not connected');
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: `telegram.connection.${mobile}`,
-                owner: 'telegram',
-                summary: 'Manual Telegram health check could not reach the client',
-                error,
-                action: 'manual',
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: 'manual-telegram-health-check',
-                readOnly: false,
-                error: error.message,
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: { status: 'unavailable', activeProbeStatus: 'skipped', mobile },
-            });
-            return;
-        }
-        try {
-            const spamBot = await (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_13__.runManualSpamBotProbe)(mobile, client);
-            res.status(200).json({
-                operation: 'manual-telegram-health-check',
-                readOnly: false,
-                success: true,
-                status: 'sent',
-                activeProbeStatus: 'sent',
-                mobile,
-                spamBot: {
-                    latestReply: spamBot.latestReply,
-                    replyIsFresh: spamBot.replyIsFresh,
-                },
-                requestId: requestIdOf(req),
-            });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `routes.checktghealth.${mobile}`, false);
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: `telegram.connection.${mobile}`,
-                owner: 'telegram',
-                summary: 'Manual Telegram health check failed',
-                error,
-                action: 'manual',
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: 'manual-telegram-health-check',
-                readOnly: false,
-                error: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: { status: 'failed', activeProbeStatus: 'failed', mobile },
-            });
-        }
-    });
-    app.get('/health/mobile/:mobile', async (req, res) => {
-        try {
-            const mobile = String(req.params.mobile ?? '').trim();
-            const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(requestIdOf(req));
-            const checks = health.checks.filter((check) => check.component.endsWith(`.${mobile}`));
-            const statusCode = (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.promoteMobileReadinessHttpStatus)(health.checks, mobile);
-            const unhealthy = statusCode === 503;
-            const degraded = !unhealthy && checks.some((check) => check.status === 'degraded');
-            res.status(statusCode).json({
-                service: health.service,
-                mobile,
-                status: unhealthy ? 'unhealthy' : degraded ? 'degraded' : 'healthy',
-                readOnly: true,
-                checks,
-                requestId: health.requestId,
-                generatedAt: health.generatedAt,
-            });
-        }
-        catch (error) {
-            sendHealthRouteFailure(req, res, error, {
-                operation: 'mobile-health',
-                component: 'service.health',
-                owner: 'system',
-                summary: 'Mobile health lookup failed',
-                errorText: 'Failed to get mobile health',
-                action: 'manual',
-            });
-        }
-    });
-    app.get('/ip', async (req, res) => {
-        res.send(await (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.getPublicIP)());
-    });
-    app.get('/getProcessId', async (req, res) => {
-        res.json({ ProcessId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.prcessID.toString() });
-    });
+    app.get('/', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.handleRoot);
+    app.get('/health/live', (_req, res) => (0,_route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.sendPromoteLiveness)(res));
+    app.get('/health', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.sendPromoteReadiness);
+    app.get('/health/ready', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.sendPromoteReadiness);
+    app.get('/health/details', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.sendPromoteHealthDetails);
+    app.get('/health/full', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.sendPromoteHealthDetails);
+    app.get('/checktghealth', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.handleChecktghealth);
+    app.get('/health/mobile/:mobile', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.handleHealthMobile);
+    app.get('/ip', _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.handleIp);
+    app.get('/getProcessId', _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.handleGetProcessId);
     // Application control routes
-    app.get('/exit', (req, res, next) => {
-        res.send("App Exits in 2 seconds");
-        next();
-    }, () => {
-        setTimeout(async () => {
-            logger.info("Received Exit Request, Exiting Now");
-            try {
-                await _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance().gracefulShutdown("Route /exit request");
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error during /exit graceful shutdown");
-            }
-            process.exit(1);
-        }, 2000);
-    });
-    app.get('/exec/:cmd', async (req, res) => {
-        let cmd = req.params.cmd;
-        logger.info(`executing: `, cmd);
-        try {
-            const result = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)(cmd).toString();
-            logger.info(result);
-            res.send(result);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error Executing /exec/:cmd");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "exec-command",
-                component: "service.health",
-                owner: "system",
-                summary: "Manual command execution failed",
-                errorText: "Failed to execute command",
-                action: "manual",
-                readOnly: false,
-            });
-        }
-    });
+    app.get('/exit', _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.handleExit, _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.exitAfterResponse);
+    app.get('/exec/:cmd', _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.handleExec);
     // Data and statistics routes
-    app.get('/getClients', async (req, res) => {
-        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-        res.json(await appService.getPromoteClientStats());
-    });
-    app.get('/getPreviousMsgs', async (req, res) => {
-        const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-        res.json(await appService.getPreviousSuccessMessages());
-    });
-    app.get('/getTotalAvailableClients', async (req, res) => {
-        try {
-            if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.UserDataDtoCrud.isInstanceExist()) {
-                await sendDatabaseUnavailable(req, res, "total-available-clients");
-                return;
-            }
-            const totalStats = (await (0,_data_db__WEBPACK_IMPORTED_MODULE_7__.getRepositories)()?.promote.getTotalAvailablePromoteClients()) ?? (0,_tg_db__WEBPACK_IMPORTED_MODULE_8__.emptyPromoteAvailability)();
-            logger.info('📊 /getTotalAvailableClients - Response:', {
-                totalClients: totalStats.totalClients,
-                totalChannels: totalStats.totalChannels,
-                uniqueClientIds: totalStats.uniqueClientIdsCount,
-                avgChannels: totalStats.avgChannels,
-                timestamp: new Date().toISOString()
-            });
-            res.json({
-                success: true,
-                data: totalStats,
-                timestamp: new Date().toISOString()
-            });
-        }
-        catch (error) {
-            logger.error('❌ /getTotalAvailableClients - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting total available clients");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "total-available-clients",
-                component: "database.mongo",
-                owner: "database",
-                summary: "Total available client stats failed",
-                errorText: "Failed to get total available clients",
-                action: "manual",
-            });
-        }
-    });
-    app.get('/getstats', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const stats = await appService.getDailyStats();
-            await (0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_12__.sendPromoteStatsNotification)((0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_12__.buildDailyStatsNotification)(stats, 'route'), "Daily stats notification failed");
-            res.json(stats);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting daily stats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "daily-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "Daily stats retrieval failed",
-                errorText: "Failed to get daily stats",
-                action: "recover",
-            });
-        }
-    });
+    app.get('/getClients', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetClients);
+    app.get('/getPreviousMsgs', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetPreviousMsgs);
+    app.get('/getTotalAvailableClients', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetTotalAvailableClients);
+    app.get('/getstats', _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__.handleGetstats);
     // New detailed stats APIs
-    app.get('/stats/detailed', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const detailedStats = await appService.getDetailedStats();
-            // Import heapdump service for enhanced memory stats
-            const { HeapdumpService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../diagnostics/heapdump-service */ "./src/diagnostics/heapdump-service.ts"));
-            const heapdumpService = HeapdumpService.getInstance();
-            const enhancedMemoryStats = heapdumpService.getDetailedMemoryStats();
-            const response = {
-                success: true,
-                data: {
-                    ...detailedStats,
-                    memory: {
-                        ...detailedStats.memory,
-                        enhanced: enhancedMemoryStats
-                    },
-                    process: {
-                        pid: process.pid,
-                        uptime: process.uptime(),
-                        nodeVersion: process.version,
-                        platform: process.platform,
-                        arch: process.arch
-                    }
-                },
-                timestamp: new Date().toISOString()
-            };
-            logger.info('📊 /stats/detailed - Response:', {
-                activeClients: detailedStats.activeClients,
-                memoryHeapUsed: enhancedMemoryStats.current.heapUsed,
-                memoryRSS: enhancedMemoryStats.current.rss,
-                heapUsedPercent: enhancedMemoryStats.percentages.heapUsedPercent + '%',
-                orphanedManagers: detailedStats.resources.orphanedManagers,
-                timestamp: response.timestamp
-            });
-            await (0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_12__.sendPromoteStatsNotification)((0,_jobs_stats_notifications__WEBPACK_IMPORTED_MODULE_12__.buildDetailedStatsNotification)(detailedStats, enhancedMemoryStats, 'route'), "Detailed stats notification failed");
-            res.json(response);
-        }
-        catch (error) {
-            logger.error('❌ /stats/detailed - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting detailed stats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "detailed-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "Detailed stats retrieval failed",
-                errorText: "Failed to get detailed stats",
-                action: "recover",
-            });
-        }
-    });
-    app.get('/stats/memory', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const detailedStats = await appService.getDetailedStats();
-            const response = {
-                memory: detailedStats.memory,
-                resources: detailedStats.resources,
-                timestamp: new Date().toISOString()
-            };
-            logger.info('🧠 /stats/memory - Response:', {
-                heapUsed: detailedStats.memory.current.heapUsed + 'MB',
-                heapTotal: detailedStats.memory.current.heapTotal + 'MB',
-                rss: detailedStats.memory.current.rss + 'MB',
-                clientMapSize: detailedStats.resources.clientMapSize,
-                managerMapSize: detailedStats.resources.managerMapSize,
-                orphanedManagers: detailedStats.resources.orphanedManagers,
-                timestamp: response.timestamp
-            });
-            res.json(response);
-        }
-        catch (error) {
-            logger.error('❌ /stats/memory - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting memory stats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "memory-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "Memory stats retrieval failed",
-                errorText: "Failed to get memory stats",
-                action: "recover",
-            });
-        }
-    });
-    app.get('/stats/system', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const basicStats = appService.getStats();
-            res.json({
-                ...basicStats,
-                serverTime: new Date().toISOString(),
-                processUptime: process.uptime(),
-                nodeVersion: process.version
-            });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting system stats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "system-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "System stats retrieval failed",
-                errorText: "Failed to get system stats",
-                action: "recover",
-            });
-        }
-    });
-    app.get('/tg-health', async (req, res) => {
-        try {
-            const healthStatus = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(requestIdOf(req));
-            const statusCode = (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.promoteReadinessHttpStatus)(healthStatus);
-            logger.info(`/tg-health - Status: ${healthStatus.status}, Code: ${statusCode}`, {
-                activeClients: healthStatus.metadata?.activeClients,
-                checks: healthStatus.summary,
-                issueCount: healthStatus.issues.length,
-                timestamp: healthStatus.generatedAt,
-            });
-            res.status(statusCode).json(healthStatus);
-        }
-        catch (error) {
-            logger.error('❌ /tg-health - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting health status");
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: "service.health",
-                owner: "system",
-                summary: "Failed to get health status",
-                error,
-                action: "manual",
-            });
-            res.status(evidence.statusCode).json(evidence.health);
-        }
-    });
+    app.get('/stats/detailed', _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__.handleStatsDetailed);
+    app.get('/stats/memory', _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__.handleStatsMemory);
+    app.get('/stats/system', _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__.handleStatsSystem);
+    app.get('/tg-health', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.handleTgHealth);
     // Telegram service routes
-    app.get('/updatePrivacy', async (req, res) => {
-        try {
-            logger.warn('Deprecated manual maintenance route called: /updatePrivacy');
-            res.status(410).json({
-                message: "Deprecated route",
-                detail: "Privacy maintenance is owned by the runtime persona flow. Manual bulk update is disabled.",
-            });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error Executing updatePrivacy");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "deprecated-privacy-maintenance",
-                component: "service.health",
-                owner: "system",
-                summary: "Deprecated privacy maintenance route failed",
-                errorText: "Failed to report deprecated privacy maintenance route",
-                action: "manual",
-            });
-        }
-    });
-    app.post('/health/check', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const forceRecovery = req.query?.force === 'true' || req.body?.force === true;
-            let beforeStats = null;
-            let preCheckError = null;
-            let postCheckError = null;
-            try {
-                beforeStats = await appService.getDetailedStats();
-            }
-            catch (error) {
-                preCheckError = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error);
-                logger.warn('🏥 /health/check - Pre-check detailed stats failed; falling back to canonical health snapshot', { error: preCheckError });
-            }
-            const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(beforeStats ? { detailedStats: beforeStats } : undefined);
-            let beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(beforeHealth);
-            if (forceRecovery) {
-                beforeRecoveryPlan = withManualForceAction(beforeRecoveryPlan, "Forced recovery requested", preCheckError ?? undefined);
-            }
-            logger.info('🏥 /health/check - Starting health check:', {
-                beforeHeapUsed: beforeStats?.memory?.current?.heapUsed ? beforeStats.memory.current.heapUsed + 'MB' : null,
-                beforeActiveClients: beforeStats?.activeClients ?? null,
-                actionableIssues: beforeRecoveryPlan.actions.length,
-                forceRecovery,
-                timestamp: new Date().toISOString()
-            });
-            const shouldRunRecovery = beforeRecoveryPlan.hasActions || forceRecovery;
-            if (shouldRunRecovery) {
-                await appService.performHealthCheck(beforeRecoveryPlan);
-            }
-            else {
-                logger.info('✅ /health/check - No recovery actions required');
-            }
-            let afterStats = null;
-            try {
-                afterStats = await appService.getDetailedStats();
-            }
-            catch (error) {
-                postCheckError = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error);
-                logger.warn('🏥 /health/check - Post-check detailed stats failed after recovery attempt', { error: postCheckError });
-            }
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)(afterStats ? { detailedStats: afterStats } : undefined);
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthHttpStatus)(afterHealth);
-            const success = statusCode === 200;
-            let message = "No recovery actions were required, but service health is not ready";
-            if (success) {
-                message = shouldRunRecovery ? "Health check completed" : "No recovery actions required";
-            }
-            else if (shouldRunRecovery) {
-                message = "Health check completed but service health is still not ready";
-            }
-            const response = {
-                operation: "manual-recovery",
-                readOnly: false,
-                success,
-                message,
-                skipped: !shouldRunRecovery,
-                force: forceRecovery,
-                recoveryPlan,
-                beforeRecoveryPlan,
-                beforeHealth,
-                afterHealth,
-                preCheckError,
-                postCheckError,
-                before: beforeStats?.memory?.current ?? null,
-                after: afterStats?.memory?.current ?? null,
-                activeClients: afterStats?.activeClients ?? beforeHealth.metadata?.activeClients ?? null,
-                activeMobiles: afterStats?.activeMobiles ?? beforeHealth.metadata?.activeMobiles ?? [],
-                timestamp: new Date().toISOString()
-            };
-            logger.info('✅ /health/check - Health check completed:', {
-                beforeHeapUsed: beforeStats?.memory?.current?.heapUsed ? beforeStats.memory.current.heapUsed + 'MB' : null,
-                afterHeapUsed: afterStats?.memory?.current?.heapUsed ? afterStats.memory.current.heapUsed + 'MB' : null,
-                activeClients: response.activeClients,
-                activeMobiles: Array.isArray(response.activeMobiles) ? response.activeMobiles.length : 0,
-                recoveryRan: shouldRunRecovery,
-                actionableIssues: beforeRecoveryPlan.actions.length,
-                memoryChange: beforeStats?.memory?.current?.heapUsed && afterStats?.memory?.current?.heapUsed
-                    ? (parseFloat(afterStats.memory.current.heapUsed) - parseFloat(beforeStats.memory.current.heapUsed)).toFixed(2) + 'MB'
-                    : null,
-                preCheckError,
-                postCheckError,
-                timestamp: response.timestamp
-            });
-            res.status(statusCode).json(response);
-        }
-        catch (error) {
-            logger.error('❌ /health/check - Error during health check:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error during health check");
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: "service.health",
-                owner: "system",
-                summary: "Manual health check failed",
-                error,
-                action: "manual",
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: "manual-recovery",
-                readOnly: false,
-                error: "Health check failed",
-                message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: { timestamp: new Date().toISOString() },
-            });
-        }
-    });
-    app.get('/getPromotionRuntimeStats', async (req, res) => {
-        try {
-            res.json(_core_Telegram_service__WEBPACK_IMPORTED_MODULE_2__.TelegramService.getInstance().getPromotionRuntimeStats());
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error executing getPromotionRuntimeStats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "promotion-runtime-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "Promotion runtime stats route failed",
-                errorText: "Failed to get promotion runtime stats",
-                action: "recover",
-            });
-        }
-    });
-    app.get('/updateProfilePics', async (req, res) => {
-        try {
-            logger.warn('Deprecated manual maintenance route called: /updateProfilePics');
-            res.status(410).json({
-                message: "Deprecated route",
-                detail: "Profile picture maintenance is owned by assigned persona state and CMS fallback. Manual bulk update is disabled.",
-            });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error Executing updateProfilePics");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "deprecated-profile-picture-maintenance",
-                component: "service.health",
-                owner: "system",
-                summary: "Deprecated profile picture maintenance route failed",
-                errorText: "Failed to report deprecated profile picture maintenance route",
-                action: "manual",
-            });
-        }
-    });
-    app.get('/getMobileStats', async (req, res) => {
-        try {
-            const telegramService = _core_Telegram_service__WEBPACK_IMPORTED_MODULE_2__.TelegramService.getInstance();
-            res.json(telegramService.getMobileStats());
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error Executing getMobileStats");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "mobile-stats",
-                component: "service.stats",
-                owner: "system",
-                summary: "Mobile stats route failed",
-                errorText: "Failed to get mobile stats",
-                action: "recover",
-            });
-        }
-    });
+    app.get('/updatePrivacy', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleUpdatePrivacy);
+    app.post('/health/check', _route_handlers_health_handlers__WEBPACK_IMPORTED_MODULE_0__.handleHealthCheck);
+    app.get('/getPromotionRuntimeStats', _route_handlers_stats_handlers__WEBPACK_IMPORTED_MODULE_3__.handleGetPromotionRuntimeStats);
+    app.get('/updateProfilePics', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleUpdateProfilePics);
+    app.get('/getMobileStats', _route_handlers_client_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetMobileStats);
     // Client management routes
-    app.get('/restart/:clientId', async (req, res) => {
-        const clientId = String(req.params.clientId ?? "").trim();
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)();
-            const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(beforeHealth);
-            const beforeCheck = findClientRestartCheck(beforeHealth, clientId);
-            const result = await appService.restartClient(clientId);
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)();
-            const afterCheck = findClientRestartCheck(afterHealth, clientId);
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = result.success
-                ? healthEvidenceStatus(afterHealth, afterCheck)
-                : 503;
-            const success = result.success && statusCode === 200;
-            if (res.headersSent) {
-                return;
-            }
-            res.status(statusCode).json({
-                operation: "client-restart",
-                readOnly: false,
-                ...result,
-                success,
-                message: success
-                    ? result.message
-                    : result.success
-                        ? "Client restart was initiated but canonical client health is still unhealthy"
-                        : result.message,
-                restartResult: result,
-                recoveryPlan,
-                beforeRecoveryPlan,
-                beforeHealth,
-                afterHealth,
-                beforeCheck,
-                afterCheck,
-                timestamp: new Date().toISOString(),
-            });
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error restarting promote client");
-            const component = clientId ? `telegram.connection.${clientId}` : "telegram.managers";
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component,
-                owner: component === "telegram.managers" ? "connection" : "telegram",
-                summary: "Manual promote client restart failed",
-                error,
-                action: "manual",
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: "client-restart",
-                readOnly: false,
-                error: "Failed to restart promote client",
-                message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: {
-                    skipped: false,
-                    reason: "restart-failed",
-                    mobile: clientId,
-                    timestamp: new Date().toISOString(),
-                },
-            });
-        }
-    });
+    app.get('/restart/:clientId', _route_handlers_process_handlers__WEBPACK_IMPORTED_MODULE_1__.handleRestart);
     // Memory and resource management routes
-    app.post('/memory/cleanup', async (req, res) => {
-        try {
-            const { MemoryCleanupService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts"));
-            const memoryService = MemoryCleanupService.getInstance();
-            const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)();
-            const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(beforeHealth);
-            const beforeCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(beforeHealth, "memory.heap");
-            const beforeStats = memoryService.getCurrentMemoryStats();
-            logger.info('🧹 /memory/cleanup - Before cleanup:', {
-                heapUsed: beforeStats.heapUsed + 'MB',
-                rss: beforeStats.rss + 'MB',
-                timestamp: new Date().toISOString()
-            });
-            memoryService.forceCleanup();
-            // Wait a moment for cleanup to take effect
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            const afterStats = memoryService.getCurrentMemoryStats();
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)();
-            const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.findHealthCheck)(afterHealth, "memory.heap");
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = healthEvidenceStatus(afterHealth, afterCheck);
-            const success = statusCode === 200;
-            const response = {
-                operation: "memory-cleanup",
-                readOnly: false,
-                success,
-                message: success
-                    ? "Memory cleanup completed"
-                    : "Memory cleanup completed but memory health is still not ready",
-                recoveryPlan,
-                beforeRecoveryPlan,
-                beforeHealth,
-                afterHealth,
-                beforeCheck,
-                afterCheck,
-                before: beforeStats,
-                after: afterStats,
-                timestamp: new Date().toISOString()
-            };
-            logger.info('✅ /memory/cleanup - After cleanup:', {
-                heapUsedBefore: beforeStats.heapUsed + 'MB',
-                heapUsedAfter: afterStats.heapUsed + 'MB',
-                rssBefore: beforeStats.rss + 'MB',
-                rssAfter: afterStats.rss + 'MB',
-                heapReduction: (parseFloat(beforeStats.heapUsed) - parseFloat(afterStats.heapUsed)).toFixed(2) + 'MB',
-                timestamp: response.timestamp
-            });
-            res.status(statusCode).json(response);
-        }
-        catch (error) {
-            logger.error('❌ /memory/cleanup - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error during memory cleanup");
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: "memory.heap",
-                owner: "memory",
-                summary: "Manual memory cleanup failed",
-                error,
-                action: "manual",
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: "memory-cleanup",
-                readOnly: false,
-                error: "Failed to perform memory cleanup",
-                message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: { timestamp: new Date().toISOString() },
-            });
-        }
-    });
-    app.post('/resources/optimize', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const mobileManager = appService.mobileManager;
-            const beforeStats = await appService.getDetailedStats();
-            const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)({ detailedStats: beforeStats });
-            const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(beforeHealth);
-            logger.info('🔧 /resources/optimize - Before optimization:', {
-                heapUsed: beforeStats.memory.current.heapUsed + 'MB',
-                clientMapSize: beforeStats.resources.clientMapSize,
-                managerMapSize: beforeStats.resources.managerMapSize,
-                orphanedManagers: beforeStats.resources.orphanedManagers,
-                missingManagers: beforeStats.resources.missingManagers,
-                timestamp: new Date().toISOString()
-            });
-            // Trigger memory optimization
-            if (mobileManager && typeof mobileManager.optimizeMemory === 'function') {
-                mobileManager.optimizeMemory();
-            }
-            // Force memory cleanup
-            const { MemoryCleanupService } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts"));
-            const memoryService = MemoryCleanupService.getInstance();
-            memoryService.forceCleanup();
-            // Wait for optimization to take effect
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            const afterStats = await appService.getDetailedStats();
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_10__.buildPromoteHealthSnapshot)({ detailedStats: afterStats });
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_9__.healthHttpStatus)(afterHealth);
-            const success = statusCode === 200;
-            const response = {
-                operation: "resource-optimization",
-                readOnly: false,
-                success,
-                message: success
-                    ? "Resource optimization completed"
-                    : "Resource optimization completed but service health is still not ready",
-                recoveryPlan,
-                beforeRecoveryPlan,
-                beforeHealth,
-                afterHealth,
-                before: {
-                    memory: beforeStats.memory.current,
-                    resources: beforeStats.resources
-                },
-                after: {
-                    memory: afterStats.memory.current,
-                    resources: afterStats.resources
-                },
-                timestamp: new Date().toISOString()
-            };
-            logger.info('✅ /resources/optimize - After optimization:', {
-                heapUsedBefore: beforeStats.memory.current.heapUsed + 'MB',
-                heapUsedAfter: afterStats.memory.current.heapUsed + 'MB',
-                orphanedManagersBefore: beforeStats.resources.orphanedManagers,
-                orphanedManagersAfter: afterStats.resources.orphanedManagers,
-                managerMapSizeBefore: beforeStats.resources.managerMapSize,
-                managerMapSizeAfter: afterStats.resources.managerMapSize,
-                heapReduction: (parseFloat(beforeStats.memory.current.heapUsed) - parseFloat(afterStats.memory.current.heapUsed)).toFixed(2) + 'MB',
-                timestamp: response.timestamp
-            });
-            res.status(statusCode).json(response);
-        }
-        catch (error) {
-            logger.error('❌ /resources/optimize - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error during resource optimization");
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.createPromoteRouteComponentFailureEvidence)({
-                requestId: requestIdOf(req),
-                component: "service.health",
-                owner: "system",
-                summary: "Resource optimization failed",
-                error,
-                action: "manual",
-            });
-            (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.sendPromoteRouteHealthFailureResponse)(res, {
-                operation: "resource-optimization",
-                readOnly: false,
-                error: "Failed to optimize resources",
-                message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_11__.promoteRouteHealthErrorMessage)(error),
-                evidence,
-                requestId: evidence.health.requestId,
-                extra: { timestamp: new Date().toISOString() },
-            });
-        }
-    });
-    app.get('/debug/timers', async (req, res) => {
-        try {
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_1__.AppService.getInstance();
-            const mobileManager = appService.mobileManager;
-            let timerInfo = {
-                totalManagers: 0,
-                managersWithTimers: 0,
-                totalTimers: 0,
-                managerDetails: []
-            };
-            const response = {
-                ...timerInfo,
-                timestamp: new Date().toISOString()
-            };
-            logger.info('🐛 /debug/timers - Timer analysis:', {
-                totalManagers: timerInfo.totalManagers,
-                managersWithTimers: timerInfo.managersWithTimers,
-                totalTimers: timerInfo.totalTimers,
-                potential_leaks: timerInfo.totalTimers > 0 ? 'Detected' : 'None',
-                details: timerInfo.managerDetails,
-                timestamp: response.timestamp
-            });
-            res.json(response);
-        }
-        catch (error) {
-            logger.error('❌ /debug/timers - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting timer debug info");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "debug-timers",
-                component: "service.health",
-                owner: "system",
-                summary: "Timer debug route failed",
-                errorText: "Failed to get timer information",
-                action: "manual",
-            });
-        }
-    });
+    app.post('/memory/cleanup', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleMemoryCleanup);
+    app.post('/resources/optimize', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleResourcesOptimize);
+    app.get('/debug/timers', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleDebugTimers);
     // Inactive Mobile Scraper routes
-    app.get('/inactive-scraper/status', async (req, res) => {
-        try {
-            const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__.InactiveMobileScraper.getInstance();
-            const status = scraper.getStatus();
-            logger.info('📊 /inactive-scraper/status - Status requested:', status);
-            res.json({
-                success: true,
-                status,
-                timestamp: new Date().toISOString()
-            });
-        }
-        catch (error) {
-            logger.error('❌ /inactive-scraper/status - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error getting inactive scraper status");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "inactive-scraper-status",
-                component: "service.health",
-                owner: "system",
-                summary: "Inactive scraper status route failed",
-                errorText: "Failed to get scraper status",
-                action: "manual",
-            });
-        }
-    });
-    app.post('/inactive-scraper/start', async (req, res) => {
-        try {
-            const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__.InactiveMobileScraper.getInstance();
-            scraper.startHourlyScraping();
-            logger.info('🚀 /inactive-scraper/start - Hourly scraping started');
-            res.json({
-                success: true,
-                message: "Hourly scraping started",
-                timestamp: new Date().toISOString()
-            });
-        }
-        catch (error) {
-            logger.error('❌ /inactive-scraper/start - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error starting inactive scraper");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "inactive-scraper-start",
-                component: "service.health",
-                owner: "system",
-                summary: "Inactive scraper start failed",
-                errorText: "Failed to start scraper",
-                action: "manual",
-                readOnly: false,
-            });
-        }
-    });
-    app.post('/inactive-scraper/stop', async (req, res) => {
-        try {
-            const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__.InactiveMobileScraper.getInstance();
-            scraper.stopHourlyScraping();
-            logger.info('🛑 /inactive-scraper/stop - Hourly scraping stopped');
-            res.json({
-                success: true,
-                message: "Hourly scraping stopped",
-                timestamp: new Date().toISOString()
-            });
-        }
-        catch (error) {
-            logger.error('❌ /inactive-scraper/stop - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error stopping inactive scraper");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "inactive-scraper-stop",
-                component: "service.health",
-                owner: "system",
-                summary: "Inactive scraper stop failed",
-                errorText: "Failed to stop scraper",
-                action: "manual",
-                readOnly: false,
-            });
-        }
-    });
-    app.post('/inactive-scraper/trigger', async (req, res) => {
-        try {
-            const scraper = _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__.InactiveMobileScraper.getInstance();
-            await scraper.triggerManualProcessing();
-            logger.info('🔧 /inactive-scraper/trigger - Manual processing completed');
-            res.json({
-                success: true,
-                message: "Manual processing completed",
-                timestamp: new Date().toISOString()
-            });
-        }
-        catch (error) {
-            logger.error('❌ /inactive-scraper/trigger - Error:', error);
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error triggering manual processing");
-            sendHealthRouteFailure(req, res, error, {
-                operation: "inactive-scraper-trigger",
-                component: "service.health",
-                owner: "system",
-                summary: "Inactive scraper manual trigger failed",
-                errorText: "Failed to trigger manual processing",
-                action: "manual",
-                readOnly: false,
-            });
-        }
-    });
+    app.get('/inactive-scraper/status', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperStatus);
+    app.post('/inactive-scraper/start', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperStart);
+    app.post('/inactive-scraper/stop', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperStop);
+    app.post('/inactive-scraper/trigger', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperTrigger);
 }
 
 
