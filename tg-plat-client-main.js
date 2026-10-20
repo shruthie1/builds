@@ -64712,6 +64712,146 @@ function scheduleOutStep(chatId, args) {
 function scheduleOutgoingFollowups(chatId, steps) {
     scheduleOutStep(chatId, { index: 0, steps });
 }
+/** 'getchannels': the first 130 dialogs' channels / groups to Saved Messages. */
+async function sendChannelListToSelf(event) {
+    const chats = await event.client.getDialogs({ limit: 130 });
+    let reply = '';
+    chats.map((chat) => {
+        if (chat.isChannel || chat.isGroup) {
+            const entityJson = chat.entity?.toJSON();
+            const username = entityJson?.username ? ` @${entityJson.username} ` : String(entityJson?.id);
+            reply = reply + (entityJson?.title || '') + " " + username + ' \n';
+        }
+    });
+    event.client.sendMessage('me', { message: reply });
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+}
+/** 'data': this chat's userData fields to Saved Messages. */
+async function sendUserDataToSelf(event, db) {
+    const data = await db.read(event.message.chatId.toString());
+    let reply = '';
+    Object.keys(data).map((key) => {
+        reply = reply + `${key}: **${data[key]}\n**`;
+    });
+    await event.client.sendMessage('me', { message: reply });
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+}
+/** 'hs': demo done - ask how it was, pitch the full show, record the demo. */
+async function markDemoShown(event, db, chatId) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+    await floodSafeSend(event.client, chatId, { message: `How is the Demo?♥️🙈` });
+    scheduleOutgoingFollowups(chatId, [
+        { delayMs: 15000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
+        { delayMs: 8000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
+    ]);
+    await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, windowCount: 1, demoGiven: true, payAmount: 50 });
+    await db.recordDemoGiven(chatId);
+    await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
+}
+/** 'hsl': full show done - ask how it was, record the full show. */
+async function markFullShowGiven(event, db, chatId) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+    await floodSafeSend(event.client, chatId, { message: `How is it?🙈` });
+    let userDetails = await db.read(chatId);
+    userDetails = await db.update(chatId, { paidReply: true, limitTime: Date.now() + (2 * 60 * 1000), demoGiven: true, payAmount: 150, totalCount: 10, windowCount: 1, secondShow: true });
+    await db.recordFullShow(chatId);
+}
+/** 'psy': full-show prices, then the pay links. */
+async function pitchFullShow(event, db, chatId) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+    await floodSafeSend(event.client, chatId, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
+    scheduleOutgoingFollowups(chatId, [
+        { delayMs: 11000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
+    ]);
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.limitTime, Date.now());
+}
+/** '..': a random greeting, then the channel / website links. */
+async function sendGreetingAndLinks(event, chatId, receiver) {
+    // Previous sales-first composition retained for quick rollback/reference:
+    // const grtng = "Hii  **" + standardMessages.getNameGreet()
+    const grtng = (0,_greetings_generate_greeting__WEBPACK_IMPORTED_MODULE_18__.generateRandomGreeting)();
+    try {
+        await floodSafeSend(event.client, receiver, { message: grtng });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error);
+    }
+    await floodSafeSend(event.client, chatId, {
+        message: `**My Videos/Updates Link:\n\nJOIN 👉🏻 @${process.env.channelLink}\nOPEN 👉🏻 ${process.env.link}**`
+    });
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+}
+/** 'dns': reply by paid amount / demo state, then hold replies for 30 min. */
+async function replyDontSpeak(event, db, chatId) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+    const userDetails = await db.read(event.message.chatId.toString());
+    if (userDetails.payAmount >= 30) {
+        if (!userDetails.demoGiven) {
+            const didPaidToOthers = await db.checkIfPaidToOthers(event.message.chatId.toString());
+            if (didPaidToOthers.paid !== "" || didPaidToOthers.demoGiven !== "") {
+                await floodSafeSend(event.client, chatId, { message: `Wait...\nI'm verifying your Payment again!!\n${didPaidToOthers.paid !== "" ? (`I think U paid to ${didPaidToOthers.paid} and U also`) : "I think U"}  ${didPaidToOthers.demoGiven !== "" ? (` took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
+            }
+            else {
+                await floodSafeSend(event.client, chatId, { message: "Dont Speak Okay!!\nI'm in **Bathroom**\nMute yourself!! I will show you Okay..!!" });
+            }
+        }
+        else {
+            if (userDetails.payAmount > 50) {
+                if (!userDetails.secondShow || userDetails.payAmount > 180) {
+                    await floodSafeSend(event.client, chatId, { message: "Mute ok.. I Will Call now!!" });
+                }
+                else if (userDetails.payAmount < 201) {
+                    await floodSafeSend(event.client, chatId, { message: "**Did you like the full Show??**" });
+                    scheduleOutgoingFollowups(chatId, [
+                        { delayMs: 3000, send: { message: "**30 Mins VideoCall   :  350₹/-\n1 hour Full   :   600₹/-**" } },
+                    ]);
+                }
+            }
+            else {
+                await floodSafeSend(event.client, chatId, { message: "**Your Demo is Over Baby!!\nPay Again! if You want More....**" });
+                scheduleOutgoingFollowups(chatId, [
+                    { delayMs: 3000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
+                ]);
+            }
+        }
+    }
+    else {
+        if (userDetails.payAmount > 15) {
+            await floodSafeSend(event.client, chatId, { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.noFreeDemo + "\n\n" + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.demo });
+        }
+        else if (userDetails.payAmount > 10) {
+            await floodSafeSend(event.client, chatId, { message: "I have sent you Pics for your money\nCall is **50Rs**\n\nPay and msg!!\nElse I will block you!!" });
+        }
+        else {
+            await floodSafeSend(event.client, chatId, { message: "Did u Pay??\nWait I'm checking your payment!!" });
+        }
+    }
+    await db.updateStatSingleKey(event.message.chatId.toString(), 'paidReply', false);
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, false);
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.limitTime, Date.now() + 30 * 60 * 1000);
+}
+/** 'dmvr': demo is over, pay again; record the demo. */
+async function markDemoOver(event, db, chatId) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+    await floodSafeSend(event.client, chatId, { message: "**Your Demo is Over Baby!!**\nPay again if u want more**\n\nNo MONEY? then No SERVICE!!\nDont WASTE your TIME!!**" });
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
+    await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.demoGiven, true);
+    await db.updateStatSingleKey(event.message.chatId.toString(), 'paidReply', true);
+}
+/** 'clf': in-house calls off, then calloff. */
+async function turnCallsOff(event) {
+    // Calls off means off: also stop in-house calls so the allow-list sync cannot reopen them.
+    (0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_15__.setInHouseCallsOverride)('off');
+    try {
+        await (await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../telegram/client-access */ "./src/telegram/client-access.ts"))).TelegramManager.getInstance()?.callManager?.disposeInHouse?.();
+    }
+    catch {
+        /* best effort: calloff below is what must happen */
+    }
+    await (0,_calls_calloff__WEBPACK_IMPORTED_MODULE_7__.calloff)(event.client);
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+}
 async function OutEventPrint(event) {
     if (event.isPrivate) {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
@@ -64776,17 +64916,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === 'getchannels') {
-                const chats = await event.client.getDialogs({ limit: 130 });
-                let reply = '';
-                chats.map((chat) => {
-                    if (chat.isChannel || chat.isGroup) {
-                        const entityJson = chat.entity?.toJSON();
-                        const username = entityJson?.username ? ` @${entityJson.username} ` : String(entityJson?.id);
-                        reply = reply + (entityJson?.title || '') + " " + username + ' \n';
-                    }
-                });
-                event.client.sendMessage('me', { message: reply });
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+                await sendChannelListToSelf(event);
             }
             else if (text.startsWith('py')) {
                 const am = parseInt(text.split(' ')[1]);
@@ -64795,13 +64925,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === 'data') {
-                const data = await db.read(event.message.chatId.toString());
-                let reply = '';
-                Object.keys(data).map((key) => {
-                    reply = reply + `${key}: **${data[key]}\n**`;
-                });
-                await event.client.sendMessage('me', { message: reply });
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+                await sendUserDataToSelf(event, db);
             }
             else if (text === 'vca') {
                 await floodSafeSend(event.client, chatId, { message: `Message me at **@MyVcAcc**\n\nI will call you in that **Account!!**` });
@@ -64865,31 +64989,13 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === 'hs') {
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-                await floodSafeSend(event.client, chatId, { message: `How is the Demo?♥️🙈` });
-                scheduleOutgoingFollowups(chatId, [
-                    { delayMs: 15000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
-                    { delayMs: 8000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
-                ]);
-                await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, windowCount: 1, demoGiven: true, payAmount: 50 });
-                await db.recordDemoGiven(chatId);
-                await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
+                await markDemoShown(event, db, chatId);
             }
             else if (text === 'hsl') {
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-                await floodSafeSend(event.client, chatId, { message: `How is it?🙈` });
-                let userDetails = await db.read(chatId);
-                userDetails = await db.update(chatId, { paidReply: true, limitTime: Date.now() + (2 * 60 * 1000), demoGiven: true, payAmount: 150, totalCount: 10, windowCount: 1, secondShow: true });
-                await db.recordFullShow(chatId);
+                await markFullShowGiven(event, db, chatId);
             }
             else if (text === 'psy') {
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-                await floodSafeSend(event.client, chatId, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
-                scheduleOutgoingFollowups(chatId, [
-                    { delayMs: 11000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
-                ]);
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.limitTime, Date.now());
+                await pitchFullShow(event, db, chatId);
             }
             else if (text === 'tgpon') {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
@@ -64919,19 +65025,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === `..`) {
-                // Previous sales-first composition retained for quick rollback/reference:
-                // const grtng = "Hii  **" + standardMessages.getNameGreet()
-                const grtng = (0,_greetings_generate_greeting__WEBPACK_IMPORTED_MODULE_18__.generateRandomGreeting)();
-                try {
-                    await floodSafeSend(event.client, receiver, { message: grtng });
-                }
-                catch (error) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error);
-                }
-                await floodSafeSend(event.client, chatId, {
-                    message: `**My Videos/Updates Link:\n\nJOIN 👉🏻 @${process.env.channelLink}\nOPEN 👉🏻 ${process.env.link}**`
-                });
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+                await sendGreetingAndLinks(event, chatId, receiver);
             }
             else if (text === `full`) {
                 await floodSafeSend(event.client, chatId, {
@@ -64972,52 +65066,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === `dns`) {
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-                const userDetails = await db.read(event.message.chatId.toString());
-                if (userDetails.payAmount >= 30) {
-                    if (!userDetails.demoGiven) {
-                        const didPaidToOthers = await db.checkIfPaidToOthers(event.message.chatId.toString());
-                        if (didPaidToOthers.paid !== "" || didPaidToOthers.demoGiven !== "") {
-                            await floodSafeSend(event.client, chatId, { message: `Wait...\nI'm verifying your Payment again!!\n${didPaidToOthers.paid !== "" ? (`I think U paid to ${didPaidToOthers.paid} and U also`) : "I think U"}  ${didPaidToOthers.demoGiven !== "" ? (` took Demo from ${didPaidToOthers.demoGiven}`) : ""}` });
-                        }
-                        else {
-                            await floodSafeSend(event.client, chatId, { message: "Dont Speak Okay!!\nI'm in **Bathroom**\nMute yourself!! I will show you Okay..!!" });
-                        }
-                    }
-                    else {
-                        if (userDetails.payAmount > 50) {
-                            if (!userDetails.secondShow || userDetails.payAmount > 180) {
-                                await floodSafeSend(event.client, chatId, { message: "Mute ok.. I Will Call now!!" });
-                            }
-                            else if (userDetails.payAmount < 201) {
-                                await floodSafeSend(event.client, chatId, { message: "**Did you like the full Show??**" });
-                                scheduleOutgoingFollowups(chatId, [
-                                    { delayMs: 3000, send: { message: "**30 Mins VideoCall   :  350₹/-\n1 hour Full   :   600₹/-**" } },
-                                ]);
-                            }
-                        }
-                        else {
-                            await floodSafeSend(event.client, chatId, { message: "**Your Demo is Over Baby!!\nPay Again! if You want More....**" });
-                            scheduleOutgoingFollowups(chatId, [
-                                { delayMs: 3000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
-                            ]);
-                        }
-                    }
-                }
-                else {
-                    if (userDetails.payAmount > 15) {
-                        await floodSafeSend(event.client, chatId, { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.noFreeDemo + "\n\n" + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.demo });
-                    }
-                    else if (userDetails.payAmount > 10) {
-                        await floodSafeSend(event.client, chatId, { message: "I have sent you Pics for your money\nCall is **50Rs**\n\nPay and msg!!\nElse I will block you!!" });
-                    }
-                    else {
-                        await floodSafeSend(event.client, chatId, { message: "Did u Pay??\nWait I'm checking your payment!!" });
-                    }
-                }
-                await db.updateStatSingleKey(event.message.chatId.toString(), 'paidReply', false);
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, false);
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.limitTime, Date.now() + 30 * 60 * 1000);
+                await replyDontSpeak(event, db, chatId);
             }
             else if (text === `ew`) {
                 await floodSafeSend(event.client, chatId, { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.cantPay });
@@ -65074,11 +65123,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === `dmvr`) {
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-                await floodSafeSend(event.client, chatId, { message: "**Your Demo is Over Baby!!**\nPay again if u want more**\n\nNo MONEY? then No SERVICE!!\nDont WASTE your TIME!!**" });
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
-                await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.demoGiven, true);
-                await db.updateStatSingleKey(event.message.chatId.toString(), 'paidReply', true);
+                await markDemoOver(event, db, chatId);
             }
             else if (text === `qr`) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
@@ -65105,16 +65150,7 @@ async function OutEventPrint(event) {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
             }
             else if (text === `clf`) {
-                // Calls off means off: also stop in-house calls so the allow-list sync cannot reopen them.
-                (0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_15__.setInHouseCallsOverride)('off');
-                try {
-                    await (await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../telegram/client-access */ "./src/telegram/client-access.ts"))).TelegramManager.getInstance()?.callManager?.disposeInHouse?.();
-                }
-                catch {
-                    /* best effort: calloff below is what must happen */
-                }
-                await (0,_calls_calloff__WEBPACK_IMPORTED_MODULE_7__.calloff)(event.client);
-                await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
+                await turnCallsOff(event);
             }
             else if (text.startsWith(`respaid`)) {
                 const msg = message.text.split(':')[1];
@@ -69122,6 +69158,469 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 function printedPaymentMs(imageDetails) {
     return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
 }
+/** A proof-blocked screenshot: never credited. */
+async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer) {
+    // No credit. Not counted as an invalid photo (no ban path). Owner (2026-10-13): a fake PROVEN by text on the
+    // screenshot (generator disclaimer / blocklist) gets the rude warning and a block after 15 min unless the real
+    // payment page arrives; a block that rests on model judgement only keeps the previous polite "old payment" reply.
+    logger.warn(`[ProcessImage] proof blocked for ${chatId} msg ${event.message.id} (${(imageDetails.proofReasons ?? []).join(",")}): not crediting`);
+    const politeOldPayment = async () => {
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+            message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES.length)],
+        });
+    };
+    const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__.TEXT_PROVEN_BLOCKS.has(r));
+    const blockedUser = await db.read(chatId);
+    if (blockedUser?.canReply === 0) {
+        // Blocked (only the fake-payment flow's blocks reach here): no reply, no ops notice (owner 2026-10-13).
+        logger.warn(`[ProcessImage] blocked user ${chatId}: proof-blocked screenshot ignored silently`);
+        return;
+    }
+    // Ops must see the image to judge the call. Fire-and-forget: the evidence post must never delay or abort the
+    // warning/block below.
+    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, fakeEvidenceCard(chatId, imageDetails)).then((sent) => {
+        if (!sent)
+            logger.error(`[ProcessImage] fake-screenshot evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
+    }).catch((error) => logger.error(`[ProcessImage] fake-screenshot evidence photo failed for ${chatId}:`, error));
+    if (textProven.length === 0) {
+        await politeOldPayment();
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
+            title: 'Flagged as fake',
+            summary: 'Not credited: flagged as fake by the models.',
+            fields: [fact('Flags', (imageDetails.proofReasons ?? []).join(', ') || 'proof blocked'), fact('Amount read', Number(imageDetails.amount) || 0)],
+            told: true,
+        });
+        return;
+    }
+    const flow = paymentFlowFor(event, chatId, db, imageDetails);
+    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    await flow.fraud(session, blockedUser?.canReply, textProven, politeOldPayment);
+}
+/** More than 6 invalid photos: evidence card to ops, then canReply = 0. */
+async function banInvalidPhotoSender(chatId, db, photoBuffer, imageDetails, userDetails, broadcastName, invalidPhotoCount) {
+    // Single message: image + analysis in one caption (was forward + separate text card).
+    const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
+        title: "User banned",
+        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
+        fields: [
+            { label: "User", value: broadcastName || "-", code: false },
+            { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
+            { label: "Paid before", value: userDetails.payAmount ?? 0, code: false },
+            { label: "Demo given", value: yesNo(userDetails.demoGiven), code: false },
+            { label: "Invalid pics", value: invalidPhotoCount },
+        ],
+        quote: String(imageDetails.description ?? "").trim() || undefined,
+        quoteLabel: "Image description",
+        quoteCollapsed: true,
+    });
+    // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
+    // must not vanish silently — otherwise a user is banned with no operator-visible record.
+    if (!banEvidenceSent) {
+        logger.error(`[ProcessImage] BAN evidence photo NOT delivered to CLIENT_UPDATES (dead channel/no bot?) — banning ${chatId} without a visible record`);
+    }
+    userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
+    return userDetails;
+}
+/** Payment-related photo: the image with its analysis to CLIENT_UPDATES. */
+async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastName, processedAmount, userDetails, invalidPhotoCount) {
+    // Single message: the image WITH the analysis as its caption. (Previously this both
+    // forwarded the image AND sent a separate text-only card — the same info twice.)
+    const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, paymentEvidenceCard({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }));
+    if (!paymentEvidenceSent) {
+        logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
+    }
+}
+/** Non-payment photo: posted to @unwantedupdates1, bot card on UNVDS as the fallback. */
+async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg) {
+    // Primary: the client account posts to @unwantedupdates1 (forward renders the photo in-chat,
+    // then a text card with the analysis). forwardToChannel swallows its own errors, but the text
+    // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
+    // Fallback ONLY then: bot photo on UNVDS (never CLIENT_UPDATES; no bot is a member of @unwantedupdates1).
+    try {
+        await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__.forwardToChannel)(event, "@unwantedupdates1");
+        await event.client.sendMessage("@unwantedupdates1", {
+            message: msg.slice(0, 1000),
+        });
+    }
+    catch (error) {
+        logger.warn(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
+        const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.UNVDS, photoBuffer, {
+            title: "Unwanted image",
+            fields: [
+                { label: "User", value: broadcastName || "-", code: false },
+                { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
+                { label: "Invalid pics", value: invalidPhotoCount, code: false },
+            ],
+            details: msg.split("\n").slice(4).filter((l) => l.trim()),
+            detailsTitle: "Image analysis",
+        });
+        if (!unwantedSent) {
+            logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
+        }
+    }
+}
+/** Failed-payment screenshot: delete, tell the user, schedule the reminder. */
+async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer) {
+    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
+    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+            "**Oye....!! Payment Failed??**",
+            "**Baby... your payment didn't go through!!**",
+            "**Darling!! This payment failed, try again!**"
+        ]),
+    });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Sent pay number', told: true });
+    await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_26__.respToFailedMSg)(event, imageDetails.text, chatId);
+    await scheduleImageFollowup(event, chatId, 'failedPaymentReminder', 10000);
+    await (0,_media_channel_upload__WEBPACK_IMPORTED_MODULE_7__.sendImageToChannel)(photoBuffer);
+}
+/** Text-proven fake screenshot: the payment flow's fraud path (warning, then block). */
+async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons) {
+    const flow = paymentFlowFor(event, chatId, db, imageDetails);
+    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    await flow.fraud(session, userDetails.canReply, fraudReasons, async () => {
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                "Hatt...\nFake screenshot!!\n\nI'm Blocking you Now!!",
+                "Stop sending fake payments!!\n\nYou're Blocked Now!!",
+                "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
+            ]),
+        });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Fake pic: told', told: true });
+        await scheduleImageFollowup(event, chatId, 'fakeScreenshotLimit', 20000);
+    });
+}
+/** True when the user paid / took a demo from another client and this screenshot does not name us (ops notice). */
+async function flagCrossClientPayment(chatId, db, text, broadcastName, blockedAnswering) {
+    let didPayOthers = false;
+    const didPayOthersResp = await db.checkIfPaidToOthers(chatId);
+    if ((didPayOthersResp.paid !== "" ||
+        didPayOthersResp.demoGiven !== "") &&
+        !text.includes(process.env.name.split(" ")[0].toLowerCase()) &&
+        !text.includes(process.env.product)) {
+        // await picEvent.message.respond({ message: `Wait...\nI'm verifying your Payment again!!\nI think U paid to ${didPayOthersResp.paid} ${didPayOthersResp.demoGiven !== "" ? (`and U also took Demo from ${didPayOthersResp.demoGiven}`) : ""}` });
+        const reply = `@${process.env.clientId}: ` +
+            broadcastName +
+            ": Trying to scam!!\n\n" +
+            `Paid: ${didPayOthersResp.paid}\n` +
+            `Demo: ${didPayOthersResp.demoGiven}`;
+        if (!blockedAnswering)
+            notifyProcessImage("crossClientPayment", "Cross-client pay", "User may have paid another client", imageUserFields(chatId, broadcastName, [
+                { label: "Paid", value: didPayOthersResp.paid || "none" },
+                { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
+            ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING, reply);
+        didPayOthers = true;
+    }
+    return didPayOthers;
+}
+/** Valid payment under 30 that differs from the paid amount: demo pics, or a demo call on a strong score. */
+async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim) {
+    logger.log("Processing low amount payment for pics/demo logic.");
+    if (userDetails.picsSent > 0) {
+        const weightedScore = canSendPicsScore(userDetails, chatId);
+        const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getDemoPicsSentTimestamp(chatId);
+        const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount, true // this branch only runs when amount !== payAmount
+        );
+        if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                    "Wait baby....!! ",
+                    "Just a moment Babyy...!!",
+                    "Give me a sec Dear...!!"
+                ]),
+            });
+            userDetails = await db.update(chatId, {
+                demoGiven: false,
+                payAmount: 50,
+            });
+            await initiateCallKeepingClaim(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
+            // Reset counters
+            userChatState.pleaseRequestCount = 0;
+            // picCount reset handled in database via state reset helper
+        }
+        else {
+            // Tell user pics already sent
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                    "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
+                    "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
+                    "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
+                ]),
+            });
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
+                title: 'Pics already sent',
+                fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
+                told: true,
+            });
+            // Pic request count handled in database (userDetails.picCount)
+        }
+    }
+    else {
+        // Send demo pics (first time or weighted score >= 3)
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [], told: true });
+        try {
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                    "Wait baby....\nSending you my hot pics!! 🔥",
+                    "Hold on darling...\nTaking pics for you!! 💋",
+                    "Just wait...\nGoing to bathroom for pics!! 🙈"
+                ]),
+            });
+            await scheduleImageFollowup(event, chatId, 'demoPicsFollowup', 6000, { amount, payAmountBefore: payAmount, picsSentBefore: userDetails.picsSent || 0 });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
+        }
+    }
+}
+/** Valid payment of 15..MAX_PAYMENT_AMOUNT: call, call link, pics or a re-call, then the fmp / low-pic clean-up. */
+async function handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, amount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted) {
+    if (amount >= 30 &&
+        amount >= userDetails.payAmount + 20 &&
+        (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canStartService)(userDetails, amount)) {
+        await initiateCallKeepingClaim(amount, userDetails, "Reg");
+        (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
+    }
+    else {
+        if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canStartService)(userDetails, amount)) {
+            userDetails = await sendCallLinkForPayment(event, chatId, db, userDetails, amount, serviceStarted);
+        }
+        else {
+            if (amount < 30 &&
+                (amount <= 25 ||
+                    (amount > 25 && !userDetails.picsSent))) {
+                await handleSmallPicsPayment(event, chatId, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
+            }
+            else if ((userDetails.payAmount < 60 &&
+                userDetails.demoGiven) ||
+                (userDetails.payAmount < 160 &&
+                    userDetails.secondShow) ||
+                amount <= userDetails.payAmount) {
+                await handleRepeatPayment(event, chatId, imageDetails, userDetails, amount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
+            }
+            else {
+                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pic ignored', summary: 'Weird case.' });
+            }
+        }
+        if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["fmp"])) {
+            await scheduleImageFollowup(event, chatId, 'fmpDelete', 15000);
+        }
+        if (amount <= userDetails.payAmount &&
+            !isWithinPastTenMinutesImage.result) {
+            await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
+                title: 'Low pic deleted',
+                summary: 'Unwanted pic: same or less amount.',
+                fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
+            });
+        }
+    }
+}
+/** Service can start but no auto call: the call link (VCUI) or the in-house call offer; saves the paid amount. */
+async function sendCallLinkForPayment(event, chatId, db, userDetails, amount, serviceStarted) {
+    const linkMessage = (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+        `Baby, you can call me here 💋\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now darling!! I'm so horny for you 🔥`,
+        `Click here to video call me baby 😘\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nI'm Naked and waiting for you sweetie!! 💦`,
+    ]);
+    const updatedData = {
+        limitTime: Date.now() + 2 * 60 * 60 * 1000
+    };
+    if (amount > userDetails.payAmount) {
+        updatedData['payAmount'] = amount;
+    }
+    if (amount > userDetails.highestPayAmount) {
+        updatedData['highestPayAmount'] = amount;
+    }
+    const inHouse = await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_35__.inHouseCallsActive)();
+    // VCUI path: link first, exactly as before.
+    if (!inHouse)
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
+    userDetails = await db.update(chatId, updatedData);
+    // Keep the claim only once the paid amount is saved: if the save fails, the payer's resend
+    // must still be credited (vcui gates the call on the saved payAmount).
+    serviceStarted();
+    // In-house: after the update, so the re-call sees the new amount.
+    if (inHouse) {
+        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_35__.offerCallOrLink)(chatId, () => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
+        serviceStarted();
+    }
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told to call', told: true });
+    return userDetails;
+}
+/** Under-30 payment that cannot start a service: demo pics, or a demo call on a strong score. */
+async function handleSmallPicsPayment(event, chatId, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim) {
+    if (userDetails.picsSent > 0) {
+        const weightedScore = canSendPicsScore(userDetails, chatId);
+        const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getDemoPicsSentTimestamp(chatId);
+        const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount);
+        // Already sent pics, check weighted score
+        if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
+            // High score, upgrade to demo call
+            userDetails.demoGiven = false;
+            if (userDetails.payAmount <= 50) {
+                await initiateCallKeepingClaim(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
+            }
+            // Reset counters
+            userChatState.pleaseRequestCount = 0;
+            // picCount reset handled in database via state reset helper
+        }
+        else {
+            // Tell user pics already sent
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                    "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
+                    "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
+                    "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
+                ]),
+            });
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
+                title: 'Pics already sent',
+                fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
+                told: true,
+            });
+            // Increment counters
+            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.incrementPleaseRequestCount(chatId);
+            // picCount handled in database (userDetails.picCount)
+        }
+    }
+    else {
+        // Send demo pics (first time or weighted score >= 3)
+        try {
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                    "Wait baby....\nSending you my Nude pics!! 🔥",
+                    "Hold on darling...\nTaking my Sexy pics for you!! 💋",
+                    "Just wait BAbuu...\nSearching my Naked photos for you!! 🙈"
+                ]),
+            });
+            await scheduleImageFollowup(event, chatId, 'firstDemoPicsFollowup', 6000, { amount, payAmountBefore: userDetails.payAmount, highestBefore: userDetails.highestPayAmount, picsSentBefore: userDetails.picsSent || 0 });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
+        }
+    }
+}
+/** Same-or-lower amount after a demo / show: re-call when recent, else "call is over". */
+async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim) {
+    if (isWithinPastTenMinutesImage.result &&
+        amount >= 30 &&
+        userDetails.callTime < Date.now() - 3 * 60 * 1000) {
+        if (amount < 50) {
+            userDetails.demoGiven = false;
+            await initiateCallKeepingClaim(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
+        }
+        else {
+            let updatedAmount = userDetails.payAmount;
+            if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
+                updatedAmount = userDetails.payAmount + 100;
+            }
+            await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
+        }
+        (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
+    }
+    else {
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                "**Your call is over baby!!**\nPay again if you want more**\n\nNo MONEY? then No SERVICE!!\nDon't WASTE your time dear!!**",
+                "**Your Call finished baby!!**\nPay again for more**\n\nMoney first, then service!!\nStop wasting time Dear!!**"
+            ])
+        });
+        await scheduleImageFollowup(event, chatId, 'callOverFollowup', 15000, { payAmountBefore: userDetails.payAmount });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
+            title: 'Call is over',
+            fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
+            told: true,
+        });
+    }
+    // Decrement invalid photo count (user sent valid payment)
+    const currentInvalidCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
+    if (currentInvalidCount > 0) {
+        userChatState.invalidPhotoCount = currentInvalidCount - 1;
+        userChatState.invalidPhotoTimestamp = Date.now();
+    }
+}
+/** Every valid payment: ledger credit, centralized payAmount update, attribution. */
+async function recordValidPaymentCredit(event, chatId, db, userDetails, amount) {
+    // Centralized payAmount update - ensures payAmount is updated for all valid payments
+    // This handles cases where payAmount might not be updated in specific code paths above
+    // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
+    // Read current payAmount from DB to ensure we have the latest value (may have been updated in code paths above)
+    const currentUserDetails = await db.read(chatId);
+    // C3/D1 — the authoritative ledger write. Every valid payment converges here,
+    // which is why the credit is taken at this one point rather than at the four
+    // scattered sites above.
+    //
+    // It runs ALONGSIDE the legacy payAmount writes, not instead of them: this step
+    // is additive so it can be verified in production before anything starts
+    // reading `lifetimePaid`. What it adds that the legacy writes cannot:
+    //   - `lifetimePaid` raised with $max, so a peak can never be lowered (three
+    //     sites in utils.ts/paidPatterns.ts actively lower `highestPayAmount`);
+    //   - idempotency, keyed on the SCREENSHOT MESSAGE. The surrounding credit
+    //     paths run inside scheduleProcessImageTask callbacks, and that helper is a
+    //     bare setTimeout wrapper with no dedupe, so one screenshot can credit twice.
+    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT) {
+        creditedSeq.delete(chatId);
+        creditedSeq.set(chatId, ++holdSeq);
+        capMap(creditedSeq);
+        try {
+            await db.creditPayment(chatId, amount, `msg:${event.message.id}`);
+        }
+        catch (creditError) {
+            // A ledger failure must never break the payment flow the user is watching.
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
+        }
+    }
+    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
+        // Only update if amount is greater than current payAmount
+        // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
+        userDetails = await db.update(chatId, {
+            payAmount: amount,
+        });
+        logger.log(`[ProcessImage] Centralized update: payAmount set to ${amount} (was ${currentUserDetails.payAmount})`);
+    }
+    else if (currentUserDetails.payAmount >= amount && amount > 0) {
+        logger.log(`[ProcessImage] Skipping centralized update: payAmount already at ${currentUserDetails.payAmount} (amount: ${amount})`);
+    }
+    try {
+        await db.recordPaymentAttribution(chatId, amount);
+    }
+    catch (error) {
+        // Payment service must not be withheld because analytics is unavailable.
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
+    }
+}
+/** Ordinary picture: compliment + pay nudge (or delete after 4 invalid), counts invalid photos. */
+async function replyToNonPaymentPicture(event, chatId, imageDetails) {
+    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
+    if (invalidPhotoCount <= 4) {
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                "Nice 😘",
+                "Looks Good",
+                "Woww💋",
+                "Yummmmm... making me wet 💦",
+                "Awww... so hot🙈",
+                "Damn... you're making me horny 😈",
+                "Fuck... that's sexy 🍆",
+                "Mmm... 💋"
+            ]),
+        });
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
+            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
+                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
+                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
+                (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Come make me cum darling**"
+            ]),
+        });
+    }
+    else {
+        await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
+    }
+    // Increment invalid photo count if inappropriate
+    if (!imageDetails.isPayment) {
+        _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.incrementInvalidPhotoCount(chatId);
+    }
+}
 async function processImage(event) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     // Set once a payment's credit is claimed; undone if the credit then throws (the payer's retry must not be a "repeat").
@@ -69153,41 +69652,7 @@ async function processImage(event) {
             return;
         }
         if (imageDetails.proofBlocked) {
-            // No credit. Not counted as an invalid photo (no ban path). Owner (2026-10-13): a fake PROVEN by text on the
-            // screenshot (generator disclaimer / blocklist) gets the rude warning and a block after 15 min unless the real
-            // payment page arrives; a block that rests on model judgement only keeps the previous polite "old payment" reply.
-            logger.warn(`[ProcessImage] proof blocked for ${chatId} msg ${event.message.id} (${(imageDetails.proofReasons ?? []).join(",")}): not crediting`);
-            const politeOldPayment = async () => {
-                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                    message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES.length)],
-                });
-            };
-            const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__.TEXT_PROVEN_BLOCKS.has(r));
-            const blockedUser = await db.read(chatId);
-            if (blockedUser?.canReply === 0) {
-                // Blocked (only the fake-payment flow's blocks reach here): no reply, no ops notice (owner 2026-10-13).
-                logger.warn(`[ProcessImage] blocked user ${chatId}: proof-blocked screenshot ignored silently`);
-                return;
-            }
-            // Ops must see the image to judge the call. Fire-and-forget: the evidence post must never delay or abort the
-            // warning/block below.
-            void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, fakeEvidenceCard(chatId, imageDetails)).then((sent) => {
-                if (!sent)
-                    logger.error(`[ProcessImage] fake-screenshot evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
-            }).catch((error) => logger.error(`[ProcessImage] fake-screenshot evidence photo failed for ${chatId}:`, error));
-            if (textProven.length === 0) {
-                await politeOldPayment();
-                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
-                    title: 'Flagged as fake',
-                    summary: 'Not credited: flagged as fake by the models.',
-                    fields: [fact('Flags', (imageDetails.proofReasons ?? []).join(', ') || 'proof blocked'), fact('Amount read', Number(imageDetails.amount) || 0)],
-                    told: true,
-                });
-                return;
-            }
-            const flow = paymentFlowFor(event, chatId, db, imageDetails);
-            const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
-            await flow.fraud(session, blockedUser?.canReply, textProven, politeOldPayment);
+            await handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer);
             return;
         }
         imageDetails.amount = imageDetails.amount || 0;
@@ -69238,27 +69703,7 @@ async function processImage(event) {
         const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
         if (invalidPhotoCount > 4 && !blockedAnswering) {
             if (invalidPhotoCount > 6) {
-                // Single message: image + analysis in one caption (was forward + separate text card).
-                const banEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, {
-                    title: "User banned",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING,
-                    fields: [
-                        { label: "User", value: broadcastName || "-", code: false },
-                        { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
-                        { label: "Paid before", value: userDetails.payAmount ?? 0, code: false },
-                        { label: "Demo given", value: yesNo(userDetails.demoGiven), code: false },
-                        { label: "Invalid pics", value: invalidPhotoCount },
-                    ],
-                    quote: String(imageDetails.description ?? "").trim() || undefined,
-                    quoteLabel: "Image description",
-                    quoteCollapsed: true,
-                });
-                // The ban proceeds regardless (a spammer must still be stopped), but a FAILED evidence send
-                // must not vanish silently — otherwise a user is banned with no operator-visible record.
-                if (!banEvidenceSent) {
-                    logger.error(`[ProcessImage] BAN evidence photo NOT delivered to CLIENT_UPDATES (dead channel/no bot?) — banning ${chatId} without a visible record`);
-                }
-                userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
+                userDetails = await banInvalidPhotoSender(chatId, db, photoBuffer, imageDetails, userDetails, broadcastName, invalidPhotoCount);
             }
             else {
                 (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
@@ -69274,41 +69719,11 @@ async function processImage(event) {
         }
         else if (imageDetails &&
             (sanitizedData.isPaymentRelated || sanitizedData.isPaymentMine || askFullScreenshot)) {
-            // Single message: the image WITH the analysis as its caption. (Previously this both
-            // forwarded the image AND sent a separate text-only card — the same info twice.)
-            const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, photoBuffer, paymentEvidenceCard({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }));
-            if (!paymentEvidenceSent) {
-                logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
-            }
+            await postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastName, processedAmount, userDetails, invalidPhotoCount);
         }
         else {
             msg = `UNWANTED IMAGE : @${process.env.clientId}\nChatId : ${chatId}\nUser : ${broadcastName}\nInvalidCount: ${invalidPhotoCount}\n\n\n${(0,_shared_format__WEBPACK_IMPORTED_MODULE_6__.parseObjectToString)({ ...imageDetails, text: imageDetails.text?.replace(/[\r\n]+/g, " ") })}\n\n\n${(0,_shared_format__WEBPACK_IMPORTED_MODULE_6__.parseObjectToString)(sanitizedData)}`;
-            // Primary: the client account posts to @unwantedupdates1 (forward renders the photo in-chat,
-            // then a text card with the analysis). forwardToChannel swallows its own errors, but the text
-            // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
-            // Fallback ONLY then: bot photo on UNVDS (never CLIENT_UPDATES; no bot is a member of @unwantedupdates1).
-            try {
-                await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__.forwardToChannel)(event, "@unwantedupdates1");
-                await event.client.sendMessage("@unwantedupdates1", {
-                    message: msg.slice(0, 1000),
-                });
-            }
-            catch (error) {
-                logger.warn(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
-                const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.UNVDS, photoBuffer, {
-                    title: "Unwanted image",
-                    fields: [
-                        { label: "User", value: broadcastName || "-", code: false },
-                        { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
-                        { label: "Invalid pics", value: invalidPhotoCount, code: false },
-                    ],
-                    details: msg.split("\n").slice(4).filter((l) => l.trim()),
-                    detailsTitle: "Image analysis",
-                });
-                if (!unwantedSent) {
-                    logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
-                }
-            }
+            await postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg);
         }
         if (!blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_25__.proceedWithCall)(userDetails, chatId, "Image Processed");
@@ -69348,18 +69763,7 @@ async function processImage(event) {
                     (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_28__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
-                        await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
-                        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                            message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                "**Oye....!! Payment Failed??**",
-                                "**Baby... your payment didn't go through!!**",
-                                "**Darling!! This payment failed, try again!**"
-                            ]),
-                        });
-                        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Sent pay number', told: true });
-                        await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_26__.respToFailedMSg)(event, imageDetails.text, chatId);
-                        await scheduleImageFollowup(event, chatId, 'failedPaymentReminder', 10000);
-                        await (0,_media_channel_upload__WEBPACK_IMPORTED_MODULE_7__.sendImageToChannel)(photoBuffer);
+                        await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer);
                     }
                     else {
                         const fraudReasons = [
@@ -69368,19 +69772,7 @@ async function processImage(event) {
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.laxmiPayeeReasons)(imageDetails, ownVpas()),
                         ];
                         if (fraudReasons.length > 0) {
-                            const flow = paymentFlowFor(event, chatId, db, imageDetails);
-                            const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
-                            await flow.fraud(session, userDetails.canReply, fraudReasons, async () => {
-                                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                    message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                        "Hatt...\nFake screenshot!!\n\nI'm Blocking you Now!!",
-                                        "Stop sending fake payments!!\n\nYou're Blocked Now!!",
-                                        "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
-                                    ]),
-                                });
-                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Fake pic: told', told: true });
-                                await scheduleImageFollowup(event, chatId, 'fakeScreenshotLimit', 20000);
-                            });
+                            await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
                         }
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
                             if (!(amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT)) {
@@ -69390,26 +69782,8 @@ async function processImage(event) {
                             }
                             else {
                                 if (amount > 11) {
-                                    let didPayOthers = false;
-                                    const didPayOthersResp = await db.checkIfPaidToOthers(chatId);
+                                    const didPayOthers = await flagCrossClientPayment(chatId, db, text, broadcastName, blockedAnswering);
                                     const { payAmount } = userDetails;
-                                    if ((didPayOthersResp.paid !== "" ||
-                                        didPayOthersResp.demoGiven !== "") &&
-                                        !text.includes(process.env.name.split(" ")[0].toLowerCase()) &&
-                                        !text.includes(process.env.product)) {
-                                        // await picEvent.message.respond({ message: `Wait...\nI'm verifying your Payment again!!\nI think U paid to ${didPayOthersResp.paid} ${didPayOthersResp.demoGiven !== "" ? (`and U also took Demo from ${didPayOthersResp.demoGiven}`) : ""}` });
-                                        const reply = `@${process.env.clientId}: ` +
-                                            broadcastName +
-                                            ": Trying to scam!!\n\n" +
-                                            `Paid: ${didPayOthersResp.paid}\n` +
-                                            `Demo: ${didPayOthersResp.demoGiven}`;
-                                        if (!blockedAnswering)
-                                            notifyProcessImage("crossClientPayment", "Cross-client pay", "User may have paid another client", imageUserFields(chatId, broadcastName, [
-                                                { label: "Paid", value: didPayOthersResp.paid || "none" },
-                                                { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
-                                            ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.WARNING, reply);
-                                        didPayOthers = true;
-                                    }
                                     const isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails);
                                     // The gate (repeat / fake-edited / old-time / credit claim) runs around handleMyPayment; when it
                                     // handled the screenshot it has already replied and nothing below runs.
@@ -69443,215 +69817,10 @@ async function processImage(event) {
                                             userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, amount);
                                         }
                                         if (amount !== payAmount && amount < 30) {
-                                            logger.log("Processing low amount payment for pics/demo logic.");
-                                            if (userDetails.picsSent > 0) {
-                                                const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getDemoPicsSentTimestamp(chatId);
-                                                const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount, true // this branch only runs when amount !== payAmount
-                                                );
-                                                if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
-                                                    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                            "Wait baby....!! ",
-                                                            "Just a moment Babyy...!!",
-                                                            "Give me a sec Dear...!!"
-                                                        ]),
-                                                    });
-                                                    userDetails = await db.update(chatId, {
-                                                        demoGiven: false,
-                                                        payAmount: 50,
-                                                    });
-                                                    await initiateCallKeepingClaim(50, userDetails, `ReAssigned for Demo (weighted score: ${weightedScore})`);
-                                                    // Reset counters
-                                                    userChatState.pleaseRequestCount = 0;
-                                                    // picCount reset handled in database via state reset helper
-                                                }
-                                                else {
-                                                    // Tell user pics already sent
-                                                    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                            "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
-                                                            "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
-                                                            "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
-                                                        ]),
-                                                    });
-                                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
-                                                        title: 'Pics already sent',
-                                                        fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
-                                                        told: true,
-                                                    });
-                                                    // Pic request count handled in database (userDetails.picCount)
-                                                }
-                                            }
-                                            else {
-                                                // Send demo pics (first time or weighted score >= 3)
-                                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [], told: true });
-                                                try {
-                                                    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                            "Wait baby....\nSending you my hot pics!! 🔥",
-                                                            "Hold on darling...\nTaking pics for you!! 💋",
-                                                            "Just wait...\nGoing to bathroom for pics!! 🙈"
-                                                        ]),
-                                                    });
-                                                    await scheduleImageFollowup(event, chatId, 'demoPicsFollowup', 6000, { amount, payAmountBefore: payAmount, picsSentBefore: userDetails.picsSent || 0 });
-                                                }
-                                                catch (error) {
-                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
-                                                }
-                                            }
+                                            await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
                                         else if (amount >= 15 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT) {
-                                            if (amount >= 30 &&
-                                                amount >= userDetails.payAmount + 20 &&
-                                                (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canStartService)(userDetails, amount)) {
-                                                await initiateCallKeepingClaim(amount, userDetails, "Reg");
-                                                (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
-                                            }
-                                            else {
-                                                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canStartService)(userDetails, amount)) {
-                                                    const linkMessage = (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                        `Baby, you can call me here 💋\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now darling!! I'm so horny for you 🔥`,
-                                                        `Click here to video call me baby 😘\n\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nI'm Naked and waiting for you sweetie!! 💦`,
-                                                    ]);
-                                                    const updatedData = {
-                                                        limitTime: Date.now() + 2 * 60 * 60 * 1000
-                                                    };
-                                                    if (amount > userDetails.payAmount) {
-                                                        updatedData['payAmount'] = amount;
-                                                    }
-                                                    if (amount > userDetails.highestPayAmount) {
-                                                        updatedData['highestPayAmount'] = amount;
-                                                    }
-                                                    const inHouse = await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_35__.inHouseCallsActive)();
-                                                    // VCUI path: link first, exactly as before.
-                                                    if (!inHouse)
-                                                        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage });
-                                                    userDetails = await db.update(chatId, updatedData);
-                                                    // Keep the claim only once the paid amount is saved: if the save fails, the payer's resend
-                                                    // must still be credited (vcui gates the call on the saved payAmount).
-                                                    serviceStarted();
-                                                    // In-house: after the update, so the re-call sees the new amount.
-                                                    if (inHouse) {
-                                                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_35__.offerCallOrLink)(chatId, () => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
-                                                        serviceStarted();
-                                                    }
-                                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told to call', told: true });
-                                                }
-                                                else {
-                                                    if (amount < 30 &&
-                                                        (amount <= 25 ||
-                                                            (amount > 25 && !userDetails.picsSent))) {
-                                                        if (userDetails.picsSent > 0) {
-                                                            const weightedScore = canSendPicsScore(userDetails, chatId);
-                                                            const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getDemoPicsSentTimestamp(chatId);
-                                                            const isSameImageRecently = isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount);
-                                                            // Already sent pics, check weighted score
-                                                            if (!isSameImageRecently && (weightedScore >= 2 || picsSentTimestamp < Date.now() - 3 * 60000) && isWithinPastTenMinutesImage.result) {
-                                                                // High score, upgrade to demo call
-                                                                userDetails.demoGiven = false;
-                                                                if (userDetails.payAmount <= 50) {
-                                                                    await initiateCallKeepingClaim(50, userDetails, `Upgrading user to Demo (score: ${weightedScore})`);
-                                                                }
-                                                                // Reset counters
-                                                                userChatState.pleaseRequestCount = 0;
-                                                                // picCount reset handled in database via state reset helper
-                                                            }
-                                                            else {
-                                                                // Tell user pics already sent
-                                                                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                                    message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                                        "I've already sent you my pics baby 💋\nVideo call is just **50Rs** darling\n\nPay me and let's have fun!!\nI'm waiting for you sweetie 😘",
-                                                                        "You already saw my hot pics baby 🔥\nNow pay **50Rs** for live video call\n\nI want to show you more... much more 😈",
-                                                                        "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
-                                                                    ]),
-                                                                });
-                                                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
-                                                                    title: 'Pics already sent',
-                                                                    fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
-                                                                    told: true,
-                                                                });
-                                                                // Increment counters
-                                                                _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.incrementPleaseRequestCount(chatId);
-                                                                // picCount handled in database (userDetails.picCount)
-                                                            }
-                                                        }
-                                                        else {
-                                                            // Send demo pics (first time or weighted score >= 3)
-                                                            try {
-                                                                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                                    message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                                        "Wait baby....\nSending you my Nude pics!! 🔥",
-                                                                        "Hold on darling...\nTaking my Sexy pics for you!! 💋",
-                                                                        "Just wait BAbuu...\nSearching my Naked photos for you!! 🙈"
-                                                                    ]),
-                                                                });
-                                                                await scheduleImageFollowup(event, chatId, 'firstDemoPicsFollowup', 6000, { amount, payAmountBefore: userDetails.payAmount, highestBefore: userDetails.highestPayAmount, picsSentBefore: userDetails.picsSent || 0 });
-                                                            }
-                                                            catch (error) {
-                                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
-                                                            }
-                                                        }
-                                                    }
-                                                    else if ((userDetails.payAmount < 60 &&
-                                                        userDetails.demoGiven) ||
-                                                        (userDetails.payAmount < 160 &&
-                                                            userDetails.secondShow) ||
-                                                        amount <= userDetails.payAmount) {
-                                                        if (isWithinPastTenMinutesImage.result &&
-                                                            amount >= 30 &&
-                                                            userDetails.callTime < Date.now() - 3 * 60 * 1000) {
-                                                            if (amount < 50) {
-                                                                userDetails.demoGiven = false;
-                                                                await initiateCallKeepingClaim(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
-                                                            }
-                                                            else {
-                                                                let updatedAmount = userDetails.payAmount;
-                                                                if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
-                                                                    updatedAmount = userDetails.payAmount + 100;
-                                                                }
-                                                                await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
-                                                            }
-                                                            (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
-                                                        }
-                                                        else {
-                                                            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                                                                message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                                                                    "**Your call is over baby!!**\nPay again if you want more**\n\nNo MONEY? then No SERVICE!!\nDon't WASTE your time dear!!**",
-                                                                    "**Your Call finished baby!!**\nPay again for more**\n\nMoney first, then service!!\nStop wasting time Dear!!**"
-                                                                ])
-                                                            });
-                                                            await scheduleImageFollowup(event, chatId, 'callOverFollowup', 15000, { payAmountBefore: userDetails.payAmount });
-                                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
-                                                                title: 'Call is over',
-                                                                fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
-                                                                told: true,
-                                                            });
-                                                        }
-                                                        // Decrement invalid photo count (user sent valid payment)
-                                                        const currentInvalidCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
-                                                        if (currentInvalidCount > 0) {
-                                                            userChatState.invalidPhotoCount = currentInvalidCount - 1;
-                                                            userChatState.invalidPhotoTimestamp = Date.now();
-                                                        }
-                                                    }
-                                                    else {
-                                                        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pic ignored', summary: 'Weird case.' });
-                                                    }
-                                                }
-                                                if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["fmp"])) {
-                                                    await scheduleImageFollowup(event, chatId, 'fmpDelete', 15000);
-                                                }
-                                                if (amount <= userDetails.payAmount &&
-                                                    !isWithinPastTenMinutesImage.result) {
-                                                    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
-                                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
-                                                        title: 'Low pic deleted',
-                                                        summary: 'Unwanted pic: same or less amount.',
-                                                        fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
-                                                    });
-                                                }
-                                            }
+                                            await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, amount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
                                         else {
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
@@ -69661,53 +69830,7 @@ async function processImage(event) {
                                                 fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
                                             });
                                         }
-                                        // Centralized payAmount update - ensures payAmount is updated for all valid payments
-                                        // This handles cases where payAmount might not be updated in specific code paths above
-                                        // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
-                                        // Read current payAmount from DB to ensure we have the latest value (may have been updated in code paths above)
-                                        const currentUserDetails = await db.read(chatId);
-                                        // C3/D1 — the authoritative ledger write. Every valid payment converges here,
-                                        // which is why the credit is taken at this one point rather than at the four
-                                        // scattered sites above.
-                                        //
-                                        // It runs ALONGSIDE the legacy payAmount writes, not instead of them: this step
-                                        // is additive so it can be verified in production before anything starts
-                                        // reading `lifetimePaid`. What it adds that the legacy writes cannot:
-                                        //   - `lifetimePaid` raised with $max, so a peak can never be lowered (three
-                                        //     sites in utils.ts/paidPatterns.ts actively lower `highestPayAmount`);
-                                        //   - idempotency, keyed on the SCREENSHOT MESSAGE. The surrounding credit
-                                        //     paths run inside scheduleProcessImageTask callbacks, and that helper is a
-                                        //     bare setTimeout wrapper with no dedupe, so one screenshot can credit twice.
-                                        if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT) {
-                                            creditedSeq.delete(chatId);
-                                            creditedSeq.set(chatId, ++holdSeq);
-                                            capMap(creditedSeq);
-                                            try {
-                                                await db.creditPayment(chatId, amount, `msg:${event.message.id}`);
-                                            }
-                                            catch (creditError) {
-                                                // A ledger failure must never break the payment flow the user is watching.
-                                                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
-                                            }
-                                        }
-                                        if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_40__.MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
-                                            // Only update if amount is greater than current payAmount
-                                            // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
-                                            userDetails = await db.update(chatId, {
-                                                payAmount: amount,
-                                            });
-                                            logger.log(`[ProcessImage] Centralized update: payAmount set to ${amount} (was ${currentUserDetails.payAmount})`);
-                                        }
-                                        else if (currentUserDetails.payAmount >= amount && amount > 0) {
-                                            logger.log(`[ProcessImage] Skipping centralized update: payAmount already at ${currentUserDetails.payAmount} (amount: ${amount})`);
-                                        }
-                                        try {
-                                            await db.recordPaymentAttribution(chatId, amount);
-                                        }
-                                        catch (error) {
-                                            // Payment service must not be withheld because analytics is unavailable.
-                                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
-                                        }
+                                        await recordValidPaymentCredit(event, chatId, db, userDetails, amount);
                                     }
                                     else if (isPaymentProperlyMine) {
                                         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
@@ -69754,35 +69877,7 @@ async function processImage(event) {
                 await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_28__.askToFinishPayment)(event);
             }
             else {
-                const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.getInvalidPhotoCount(chatId);
-                if (invalidPhotoCount <= 4) {
-                    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                            "Nice 😘",
-                            "Looks Good",
-                            "Woww💋",
-                            "Yummmmm... making me wet 💦",
-                            "Awww... so hot🙈",
-                            "Damn... you're making me horny 😈",
-                            "Fuck... that's sexy 🍆",
-                            "Mmm... 💋"
-                        ]),
-                    });
-                    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
-                        message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
-                            (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Let's enjoy now baby**",
-                            (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**I'm ready to fuck you now**",
-                            (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.PayMsgArray) + "\n\n**Come make me cum darling**"
-                        ]),
-                    });
-                }
-                else {
-                    await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
-                }
-                // Increment invalid photo count if inappropriate
-                if (!imageDetails.isPayment) {
-                    _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.incrementInvalidPhotoCount(chatId);
-                }
+                await replyToNonPaymentPicture(event, chatId, imageDetails);
             }
         }
         releaseClaim = undefined;
@@ -73343,46 +73438,649 @@ const outboundQueue = new OutboundQueue({}, outboundBackup());
 
 /***/ },
 
-/***/ "./src/pattern-handlers/commonPatterns.ts"
-/*!************************************************!*\
-  !*** ./src/pattern-handlers/commonPatterns.ts ***!
-  \************************************************/
+/***/ "./src/pattern-handlers/common/body-patterns.ts"
+/*!******************************************************!*\
+  !*** ./src/pattern-handlers/common/body-patterns.ts ***!
+  \******************************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   commonPatterns: () => (/* binding */ commonPatterns),
-/* harmony export */   isBotAccusation: () => (/* binding */ isBotAccusation)
+/* harmony export */   bodyPatterns: () => (/* binding */ bodyPatterns)
 /* harmony export */ });
-/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../conversation/text-match */ "./src/conversation/text-match.ts");
-/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
 /* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../conversation/messages/payment-links */ "./src/conversation/messages/payment-links.ts");
-/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
-/* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
-/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
-/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
-/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
-/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../calls/voice-proof */ "./src/calls/voice-proof.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_15___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_15__);
-/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
-/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
-/* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
-/**
- * Common Pattern Handlers
- * These patterns are shared between paid and unpaid users
- * Each handler returns true if it matched and handled the message
- */
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Body-part appreciation. */
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:common-patterns");
+const bodyPatterns = [
+    // ===== BODY PARTS APPRECIATION - SEPARATED FOR FOCUSED RESPONSES =====
+    {
+        id: 'user_body_compliments_nice_hot_sexy',
+        priority: 167,
+        scope: 'all',
+        description: 'Body compliments (nice, hot, sexy, beautiful)',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'voice mail', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+                'hard work', 'hard exam', 'hard time', 'wet weather', 'wet paint', 'wet floor',
+            ];
+            const BODY_PARTS = [
+                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
+                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati', 'cleavage',
+                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
+                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
+                'waist', 'hips', 'legs', 'arms', 'lips', 'neck', 'back', 'shoulders', 'face',
+                'mukham', 'mokam', 'cheh', 'chehra', 'body',
+            ];
+            const BODY_COMPLIMENTS = ['nice', 'hot', 'sexy', 'beautiful', 'cute', 'good', 'azhaga', 'chanagide', 'kollam'];
+            const COMPLIMENT_FALSE_POSITIVES = ['execute', 'acute', 'photo', 'shot', 'hotspot', 'hotel'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMPLIMENT_FALSE_POSITIVES))
+                return false;
+            if (!(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BODY_COMPLIMENTS))
+                return false;
+            logger.debug(`[BodyCompliments] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.bodyComplimentsReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_body_size_how_big_small_question',
+        priority: 166,
+        scope: 'all',
+        description: 'Body size questions (big, small, tight, round)',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'workout',
+                'hard work', 'hard exam', 'hard time',
+            ];
+            const BODY_PARTS = [
+                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
+                'nippl', 'nipl', 'chest', 'chati', 'thigh', 'butt', 'bum',
+                'ass', 'pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut', 'hole',
+                'gaand', 'vagina', 'belly', 'stomach', 'navel', 'waist', 'hips',
+                'legs', 'lips', 'body',
+            ];
+            const normalized = text.toLowerCase();
+            const padded = ` ${normalized} `;
+            const SIZE_WORDS = ['size', 'big', 'measurement', 'small', 'soft', 'tight', 'round', 'huge', 'thick', 'fat', 'bada', 'chota', 'mota'];
+            const SIZE_OWNER_WORDS = [' your ', ' ur ', ' tumhara ', ' teri '];
+            const SIZE_QUESTION_TEXT = ['kitna', 'kitni', 'what', 'whats', 'how', 'kya', 'bata'];
+            const PERSON_SIZE_WORDS = [' you ', ' u ', ' ho ', ' are '];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            const bodyPartSizeAsk = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SIZE_WORDS);
+            const directSizeAsk = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['size']) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SIZE_OWNER_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_QUESTION_TEXT) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['size', 'size?']))) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_QUESTION_TEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PERSON_SIZE_WORDS));
+            if (!bodyPartSizeAsk && !directSizeAsk)
+                return false;
+            logger.debug(`[BodySize] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.bodySizeReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_body_show_desire_want_to_see',
+        priority: 165,
+        scope: 'all',
+        description: 'Desire to see/show body parts',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+            ];
+            const BODY_PARTS = [
+                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
+                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
+                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
+                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
+                'waist', 'hips', 'legs', 'lips', 'face', 'body',
+            ];
+            const WANT_SEE = [
+                'want', 'wanna', 'see', 'show', 'look', 'watch', 'display',
+                'dikhao', 'dekh', 'dekhna', 'chahiye', 'chudu', 'chupinchu',
+                'chupu', 'kaval', 'kaatu', 'kaattu', 'paaru', 'venum', 'venam',
+                'torsu', 'beku', 'nodu', 'kaanikku', 'nokku',
+            ];
+            const BARE_BODY_FILLERS = ['baby', 'babe', 'na', 'please', 'plz', 'pls', 'reyy', 'rey', 'yaar', 'jaan', 'dear'];
+            const BARE_BODY_EXCLUSIONS = [
+                'nice', 'hot', 'sexy', 'beautiful', 'cute', 'big', 'small', 'size',
+                'tight', 'touch', 'kiss', 'lick', 'press', 'squeeze',
+                'send', 'sent', 'bhej', 'pic', 'pics', 'photo', 'video', 'image', 'img',
+                'wassup', 'wasup',
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            const explicitShowDesire = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, WANT_SEE) && (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS);
+            const bareBodyRequest = text.trim().length <= 18 &&
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BARE_BODY_FILLERS) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BARE_BODY_EXCLUSIONS);
+            if (!explicitShowDesire && !bareBodyRequest)
+                return false;
+            logger.debug(`[BodyShowDesire] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.bodyShowDesireReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_body_touch_action_request',
+        priority: 164,
+        scope: 'all',
+        description: 'Touch/physical actions on body parts',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+            ];
+            const BODY_PARTS = [
+                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
+                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
+                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
+                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
+                'waist', 'hips', 'legs', 'lips', 'face', 'body',
+            ];
+            const TOUCH_ACTIONS = ['touch', 'hold', 'rub', 'press', 'squeeze', 'push', 'pushing', 'pussing', 'lick', 'kiss', 'finger', 'play', 'thodu', 'muddu', 'muttu'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TOUCH_ACTIONS) || !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS))
+                return false;
+            logger.debug(`[BodyTouch] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.bodyTouchActionsReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_clothing_removal_undress_request',
+        priority: 163,
+        scope: 'all',
+        description: 'Requests to remove/open clothing',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const OPEN_REMOVE = ['open', 'remove', 'take off', 'strip', 'undress', 'vippu', 'utaro', 'utaar'];
+            const CLOTHING = ['dress', 'cloth', 'kapd', 'bra', 'pant', 'shirt', 'top', 'skirt'];
+            const NAKED_COMMANDS = ['strip', 'undress', 'get naked', 'go naked', 'fully nude'];
+            const NAKED_EXACT = ['naked', 'nude', 'nanga', 'nangi', 'naked baby', 'nude baby', 'naked na', 'nude na', 'naked please', 'nude please'];
+            const SEND_NUDE_CONTEXT = ['send', 'sent', 'bhej', 'dedo', 'dede', 'de do', 'give', 'gimme', 'pic', 'photo'];
+            const clothingRemoval = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, OPEN_REMOVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CLOTHING);
+            const nakedRemoval = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NAKED_COMMANDS) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, NAKED_EXACT)) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SEND_NUDE_CONTEXT);
+            if (!clothingRemoval && !nakedRemoval)
+                return false;
+            logger.debug(`[ClothingRemoval] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.clothingRemovalReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_body_contextual_appreciation',
+        priority: 159,
+        scope: 'all',
+        description: 'Contextual body appreciation (milk, chest, bra)',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+            ];
+            const BODY_PARTS = [
+                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
+                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
+                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
+                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
+                'waist', 'hips', 'legs', 'lips', 'face', 'body',
+            ];
+            const SHOW_SEND = ['show', 'send', 'sent', 'bhej', 'give', 'dedo', 'de do', 'dikha', 'anuppu', 'kalisu', 'ayakku', 'kodu'];
+            const NUDITY = ['nude', 'nudes', 'naked', 'nanga', 'nangi'];
+            const SEND_ONLY = ['send', 'sent', 'bhej', 'dedo', 'dede', 'de do', 'give', 'gimme'];
+            const CONTEXTUAL_BODY = ['bra', 'chest', 'milk', 'doodh', 'dudh', 'palu'];
+            const MEDIA_WORDS = ['pic', 'photo', 'video', 'image', 'img', 'selfie'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            const bodyShowSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_SEND) && (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_6__.containsBodyTerm)(text, BODY_PARTS);
+            const nudeSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NUDITY) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SEND_ONLY);
+            const contextualMedia = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CONTEXTUAL_BODY) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_SEND) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MEDIA_WORDS));
+            if (!bodyShowSend && !nudeSend && !contextualMedia)
+                return false;
+            logger.debug(`[BodyContextual] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.naturalBodyReplies), true);
+            return true;
+        }
+    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/dirty-talk-patterns.ts"
+/*!************************************************************!*\
+  !*** ./src/pattern-handlers/common/dirty-talk-patterns.ts ***!
+  \************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   dirtyTalkPatterns: () => (/* binding */ dirtyTalkPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Dirty talk, moan requests, dick compliments, private-parts questions. */
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:common-patterns");
+const dirtyTalkPatterns = [
+    // ===== DIRTY TALK - SEPARATED FOR FOCUSED RESPONSES =====
+    {
+        id: 'user_explicit_dirty_words_slang',
+        priority: 152,
+        scope: 'all',
+        description: 'Explicit dirty words/slang',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXPLICIT_WORDS = [
+                'slut', 'whore', 'bitch', 'randi', 'kutiya', 'saali',
+                'lanja', 'boothu', 'bothu', 'gandi', 'gndi', 'mulugu',
+            ];
+            const DIRTY_WORD_TONE = ['dirty', 'drty', 'gandi', 'gndi', 'slutty'];
+            const WORD_TARGETS = ['word', 'slang', 'gaali', 'gali'];
+            const dirtyWordRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRTY_WORD_TONE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, WORD_TARGETS);
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXPLICIT_WORDS) && !dirtyWordRequest)
+                return false;
+            logger.debug(`[ExplicitWords] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.explicitWordsReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_dirty_talk_conversation_request',
+        priority: 151,
+        scope: 'all',
+        description: 'Dirty talk conversation requests',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = ['dirty shirt', 'dirty cloth', 'dirty dress', 'dirty room', 'dirty water', 'dirty floor', 'dirty hands'];
+            const DIRTY_TALK_TONE = ['dirty', 'drty', 'gandi', 'gndi', 'sex', 'hot', 'naughty', 'wild', 'boothu', 'bothu'];
+            const TALK_TARGETS = ['talk', 'chat', 'conversation', 'baat', 'matl'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRTY_TALK_TONE) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, TALK_TARGETS))
+                return false;
+            logger.debug(`[DirtyTalkRequest] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.talkRequestReplies), true);
+            return true;
+        }
+    },
+    {
+        // Generic dirty/naughty request ("say something dirty", "be naughty with me")
+        // not paired with a talk word. Lowest priority among dirty sub-types.
+        id: 'user_general_dirty_naughty_request',
+        priority: 150,
+        scope: 'all',
+        description: 'Generic dirty/naughty talk requests not tied to a specific talk word',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'bad network', 'feeling bad', 'dirty shirt', 'dirty cloth',
+                'dirty dress', 'dirty room', 'dirty water', 'dirty floor',
+                'dirty hands', 'dirty mind problem',
+            ];
+            const GENERAL_DIRTY = ['dirty', 'drty', 'naughty', 'kinky', 'nasty', 'gandi', 'gndi', 'boothu', 'bothu'];
+            const BAD_ROLEPLAY = ['be bad', 'act bad', 'talk bad', 'say bad', 'tell bad', 'bad baby', 'bad babe'];
+            const generalDirty = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, GENERAL_DIRTY);
+            const roleplayDirty = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, BAD_ROLEPLAY);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!generalDirty && !roleplayDirty)
+                return false;
+            logger.debug(`[GeneralDirty] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.naturalDirtyTalkReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_moan_sound_audio_request',
+        priority: 188,
+        scope: 'all',
+        description: 'Moaning/sound requests',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const BLOCKED_CONTEXT = ['price', 'rate', 'cost', 'kitna', 'how much', 'payment', 'paid', 'demo'];
+            const MOAN_CUES = ['moan', 'awaz', 'siskiyan', 'noise', 'sound', 'voice sex'];
+            const PLEASURE_CUES = ['sex', 'pleasure', 'orgasm', 'climax'];
+            const moanPleasure = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MOAN_CUES) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PLEASURE_CUES);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, BLOCKED_CONTEXT))
+                return false;
+            if (!moanPleasure && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_8__.isMoanDirectOrContinuation)(text, allMsg))
+                return false;
+            logger.debug(`[MoanRequest] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.moanRequestReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_dick_compliment_size_question',
+        priority: 170,
+        scope: 'all',
+        description: 'User asking about their dick - seductive compliments',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // Also catch the user bragging/asking about HIS dick ("my dick is big",
+            // "my cock", "mera lund bada") — a dick-compliment cue even without a question.
+            // Exclude show/send requests ("can i show you my dick") — those are media intents.
+            const EXCLUDED_CONTEXT = ['cocktail', 'peacock', 'myth'];
+            const SHOW_GUARD = ['show', 'send', 'dikha', 'dekho', 'see', 'watch', 'bhej', 'pic', 'photo', 'video', 'image', 'img'];
+            const DICK = ['dick', 'dik', 'dck', 'cock', 'lund', 'lauda', 'penis'];
+            const POSSESSIVE = ['my', 'mera', 'mere'];
+            const QUALITY = ['big', 'bada', 'huge', 'hard', 'long', 'size', 'mota'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SHOW_GUARD))
+                return false;
+            const possessiveDick = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, POSSESSIVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DICK);
+            const dickQuality = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DICK) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, QUALITY);
+            const myDick = possessiveDick || dickQuality;
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_8__.isDickQuestion)(text) || myDick) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.dickComplimentReplies), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.sendReaction)(event, '🍆');
+                // Follow up with encouragement to show/pay
+                if (userDetails.payAmount < 50) {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_6__.schedulePatternFollowup)(event, context, 15000, {
+                        kind: 'respond', text: "Show me now in **video call** baby! 😉\n\n" + (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.PayMsgArray),
+                    }, { label: 'common.dick.videoCall' });
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_can_show_private_parts_question',
+        priority: 181,
+        scope: 'all',
+        description: 'User asking if they can show their private parts',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_8__.isCanShowPrivatePartsQuestion)(text)) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.canShowReplies), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.sendReaction)(event, '👀');
+                // Follow up with video call encouragement
+                if (userDetails.payAmount < 50) {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_6__.schedulePatternFollowup)(event, context, 15000, {
+                        kind: 'respond', text: "Let's do **video call** so I can see you **live**! 😈\n\n" + (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage)(userDetails.payAmount)),
+                    }, { label: 'common.canShow.videoCall' });
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/horny-patterns.ts"
+/*!*******************************************************!*\
+  !*** ./src/pattern-handlers/common/horny-patterns.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   hornyPatterns: () => (/* binding */ hornyPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Horny status. */
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:common-patterns");
+const hornyPatterns = [
+    // ===== HORNY STATUS - SEPARATED FOR FOCUSED RESPONSES =====
+    {
+        id: 'user_explicit_arousal_jerking_masturbating',
+        priority: 158,
+        scope: 'all',
+        description: 'Explicit arousal expressions (jerking, masturbating, cumming)',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+                'jerk chicken', 'beef jerky', 'turkey jerky', 'hilarious', 'kottu parotta',
+            ];
+            const DIRECT_AROUSAL = ['horny', 'horni', 'horney', 'masturbat', 'mastrubat', 'kottu'];
+            const JERK_AROUSAL = ['jerk off', 'jerking off', 'jerk my', 'jerk me', 'jerk you', 'jerk u'];
+            const HILA_AROUSAL = ['hilana', 'hila raha', 'hila rha', 'hila do', 'hila de'];
+            const MUTH_AROUSAL = ['muth maar', 'muth mar', 'muth nikal', 'muth kar'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRECT_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, JERK_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HILA_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MUTH_AROUSAL))
+                return false;
+            logger.debug(`[ExplicitArousal] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.explicitArousalReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_hard_erect_status_expression',
+        priority: 157,
+        scope: 'all',
+        description: 'Hard/erect status expressions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'hardware', 'hard drive', 'hard disk', 'hard work', 'hard exam', 'hard time',
+                'hard copy', 'hard reset', 'hard question', 'dictionary', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+            ];
+            const SHORT_HARD = [
+                'hard', 'hard?', 'hard!', 'hard.', 'hrd', 'hrd?', 'erect', 'erect?',
+                'stiff', 'stiff?', 'khada', 'khada?', 'sakht', 'sakht?',
+            ];
+            const SELF_HARD = [
+                'i am hard', "i'm hard", 'im hard', 'i m hard', 'getting hard', 'feeling hard',
+                'my hard', 'me hard', 'rock hard', 'i am erect', "i'm erect", 'im erect',
+                'i m erect', 'getting erect', 'feeling erect', 'khada ho', 'khada hai',
+                'sakht ho', 'sakht hai',
+            ];
+            const DICK_TERMS = ['dick', 'dic', 'cock', 'penis', 'lund', 'lulli', 'modda', 'sullu'];
+            const HARD_TERMS = ['hard', 'hrd', 'erect', 'stiff', 'khada', 'sakht', 'lechi', 'nilichindi'];
+            const trimmed = text.trim().toLowerCase();
+            const shortHard = SHORT_HARD.includes(trimmed);
+            const selfHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SELF_HARD);
+            const dickHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DICK_TERMS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HARD_TERMS);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!shortHard && !selfHard && !dickHard)
+                return false;
+            logger.debug(`[HardStatus] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.hardStatusReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_wet_tight_status_expression',
+        priority: 156,
+        scope: 'all',
+        description: 'Wet/tight status expressions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'wet weather', 'wet paint', 'wet floor', 'wet wipes', 'wet tissue',
+                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
+                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
+            ];
+            const SHORT_WET = [
+                'wet', 'wet?', 'wet!', 'wet.', 'moist', 'moist?', 'geeli', 'geeli?',
+                'geela', 'geela?', 'gela', 'gela?', 'thadiga', 'tadap',
+            ];
+            const DIRECT_WET = [
+                'are you wet', 'r u wet', 'u wet', 'you wet', 'so wet', 'very wet',
+                'kitni wet', 'how wet', 'wet ho', 'wet hai', 'geeli ho', 'geela ho',
+                'geeli hai', 'geela hai', 'tadap rahi', 'tadap raha',
+            ];
+            const PUSSY_TERMS = ['pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut'];
+            const WET_TERMS = ['wet', 'moist', 'geeli', 'geela', 'gela', 'thadiga'];
+            const trimmed = text.trim().toLowerCase();
+            const directWet = SHORT_WET.includes(trimmed) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRECT_WET);
+            const pussyWet = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PUSSY_TERMS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, WET_TERMS);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!directWet && !pussyWet)
+                return false;
+            logger.debug(`[WetStatus] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.wetStatusReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_climax_cumming_expression',
+        priority: 155,
+        scope: 'all',
+        description: 'Climax/cumming expressions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
+                'payment', 'paisa', 'money', 'amount', 'today', 'tomorrow', 'over', 'home',
+                'back', 'work', 'office', 'release date', 'press release',
+                'cumber', 'cumin powder', 'cumin seed', 'cumin tea', 'cumul',
+                'cummins', 'accum', 'scum', 'succumb',
+            ];
+            const DIRECT_CLIMAX = ['cum', 'climax', 'orgasm', 'varunnu', 'barthide', 'vanthuten'];
+            const FINISH_ACTIONS = ['come', 'coming', 'finish', 'release'];
+            const SEXUAL_CONTEXT = [
+                'dick', 'cock', 'penis', 'lund', 'lulli', 'modda', 'sullu',
+                'pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut',
+                'horny', 'inside', 'together', 'load', 'sex',
+            ];
+            const directClimax = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRECT_CLIMAX);
+            const contextualFinish = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FINISH_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SEXUAL_CONTEXT);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!directClimax && !contextualFinish)
+                return false;
+            logger.debug(`[Climax] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.climaxReplies), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_control_loss_cant_control',
+        priority: 154,
+        scope: 'all',
+        description: 'Loss of control expressions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'remote control', 'control room', 'control panel', 'quality control',
+                'stop payment', 'payment stop', 'hold payment', 'payment hold',
+                'stop message', 'stop texting', 'lost phone', 'lost money',
+            ];
+            const CONTROL_LOSS = [
+                'cant control', "can't control", 'cannot control', 'can not control',
+                'unable to control', 'losing control', 'lost control', 'control nahi',
+                'control nhi', 'control nai', 'control ledu',
+            ];
+            const STOP_HOLD_LOSS = [
+                'cant stop', "can't stop", 'cannot stop', 'can not stop', 'unable to stop',
+                'cant hold', "can't hold", 'cannot hold', 'can not hold', 'unable to hold',
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, CONTROL_LOSS) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, STOP_HOLD_LOSS))
+                return false;
+            logger.debug(`[ControlLoss] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.controlLossReplies), true);
+            return true;
+        }
+    },
+    {
+        // General arousal/mood ("turned on", "so aroused") not tied to a body part.
+        // Lowest priority among the horny sub-types so the 5 specific ones win first.
+        id: 'user_general_horny_aroused_mood',
+        priority: 153,
+        scope: 'all',
+        description: 'Generic arousal/mood expressions not tied to a specific body part',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const EXCLUDED_CONTEXT = [
+                'doctor', 'medical', 'hospital', 'tablet', 'medicine',
+                'turn on light', 'turned on light', 'turned on the light',
+                'turn on fan', 'turned on fan', 'power on', 'switch on', 'device on',
+            ];
+            const AROUSAL_MOOD = ['turned on', 'turn me on', 'turned me on', 'turns me on', 'turning me on', 'arous'];
+            const WANT_YOU_DESIRE = [
+                'want you so bad', 'want you badly', 'want you so much',
+                'want you right now', 'want you rn',
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
+                return false;
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, AROUSAL_MOOD) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, WANT_YOU_DESIRE))
+                return false;
+            logger.debug(`[GeneralHorny] Detected in: "${text}"`);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.naturalHornyReplies), true);
+            return true;
+        }
+    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/opening-and-fallback-patterns.ts"
+/*!**********************************************************************!*\
+  !*** ./src/pattern-handlers/common/opening-and-fallback-patterns.ts ***!
+  \**********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   openingAndFallbackPatterns: () => (/* binding */ openingAndFallbackPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
+/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Refund, greetings, ready-to-pay, yes / off-domain / generic-question fallbacks, trust reassurance. */
 
 
 
@@ -73395,18 +74093,195 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+const openingAndFallbackPatterns = [
+    // ===== PRIORITY 95-100: CRITICAL PATTERNS =====
+    {
+        id: 'user_refund_money_back_request',
+        priority: 200,
+        scope: 'all',
+        description: 'Refund requests - HIGH PRIORITY to prevent escalation',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const NEGATED_REFUND = ['do not refund', 'dont refund', "don't refund", 'not refund', 'no refund', 'refund mat'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEGATED_REFUND))
+                return false;
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['refund', 'not satisfied', 'wapas', 'return', 'money back'])) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.refundReplyPool)(text)));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🥺');
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_greeting_hi_hello_hey',
+        priority: 128,
+        scope: 'all',
+        description: 'Greetings like hi, hello, hey',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            if (text === "hi" || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.startswith)(text, ['hello', 'hii', 'hai', 'hlw', 'hlo', 'hi ', 'hyy', 'hey', 'good morning', 'good mor', 'gud mor', 'good eve', 'good aft', 'good day', 'wassup', 'wasup', 'sup', 'namaste', 'namaskar', 'helo', 'hlllo'])) {
+                const array = ['Hello', 'Hii', 'Hai', 'Hlo', 'hlooo', 'Hi', 'Hyy', 'Hey'];
+                const randomElement = array[Math.floor(Math.random() * array.length)];
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${randomElement} **${context.senderJson.firstName}...**!!`, true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_ready_to_pay_confirmation',
+        priority: 30,
+        scope: 'all',
+        description: 'User indicates readiness to pay - robust matching',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // Bag-based READY match: commitment cue + payment word, or WhatsApp mention
+            const COMMIT = ['ok', 'okay', 'ill', 'i will', 'lets', 'ready to', 'wanna', 'want to', 'chalo', 'theek hai'];
+            const PAY_ACTION = ['paying', 'pay now', 'i pay it', 'pay karu', 'pay karunga', 'paise dunga'];
+            // Guard: "not ready to pay" is NOT readiness — prevents negation stealing the ready route
+            const NEGATION_WORDS = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'never', 'mat', "can't", 'cant', 'cannot'];
+            // Guard: "what if you dont call after i pay" is a TRUST/FEAR objection, not readiness — prevents conditional/fear phrases stealing the ready route
+            const fearCondtionalPhrases = ['what if', 'what happens if', 'kya hoga', 'agar', 'suppose', 'if i', 'after i', 'before i', 'dont call', 'wont call', 'not call', 'nahi call', 'nhi call'];
+            const hasStandalonePay = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsPadded)(text, ['pay']);
+            const hasPayAction = hasStandalonePay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION);
+            const isReady = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMMIT) && hasPayAction) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok pay', 'okay pay']))
+                && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsPadded)(text, NEGATION_WORDS)
+                && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, fearCondtionalPhrases);
+            if (isReady) {
+                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_8__.finishPaymentMsgs)}`;
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, userDetails.chatId, reply);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_yes_response_fallback',
+        priority: 10,
+        scope: 'all',
+        description: 'User says "yes" to a prompt',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['yes', 'yep', 'yeah', 'yup', 'haan', 'haa', 'sure', 'okk', 'theek', 'sari'])) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getCoreInitMsg)()}`);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        // Catch-all (lowest priority): when nothing specific matched, the girl TAKES THE
+        // LEAD and asks an engaging question (offDomainRedirectMsgs is now a question pool)
+        // to keep the chat alive — instead of redirecting-to-pay or going silent.
+        // Still guarded so it only fires on a real stray sentence, not noise/numbers.
+        id: 'user_off_domain_redirect',
+        priority: 9,
+        scope: 'all',
+        description: 'Unmatched chatter — girl leads with an engaging question (general/flirty/forbidden)',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const trimmed = (text ?? '').trim();
+            // Only fire on a real stray message — not 1-char noise, not a bare number.
+            if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.isOnlyDigits)(trimmed)) {
+                return false;
+            }
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getCoreInitMsg)(), true);
+            return true;
+        }
+    },
+    {
+        // Near-last-resort: a question nothing specific handled. Negative-framed questions
+        // ("are you a bot/fake/not real?") get a reassuring NO; every other question gets an
+        // affirmative, payment/erotic-encouraging YES instead of silence or a wrong match.
+        id: 'user_generic_question_fallback',
+        priority: 11,
+        scope: 'all',
+        description: 'Generic question fallback — No to negative-framed, encouraging Yes to the rest',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const isQuestion = text.includes('?') ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
+            if (!isQuestion) {
+                return false;
+            }
+            const isNegativeFramed = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+                'bot', 'robot', 'fake', 'fak', 'frau', 'scam', 'real girl', 'not real', 'auto', 'automat', 'spam', 'cheat',
+            ]);
+            if (isNegativeFramed) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.botArray), true);
+            }
+            else {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage)(userDetails.payAmount))}`,
+                    `Haan baby, of course! 🙈\n\n**Pay** na and let's enjoy! 💋`,
+                    `Yess reyy!! 🔥\n\nJust **pay** baby, I'll do it all for you! 😈`,
+                    `Ofcourse baby 😚\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}`,
+                ]), true);
+            }
+            return true;
+        }
+    },
+    {
+        id: 'user_trust_distrust_reassurance',
+        priority: 24,
+        scope: 'all',
+        description: 'Distrust / fear-of-cheating reassurance',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const TRUST_FEAR = ['genuine', 'legit', 'bharosa', 'believe', 'guarantee'];
+            const DOUBT_CUE = ['is it', 'is this', 'is that', 'are you', 'are u', 'r u', 'u real', 'what if', 'how do i', 'how to'];
+            const TRUST_PHRASES = [
+                'take money and run', 'money and run', 'will cheat', 'girls cheat',
+                'you cheat', 'will run', 'bhag jaogi', 'bhag jaunga', 'paise lekar',
+                'paise leke', 'how to trust', 'how do i trust', 'cant trust',
+                'dont trust', 'trust kaise', 'believe you', 'how to believe', 'dhokha', 'cheat karegi'
+            ];
+            const PAYMENT_EXCLUSION = [
+                'money deducted', 'amount deducted', 'paisa kat', 'paise kat',
+                'debited but', 'deducted but', 'cut gaya', 'kat gaya',
+                'sent screenshot', 'sent the screenshot'
+            ];
+            const isGuaranteeFear = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TRUST_FEAR) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DOUBT_CUE)) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TRUST_PHRASES)) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_EXCLUSION);
+            if (isGuaranteeFear) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.trustReassuranceMsgs), true);
+                return true;
+            }
+            return false;
+        }
+    },
+];
 
 
+/***/ },
+
+/***/ "./src/pattern-handlers/common/pattern-helpers.ts"
+/*!********************************************************!*\
+  !*** ./src/pattern-handlers/common/pattern-helpers.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   BODY_PART_TERMS: () => (/* binding */ BODY_PART_TERMS),
+/* harmony export */   containsBodyTerm: () => (/* binding */ containsBodyTerm),
+/* harmony export */   containsPadded: () => (/* binding */ containsPadded),
+/* harmony export */   hasPaymentFailureIntent: () => (/* binding */ hasPaymentFailureIntent),
+/* harmony export */   hasRepeatRecoveryIntent: () => (/* binding */ hasRepeatRecoveryIntent),
+/* harmony export */   isBotAccusation: () => (/* binding */ isBotAccusation),
+/* harmony export */   isCanShowPrivatePartsQuestion: () => (/* binding */ isCanShowPrivatePartsQuestion),
+/* harmony export */   isDickQuestion: () => (/* binding */ isDickQuestion),
+/* harmony export */   isGoodbyeIntent: () => (/* binding */ isGoodbyeIntent),
+/* harmony export */   isMoanDirectOrContinuation: () => (/* binding */ isMoanDirectOrContinuation),
+/* harmony export */   isOnlyDigits: () => (/* binding */ isOnlyDigits),
+/* harmony export */   isPaymentAccessIssue: () => (/* binding */ isPaymentAccessIssue),
+/* harmony export */   isServiceDescriptionQuestion: () => (/* binding */ isServiceDescriptionQuestion),
+/* harmony export */   paymentPendingReplyPool: () => (/* binding */ paymentPendingReplyPool),
+/* harmony export */   processReplyPool: () => (/* binding */ processReplyPool),
+/* harmony export */   refundReplyPool: () => (/* binding */ refundReplyPool),
+/* harmony export */   serviceDescriptionReplyPool: () => (/* binding */ serviceDescriptionReplyPool),
+/* harmony export */   trimPunctuation: () => (/* binding */ trimPunctuation)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/** Text predicates and reply pools shared by the common pattern groups. */
 
 
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:common-patterns");
 const BODY_PART_TERMS = ['boob', 'pussy', 'dick', 'ass', 'nipple', 'body'];
 function trimPunctuation(value) {
     let result = value.trim().toLowerCase();
@@ -73431,13 +74306,13 @@ function isBotAccusation(text) {
 }
 function containsPadded(text, terms) {
     const padded = ` ${trimPunctuation(text)} `;
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, terms.map((term) => ` ${trimPunctuation(term)} `));
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, terms.map((term) => ` ${trimPunctuation(term)} `));
 }
 function containsBodyTerm(text, terms) {
     const wordOnly = ['ass', 'bum', 'butt', 'hole', 'face', 'body', 'lips', 'legs', 'hips', 'waist', 'back', 'neck', 'arms'];
     const wordTerms = terms.filter((term) => wordOnly.includes(term));
     const looseTerms = terms.filter((term) => !wordOnly.includes(term));
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, looseTerms) || containsPadded(text, wordTerms);
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, looseTerms) || containsPadded(text, wordTerms);
 }
 function isOnlyDigits(value) {
     const trimmed = value.trim();
@@ -73465,24 +74340,24 @@ function isServiceDescriptionQuestion(text) {
     ];
     const PERFORM_QUESTION = ['what you perform', 'kya perform', 'kya karte ho', 'how you do'];
     const EXCLUSION = ['how much', 'how many', 'kitna', 'kitne', 'price', 'rate', 'cost', 'fees', 'charges', 'amount', 'rs', 'rupees'];
-    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_QUESTION) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ACTIVITY_QUESTION) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, INCLUSION_QUESTION) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HAPPEN_QUESTION) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PERFORM_QUESTION)) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUSION);
+    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SERVICE_QUESTION) ||
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ACTIVITY_QUESTION) ||
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, INCLUSION_QUESTION) ||
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, HAPPEN_QUESTION) ||
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, PERFORM_QUESTION)) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, EXCLUSION);
 }
 function isPaymentAccessIssue(text) {
     const padded = ` ${trimPunctuation(text)} `;
-    const hasPaymentTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['scan', 'scanner', 'qr', 'barcode', 'code', 'gpay', 'google pay', 'phonepe', 'paytm', 'upi', 'payment']);
-    const hasFailureSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+    const hasPaymentTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['scan', 'scanner', 'qr', 'barcode', 'code', 'gpay', 'google pay', 'phonepe', 'paytm', 'upi', 'payment']);
+    const hasFailureSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, [
         'block', 'blocked', 'not work', 'not working', 'work no', 'failed', 'fail',
         'error', 'issue', 'problem', 'cant', "can't", 'cannot', 'unable',
         'not goes', 'not going', 'not open', 'declined', 'rejected'
     ]);
-    const hasNegatedFailure = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' no ', ' not ']) &&
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['issue', 'problem', 'error', 'fail', 'failure']);
-    const hasSuccessfulPaymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['success', 'successful', 'done', 'completed', 'paid']) &&
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['no issue', 'no problem', 'no error', 'working', 'worked']);
+    const hasNegatedFailure = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, [' no ', ' not ']) &&
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['issue', 'problem', 'error', 'fail', 'failure']);
+    const hasSuccessfulPaymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['success', 'successful', 'done', 'completed', 'paid']) &&
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['no issue', 'no problem', 'no error', 'working', 'worked']);
     return hasPaymentTarget && hasFailureSignal && !hasNegatedFailure && !hasSuccessfulPaymentContext;
 }
 function hasPaymentFailureIntent(text) {
@@ -73527,24 +74402,24 @@ function hasPaymentFailureIntent(text) {
         'no error',
     ];
     const NON_PAYMENT_GUARD = ['demo', 'trust', 'free', 'chat', 'talk', 'discuss'];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, STANDALONE_FAILURE) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['pay not happening', 'payment not happening', 'upi not going']))
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, STANDALONE_FAILURE) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['pay not happening', 'payment not happening', 'upi not going']))
         return true;
-    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_TARGET) &&
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, FAILURE_CUE) &&
-        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SUCCESS_GUARD) &&
-        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NON_PAYMENT_GUARD));
+    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, PAYMENT_TARGET) &&
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, FAILURE_CUE) &&
+        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SUCCESS_GUARD) &&
+        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, NON_PAYMENT_GUARD));
 }
 function hasRepeatRecoveryIntent(text) {
     const normalized = text.toLowerCase();
     const padded = ` ${trimPunctuation(text)} `;
-    const paymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'pay', 'upi', 'gpay', 'phonepe', 'paytm', 'qr', 'scanner', 'link']);
+    const paymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['payment', 'pay', 'upi', 'gpay', 'phonepe', 'paytm', 'qr', 'scanner', 'link']);
     const NEGATION = [' not ', ' nahi ', ' nhi ', ' no '];
     const PAYMENT_ACCESS_ACTION = ['ja', 'chal', 'dikh', 'khul', 'open', 'show', 'work', 'going', 'happen'];
-    if (paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, NEGATION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, PAYMENT_ACCESS_ACTION))
+    if (paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, NEGATION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, PAYMENT_ACCESS_ACTION))
         return false;
     const DEVICE_TEXT = ['video call', 'voice call'];
     const DEVICE_WORDS = [' call ', ' cal ', ' vc ', ' video ', ' voice ', ' audio ', ' sound ', ' mic ', ' screen ', ' camera '];
-    const hasDevice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, DEVICE_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, DEVICE_WORDS);
+    const hasDevice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, DEVICE_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, DEVICE_WORDS);
     const RECOVERY_STATUS_TEXT = [
         'disconnect', 'dropped', 'drop ho', 'cut gaya', 'cut ho', 'cut off',
         'ended', 'end ho', 'over ho', 'band ho', 'ruk gaya', 'ruk gya',
@@ -73561,16 +74436,16 @@ function hasRepeatRecoveryIntent(text) {
     const SCREEN = ['screen', 'video', 'camera'];
     const SCREEN_ISSUE = ['stuck', 'hang', 'freeze', 'froze', 'band', 'gone', 'gaya', 'stop', 'black', 'blank', 'not showing', 'nahi aa', 'nhi aa', 'nahi dikh', 'nhi dikh', 'issue', 'problem'];
     const NETWORK_ISSUE = ['issue', 'problem', 'cut off', 'gone', 'gaya', 'lagging', 'lag ho', 'slow'];
-    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['restart', 'start again']) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['connect', 'connecting']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, NEGATION)) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['not connecting']) ||
-        (hasDevice && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, RECOVERY_STATUS_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, RECOVERY_STATUS_WORDS))) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, AUDIO) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, AUDIO_ISSUE)) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SCREEN) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SCREEN_ISSUE)) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['sunai', 'dikhai']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' nahi ', ' nhi ', ' not '])) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['black', 'blank']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['screen'])) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['no sound', 'no voice', 'no audio', 'no video'])) ||
-        (!paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['net', 'network']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, NETWORK_ISSUE)));
+    return ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['restart', 'start again']) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['connect', 'connecting']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, NEGATION)) ||
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['not connecting']) ||
+        (hasDevice && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, RECOVERY_STATUS_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, RECOVERY_STATUS_WORDS))) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, AUDIO) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, AUDIO_ISSUE)) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, SCREEN) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, SCREEN_ISSUE)) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['sunai', 'dikhai']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, [' nahi ', ' nhi ', ' not '])) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['black', 'blank']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['screen'])) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['no sound', 'no voice', 'no audio', 'no video'])) ||
+        (!paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, ['net', 'network']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(normalized, NETWORK_ISSUE)));
 }
 function processReplyPool(text) {
     const afterPaymentContext = [
@@ -73579,20 +74454,20 @@ function processReplyPool(text) {
         'paid ke baad', 'payment ke baad', 'pay karne ke baad',
     ];
     const nextAction = ['what', 'wat', 'wht', 'next', 'now', 'ab', 'karu', 'karna', 'krna', 'kya'];
-    const afterPayment = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, afterPaymentContext) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, nextAction)) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what', 'wat', 'wht']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['after']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['pay', 'payment'])) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['i paid']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, nextAction));
+    const afterPayment = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, afterPaymentContext) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, nextAction)) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['what', 'wat', 'wht']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['after']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['pay', 'payment'])) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['i paid']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, nextAction));
     if (afterPayment)
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.processAfterPaymentMsgs;
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.processAfterPaymentMsgs;
     const BOOKING_ACTION = ['book', 'booking', 'order', 'purchase', 'buy', 'select', 'choose', 'plan'];
     const SERVICE_WANT = ['chahiye', 'chahie', 'chaahiye', 'want', 'need', 'lena', 'leni', 'leneka', 'book', 'booking'];
-    const booking = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BOOKING_ACTION) || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['service']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_WANT));
+    const booking = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, BOOKING_ACTION) || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['service']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SERVICE_WANT));
     if (booking)
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.processBookingMsgs;
-    const nextStep = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what', 'wat', 'wht', 'wt', 'kya', 'ab', 'next', 'proceed', 'go ahead', 'karu', 'karun', 'kru', 'krna', 'karna', 'kare', 'karen']);
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.processBookingMsgs;
+    const nextStep = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, ['what', 'wat', 'wht', 'wt', 'kya', 'ab', 'next', 'proceed', 'go ahead', 'karu', 'karun', 'kru', 'krna', 'karna', 'kare', 'karen']);
     if (nextStep)
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.processNextStepMsgs;
-    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.processMsgs;
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.processNextStepMsgs;
+    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.processMsgs;
 }
 function paymentPendingReplyPool(text) {
     // Check for deducted money cases
@@ -73601,24 +74476,24 @@ function paymentPendingReplyPool(text) {
         'money cut', 'amount cut', 'cut gaya', 'kat gaya',
         'money debited', 'amount debited', 'deducted', 'debited'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, deductedKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.paymentDeductedMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, deductedKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.paymentDeductedMsgs;
     }
     // Check for reference / UTR / Txn ID
     const referenceKeywords = [
         'utr', 'txn', 'transaction', 'reference', 'ref',
         'bank ref', 'bank reference', 'ref id', 'ref no'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, referenceKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.paymentReferenceReceivedMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, referenceKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.paymentReferenceReceivedMsgs;
     }
     // Check for screenshot / proof sent
     const proofKeywords = [
         'screenshot', 'ss', 'proof', 'upload', 'attach', 'attached',
         'bhej', 'bheja', 'sent', 'diya', 'dia', 'screen shot'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, proofKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.paymentProofReceivedMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, proofKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.paymentProofReceivedMsgs;
     }
     // Check for waiting / no service cases
     const waitingKeywords = [
@@ -73628,11 +74503,11 @@ function paymentPendingReplyPool(text) {
         'not coming', 'not received', 'still waiting',
         'payment ke baad', 'paid but'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, waitingKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.paymentNoServiceMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, waitingKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.paymentNoServiceMsgs;
     }
     // Default fallback
-    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.paymentPendingMsgs;
+    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.paymentPendingMsgs;
 }
 function serviceDescriptionReplyPool(text) {
     // Voice + Video / Call combination
@@ -73640,26 +74515,26 @@ function serviceDescriptionReplyPool(text) {
         'voice video', 'audio video', 'voice call', 'audio call',
         'video voice', 'call voice', 'call audio', 'both'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, voiceVideoKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.serviceModalityMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, voiceVideoKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.serviceModalityMsgs;
     }
     // Show / Dikha related
     const showKeywords = [
         'show', 'dikha', 'dikhana', 'see', 'watch', 'dekha', 'dikhau'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, showKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.serviceShowMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, showKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.serviceShowMsgs;
     }
     // Include / What all included
     const includeKeywords = [
         'include', 'included', 'inside', 'contain', 'all', 'sab',
         'kya sab', 'what all', 'activities', 'perform', 'kya kya'
     ];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, includeKeywords)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.serviceIncludedMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, includeKeywords)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.serviceIncludedMsgs;
     }
     // Default fallback
-    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.serviceDescriptionMsgs;
+    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.serviceDescriptionMsgs;
 }
 function refundReplyPool(text) {
     const SATISFACTION = [
@@ -73669,27 +74544,27 @@ function refundReplyPool(text) {
     const MONEY_BACK = ['money back', 'money return', 'return money', 'refund my money'];
     const LOCAL_MONEY = ['paisa', 'paise'];
     const RETURN_WORDS = ['wapis', 'wapas', 'return'];
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SATISFACTION)) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.refundSatisfactionMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SATISFACTION)) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.refundSatisfactionMsgs;
     }
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MONEY_BACK) || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, LOCAL_MONEY) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, RETURN_WORDS))) {
-        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.refundMoneyBackMsgs;
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, MONEY_BACK) || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, LOCAL_MONEY) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, RETURN_WORDS))) {
+        return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.refundMoneyBackMsgs;
     }
-    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.refundPolicyMsgs;
+    return _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_1__.refundPolicyMsgs;
 }
 function isDickQuestion(text) {
     const DICK = ['dick', 'dik', 'dck', 'cock', 'lund', 'lauda', 'penis'];
     const POSSESSIVE = ['my', 'mera', 'mere'];
     const QUESTION = ['how', 'hw', 'kya', 'kaisa', 'lagta', 'size', 'big', 'bada', 'long', 'mota'];
     const SHOW_GUARD = ['show', 'send', 'dikha', 'dekho', 'see', 'watch', 'bhej', 'pic', 'photo', 'video', 'image', 'img'];
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DICK) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, POSSESSIVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, QUESTION) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_GUARD);
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, DICK) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, POSSESSIVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, QUESTION) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SHOW_GUARD);
 }
 function isCanShowPrivatePartsQuestion(text) {
     const PERMISSION = ['can', 'could', 'may', 'allow', 'permission', 'kya'];
     const SELF = ['i ', 'me', 'my', 'mera', 'mere'];
     const SHOW = ['show', 'send', 'dikha', 'bhej', 'open'];
     const PARTS = ['dick', 'dik', 'dck', 'cock', 'lund', 'lauda', 'penis', 'pic', 'photo', 'nude', 'body', 'parts', 'pussy', 'boob'];
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PERMISSION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SELF) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PARTS);
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, PERMISSION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SELF) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, SHOW) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, PARTS);
 }
 function isMoanDirectOrContinuation(text, allMsg) {
     const trimmed = trimPunctuation(text);
@@ -73699,8 +74574,8 @@ function isMoanDirectOrContinuation(text, allMsg) {
     ];
     const DIRECT_MOAN = ['moan', 'awaz', 'siskiyan', 'sexy sound', 'sex sound', 'moan sound', 'voice sex'];
     const SHORT_MOAN = ['mon'];
-    const directMoanRequest = !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BLOCKED_CONTEXT) &&
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRECT_MOAN) || SHORT_MOAN.includes(trimmed));
+    const directMoanRequest = !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, BLOCKED_CONTEXT) &&
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, DIRECT_MOAN) || SHORT_MOAN.includes(trimmed));
     if (directMoanRequest)
         return true;
     const stretchedDoContinuation = trimmed.length >= 3 &&
@@ -73713,7 +74588,7 @@ function isMoanDirectOrContinuation(text, allMsg) {
         return false;
     }
     const recentContext = allMsg.toLowerCase().slice(-300);
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(recentContext, DIRECT_MOAN) || SHORT_MOAN.includes(trimPunctuation(recentContext));
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(recentContext, DIRECT_MOAN) || SHORT_MOAN.includes(trimPunctuation(recentContext));
 }
 function isGoodbyeIntent(text) {
     const trimmed = trimPunctuation(text);
@@ -73722,936 +74597,51 @@ function isGoodbyeIntent(text) {
     const SEE_YOU = ['see you', 'see u', 'see ya'];
     const SEE_YOU_TAIL = ['later', 'soon', 'tomorrow', 'tmrw', 'again', 'bye'];
     return (GOODBYE_EXACT.includes(trimmed) ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(trimmed, GOODBYE_TEXT) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(trimmed, SEE_YOU) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(trimmed, SEE_YOU_TAIL)) ||
-        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(trimmed, ['take']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(trimmed, ['care'])));
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(trimmed, GOODBYE_TEXT) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(trimmed, SEE_YOU) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(trimmed, SEE_YOU_TAIL)) ||
+        ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(trimmed, ['take']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(trimmed, ['care'])));
 }
-/**
- * Common patterns that work for both paid and unpaid users
- * Priority ranges:
- * - 90-100: Critical/High priority (greetings, payment done, etc.)
- * - 70-89: Medium-high priority (common queries)
- * - 50-69: Medium priority (general responses)
- * - 30-49: Low priority (fallback patterns)
- */
-const commonPatterns = [
-    // ===== PRIORITY 95-100: CRITICAL PATTERNS =====
-    {
-        id: 'user_refund_money_back_request',
-        priority: 200,
-        scope: 'all',
-        description: 'Refund requests - HIGH PRIORITY to prevent escalation',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const NEGATED_REFUND = ['do not refund', 'dont refund', "don't refund", 'not refund', 'no refund', 'refund mat'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEGATED_REFUND))
-                return false;
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['refund', 'not satisfied', 'wapas', 'return', 'money back'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(refundReplyPool(text)));
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🥺');
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_greeting_hi_hello_hey',
-        priority: 128,
-        scope: 'all',
-        description: 'Greetings like hi, hello, hey',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            if (text === "hi" || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.startswith)(text, ['hello', 'hii', 'hai', 'hlw', 'hlo', 'hi ', 'hyy', 'hey', 'good morning', 'good mor', 'gud mor', 'good eve', 'good aft', 'good day', 'wassup', 'wasup', 'sup', 'namaste', 'namaskar', 'helo', 'hlllo'])) {
-                const array = ['Hello', 'Hii', 'Hai', 'Hlo', 'hlooo', 'Hi', 'Hyy', 'Hey'];
-                const randomElement = array[Math.floor(Math.random() * array.length)];
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${randomElement} **${context.senderJson.firstName}...**!!`, true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_ready_to_pay_confirmation',
-        priority: 30,
-        scope: 'all',
-        description: 'User indicates readiness to pay - robust matching',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // Bag-based READY match: commitment cue + payment word, or WhatsApp mention
-            const COMMIT = ['ok', 'okay', 'ill', 'i will', 'lets', 'ready to', 'wanna', 'want to', 'chalo', 'theek hai'];
-            const PAY_ACTION = ['paying', 'pay now', 'i pay it', 'pay karu', 'pay karunga', 'paise dunga'];
-            // Guard: "not ready to pay" is NOT readiness — prevents negation stealing the ready route
-            const NEGATION_WORDS = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'never', 'mat', "can't", 'cant', 'cannot'];
-            // Guard: "what if you dont call after i pay" is a TRUST/FEAR objection, not readiness — prevents conditional/fear phrases stealing the ready route
-            const fearCondtionalPhrases = ['what if', 'what happens if', 'kya hoga', 'agar', 'suppose', 'if i', 'after i', 'before i', 'dont call', 'wont call', 'not call', 'nahi call', 'nhi call'];
-            const hasStandalonePay = containsPadded(text, ['pay']);
-            const hasPayAction = hasStandalonePay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION);
-            const isReady = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMMIT) && hasPayAction) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok pay', 'okay pay']))
-                && !containsPadded(text, NEGATION_WORDS)
-                && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, fearCondtionalPhrases);
-            if (isReady) {
-                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_17__.finishPaymentMsgs)}`;
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_12__.pushToReplies)(event, userDetails.chatId, reply);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_yes_response_fallback',
-        priority: 10,
-        scope: 'all',
-        description: 'User says "yes" to a prompt',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['yes', 'yep', 'yeah', 'yup', 'haan', 'haa', 'sure', 'okk', 'theek', 'sari'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_18__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_18__.getCoreInitMsg)()}`);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        // Catch-all (lowest priority): when nothing specific matched, the girl TAKES THE
-        // LEAD and asks an engaging question (offDomainRedirectMsgs is now a question pool)
-        // to keep the chat alive — instead of redirecting-to-pay or going silent.
-        // Still guarded so it only fires on a real stray sentence, not noise/numbers.
-        id: 'user_off_domain_redirect',
-        priority: 9,
-        scope: 'all',
-        description: 'Unmatched chatter — girl leads with an engaging question (general/flirty/forbidden)',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const trimmed = (text ?? '').trim();
-            // Only fire on a real stray message — not 1-char noise, not a bare number.
-            if (trimmed.length < 2 || isOnlyDigits(trimmed)) {
-                return false;
-            }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_18__.getCoreInitMsg)(), true);
-            return true;
-        }
-    },
-    {
-        // Near-last-resort: a question nothing specific handled. Negative-framed questions
-        // ("are you a bot/fake/not real?") get a reassuring NO; every other question gets an
-        // affirmative, payment/erotic-encouraging YES instead of silence or a wrong match.
-        id: 'user_generic_question_fallback',
-        priority: 11,
-        scope: 'all',
-        description: 'Generic question fallback — No to negative-framed, encouraging Yes to the rest',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const isQuestion = text.includes('?') ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
-            if (!isQuestion) {
-                return false;
-            }
-            const isNegativeFramed = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
-                'bot', 'robot', 'fake', 'fak', 'frau', 'scam', 'real girl', 'not real', 'auto', 'automat', 'spam', 'cheat',
-            ]);
-            if (isNegativeFramed) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.botArray), true);
-            }
-            else {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount))}`,
-                    `Haan baby, of course! 🙈\n\n**Pay** na and let's enjoy! 💋`,
-                    `Yess reyy!! 🔥\n\nJust **pay** baby, I'll do it all for you! 😈`,
-                    `Ofcourse baby 😚\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.PayMsgArray)}`,
-                ]), true);
-            }
-            return true;
-        }
-    },
-    {
-        id: 'user_trust_distrust_reassurance',
-        priority: 24,
-        scope: 'all',
-        description: 'Distrust / fear-of-cheating reassurance',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const TRUST_FEAR = ['genuine', 'legit', 'bharosa', 'believe', 'guarantee'];
-            const DOUBT_CUE = ['is it', 'is this', 'is that', 'are you', 'are u', 'r u', 'u real', 'what if', 'how do i', 'how to'];
-            const TRUST_PHRASES = [
-                'take money and run', 'money and run', 'will cheat', 'girls cheat',
-                'you cheat', 'will run', 'bhag jaogi', 'bhag jaunga', 'paise lekar',
-                'paise leke', 'how to trust', 'how do i trust', 'cant trust',
-                'dont trust', 'trust kaise', 'believe you', 'how to believe', 'dhokha', 'cheat karegi'
-            ];
-            const PAYMENT_EXCLUSION = [
-                'money deducted', 'amount deducted', 'paisa kat', 'paise kat',
-                'debited but', 'deducted but', 'cut gaya', 'kat gaya',
-                'sent screenshot', 'sent the screenshot'
-            ];
-            const isGuaranteeFear = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TRUST_FEAR) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DOUBT_CUE)) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TRUST_PHRASES)) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_EXCLUSION);
-            if (isGuaranteeFear) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.trustReassuranceMsgs), true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        // Payment proof sent / "money deducted but no call" — pending/dispute reassurance.
-        id: 'user_payment_proof_pending',
-        priority: 188,
-        scope: 'all',
-        description: 'Payment screenshot sent / money deducted but no service yet',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const SCREENSHOT_PROOF = [
-                'screenshot', 'send screenshot',
-                'sent screenshot', 'payment screenshot', 'payment proof',
-                'screenshot bhej', 'screenshot sent', 'ss bhej', 'ss sent', 'ss diya',
-                'proof de diya', 'screenshot diya', 'txn screenshot',
-                'utr', 'reference number', 'transaction id', 'txn id'
-            ];
-            const DEDUCTED = [
-                'money deducted', 'amount deducted', 'money cut', 'amount cut',
-                'paisa kat', 'paise kat', 'money debited', 'amount debited',
-                'cut gaya', 'kat gaya', 'debited', 'deducted'
-            ];
-            const SERVICE_WAIT = [
-                'no call', 'no reply', 'no response', 'no service', 'call kab',
-                'call nahi', 'call nhi', 'service nahi', 'service kab',
-                'waiting', 'wait kar', 'call not received', 'call nahi aaya',
-                'payment ke baad', 'paid but', 'payment done but', 'still waiting',
-                'payment kiya call', 'money sent no', 'paid no call'
-            ];
-            const PAYMENT_CONTEXT = [
-                'payment', 'paid', 'money', 'paisa', 'paise', 'amount', 'rupees',
-                'transaction', 'transfer', 'upi', 'gpay', 'phonepe', 'paytm',
-                'screenshot', 'proof', 'utr', 'deducted', 'debited', 'cut gaya', 'kat gaya'
-            ];
-            const cannotHavePaid = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay']) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['will pay', 'pay later', 'pay tomorrow', 'then i will pay', 'pay karunga', 'pay karungi']) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'payment', 'pay', 'sent money', 'transfer']));
-            const personalMediaOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['my pic', 'my photo', 'my video', 'my videos']) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'screenshot', 'proof', 'utr', 'transaction']);
-            if (cannotHavePaid || personalMediaOnly)
-                return false;
-            // Skip if user is asking about "process" without payment context
-            const processOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['process', 'proces', 'proccess', 'procedure']) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'pay', 'paid', 'screenshot', 'proof', 'money', 'paisa', 'paise']);
-            if (processOnly)
-                return false;
-            const hasScreenshot = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SCREENSHOT_PROOF);
-            const hasDeducted = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DEDUCTED);
-            const hasWaiting = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_WAIT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_CONTEXT);
-            if (hasScreenshot || hasDeducted || hasWaiting) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(paymentPendingReplyPool(text)), true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        // Repeat-service / "one more round" / "lets do again".
-        id: 'user_repeat_service_request',
-        priority: 187,
-        scope: 'all',
-        description: 'Repeat service request after a session',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const normalized = text.toLowerCase();
-            let trimmed = normalized.trim();
-            while (trimmed.endsWith('.') || trimmed.endsWith('?') || trimmed.endsWith('!')) {
-                trimmed = trimmed.slice(0, -1).trim();
-            }
-            const recoveryContext = hasRepeatRecoveryIntent(text);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, [
-                'dont disturb', "don't disturb", 'do not disturb', 'dont message',
-                "don't message", 'do not message', 'leave me alone', 'stop messaging'
-            ]))
-                return false;
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['chalo bye', 'chal bye', 'bye chalo', 'bye chal']))
-                return false;
-            if (!recoveryContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call lagao', 'call laga', 'vc lagao', 'video lagao', 'jaldi call', 'abhi call', 'fast call']))
-                return false;
-            if (trimmed === 'voice not working' || trimmed === 'audio not working')
-                return false;
-            const NEXT_PROCESS = ['next step', 'next kya', 'next kaise', 'what next', 'now what', 'process', 'procedure', 'steps'];
-            if (!recoveryContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, NEXT_PROCESS))
-                return false;
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['demo', 'pic', 'pics', 'photo', 'image', 'proof']) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call', 'vc', 'service']))
-                return false;
-            const paymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['payment', 'pay', 'upi', 'gpay', 'phonepe', 'paytm', 'qr']);
-            if (paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['nahi', 'nhi', 'not']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['ja', 'chal', 'dikh', 'khul', 'open', 'show', 'work']))
-                return false;
-            const SERVICE_TARGET = ['call', 'vc', 'video', 'service', 'round', 'time'];
-            const REPEAT_ACTION = ['again', 'repeat', 'restart', 'resume', 'reconnect', 'continue', 'next', 'dobara', 'phir se', 'phirse'];
-            const MORE_ACTION = ['one more', 'once more', 'another', 'more more'];
-            const doAgain = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['do', 'lets']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['again', 'dobara', 'phir se', 'phirse']);
-            const repeatService = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, REPEAT_ACTION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SERVICE_TARGET);
-            const moreService = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, MORE_ACTION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SERVICE_TARGET);
-            const callEnded = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call ended', 'call end', 'call over', 'call band', 'call ruk', 'call chala', 'call dropped', 'call drop', 'call cut', 'cut gaya call']);
-            const mediaStopped = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['video stopped', 'voice stopped', 'audio stopped', 'screen froze', 'voice not coming']);
-            const matched = recoveryContext || doAgain || repeatService || moreService || callEnded || mediaStopped;
-            if (!matched)
-                return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(recoveryContext ? _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.repeatRecoveryMsgs : _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.repeatServiceMsgs), true);
-            return true;
-        }
-    },
-    {
-        // Hesitation / time-pass — soft re-engagement (lowest of the new dedicated handlers).
-        id: 'user_hesitation_reengagement',
-        priority: 21,
-        scope: 'all',
-        description: 'Hesitation / let me think / just chatting / maybe later',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['let me think', 'lemme think', 'thinking', 'soch', 'maybe later', 'may be later', 'later baby', 'baad me', 'baad mein', 'just chatting', 'only chat', 'timepass', 'just talking', 'not now', 'new here', 'i am new', 'im new', 'first time', 'naya hu'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.hesitationMsgs), true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_amount_with_face_pic_confirmation',
-        priority: 193,
-        scope: 'all',
-        description: 'User asks if amount with face/pic is okay - e.g., "100rs with face okay"',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // EXCLUSION: Service description questions
-            if (isServiceDescriptionQuestion(text)) {
-                return false;
-            }
-            // EXCLUSION: Questions about services, counts, etc.
-            const serviceQuestionKeywords = [
-                'how many', 'how much', 'what all', 'kya sab', 'kya kya', 'em em', 'on how many'
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, serviceQuestionKeywords)) {
-                return false;
-            }
-            const amountValue = (0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_20__.serviceOfferAmountFromText)(text);
-            const hasAmount = amountValue !== -1;
-            // Face / Pic related keywords
-            const faceKeywords = [
-                'face', 'fac', 'fce', 'chehra', 'muh'
-            ];
-            const picKeywords = [
-                'pic', 'photo', 'pict', 'image', 'img', 'selfie'
-            ];
-            // Confirmation / Okay keywords
-            const okayKeywords = [
-                'okay', 'ok', 'okk', 'oky', 'fine', 'fn', 'thik',
-                'theek', 'theek hai', 'thik hai', 'chalega', 'chlega',
-                'hoga', 'hga', 'right', 'ryt', 'good', 'gud',
-                'accha', 'acha', 'aacha', 'karoge', "dikahoge", 'will you', 'will u',
-                "?"
-            ];
-            const hasFace = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, faceKeywords);
-            const hasPic = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, picKeywords);
-            const hasOkay = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, okayKeywords);
-            const hasPlanContext = hasFace || hasPic || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call', 'video', 'service']) ||
-                containsPadded(text, ['vc', 'min', 'mins', 'minute', 'minutes', 'hour', 'hr']);
-            // Require a concrete plan cue as well as an amount. This avoids accepting an
-            // unrelated number merely because the same message also contains "okay".
-            if (hasAmount && amountValue > 15 && hasPlanContext && (hasFace || hasPic || hasOkay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['?']))) {
-                logger.debug(`[AmountFaceConfirm] Detected: "${text}" (amount: ${amountValue}, hasFace: ${hasFace}, hasPic: ${hasPic}, hasOkay: ${hasOkay})`);
-                let reply;
-                if (hasFace && amountValue < 150) {
-                    reply = `The **with-face plan is 150₹** baby.\n\n**100₹** is the **without-face** option. Choose one and pay.`;
-                }
-                else if (!hasFace && amountValue === 100) {
-                    reply = `Yes baby, **100₹ is the without-face plan**.\n\nPay and send the screenshot here.`;
-                }
-                else if (hasFace && amountValue === 150) {
-                    reply = `Yes baby, **150₹ is the with-face plan**.\n\nPay and send the screenshot here.`;
-                }
-                else {
-                    reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_17__.finishPaymentMsgs)}`;
-                }
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_12__.pushToReplies)(event, userDetails.chatId, reply);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'unpaid_user_bot_automated_verification',
-        priority: 195,
-        scope: 'all',
-        description: 'Bot/automated questions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const trimmed = trimPunctuation(text);
-            const padded = ` ${trimmed} `;
-            const BOT_EXACT = ['bot', 'bott', 'ai', 'robot'];
-            const BOT_TEXT = [
-                'chatbot', 'robot', 'artificial intelligence', 'gpt', 'chatgpt',
-                'chtgpt', 'openai', 'claude', 'llm', 'automated reply',
-                'auto reply', 'automatic reply', 'automation',
-            ];
-            const BOT_WORDS = [' bot ', ' bott ', ' bots ', ' ai '];
-            const BOT_CONTEXT = ['are you', 'are u', 'r u', 'you are', 'u are', 'is this', 'talking to', 'chat with'];
-            const isBotQuestion = BOT_EXACT.includes(trimmed) ||
-                isBotAccusation(text) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BOT_TEXT) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, BOT_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BOT_CONTEXT));
-            if (isBotQuestion) {
-                // Only the stock denial (owner, 2026-10-18): nothing appended, never an opener after it.
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.botArray));
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_payment_confirmation_claim',
-        priority: 196,
-        scope: 'all',
-        description: 'User claims they paid',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // Skip automated UPI app notifications
-            const autoNotificationKeywords = [
-                'paid using phonepe', 'paid using paytm', 'paid using gpay',
-                'paid via navi', 'paid via upi', 'via navi upi', 'via phonepe',
-                'paid securely on', 'explore the app now', 'enjoy exciting cashbacks',
-                'lightning fast transactions', 'phon.pe/', 'r.navi.com',
-                'download the app', 'on every payment'
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, autoNotificationKeywords)) {
-                return false;
-            }
-            const MONEY = ['money', 'paisa', 'paise', 'amount', 'rupees', 'payment', 'paymnt', 'amnt'];
-            const COMPLETED = ['kar diya', 'kar diye', 'ho gaya', 'ho gya', 'bhej diya', 'bheja', 'diya', 'diye', 'sent', 'send kiya', 'transfer', 'transferred', 'chesa', 'chesanu', 'did it', 'done it', 'done'];
-            const EXPLICIT_PAYMENT_DONE = [
-                'payment done', 'payment ho gaya', 'payment ho gya', 'pay kar diya',
-                'paid already', 'already paid', 'have paid', 'i paid', 'paid now'
-            ];
-            const NEG = ['cant', "can't", 'unable', 'fail', 'failed', 'error', 'problem', 'issue', 'kaise', 'how to', 'how do i'];
-            const URGENCY = ['start service', 'start call'];
-            const simpleClaim = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(trimPunctuation(text), ['paid']);
-            const hasQuestion = text.includes('?');
-            const hasPaymentNegation = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
-                'not paid', 'nahi paid', 'nhi paid', 'payment nahi', 'nahi bheja', 'nahi diya',
-                'no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay'
-            ]) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'pay', 'sent', 'transfer', 'bhej', 'done']));
-            const hasFuturePayment = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['will pay', 'going to pay', 'pay karunga', 'pay karungi', 'pay karu', 'bhej dunga']);
-            const hasPaymentSubject = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MONEY) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['google pay', 'phone pe']) ||
-                containsPadded(text, ['pay', 'rs', 'amt', 'upi', 'gpay', 'phonepe', 'paytm', 'navi']);
-            const hasCompletedAction = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMPLETED);
-            const explicitPaymentDone = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXPLICIT_PAYMENT_DONE);
-            const sendsProof = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['screenshot', 'payment proof', 'txn screenshot', 'utr', 'transaction id']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['sent', 'send', 'bhej', 'diya', 'shared', 'share']);
-            const unresolvedServiceWait = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['no call', 'no service', 'no reply', 'no response', 'still waiting', 'call nahi', 'call nhi']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'payment', 'money', 'paisa', 'paise']);
-            const isPaymentConfirmed = simpleClaim ||
-                ((explicitPaymentDone || (hasPaymentSubject && hasCompletedAction)) &&
-                    !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment && !sendsProof && !unresolvedServiceWait) ||
-                (containsPadded(text, ['paid']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, URGENCY) && !hasFuturePayment && !hasPaymentNegation && !hasQuestion && !sendsProof && !unresolvedServiceWait);
-            if (isPaymentConfirmed) {
-                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.UserDataDtoCrud.getInstance();
-                const paidCount = await db.getSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.user.paidCount) + 1;
-                await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.user.paidCount, paidCount);
-                try {
-                    await event.client.sendMessage('@miscmessages', {
-                        message: `${process.env.clientId}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${context.broadcastName}</a>: ${text}`,
-                        parseMode: 'html',
-                        linkPreview: false
-                    });
-                    await event.message.forwardTo('me');
-                }
-                catch (error) {
-                    const fwdMsg = error instanceof Error ? error.message : String(error);
-                    if ((0,_tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_21__.isExpectedTelegramLogOutcome)(fwdMsg))
-                        logger.warn('cannot forward', fwdMsg);
-                    else
-                        logger.error('cannot forward', fwdMsg);
-                }
-                if (paidCount == 2) {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                        "Okay baby, checking your payment 🙈 give me 2 mins, then I'll call you 💕",
-                        "Verifying it baby ⏱️ send me the screenshot once and I'll call right away 😘",
-                        "Haan checking na 🔍 the moment it's confirmed I'll call you, promise 💋",
-                    ]));
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 120000, {
-                        kind: 'respond', text: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.aut + "\nDont be Angry for Delay....!!\nI will give you service PAkka!!\n\nI will message you when I'm come back to Online!!",
-                    }, { label: 'common.paid.delayApology' });
-                    const limitTime = await db.getSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.user.limitTime);
-                    await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.user.limitTime, Math.max((Date.now() + (10 * 60 * 1000)), limitTime));
-                }
-                else if (paidCount === undefined || paidCount < 1) {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(['??', 'Huh??', '?? 🤔', 'Kya baby??']));
-                    if (paidCount === 0) {
-                        (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 40000, {
-                            kind: 'respond', text: `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.getChannelLinks()}`,
-                        }, { label: 'common.paid.channelLinks' });
-                    }
-                }
-                else if (paidCount == 1) {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                        _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.wait,
-                        "**Checking your payment** baby...\nWhat's your **name on payment**?\n\n**Wait 5 mins** & send the screenshot once! 🙈",
-                    ]));
-                }
-                else {
-                    const claimedAt = Date.now();
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(["Checking.....", "Let me check baby...", "Checking na, wait... 🙈", "Verifying baby... 1 sec"]));
-                    // Dropped when the screenshot already came (prod 2026-10-15: asked for it after judging it).
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                            _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.screenshot,
-                            "**Send me the payment screenshot** baby! 🙈",
-                            "Bhejo na the screenshot reyy! 📲",
-                        ]),
-                    }, { label: 'common.paid.screenshotAsk', guards: { skipIfPaymentPhotoSince: claimedAt } });
-                }
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_ambiguous_payment_status',
-        priority: 195,
-        scope: 'all',
-        description: 'Clarify bare sent/done/check messages without assuming payment succeeded',
-        handler: async (event, text) => {
-            if (!(0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(trimPunctuation(text), ['sent', 'done', 'check']))
-                return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                'What did you send baby—**payment proof or something else**?\n\nTell me once so I check the right thing.',
-                'Done with **payment**, or done with something else?\n\nIf it is payment, send the **screenshot / UTR** here.',
-                'What should I check baby?\n\nIf you mean payment, share the **payment proof**; otherwise tell me what you sent.'
-            ]), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_empty_text_message',
-        priority: 199,
-        scope: 'all',
-        description: 'Empty text message',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            if (text === '' && !event.message.media) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    '?',
-                    'What baby??',
-                    '??',
-                    '......?',
-                    'Kya hua baby?',
-                    'Hello? 😕',
-                    'Bolo baby...'
-                ]));
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_service_what_will_you_show_question',
-        priority: 187,
-        scope: 'all',
-        description: 'Service description questions (what all will I do/show) - HIGH PRIORITY for conversion',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const SERVICE_QUESTION = ['what', 'wht', 'kya', 'em', 'enti'];
-            const SHOW_DO = ['show', 'dikha', 'dikh', 'perform', 'do', 'kar', 'hoga', 'hog'];
-            const SERVICE_CONTEXT = ['call', 'video', 'vc', 'service'];
-            const PRICE_CONTEXT = ['how much', 'kitna', 'kitne', 'price', 'rate', 'cost', 'amount', 'charge'];
-            const serviceShowQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_QUESTION) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_DO) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_CONTEXT) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_CONTEXT);
-            if (isServiceDescriptionQuestion(text) || serviceShowQuestion) {
-                logger.debug(`[ServiceDescription] Detected: "${text}"`);
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(serviceDescriptionReplyPool(text)));
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '😘');
-                // Upsell opportunity for low payment users
-                if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)),
-                    }, { label: 'common.serviceDescription.upsell' });
-                }
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_service_process_how_to_question',
-        priority: 188,
-        scope: 'all',
-        description: 'Service process / what-to-do-next questions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // Exclusion: Paid + amount + start service
-            const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'pay', 'payment']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIGITS) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['start', 'service', 'call'])) {
-                return false;
-            }
-            // After payment process questions
-            const afterPaymentKeywords = [
-                'after payment', 'payment done', 'payment ho gaya', 'payment ho gya',
-                'pay ho gaya', 'done payment', 'paid', 'after pay'
-            ];
-            const nextActionKeywords = ['what', 'next', 'now', 'ab', 'karu', 'karna', 'krna', 'kya'];
-            const afterPaymentProcess = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, afterPaymentKeywords) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, nextActionKeywords)) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid ke baad', 'payment ke baad', 'pay karne ke baad', 'i paid what', 'paid now what']);
-            if (afterPaymentProcess) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(processReplyPool(text)), true);
-                return true;
-            }
-            // Payment method questions (should not trigger here)
-            const paymentMethodKeywords = [
-                'how to pay', 'where to pay', 'kaise pay', 'kaha pay', 'payment kaise',
-                'upi kaise', 'qr kaise', 'gpay kaise', 'phonepe kaise'
-            ];
-            const technicalPayment = hasPaymentFailureIntent(text) || isPaymentAccessIssue(text);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, paymentMethodKeywords) || technicalPayment)
-                return false;
-            // Other exclusions
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what you do', 'what u do', 'what do you do']))
-                return false;
-            if (hasRepeatRecoveryIntent(text))
-                return false;
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call again', 'vc again', 'video again', 'restart call', 'repeat call']))
-                return false;
-            // Main process / next step detection
-            const processKeywords = [
-                'process', 'procedure', 'steps', 'next step', 'what next', 'now what',
-                'kaise karu', 'kya karna', 'kya karu', 'ab kya', 'next kya', 'next kaise',
-                'step by step', 'process bata', 'procedure bata', 'how to start',
-                'start kaise', 'service kaise', 'booking kaise', 'how to book',
-                'what to do now', 'kya karna hai', 'process kya', 'kya next'
-            ];
-            const matched = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, processKeywords) ||
-                text.trim().toLowerCase() === 'process' ||
-                text.trim().toLowerCase() === 'procedure' ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['start how', 'start kaise', 'go ahead how']);
-            if (matched) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(processReplyPool(text)), true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_confused_needs_clarity',
-        priority: 139,
-        scope: 'all',
-        description: 'User says they do not understand the flow',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const confusionKeywords = [
-                "don't understand", "dont understand", "not understand",
-                "samajh nahi", "samjh nahi", "pata nahi", "not clear",
-                "confuse", "confused", "clear nahi", "samajh nahi aa raha"
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, confusionKeywords)) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `Simple:\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.demo}\n\nPay on my Website 👇\n${process.env.link}`, true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_age_question',
-        priority: 183,
-        scope: 'all',
-        description: 'Age query',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const normalized = text.toLowerCase();
-            let trimmed = normalized.trim();
-            while (trimmed.endsWith('.') || trimmed.endsWith('?') || trimmed.endsWith('!')) {
-                trimmed = trimmed.slice(0, -1).trim();
-            }
-            const padded = ` ${trimmed} `;
-            const AGE_WORDS = [' age ', ' umar ', ' umra ', ' vayasu ', ' vayassu '];
-            const AGE_PHRASES = ['kitne saal', 'kitni saal', 'kitne ki ho', 'kitni ki ho', 'enni years', 'enni yrs'];
-            const AGE_PERSON = [' ur ', ' your ', ' you ', ' u ', ' nim ', ' nee ', ' ni ', ' tera ', ' teri ', ' tumhara ', ' tumhari ', ' aapka ', ' aapki '];
-            const BARE_AGE = ['age', 'ur age', 'your age', 'umar', 'umra', 'vayasu', 'vayassu'];
-            const isBareAge = BARE_AGE.includes(trimmed);
-            const hasAgeContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, AGE_PHRASES) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, AGE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, AGE_PERSON)) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' old ']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' you ', ' u ', ' are ', ' r ']));
-            if (isBareAge || hasAgeContext) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.age, true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_name_question',
-        priority: 182,
-        scope: 'all',
-        description: 'Name query — "what is your name"',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const normalized = text.toLowerCase();
-            const trimmed = trimPunctuation(text);
-            const padded = ` ${trimmed} `;
-            const nameKeywords = ['name', 'naam', 'peru', 'hesr'];
-            const possessiveWords = [
-                ' ur ', ' your ', ' you ', ' u ', ' nim ', ' nee ', ' ni ',
-                ' tera ', ' teri ', ' tumhara ', ' tumhari ', ' aapka ', ' aapki ',
-            ];
-            const bareName = ['name', 'naam', 'peru', 'ur name', 'your name', 'ur naam', 'your naam', 'nee peru', 'un peru'];
-            const isBareName = bareName.includes(trimmed);
-            const hasPossessiveName = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, possessiveWords) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, nameKeywords);
-            const directNameQuestions = [
-                'your name', 'ur name', 'ur naam', 'whats your name',
-                'what is your name', 'naam kya', 'kya naam', 'naam batao',
-                'tera naam', 'tumhara naam', 'nee peru', 'un peru',
-                'whats ur name', 'tell me your name', 'naam kya hai'
-            ];
-            if (isBareName || hasPossessiveName || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, directNameQuestions)) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `I'm **${process.env.name?.split(" ")[0] || "Priya"}** baby 😊`, true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_bargaining_discount_price_request',
-        priority: 181,
-        scope: 'all',
-        description: 'Bargaining/discount requests - HIGH PRIORITY to handle price objections',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // ===== Bargaining/discount: bags-based =====
-            const BUDGET = ['only 50', 'only 100', 'only have', 'budget', 'afford', 'itna hi', 'paise nahi', 'thoda hi'];
-            const PRICE_ASK = [
-                'rate', 'evlo', 'entha', 'how much rate', 'best price',
-                'final price', 'last price', 'kitna lagega', 'price kya'
-            ];
-            const OBJECTION = [
-                'discount', 'kam', 'less', 'expensive', 'jyada', 'reduce',
-                'costly', 'thoda kam', 'kam kar', 'bargain', 'negotiate',
-                'cheaper', 'cheap', 'offer', 'too costly', 'too much',
-                'sasta', 'sasti', 'kam karo', 'thoda kam karo', 'rate kam'
-            ];
-            const isBudget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BUDGET);
-            const isPriceAsk = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_ASK);
-            const isObjection = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, OBJECTION);
-            if (isBudget) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.budgetOfferIntroMsgs));
-                return true;
-            }
-            if (isPriceAsk) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.priceAskIntroMsgs));
-                return true;
-            }
-            if (isObjection) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.bargainMsgs));
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                    kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)),
-                }, { label: 'common.bargain.upsell' });
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🙄');
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_location_where_question',
-        priority: 138,
-        scope: 'all',
-        description: 'Location queries',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const normalized = text.toLowerCase();
-            const padded = ` ${normalized.trim()} `;
-            // Specific Hyderabad area query
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['hyderabad', 'hyd'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    "LB Nagar",
-                    "LB Nagar baby 😊",
-                    "I'm in LB Nagar na",
-                    "LB Nagar side!!"
-                ]), true);
-                return true;
-            }
-            // General location / where are you from questions
-            const locationQuestionKeywords = [
-                'where', 'whr', 'kaha', 'kahan', 'kha s', 'kaha s',
-                'ekkada nundi', 'ellide ninda', 'eppadi ninda',
-                'locat', 'plac', 'area', 'city', 'town'
-            ];
-            const fromText = ['from', 'frm', 'liv', 'rehti', 'rehte', 'reh', 'you from'];
-            const fromWords = [' ho ', ' r u ', ' ru '];
-            const blockedContext = ['chat', 'work', 'call', 'video', 'voice', ...BODY_PART_TERMS];
-            const hasLocationCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, locationQuestionKeywords);
-            const hasFromCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, fromText) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, fromWords);
-            const hasPersonCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' u ', ' you ', ' your ']);
-            const isLocationQuestion = (hasLocationCue && hasFromCue && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, blockedContext)) ||
-                (hasPersonCue && hasFromCue && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['from', 'locat', 'place', 'area']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, blockedContext));
-            if (isLocationQuestion) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    "Hyderabad!!",
-                    "Hyderabad baby 😊",
-                    "I'm from **Hyderabad** na!",
-                    "Hyderabad reyy!!"
-                ]), true);
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'unpaid_user_goodbye_farewell',
-        priority: 160,
-        scope: 'all',
-        description: 'Goodbye / exit / abuse intent',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const hasGoodbyeIntent = isGoodbyeIntent(text);
-            const padded = ` ${trimPunctuation(text)} `;
-            const ABUSE = ['bitch', 'lanj', 'randi', 'gandu', 'bsdk', 'madarchod', 'bhosdi', 'fuck off', 'shut up'];
-            const HARD_EXIT = [
-                'get lost', 'go away', 'leave me alone', 'leave me', 'leave it',
-                'stop messaging', 'stop message', 'stop texting', 'dont message',
-                "don't message", 'do not message', 'message mat', 'mat message',
-                'dont disturb', "don't disturb", 'do not disturb',
-                'block me', 'no need', 'no interest', 'not interested', 'not intres',
-                'no intres', 'nai chahiye', 'nahi chahiye', 'nhi chahiye',
-                'door ja',
-            ];
-            // "nikal" = get out, but "pani nikal gaya" = finished: not an exit when any pani spelling is there.
-            const NIKAL_EXIT = ['chal nikal', 'nikal', 'nikaal', 'niklo'];
-            const PANI = ['pani', 'paani', 'panni', 'panee', 'paanee'];
-            const nikalExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NIKAL_EXIT) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PANI);
-            const KEEP_CONTACT = [
-                'dont stop', "don't stop", 'do not stop', 'dont want to stop',
-                "don't want to stop", 'do not want to stop', 'keep messaging', 'keep texting'
-            ];
-            const messageStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['msg', 'message']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['mat', 'mt'])) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['wrna', 'warna', 'otherwise']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['msg', 'message']));
-            const safetyStop = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['police', 'cop']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['officer', 'case', 'crime', 'legal']);
-            const respectStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['behave']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['proper', 'properly'])) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['human', 'humans']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['animal', 'animals']));
-            const hardExitOrAbuse = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ABUSE) ||
-                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HARD_EXIT) || nikalExit || messageStop || safetyStop || respectStop) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, KEEP_CONTACT));
-            const negativeWords = ['no', 'not', 'nahi', 'nhi', 'mat', 'band', 'stop', 'cancel'];
-            const moneyWords = ['money', 'paisa', 'paise', 'payment', 'rs', 'rupees', 'pay'];
-            const moneyExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, negativeWords) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, moneyWords) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' bye ', ' go ', ' leave ', ' stop ']);
-            const GOODBYE_FALSE_POSITIVE = ['maybe', 'nearby', 'lobby', 'hobby', 'rugby', 'abbey'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, GOODBYE_FALSE_POSITIVE) && !hasGoodbyeIntent && !hardExitOrAbuse) {
-                return false;
-            }
-            if (hasGoodbyeIntent || hardExitOrAbuse || moneyExit) {
-                try {
-                    await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_15__.Api.messages.SetTyping({
-                        peer: await event.message.getSender(),
-                        action: new telegram__WEBPACK_IMPORTED_MODULE_15__.Api.SendMessageRecordAudioAction(),
-                    }));
-                }
-                catch (error) {
-                    // Ignore
-                }
-                if (!context.isPaidUser && hasGoodbyeIntent && !hardExitOrAbuse && !moneyExit) {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, "Okay, bye. Message me later if you want to continue.", true);
-                    return true;
-                }
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.bye, true);
-                if (hardExitOrAbuse || moneyExit) {
-                    const { setTemporaryLimit } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../conversation/abuse-detection */ "./src/conversation/abuse-detection.ts"));
-                    await setTemporaryLimit(context.chatId, 5, 'User explicitly ended the conversation');
-                }
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_privacy_safety_concerns',
-        priority: 180,
-        scope: 'all',
-        description: 'Privacy/safety concerns - HIGH PRIORITY to reassure users',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // Strong fears (blackmail, recording, leak, etc.)
-            const isRecordingFear = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
-                'blackmail', 'record', 'recording', 'screenshot me', 'screenshot mat',
-                'leak', 'will you save', 'save my', 'anyone see', 'no one see',
-                'noone will see', 'nobody see', 'nobody will see', 'will anyone see',
-                'who will see', 'viral'
-            ]);
-            // General safety / privacy questions
-            const isSafetyQ = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
-                'safe', 'secure', 'privacy', 'private', 'confidential',
-                'risk', 'danger', 'trust', 'bharosa'
-            ]);
-            if (isRecordingFear) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.recordingDenialMsgs));
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔒');
-                return true;
-            }
-            if (isSafetyQ) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.privacyMsgs));
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔒');
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_availability_are_you_online_question',
-        priority: 178,
-        scope: 'all',
-        description: 'Availability questions - HIGH PRIORITY for conversion',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const availabilityKeywords = ['available', 'avil', 'busy', 'online', 'active'];
-            const questionContext = [
-                'you', 'u ', 'are', 'now', 'rn', 'currently', 'service',
-                'right now', 'abhi'
-            ];
-            const isAvailabilityQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, availabilityKeywords) &&
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, questionContext) ||
-                    (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['available', 'busy', 'online', 'active']));
-            if (isAvailabilityQuestion) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.availableReplies));
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '👀');
-                // Follow-up upsell for low-paying users
-                if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)),
-                    }, { label: 'common.availability.upsell' });
-                }
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_wait_okay_acknowledgment',
-        priority: 176,
-        scope: 'all',
-        description: 'Wait, ok, okay acknowledgments with contextual follow-up',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // User is telling us to wait (exclude impatient/urgent contexts)
-            const isWaitAck = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['wait', 'ruko', 'aagu', 'thoda wait']) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['cant wait', "can't wait", 'cnt wait', 'why', 'kyun',
-                    'waiting for', 'how long', 'long wait', 'kitna time']);
-            const isSimpleAck = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok', 'okay', 'kk', 'k', 'okay baby', 'ok baby', 'accha', 'theek']);
-            if (isWaitAck || isSimpleAck) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_12__.pushToReplies)(event, userDetails.chatId, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    "Okay!",
-                    "Ok baby 😊",
-                    "Hmm okay",
-                    "Theek hai",
-                    "Okay na 💕"
-                ]));
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_offline_physical_meeting_request',
-        priority: 191,
-        scope: 'all',
-        description: 'Specific offline/physical meeting requests from backup',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const meetupKeywords = [
-                'real meet', 'meet real', 'real life', 'in real', 'real me',
-                'direct', 'offline', 'physical', 'offl', 'phys', 'in person',
-                'kalus', 'hotel', 'room', 'milna', 'milne', 'come to my',
-                'come to your', 'meet in real'
-            ];
-            const negativeWords = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'cant', "can't", 'never'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, meetupKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, negativeWords)) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.ntnw), true);
-                return true;
-            }
-            return false;
-        }
-    },
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/payment-method-patterns.ts"
+/*!****************************************************************!*\
+  !*** ./src/pattern-handlers/common/payment-method-patterns.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   paymentMethodPatterns: () => (/* binding */ paymentMethodPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/payment-links */ "./src/conversation/messages/payment-links.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Payment link, UPI id, Google Pay, payment failures. */
+
+
+
+
+
+
+
+
+
+
+
+
+const paymentMethodPatterns = [
     {
         id: 'user_payment_link_request',
         priority: 126,
@@ -74669,24 +74659,24 @@ const commonPatterns = [
             const NETWORK_COMPLAINT_WORDS = ['bad', 'slow', 'issue', 'problem', 'not working'];
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TIME_WORDS))
                 return false;
-            const hasApp = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, APP_TEXT) || containsPadded(text, APP_WORDS);
-            const hasLinkWord = containsPadded(text, LINK_WORDS);
+            const hasApp = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, APP_TEXT) || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, APP_WORDS);
+            const hasLinkWord = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, LINK_WORDS);
             const hasPaymentWord = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'money', 'paisa', 'paise', 'transfer', 'bhej', 'bheja', 'diya', 'diye', 'paid']) ||
-                containsPadded(text, ['pay', 'send']);
-            const hasMethodTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['app', 'payment']) || containsPadded(text, ['upi']);
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['pay', 'send']);
+            const hasMethodTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['app', 'payment']) || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['upi']);
             const hasPaymentContext = hasApp || hasPaymentWord || hasLinkWord;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NETWORK_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NETWORK_COMPLAINT_WORDS) && !hasPaymentContext) {
                 return false;
             }
             // "Which app should I pay with?" — recommend, don't dump the link block.
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HOW_WHERE) && hasMethodTarget) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.whichAppMsgs), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.whichAppMsgs), true);
                 return true;
             }
             if (!(hasApp || hasLinkWord) && !((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HOW_WHERE) && hasPaymentWord))
                 return false;
-            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(event.client, context.chatId, {
-                message: '<b>PAY to Payment Links👇👇</b>\n\n' + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.getPynw() +
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, {
+                message: '<b>PAY to Payment Links👇👇</b>\n\n' + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.getPynw() +
                     `\n\n<b>Pay now</b> and send me <b>Screenshot!!</b>\nI will do <b>VideoCall</b> Now <b>itself!!</b>` +
                     '\n\n<b>' + `Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>`,
                 parseMode: 'html',
@@ -74739,10 +74729,10 @@ const commonPatterns = [
                 return false;
             if (!isUpiIdRequest)
                 return false;
-            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(event.client, context.chatId, {
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, {
                 message: `Pay to my UPI Adress\n\nCopy paste full Msg👇🏻👇🏻👇🏻👇🏻\n\n`
             });
-            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 5000, { kind: 'send', message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.upiID }, { label: 'common.upi.id' });
+            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 5000, { kind: 'send', message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.upiID }, { label: 'common.upi.id' });
             return true;
         }
     },
@@ -74779,7 +74769,7 @@ const commonPatterns = [
                 return false;
             if (!(0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, GPAY_WORDS) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, GPAY_REQUEST_CUES) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(` ${text.toLowerCase()} `, GPAY_ACTION_WORDS))
                 return false;
-            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(event.client, context.chatId, {
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, {
                 message: `Open 👉🏻 ${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.gpay1}`,
                 parseMode: 'html',
                 linkPreview: false
@@ -74847,24 +74837,24 @@ const commonPatterns = [
             if (!hasPaymentIssue && !hasPaymentProblem)
                 return false;
             // Handle payment issue
-            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.UserDataDtoCrud.getInstance();
-            const failCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementPaymentFailedCount(context.chatId);
+            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
+            const failCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.incrementPaymentFailedCount(context.chatId);
             // Send appropriate response based on failure count
             if (failCount > 3) {
                 // High failure count - provide more helpful guidance
-                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(event.client, context.chatId, {
+                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, {
                     message: `I see you're having trouble with payment 😔\n\nLet me help you!\n\n<b>Try these WORKING methods:</b>\n\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.paytm2} - PayTm (Most Reliable)\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.phonepe3} - PhonePe (Working)\n\nOr send me screenshot of the error!`,
                     parseMode: "html"
                 });
             }
             else {
                 // Initial response asking for screenshot
-                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(event.client, context.chatId, {
+                await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, {
                     message: `Send me the <b>Screenshot</b> of your Payment first!!\n<b>What is coming...??</b>\n\nUse "PhonePe / PayTm"  ONLY!!✅✅\n\nGPay - ${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.gpay2}</b>`,
                     parseMode: "html"
                 });
                 // Follow-up message after 20 seconds with alternative links
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 20000, {
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 20000, {
                     kind: 'send',
                     message: `<b>Oye....!!\n\n\nTry</b> this <b>NEW WORKING</b> Links👇👇\n\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.paytm2} - Working\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.phonepe3} - Working\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.gpay1} - Doubt (Try Once)\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_3__.payLinks.gpay2} - Doubt (Try Once)\n\nPlease Use<b>"PhonePe / PayTm"  ONLY!!</b>✅✅`,
                     parseMode: 'html',
@@ -74878,10 +74868,445 @@ const commonPatterns = [
                 linkPreview: false
             });
             // Update limit time (10 minutes from now)
-            await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__.user.limitTime, Date.now() + (10 * 60 * 1000));
+            await db.updateSingleKey(event.message.chatId.toString(), _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.user.limitTime, Date.now() + (10 * 60 * 1000));
             return true;
         }
     },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/payment-status-patterns.ts"
+/*!****************************************************************!*\
+  !*** ./src/pattern-handlers/common/payment-status-patterns.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   paymentStatusPatterns: () => (/* binding */ paymentStatusPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Payment proof pending, repeat service, payment-confirmation claims, bot verification, empty text. */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:common-patterns");
+const paymentStatusPatterns = [
+    {
+        // Payment proof sent / "money deducted but no call" — pending/dispute reassurance.
+        id: 'user_payment_proof_pending',
+        priority: 188,
+        scope: 'all',
+        description: 'Payment screenshot sent / money deducted but no service yet',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const SCREENSHOT_PROOF = [
+                'screenshot', 'send screenshot',
+                'sent screenshot', 'payment screenshot', 'payment proof',
+                'screenshot bhej', 'screenshot sent', 'ss bhej', 'ss sent', 'ss diya',
+                'proof de diya', 'screenshot diya', 'txn screenshot',
+                'utr', 'reference number', 'transaction id', 'txn id'
+            ];
+            const DEDUCTED = [
+                'money deducted', 'amount deducted', 'money cut', 'amount cut',
+                'paisa kat', 'paise kat', 'money debited', 'amount debited',
+                'cut gaya', 'kat gaya', 'debited', 'deducted'
+            ];
+            const SERVICE_WAIT = [
+                'no call', 'no reply', 'no response', 'no service', 'call kab',
+                'call nahi', 'call nhi', 'service nahi', 'service kab',
+                'waiting', 'wait kar', 'call not received', 'call nahi aaya',
+                'payment ke baad', 'paid but', 'payment done but', 'still waiting',
+                'payment kiya call', 'money sent no', 'paid no call'
+            ];
+            const PAYMENT_CONTEXT = [
+                'payment', 'paid', 'money', 'paisa', 'paise', 'amount', 'rupees',
+                'transaction', 'transfer', 'upi', 'gpay', 'phonepe', 'paytm',
+                'screenshot', 'proof', 'utr', 'deducted', 'debited', 'cut gaya', 'kat gaya'
+            ];
+            const cannotHavePaid = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay']) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['will pay', 'pay later', 'pay tomorrow', 'then i will pay', 'pay karunga', 'pay karungi']) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'payment', 'pay', 'sent money', 'transfer']));
+            const personalMediaOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['my pic', 'my photo', 'my video', 'my videos']) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'screenshot', 'proof', 'utr', 'transaction']);
+            if (cannotHavePaid || personalMediaOnly)
+                return false;
+            // Skip if user is asking about "process" without payment context
+            const processOnly = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['process', 'proces', 'proccess', 'procedure']) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['payment', 'pay', 'paid', 'screenshot', 'proof', 'money', 'paisa', 'paise']);
+            if (processOnly)
+                return false;
+            const hasScreenshot = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SCREENSHOT_PROOF);
+            const hasDeducted = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DEDUCTED);
+            const hasWaiting = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_WAIT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_CONTEXT);
+            if (hasScreenshot || hasDeducted || hasWaiting) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.paymentPendingReplyPool)(text)), true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        // Repeat-service / "one more round" / "lets do again".
+        id: 'user_repeat_service_request',
+        priority: 187,
+        scope: 'all',
+        description: 'Repeat service request after a session',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const normalized = text.toLowerCase();
+            let trimmed = normalized.trim();
+            while (trimmed.endsWith('.') || trimmed.endsWith('?') || trimmed.endsWith('!')) {
+                trimmed = trimmed.slice(0, -1).trim();
+            }
+            const recoveryContext = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.hasRepeatRecoveryIntent)(text);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, [
+                'dont disturb', "don't disturb", 'do not disturb', 'dont message',
+                "don't message", 'do not message', 'leave me alone', 'stop messaging'
+            ]))
+                return false;
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['chalo bye', 'chal bye', 'bye chalo', 'bye chal']))
+                return false;
+            if (!recoveryContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call lagao', 'call laga', 'vc lagao', 'video lagao', 'jaldi call', 'abhi call', 'fast call']))
+                return false;
+            if (trimmed === 'voice not working' || trimmed === 'audio not working')
+                return false;
+            const NEXT_PROCESS = ['next step', 'next kya', 'next kaise', 'what next', 'now what', 'process', 'procedure', 'steps'];
+            if (!recoveryContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, NEXT_PROCESS))
+                return false;
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['demo', 'pic', 'pics', 'photo', 'image', 'proof']) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call', 'vc', 'service']))
+                return false;
+            const paymentContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['payment', 'pay', 'upi', 'gpay', 'phonepe', 'paytm', 'qr']);
+            if (paymentContext && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['nahi', 'nhi', 'not']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['ja', 'chal', 'dikh', 'khul', 'open', 'show', 'work']))
+                return false;
+            const SERVICE_TARGET = ['call', 'vc', 'video', 'service', 'round', 'time'];
+            const REPEAT_ACTION = ['again', 'repeat', 'restart', 'resume', 'reconnect', 'continue', 'next', 'dobara', 'phir se', 'phirse'];
+            const MORE_ACTION = ['one more', 'once more', 'another', 'more more'];
+            const doAgain = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['do', 'lets']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['again', 'dobara', 'phir se', 'phirse']);
+            const repeatService = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, REPEAT_ACTION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SERVICE_TARGET);
+            const moreService = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, MORE_ACTION) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SERVICE_TARGET);
+            const callEnded = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['call ended', 'call end', 'call over', 'call band', 'call ruk', 'call chala', 'call dropped', 'call drop', 'call cut', 'cut gaya call']);
+            const mediaStopped = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['video stopped', 'voice stopped', 'audio stopped', 'screen froze', 'voice not coming']);
+            const matched = recoveryContext || doAgain || repeatService || moreService || callEnded || mediaStopped;
+            if (!matched)
+                return false;
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(recoveryContext ? _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.repeatRecoveryMsgs : _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.repeatServiceMsgs), true);
+            return true;
+        }
+    },
+    {
+        // Hesitation / time-pass — soft re-engagement (lowest of the new dedicated handlers).
+        id: 'user_hesitation_reengagement',
+        priority: 21,
+        scope: 'all',
+        description: 'Hesitation / let me think / just chatting / maybe later',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['let me think', 'lemme think', 'thinking', 'soch', 'maybe later', 'may be later', 'later baby', 'baad me', 'baad mein', 'just chatting', 'only chat', 'timepass', 'just talking', 'not now', 'new here', 'i am new', 'im new', 'first time', 'naya hu'])) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.hesitationMsgs), true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_amount_with_face_pic_confirmation',
+        priority: 193,
+        scope: 'all',
+        description: 'User asks if amount with face/pic is okay - e.g., "100rs with face okay"',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // EXCLUSION: Service description questions
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.isServiceDescriptionQuestion)(text)) {
+                return false;
+            }
+            // EXCLUSION: Questions about services, counts, etc.
+            const serviceQuestionKeywords = [
+                'how many', 'how much', 'what all', 'kya sab', 'kya kya', 'em em', 'on how many'
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, serviceQuestionKeywords)) {
+                return false;
+            }
+            const amountValue = (0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_11__.serviceOfferAmountFromText)(text);
+            const hasAmount = amountValue !== -1;
+            // Face / Pic related keywords
+            const faceKeywords = [
+                'face', 'fac', 'fce', 'chehra', 'muh'
+            ];
+            const picKeywords = [
+                'pic', 'photo', 'pict', 'image', 'img', 'selfie'
+            ];
+            // Confirmation / Okay keywords
+            const okayKeywords = [
+                'okay', 'ok', 'okk', 'oky', 'fine', 'fn', 'thik',
+                'theek', 'theek hai', 'thik hai', 'chalega', 'chlega',
+                'hoga', 'hga', 'right', 'ryt', 'good', 'gud',
+                'accha', 'acha', 'aacha', 'karoge', "dikahoge", 'will you', 'will u',
+                "?"
+            ];
+            const hasFace = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, faceKeywords);
+            const hasPic = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, picKeywords);
+            const hasOkay = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, okayKeywords);
+            const hasPlanContext = hasFace || hasPic || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call', 'video', 'service']) ||
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.containsPadded)(text, ['vc', 'min', 'mins', 'minute', 'minutes', 'hour', 'hr']);
+            // Require a concrete plan cue as well as an amount. This avoids accepting an
+            // unrelated number merely because the same message also contains "okay".
+            if (hasAmount && amountValue > 15 && hasPlanContext && (hasFace || hasPic || hasOkay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['?']))) {
+                logger.debug(`[AmountFaceConfirm] Detected: "${text}" (amount: ${amountValue}, hasFace: ${hasFace}, hasPic: ${hasPic}, hasOkay: ${hasOkay})`);
+                let reply;
+                if (hasFace && amountValue < 150) {
+                    reply = `The **with-face plan is 150₹** baby.\n\n**100₹** is the **without-face** option. Choose one and pay.`;
+                }
+                else if (!hasFace && amountValue === 100) {
+                    reply = `Yes baby, **100₹ is the without-face plan**.\n\nPay and send the screenshot here.`;
+                }
+                else if (hasFace && amountValue === 150) {
+                    reply = `Yes baby, **150₹ is the with-face plan**.\n\nPay and send the screenshot here.`;
+                }
+                else {
+                    reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__.finishPaymentMsgs)}`;
+                }
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, userDetails.chatId, reply);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'unpaid_user_bot_automated_verification',
+        priority: 195,
+        scope: 'all',
+        description: 'Bot/automated questions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const trimmed = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.trimPunctuation)(text);
+            const padded = ` ${trimmed} `;
+            const BOT_EXACT = ['bot', 'bott', 'ai', 'robot'];
+            const BOT_TEXT = [
+                'chatbot', 'robot', 'artificial intelligence', 'gpt', 'chatgpt',
+                'chtgpt', 'openai', 'claude', 'llm', 'automated reply',
+                'auto reply', 'automatic reply', 'automation',
+            ];
+            const BOT_WORDS = [' bot ', ' bott ', ' bots ', ' ai '];
+            const BOT_CONTEXT = ['are you', 'are u', 'r u', 'you are', 'u are', 'is this', 'talking to', 'chat with'];
+            const isBotQuestion = BOT_EXACT.includes(trimmed) ||
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.isBotAccusation)(text) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BOT_TEXT) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, BOT_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BOT_CONTEXT));
+            if (isBotQuestion) {
+                // Only the stock denial (owner, 2026-10-18): nothing appended, never an opener after it.
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.botArray));
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_payment_confirmation_claim',
+        priority: 196,
+        scope: 'all',
+        description: 'User claims they paid',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // Skip automated UPI app notifications
+            const autoNotificationKeywords = [
+                'paid using phonepe', 'paid using paytm', 'paid using gpay',
+                'paid via navi', 'paid via upi', 'via navi upi', 'via phonepe',
+                'paid securely on', 'explore the app now', 'enjoy exciting cashbacks',
+                'lightning fast transactions', 'phon.pe/', 'r.navi.com',
+                'download the app', 'on every payment'
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, autoNotificationKeywords)) {
+                return false;
+            }
+            const MONEY = ['money', 'paisa', 'paise', 'amount', 'rupees', 'payment', 'paymnt', 'amnt'];
+            const COMPLETED = ['kar diya', 'kar diye', 'ho gaya', 'ho gya', 'bhej diya', 'bheja', 'diya', 'diye', 'sent', 'send kiya', 'transfer', 'transferred', 'chesa', 'chesanu', 'did it', 'done it', 'done'];
+            const EXPLICIT_PAYMENT_DONE = [
+                'payment done', 'payment ho gaya', 'payment ho gya', 'pay kar diya',
+                'paid already', 'already paid', 'have paid', 'i paid', 'paid now'
+            ];
+            const NEG = ['cant', "can't", 'unable', 'fail', 'failed', 'error', 'problem', 'issue', 'kaise', 'how to', 'how do i'];
+            const URGENCY = ['start service', 'start call'];
+            const simpleClaim = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.trimPunctuation)(text), ['paid']);
+            const hasQuestion = text.includes('?');
+            const hasPaymentNegation = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+                'not paid', 'nahi paid', 'nhi paid', 'payment nahi', 'nahi bheja', 'nahi diya',
+                'no money', 'dont have money', "don't have money", 'cannot pay', "can't pay", 'cant pay', 'unable to pay'
+            ]) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['not', 'nahi', 'nhi']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'pay', 'sent', 'transfer', 'bhej', 'done']));
+            const hasFuturePayment = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['will pay', 'going to pay', 'pay karunga', 'pay karungi', 'pay karu', 'bhej dunga']);
+            const hasPaymentSubject = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MONEY) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['google pay', 'phone pe']) ||
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.containsPadded)(text, ['pay', 'rs', 'amt', 'upi', 'gpay', 'phonepe', 'paytm', 'navi']);
+            const hasCompletedAction = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMPLETED);
+            const explicitPaymentDone = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXPLICIT_PAYMENT_DONE);
+            const sendsProof = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['screenshot', 'payment proof', 'txn screenshot', 'utr', 'transaction id']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['sent', 'send', 'bhej', 'diya', 'shared', 'share']);
+            const unresolvedServiceWait = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['no call', 'no service', 'no reply', 'no response', 'still waiting', 'call nahi', 'call nhi']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'payment', 'money', 'paisa', 'paise']);
+            const isPaymentConfirmed = simpleClaim ||
+                ((explicitPaymentDone || (hasPaymentSubject && hasCompletedAction)) &&
+                    !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment && !sendsProof && !unresolvedServiceWait) ||
+                ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.containsPadded)(text, ['paid']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, URGENCY) && !hasFuturePayment && !hasPaymentNegation && !hasQuestion && !sendsProof && !unresolvedServiceWait);
+            if (isPaymentConfirmed) {
+                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.UserDataDtoCrud.getInstance();
+                const paidCount = await db.getSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.user.paidCount) + 1;
+                await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.user.paidCount, paidCount);
+                try {
+                    await event.client.sendMessage('@miscmessages', {
+                        message: `${process.env.clientId}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${context.broadcastName}</a>: ${text}`,
+                        parseMode: 'html',
+                        linkPreview: false
+                    });
+                    await event.message.forwardTo('me');
+                }
+                catch (error) {
+                    const fwdMsg = error instanceof Error ? error.message : String(error);
+                    if ((0,_tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_12__.isExpectedTelegramLogOutcome)(fwdMsg))
+                        logger.warn('cannot forward', fwdMsg);
+                    else
+                        logger.error('cannot forward', fwdMsg);
+                }
+                if (paidCount == 2) {
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                        "Okay baby, checking your payment 🙈 give me 2 mins, then I'll call you 💕",
+                        "Verifying it baby ⏱️ send me the screenshot once and I'll call right away 😘",
+                        "Haan checking na 🔍 the moment it's confirmed I'll call you, promise 💋",
+                    ]));
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 120000, {
+                        kind: 'respond', text: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.aut + "\nDont be Angry for Delay....!!\nI will give you service PAkka!!\n\nI will message you when I'm come back to Online!!",
+                    }, { label: 'common.paid.delayApology' });
+                    const limitTime = await db.getSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.user.limitTime);
+                    await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.user.limitTime, Math.max((Date.now() + (10 * 60 * 1000)), limitTime));
+                }
+                else if (paidCount === undefined || paidCount < 1) {
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(['??', 'Huh??', '?? 🤔', 'Kya baby??']));
+                    if (paidCount === 0) {
+                        (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 40000, {
+                            kind: 'respond', text: `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.getChannelLinks()}`,
+                        }, { label: 'common.paid.channelLinks' });
+                    }
+                }
+                else if (paidCount == 1) {
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                        _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.wait,
+                        "**Checking your payment** baby...\nWhat's your **name on payment**?\n\n**Wait 5 mins** & send the screenshot once! 🙈",
+                    ]));
+                }
+                else {
+                    const claimedAt = Date.now();
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(["Checking.....", "Let me check baby...", "Checking na, wait... 🙈", "Verifying baby... 1 sec"]));
+                    // Dropped when the screenshot already came (prod 2026-10-15: asked for it after judging it).
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 15000, {
+                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                            _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.screenshot,
+                            "**Send me the payment screenshot** baby! 🙈",
+                            "Bhejo na the screenshot reyy! 📲",
+                        ]),
+                    }, { label: 'common.paid.screenshotAsk', guards: { skipIfPaymentPhotoSince: claimedAt } });
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_ambiguous_payment_status',
+        priority: 195,
+        scope: 'all',
+        description: 'Clarify bare sent/done/check messages without assuming payment succeeded',
+        handler: async (event, text) => {
+            if (!(0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.trimPunctuation)(text), ['sent', 'done', 'check']))
+                return false;
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                'What did you send baby—**payment proof or something else**?\n\nTell me once so I check the right thing.',
+                'Done with **payment**, or done with something else?\n\nIf it is payment, send the **screenshot / UTR** here.',
+                'What should I check baby?\n\nIf you mean payment, share the **payment proof**; otherwise tell me what you sent.'
+            ]), true);
+            return true;
+        }
+    },
+    {
+        id: 'user_empty_text_message',
+        priority: 199,
+        scope: 'all',
+        description: 'Empty text message',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            if (text === '' && !event.message.media) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                    '?',
+                    'What baby??',
+                    '??',
+                    '......?',
+                    'Kya hua baby?',
+                    'Hello? 😕',
+                    'Bolo baby...'
+                ]));
+                return true;
+            }
+            return false;
+        }
+    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/personal-question-patterns.ts"
+/*!*******************************************************************!*\
+  !*** ./src/pattern-handlers/common/personal-question-patterns.ts ***!
+  \*******************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   personalQuestionPatterns: () => (/* binding */ personalQuestionPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Language, virgin, married, compliments, proposal, love. */
+
+
+
+
+
+
+
+
+
+const personalQuestionPatterns = [
     {
         id: 'user_language_question',
         priority: 123,
@@ -74921,14 +75346,14 @@ const commonPatterns = [
             if (!asksLanguage && !languageInability && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NATIVE_LANGUAGE_CUES)) {
                 return false;
             }
-            const askedCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_14__.stateManager.incrementLanguageAskedCount(context.chatId);
+            const askedCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.incrementLanguageAskedCount(context.chatId);
             if (askedCount <= 1) {
                 // First time: tell them which languages I speak.
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.language);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.language);
             }
             else {
                 // Asked again: pivot to a GENERAL pay nudge (no language/hear/speak wording).
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
                     "Pay first baby, then I'll do speak whatever you want! 💋",
                     "I already told you na baby 🙈\n\n**Pay** first, then I'll do whaterver you want! 💋",
                     "Enough chatting reyy 😈\n\n**Pay** first baby, then I'll do everything you ask! 🔥",
@@ -74952,7 +75377,7 @@ const commonPatterns = [
                 return false;
             if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PERSON_CONTEXT) && !(0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['virgin', 'virgin?']))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.notVirgin, true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.notVirgin, true);
             return true;
         }
     },
@@ -74982,11 +75407,11 @@ const commonPatterns = [
             const isRelationship = isSingleQuestion || isPartnerQuestion;
             const isMarried = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, MARRIED_WORDS) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, MARRIED_CONTEXT) || text.includes('?'));
             if (isRelationship) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.relationshipMsgs), true); // boyfriend/single
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.relationshipMsgs), true); // boyfriend/single
                 return true;
             }
             if (isMarried) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.marriedMsgs), true); // marriage status
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.marriedMsgs), true); // marriage status
                 return true;
             }
             return false;
@@ -75037,11 +75462,11 @@ const commonPatterns = [
             if (!isShortReaction && !isContextualCompliment && !isVoiceCompliment)
                 return false;
             if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEGATIVE_WORDS)) {
-                const randomElement = _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.thanksArray[Math.floor(Math.random() * _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.thanksArray.length)];
+                const randomElement = _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__.thanksArray[Math.floor(Math.random() * _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__.thanksArray.length)];
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, randomElement, true);
                 return true;
             }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)), true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)), true);
             return true;
         }
     },
@@ -75078,17 +75503,507 @@ const commonPatterns = [
             const isThanks = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, THANKS_EXACT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, THANKS_PHRASES);
             const isLove = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, LOVE_EXACT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, LOVE_PHRASES);
             if (isLove) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.affectionMsgs), true); // affection
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.affectionMsgs), true); // affection
                 return true;
             }
             if (isThanks) {
-                const ranomThanks = _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.thanksArray[Math.floor(Math.random() * _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.thanksArray.length)];
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${ranomThanks}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.thanksNdPay}`, true); // gratitude
+                const ranomThanks = _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__.thanksArray[Math.floor(Math.random() * _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__.thanksArray.length)];
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${ranomThanks}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.thanksNdPay}`, true); // gratitude
                 return true;
             }
             return false;
         }
     },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/service-and-persona-patterns.ts"
+/*!*********************************************************************!*\
+  !*** ./src/pattern-handlers/common/service-and-persona-patterns.ts ***!
+  \*********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   serviceAndPersonaPatterns: () => (/* binding */ serviceAndPersonaPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_text_match__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/text-match */ "./src/conversation/text-match.ts");
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_9___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_9__);
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): What the service shows / how it works, age, name, bargaining, location, goodbye, privacy, availability. */
+
+
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-aut:common-patterns");
+const serviceAndPersonaPatterns = [
+    {
+        id: 'user_service_what_will_you_show_question',
+        priority: 187,
+        scope: 'all',
+        description: 'Service description questions (what all will I do/show) - HIGH PRIORITY for conversion',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const SERVICE_QUESTION = ['what', 'wht', 'kya', 'em', 'enti'];
+            const SHOW_DO = ['show', 'dikha', 'dikh', 'perform', 'do', 'kar', 'hoga', 'hog'];
+            const SERVICE_CONTEXT = ['call', 'video', 'vc', 'service'];
+            const PRICE_CONTEXT = ['how much', 'kitna', 'kitne', 'price', 'rate', 'cost', 'amount', 'charge'];
+            const serviceShowQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_QUESTION) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_DO) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_CONTEXT) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_CONTEXT);
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isServiceDescriptionQuestion)(text) || serviceShowQuestion) {
+                logger.debug(`[ServiceDescription] Detected: "${text}"`);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.serviceDescriptionReplyPool)(text)));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '😘');
+                // Upsell opportunity for low payment users
+                if (userDetails.payAmount < 50) {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
+                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
+                    }, { label: 'common.serviceDescription.upsell' });
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_service_process_how_to_question',
+        priority: 188,
+        scope: 'all',
+        description: 'Service process / what-to-do-next questions',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // Exclusion: Paid + amount + start service
+            const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid', 'pay', 'payment']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIGITS) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['start', 'service', 'call'])) {
+                return false;
+            }
+            // After payment process questions
+            const afterPaymentKeywords = [
+                'after payment', 'payment done', 'payment ho gaya', 'payment ho gya',
+                'pay ho gaya', 'done payment', 'paid', 'after pay'
+            ];
+            const nextActionKeywords = ['what', 'next', 'now', 'ab', 'karu', 'karna', 'krna', 'kya'];
+            const afterPaymentProcess = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, afterPaymentKeywords) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, nextActionKeywords)) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid ke baad', 'payment ke baad', 'pay karne ke baad', 'i paid what', 'paid now what']);
+            if (afterPaymentProcess) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.processReplyPool)(text)), true);
+                return true;
+            }
+            // Payment method questions (should not trigger here)
+            const paymentMethodKeywords = [
+                'how to pay', 'where to pay', 'kaise pay', 'kaha pay', 'payment kaise',
+                'upi kaise', 'qr kaise', 'gpay kaise', 'phonepe kaise'
+            ];
+            const technicalPayment = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.hasPaymentFailureIntent)(text) || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isPaymentAccessIssue)(text);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, paymentMethodKeywords) || technicalPayment)
+                return false;
+            // Other exclusions
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what you do', 'what u do', 'what do you do']))
+                return false;
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.hasRepeatRecoveryIntent)(text))
+                return false;
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call again', 'vc again', 'video again', 'restart call', 'repeat call']))
+                return false;
+            // Main process / next step detection
+            const processKeywords = [
+                'process', 'procedure', 'steps', 'next step', 'what next', 'now what',
+                'kaise karu', 'kya karna', 'kya karu', 'ab kya', 'next kya', 'next kaise',
+                'step by step', 'process bata', 'procedure bata', 'how to start',
+                'start kaise', 'service kaise', 'booking kaise', 'how to book',
+                'what to do now', 'kya karna hai', 'process kya', 'kya next'
+            ];
+            const matched = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, processKeywords) ||
+                text.trim().toLowerCase() === 'process' ||
+                text.trim().toLowerCase() === 'procedure' ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['start how', 'start kaise', 'go ahead how']);
+            if (matched) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.processReplyPool)(text)), true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_confused_needs_clarity',
+        priority: 139,
+        scope: 'all',
+        description: 'User says they do not understand the flow',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const confusionKeywords = [
+                "don't understand", "dont understand", "not understand",
+                "samajh nahi", "samjh nahi", "pata nahi", "not clear",
+                "confuse", "confused", "clear nahi", "samajh nahi aa raha"
+            ];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, confusionKeywords)) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `Simple:\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.demo}\n\nPay on my Website 👇\n${process.env.link}`, true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_age_question',
+        priority: 183,
+        scope: 'all',
+        description: 'Age query',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const normalized = text.toLowerCase();
+            let trimmed = normalized.trim();
+            while (trimmed.endsWith('.') || trimmed.endsWith('?') || trimmed.endsWith('!')) {
+                trimmed = trimmed.slice(0, -1).trim();
+            }
+            const padded = ` ${trimmed} `;
+            const AGE_WORDS = [' age ', ' umar ', ' umra ', ' vayasu ', ' vayassu '];
+            const AGE_PHRASES = ['kitne saal', 'kitni saal', 'kitne ki ho', 'kitni ki ho', 'enni years', 'enni yrs'];
+            const AGE_PERSON = [' ur ', ' your ', ' you ', ' u ', ' nim ', ' nee ', ' ni ', ' tera ', ' teri ', ' tumhara ', ' tumhari ', ' aapka ', ' aapki '];
+            const BARE_AGE = ['age', 'ur age', 'your age', 'umar', 'umra', 'vayasu', 'vayassu'];
+            const isBareAge = BARE_AGE.includes(trimmed);
+            const hasAgeContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, AGE_PHRASES) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, AGE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, AGE_PERSON)) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' old ']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' you ', ' u ', ' are ', ' r ']));
+            if (isBareAge || hasAgeContext) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.age, true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_name_question',
+        priority: 182,
+        scope: 'all',
+        description: 'Name query — "what is your name"',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const normalized = text.toLowerCase();
+            const trimmed = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.trimPunctuation)(text);
+            const padded = ` ${trimmed} `;
+            const nameKeywords = ['name', 'naam', 'peru', 'hesr'];
+            const possessiveWords = [
+                ' ur ', ' your ', ' you ', ' u ', ' nim ', ' nee ', ' ni ',
+                ' tera ', ' teri ', ' tumhara ', ' tumhari ', ' aapka ', ' aapki ',
+            ];
+            const bareName = ['name', 'naam', 'peru', 'ur name', 'your name', 'ur naam', 'your naam', 'nee peru', 'un peru'];
+            const isBareName = bareName.includes(trimmed);
+            const hasPossessiveName = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, possessiveWords) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, nameKeywords);
+            const directNameQuestions = [
+                'your name', 'ur name', 'ur naam', 'whats your name',
+                'what is your name', 'naam kya', 'kya naam', 'naam batao',
+                'tera naam', 'tumhara naam', 'nee peru', 'un peru',
+                'whats ur name', 'tell me your name', 'naam kya hai'
+            ];
+            if (isBareName || hasPossessiveName || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, directNameQuestions)) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `I'm **${process.env.name?.split(" ")[0] || "Priya"}** baby 😊`, true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_bargaining_discount_price_request',
+        priority: 181,
+        scope: 'all',
+        description: 'Bargaining/discount requests - HIGH PRIORITY to handle price objections',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // ===== Bargaining/discount: bags-based =====
+            const BUDGET = ['only 50', 'only 100', 'only have', 'budget', 'afford', 'itna hi', 'paise nahi', 'thoda hi'];
+            const PRICE_ASK = [
+                'rate', 'evlo', 'entha', 'how much rate', 'best price',
+                'final price', 'last price', 'kitna lagega', 'price kya'
+            ];
+            const OBJECTION = [
+                'discount', 'kam', 'less', 'expensive', 'jyada', 'reduce',
+                'costly', 'thoda kam', 'kam kar', 'bargain', 'negotiate',
+                'cheaper', 'cheap', 'offer', 'too costly', 'too much',
+                'sasta', 'sasti', 'kam karo', 'thoda kam karo', 'rate kam'
+            ];
+            const isBudget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BUDGET);
+            const isPriceAsk = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_ASK);
+            const isObjection = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, OBJECTION);
+            if (isBudget) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.budgetOfferIntroMsgs));
+                return true;
+            }
+            if (isPriceAsk) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.priceAskIntroMsgs));
+                return true;
+            }
+            if (isObjection) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.bargainMsgs));
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
+                    kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
+                }, { label: 'common.bargain.upsell' });
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🙄');
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_location_where_question',
+        priority: 138,
+        scope: 'all',
+        description: 'Location queries',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const normalized = text.toLowerCase();
+            const padded = ` ${normalized.trim()} `;
+            // Specific Hyderabad area query
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['hyderabad', 'hyd'])) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                    "LB Nagar",
+                    "LB Nagar baby 😊",
+                    "I'm in LB Nagar na",
+                    "LB Nagar side!!"
+                ]), true);
+                return true;
+            }
+            // General location / where are you from questions
+            const locationQuestionKeywords = [
+                'where', 'whr', 'kaha', 'kahan', 'kha s', 'kaha s',
+                'ekkada nundi', 'ellide ninda', 'eppadi ninda',
+                'locat', 'plac', 'area', 'city', 'town'
+            ];
+            const fromText = ['from', 'frm', 'liv', 'rehti', 'rehte', 'reh', 'you from'];
+            const fromWords = [' ho ', ' r u ', ' ru '];
+            const blockedContext = ['chat', 'work', 'call', 'video', 'voice', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.BODY_PART_TERMS];
+            const hasLocationCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, locationQuestionKeywords);
+            const hasFromCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, fromText) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, fromWords);
+            const hasPersonCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' u ', ' you ', ' your ']);
+            const isLocationQuestion = (hasLocationCue && hasFromCue && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, blockedContext)) ||
+                (hasPersonCue && hasFromCue && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['from', 'locat', 'place', 'area']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, blockedContext));
+            if (isLocationQuestion) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                    "Hyderabad!!",
+                    "Hyderabad baby 😊",
+                    "I'm from **Hyderabad** na!",
+                    "Hyderabad reyy!!"
+                ]), true);
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'unpaid_user_goodbye_farewell',
+        priority: 160,
+        scope: 'all',
+        description: 'Goodbye / exit / abuse intent',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const hasGoodbyeIntent = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isGoodbyeIntent)(text);
+            const padded = ` ${(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.trimPunctuation)(text)} `;
+            const ABUSE = ['bitch', 'lanj', 'randi', 'gandu', 'bsdk', 'madarchod', 'bhosdi', 'fuck off', 'shut up'];
+            const HARD_EXIT = [
+                'get lost', 'go away', 'leave me alone', 'leave me', 'leave it',
+                'stop messaging', 'stop message', 'stop texting', 'dont message',
+                "don't message", 'do not message', 'message mat', 'mat message',
+                'dont disturb', "don't disturb", 'do not disturb',
+                'block me', 'no need', 'no interest', 'not interested', 'not intres',
+                'no intres', 'nai chahiye', 'nahi chahiye', 'nhi chahiye',
+                'door ja',
+            ];
+            // "nikal" = get out, but "pani nikal gaya" = finished: not an exit when any pani spelling is there.
+            const NIKAL_EXIT = ['chal nikal', 'nikal', 'nikaal', 'niklo'];
+            const PANI = ['pani', 'paani', 'panni', 'panee', 'paanee'];
+            const nikalExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NIKAL_EXIT) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PANI);
+            const KEEP_CONTACT = [
+                'dont stop', "don't stop", 'do not stop', 'dont want to stop',
+                "don't want to stop", 'do not want to stop', 'keep messaging', 'keep texting'
+            ];
+            const messageStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['msg', 'message']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['mat', 'mt'])) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['wrna', 'warna', 'otherwise']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['msg', 'message']));
+            const safetyStop = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['police', 'cop']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['officer', 'case', 'crime', 'legal']);
+            const respectStop = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['behave']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['proper', 'properly'])) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['human', 'humans']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['animal', 'animals']));
+            const hardExitOrAbuse = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ABUSE) ||
+                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HARD_EXIT) || nikalExit || messageStop || safetyStop || respectStop) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, KEEP_CONTACT));
+            const negativeWords = ['no', 'not', 'nahi', 'nhi', 'mat', 'band', 'stop', 'cancel'];
+            const moneyWords = ['money', 'paisa', 'paise', 'payment', 'rs', 'rupees', 'pay'];
+            const moneyExit = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, negativeWords) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, moneyWords) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' bye ', ' go ', ' leave ', ' stop ']);
+            const GOODBYE_FALSE_POSITIVE = ['maybe', 'nearby', 'lobby', 'hobby', 'rugby', 'abbey'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, GOODBYE_FALSE_POSITIVE) && !hasGoodbyeIntent && !hardExitOrAbuse) {
+                return false;
+            }
+            if (hasGoodbyeIntent || hardExitOrAbuse || moneyExit) {
+                try {
+                    await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_9__.Api.messages.SetTyping({
+                        peer: await event.message.getSender(),
+                        action: new telegram__WEBPACK_IMPORTED_MODULE_9__.Api.SendMessageRecordAudioAction(),
+                    }));
+                }
+                catch (error) {
+                    // Ignore
+                }
+                if (!context.isPaidUser && hasGoodbyeIntent && !hardExitOrAbuse && !moneyExit) {
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, "Okay, bye. Message me later if you want to continue.", true);
+                    return true;
+                }
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.bye, true);
+                if (hardExitOrAbuse || moneyExit) {
+                    const { setTemporaryLimit } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../conversation/abuse-detection */ "./src/conversation/abuse-detection.ts"));
+                    await setTemporaryLimit(context.chatId, 5, 'User explicitly ended the conversation');
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_privacy_safety_concerns',
+        priority: 180,
+        scope: 'all',
+        description: 'Privacy/safety concerns - HIGH PRIORITY to reassure users',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // Strong fears (blackmail, recording, leak, etc.)
+            const isRecordingFear = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+                'blackmail', 'record', 'recording', 'screenshot me', 'screenshot mat',
+                'leak', 'will you save', 'save my', 'anyone see', 'no one see',
+                'noone will see', 'nobody see', 'nobody will see', 'will anyone see',
+                'who will see', 'viral'
+            ]);
+            // General safety / privacy questions
+            const isSafetyQ = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+                'safe', 'secure', 'privacy', 'private', 'confidential',
+                'risk', 'danger', 'trust', 'bharosa'
+            ]);
+            if (isRecordingFear) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.recordingDenialMsgs));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔒');
+                return true;
+            }
+            if (isSafetyQ) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.privacyMsgs));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔒');
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_availability_are_you_online_question',
+        priority: 178,
+        scope: 'all',
+        description: 'Availability questions - HIGH PRIORITY for conversion',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const availabilityKeywords = ['available', 'avil', 'busy', 'online', 'active'];
+            const questionContext = [
+                'you', 'u ', 'are', 'now', 'rn', 'currently', 'service',
+                'right now', 'abhi'
+            ];
+            const isAvailabilityQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, availabilityKeywords) &&
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, questionContext) ||
+                    (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['available', 'busy', 'online', 'active']));
+            if (isAvailabilityQuestion) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_5__.availableReplies));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '👀');
+                // Follow-up upsell for low-paying users
+                if (userDetails.payAmount < 50) {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
+                        kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
+                    }, { label: 'common.availability.upsell' });
+                }
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_wait_okay_acknowledgment',
+        priority: 176,
+        scope: 'all',
+        description: 'Wait, ok, okay acknowledgments with contextual follow-up',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            // User is telling us to wait (exclude impatient/urgent contexts)
+            const isWaitAck = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['wait', 'ruko', 'aagu', 'thoda wait']) &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['cant wait', "can't wait", 'cnt wait', 'why', 'kyun',
+                    'waiting for', 'how long', 'long wait', 'kitna time']);
+            const isSimpleAck = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok', 'okay', 'kk', 'k', 'okay baby', 'ok baby', 'accha', 'theek']);
+            if (isWaitAck || isSimpleAck) {
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                    "Okay!",
+                    "Ok baby 😊",
+                    "Hmm okay",
+                    "Theek hai",
+                    "Okay na 💕"
+                ]));
+                return true;
+            }
+            return false;
+        }
+    },
+    {
+        id: 'user_offline_physical_meeting_request',
+        priority: 191,
+        scope: 'all',
+        description: 'Specific offline/physical meeting requests from backup',
+        handler: async (event, text, allMsg, userDetails, context) => {
+            const meetupKeywords = [
+                'real meet', 'meet real', 'real life', 'in real', 'real me',
+                'direct', 'offline', 'physical', 'offl', 'phys', 'in person',
+                'kalus', 'hotel', 'room', 'milna', 'milne', 'come to my',
+                'come to your', 'meet in real'
+            ];
+            const negativeWords = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'cant', "can't", 'never'];
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, meetupKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, negativeWords)) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.ntnw), true);
+                return true;
+            }
+            return false;
+        }
+    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/sexual-patterns.ts"
+/*!********************************************************!*\
+  !*** ./src/pattern-handlers/common/sexual-patterns.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   sexualPatterns: () => (/* binding */ sexualPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Sexual interactions. */
+
+
+
+
+
+const sexualPatterns = [
     // ===== PRIORITY 75-79: SEXUAL & DIRTY PATTERNS (New) =====
     {
         id: 'user_sex_interactions_kiss_hug_suck',
@@ -75100,582 +76015,105 @@ const commonPatterns = [
             const padded = ` ${normalized} `;
             const PERSON_WORDS = [' me ', ' you ', ' u ', ' ur ', ' your ', ' baby ', ' babe ', ' na '];
             const REQUEST_TEXT = ['give', 'want', 'wanna', 'kaval', 'chahiye'];
-            const isKiss = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['kiss', 'smooch', 'liplock', 'mudhu', 'umma']) &&
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PERSON_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, REQUEST_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['lip']));
-            const isHug = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['hug', 'cuddle', 'hold']) &&
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PERSON_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' tight ', ' come ']));
+            const isKiss = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['kiss', 'smooch', 'liplock', 'mudhu', 'umma']) &&
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, PERSON_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, REQUEST_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['lip']));
+            const isHug = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['hug', 'cuddle', 'hold']) &&
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, PERSON_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, [' tight ', ' come ']));
             const ORAL_ACTIONS = ['suck', 'lick', 'blow', 'bj', 'mouth', 'put', 'cheeku', 'notlo', 'chus', 'choos', 'chati'];
             const ORAL_DIRECT_ACTIONS = ['suck', 'lick', 'blow', 'bj'];
             const ORAL_TARGETS = ['dick', 'cock', 'lulli', 'modda', 'sullu', 'penis', 'lund', 'lawda', 'lavda'];
             const ORAL_DESIRE = ['wanna', 'want to', 'wana'];
             const ORAL_COMMAND_WORDS = [' me ', ' you ', ' u ', ' it ', ' na ', ' baby ', ' my ', ' for '];
-            const isSuck = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ORAL_ACTIONS) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ORAL_TARGETS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ORAL_DESIRE))) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ORAL_DIRECT_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, ORAL_COMMAND_WORDS));
-            const isSex = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['sex', 'fuck', 'deng', 'fck', 'fuk']) &&
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['chat', 'video', 'call', 'karna', 'kaval', 'want', 'karo', 'kar', 'hard']) ||
-                    (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' me ', ' you ', ' u ']));
-            const isBody = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['show', 'open', 'nude', 'naked', 'vippu']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['boob', 'pussy', 'ass', 'butt', 'pic', 'video', 'cam']);
+            const isSuck = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ORAL_ACTIONS) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ORAL_TARGETS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ORAL_DESIRE))) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ORAL_DIRECT_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, ORAL_COMMAND_WORDS));
+            const isSex = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['sex', 'fuck', 'deng', 'fck', 'fuk']) &&
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['chat', 'video', 'call', 'karna', 'kaval', 'want', 'karo', 'kar', 'hard']) ||
+                    (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, [' me ', ' you ', ' u ']));
+            const isBody = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['show', 'open', 'nude', 'naked', 'vippu']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['boob', 'pussy', 'ass', 'butt', 'pic', 'video', 'cam']);
             const SEE_SHOW_ACTIONS = ['see', 'show', 'watch', 'look', 'dekh', 'paaru', 'chudali'];
             const SEE_SHOW_TARGETS = ['naked', 'nude', 'body', 'everything', 'all'];
             const SEE_DESIRE = ['wanna', 'want', 'venum', 'chahiye'];
             const LOCAL_PERSON_TARGETS = ['unna', 'ninnu', 'tujhe'];
-            const isSeeNaked = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEE_SHOW_TARGETS)) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEE_DESIRE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' you ', ' u '])) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, LOCAL_PERSON_TARGETS));
+            const isSeeNaked = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEE_SHOW_TARGETS)) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEE_DESIRE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, [' you ', ' u '])) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEE_SHOW_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, LOCAL_PERSON_TARGETS));
             const SELF_WORDS = [' yourself ', ' urself '];
             const SELF_PLAY_ACTIONS = ['play', 'touch', 'finger', 'rub'];
-            const isMasturbateCmd = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SELF_PLAY_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SELF_WORDS)) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['use']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['toy', 'dildo', 'vibrator']));
-            const isSpread = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['spread', 'open']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['legs']);
-            const isSelfHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['rock hard', 'got hard']) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' i ', ' im ', " i'm ", ' am ']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['hard', 'hrd', 'erect']));
+            const isMasturbateCmd = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SELF_PLAY_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, SELF_WORDS)) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['use']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['toy', 'dildo', 'vibrator']));
+            const isSpread = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['spread', 'open']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['legs']);
+            const isSelfHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['rock hard', 'got hard']) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, [' i ', ' im ', " i'm ", ' am ']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['hard', 'hrd', 'erect']));
             // Reply granularity: each sub-intent gets its OWN fitting pool, not one shared
             // reply. Order = most-specific first.
             if (isSuck) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.offerMsgs), true); // oral offer
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.offerMsgs), true); // oral offer
                 return true;
             }
             if (isSelfHard) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.hardStatusReplies), true); // his hard status
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.hardStatusReplies), true); // his hard status
                 return true;
             }
             if (isMasturbateCmd) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.explicitArousalReplies), true); // mutual play
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.explicitArousalReplies), true); // mutual play
                 return true;
             }
             if (isSeeNaked || isSpread || isBody) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.bodyShowDesireReplies), true); // show body
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.bodyShowDesireReplies), true); // show body
                 return true;
             }
             if (isKiss || isHug || isSex) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.naturalSexChatReplies), true); // general intimate
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.naturalSexChatReplies), true); // general intimate
                 return true;
             }
             return false;
         }
     },
-    // ===== BODY PARTS APPRECIATION - SEPARATED FOR FOCUSED RESPONSES =====
-    {
-        id: 'user_body_compliments_nice_hot_sexy',
-        priority: 167,
-        scope: 'all',
-        description: 'Body compliments (nice, hot, sexy, beautiful)',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'voice mail', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-                'hard work', 'hard exam', 'hard time', 'wet weather', 'wet paint', 'wet floor',
-            ];
-            const BODY_PARTS = [
-                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
-                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati', 'cleavage',
-                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
-                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
-                'waist', 'hips', 'legs', 'arms', 'lips', 'neck', 'back', 'shoulders', 'face',
-                'mukham', 'mokam', 'cheh', 'chehra', 'body',
-            ];
-            const BODY_COMPLIMENTS = ['nice', 'hot', 'sexy', 'beautiful', 'cute', 'good', 'azhaga', 'chanagide', 'kollam'];
-            const COMPLIMENT_FALSE_POSITIVES = ['execute', 'acute', 'photo', 'shot', 'hotspot', 'hotel'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMPLIMENT_FALSE_POSITIVES))
-                return false;
-            if (!containsBodyTerm(text, BODY_PARTS) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BODY_COMPLIMENTS))
-                return false;
-            logger.debug(`[BodyCompliments] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.bodyComplimentsReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_body_size_how_big_small_question',
-        priority: 166,
-        scope: 'all',
-        description: 'Body size questions (big, small, tight, round)',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'workout',
-                'hard work', 'hard exam', 'hard time',
-            ];
-            const BODY_PARTS = [
-                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
-                'nippl', 'nipl', 'chest', 'chati', 'thigh', 'butt', 'bum',
-                'ass', 'pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut', 'hole',
-                'gaand', 'vagina', 'belly', 'stomach', 'navel', 'waist', 'hips',
-                'legs', 'lips', 'body',
-            ];
-            const normalized = text.toLowerCase();
-            const padded = ` ${normalized} `;
-            const SIZE_WORDS = ['size', 'big', 'measurement', 'small', 'soft', 'tight', 'round', 'huge', 'thick', 'fat', 'bada', 'chota', 'mota'];
-            const SIZE_OWNER_WORDS = [' your ', ' ur ', ' tumhara ', ' teri '];
-            const SIZE_QUESTION_TEXT = ['kitna', 'kitni', 'what', 'whats', 'how', 'kya', 'bata'];
-            const PERSON_SIZE_WORDS = [' you ', ' u ', ' ho ', ' are '];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            const bodyPartSizeAsk = containsBodyTerm(text, BODY_PARTS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SIZE_WORDS);
-            const directSizeAsk = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['size']) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SIZE_OWNER_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_QUESTION_TEXT) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['size', 'size?']))) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_QUESTION_TEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SIZE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PERSON_SIZE_WORDS));
-            if (!bodyPartSizeAsk && !directSizeAsk)
-                return false;
-            logger.debug(`[BodySize] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.bodySizeReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_body_show_desire_want_to_see',
-        priority: 165,
-        scope: 'all',
-        description: 'Desire to see/show body parts',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-            ];
-            const BODY_PARTS = [
-                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
-                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
-                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
-                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
-                'waist', 'hips', 'legs', 'lips', 'face', 'body',
-            ];
-            const WANT_SEE = [
-                'want', 'wanna', 'see', 'show', 'look', 'watch', 'display',
-                'dikhao', 'dekh', 'dekhna', 'chahiye', 'chudu', 'chupinchu',
-                'chupu', 'kaval', 'kaatu', 'kaattu', 'paaru', 'venum', 'venam',
-                'torsu', 'beku', 'nodu', 'kaanikku', 'nokku',
-            ];
-            const BARE_BODY_FILLERS = ['baby', 'babe', 'na', 'please', 'plz', 'pls', 'reyy', 'rey', 'yaar', 'jaan', 'dear'];
-            const BARE_BODY_EXCLUSIONS = [
-                'nice', 'hot', 'sexy', 'beautiful', 'cute', 'big', 'small', 'size',
-                'tight', 'touch', 'kiss', 'lick', 'press', 'squeeze',
-                'send', 'sent', 'bhej', 'pic', 'pics', 'photo', 'video', 'image', 'img',
-                'wassup', 'wasup',
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            const explicitShowDesire = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, WANT_SEE) && containsBodyTerm(text, BODY_PARTS);
-            const bareBodyRequest = text.trim().length <= 18 &&
-                containsBodyTerm(text, BODY_PARTS) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BARE_BODY_FILLERS) &&
-                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BARE_BODY_EXCLUSIONS);
-            if (!explicitShowDesire && !bareBodyRequest)
-                return false;
-            logger.debug(`[BodyShowDesire] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.bodyShowDesireReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_body_touch_action_request',
-        priority: 164,
-        scope: 'all',
-        description: 'Touch/physical actions on body parts',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-            ];
-            const BODY_PARTS = [
-                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
-                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
-                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
-                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
-                'waist', 'hips', 'legs', 'lips', 'face', 'body',
-            ];
-            const TOUCH_ACTIONS = ['touch', 'hold', 'rub', 'press', 'squeeze', 'push', 'pushing', 'pussing', 'lick', 'kiss', 'finger', 'play', 'thodu', 'muddu', 'muttu'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TOUCH_ACTIONS) || !containsBodyTerm(text, BODY_PARTS))
-                return false;
-            logger.debug(`[BodyTouch] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.bodyTouchActionsReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_clothing_removal_undress_request',
-        priority: 163,
-        scope: 'all',
-        description: 'Requests to remove/open clothing',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const OPEN_REMOVE = ['open', 'remove', 'take off', 'strip', 'undress', 'vippu', 'utaro', 'utaar'];
-            const CLOTHING = ['dress', 'cloth', 'kapd', 'bra', 'pant', 'shirt', 'top', 'skirt'];
-            const NAKED_COMMANDS = ['strip', 'undress', 'get naked', 'go naked', 'fully nude'];
-            const NAKED_EXACT = ['naked', 'nude', 'nanga', 'nangi', 'naked baby', 'nude baby', 'naked na', 'nude na', 'naked please', 'nude please'];
-            const SEND_NUDE_CONTEXT = ['send', 'sent', 'bhej', 'dedo', 'dede', 'de do', 'give', 'gimme', 'pic', 'photo'];
-            const clothingRemoval = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, OPEN_REMOVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CLOTHING);
-            const nakedRemoval = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NAKED_COMMANDS) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, NAKED_EXACT)) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SEND_NUDE_CONTEXT);
-            if (!clothingRemoval && !nakedRemoval)
-                return false;
-            logger.debug(`[ClothingRemoval] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.clothingRemovalReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_body_contextual_appreciation',
-        priority: 159,
-        scope: 'all',
-        description: 'Contextual body appreciation (milk, chest, bra)',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-            ];
-            const BODY_PARTS = [
-                'sallu', 'solla', 'sollu', 'boob', 'bobs', 'tits', 'breast',
-                'milk', 'doodh', 'dudh', 'palu', 'nippl', 'nipl', 'chest', 'chati',
-                'thigh', 'butt', 'bum', 'ass', 'pussy', 'pusi', 'pooku', 'poku',
-                'puku', 'chut', 'hole', 'gaand', 'vagina', 'belly', 'stomach', 'navel',
-                'waist', 'hips', 'legs', 'lips', 'face', 'body',
-            ];
-            const SHOW_SEND = ['show', 'send', 'sent', 'bhej', 'give', 'dedo', 'de do', 'dikha', 'anuppu', 'kalisu', 'ayakku', 'kodu'];
-            const NUDITY = ['nude', 'nudes', 'naked', 'nanga', 'nangi'];
-            const SEND_ONLY = ['send', 'sent', 'bhej', 'dedo', 'dede', 'de do', 'give', 'gimme'];
-            const CONTEXTUAL_BODY = ['bra', 'chest', 'milk', 'doodh', 'dudh', 'palu'];
-            const MEDIA_WORDS = ['pic', 'photo', 'video', 'image', 'img', 'selfie'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            const bodyShowSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_SEND) && containsBodyTerm(text, BODY_PARTS);
-            const nudeSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NUDITY) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SEND_ONLY);
-            const contextualMedia = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CONTEXTUAL_BODY) && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_SEND) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MEDIA_WORDS));
-            if (!bodyShowSend && !nudeSend && !contextualMedia)
-                return false;
-            logger.debug(`[BodyContextual] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.naturalBodyReplies), true);
-            return true;
-        }
-    },
-    // ===== HORNY STATUS - SEPARATED FOR FOCUSED RESPONSES =====
-    {
-        id: 'user_explicit_arousal_jerking_masturbating',
-        priority: 158,
-        scope: 'all',
-        description: 'Explicit arousal expressions (jerking, masturbating, cumming)',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-                'jerk chicken', 'beef jerky', 'turkey jerky', 'hilarious', 'kottu parotta',
-            ];
-            const DIRECT_AROUSAL = ['horny', 'horni', 'horney', 'masturbat', 'mastrubat', 'kottu'];
-            const JERK_AROUSAL = ['jerk off', 'jerking off', 'jerk my', 'jerk me', 'jerk you', 'jerk u'];
-            const HILA_AROUSAL = ['hilana', 'hila raha', 'hila rha', 'hila do', 'hila de'];
-            const MUTH_AROUSAL = ['muth maar', 'muth mar', 'muth nikal', 'muth kar'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRECT_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, JERK_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HILA_AROUSAL) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MUTH_AROUSAL))
-                return false;
-            logger.debug(`[ExplicitArousal] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.explicitArousalReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_hard_erect_status_expression',
-        priority: 157,
-        scope: 'all',
-        description: 'Hard/erect status expressions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'hardware', 'hard drive', 'hard disk', 'hard work', 'hard exam', 'hard time',
-                'hard copy', 'hard reset', 'hard question', 'dictionary', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-            ];
-            const SHORT_HARD = [
-                'hard', 'hard?', 'hard!', 'hard.', 'hrd', 'hrd?', 'erect', 'erect?',
-                'stiff', 'stiff?', 'khada', 'khada?', 'sakht', 'sakht?',
-            ];
-            const SELF_HARD = [
-                'i am hard', "i'm hard", 'im hard', 'i m hard', 'getting hard', 'feeling hard',
-                'my hard', 'me hard', 'rock hard', 'i am erect', "i'm erect", 'im erect',
-                'i m erect', 'getting erect', 'feeling erect', 'khada ho', 'khada hai',
-                'sakht ho', 'sakht hai',
-            ];
-            const DICK_TERMS = ['dick', 'dic', 'cock', 'penis', 'lund', 'lulli', 'modda', 'sullu'];
-            const HARD_TERMS = ['hard', 'hrd', 'erect', 'stiff', 'khada', 'sakht', 'lechi', 'nilichindi'];
-            const trimmed = text.trim().toLowerCase();
-            const shortHard = SHORT_HARD.includes(trimmed);
-            const selfHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SELF_HARD);
-            const dickHard = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DICK_TERMS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HARD_TERMS);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!shortHard && !selfHard && !dickHard)
-                return false;
-            logger.debug(`[HardStatus] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.hardStatusReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_wet_tight_status_expression',
-        priority: 156,
-        scope: 'all',
-        description: 'Wet/tight status expressions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'wet weather', 'wet paint', 'wet floor', 'wet wipes', 'wet tissue',
-                'hardware', 'hard drive', 'hard disk', 'touch screen', 'system',
-                'family', 'mother', 'sister', 'brother', 'father', 'food', 'fitness', 'workout',
-            ];
-            const SHORT_WET = [
-                'wet', 'wet?', 'wet!', 'wet.', 'moist', 'moist?', 'geeli', 'geeli?',
-                'geela', 'geela?', 'gela', 'gela?', 'thadiga', 'tadap',
-            ];
-            const DIRECT_WET = [
-                'are you wet', 'r u wet', 'u wet', 'you wet', 'so wet', 'very wet',
-                'kitni wet', 'how wet', 'wet ho', 'wet hai', 'geeli ho', 'geela ho',
-                'geeli hai', 'geela hai', 'tadap rahi', 'tadap raha',
-            ];
-            const PUSSY_TERMS = ['pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut'];
-            const WET_TERMS = ['wet', 'moist', 'geeli', 'geela', 'gela', 'thadiga'];
-            const trimmed = text.trim().toLowerCase();
-            const directWet = SHORT_WET.includes(trimmed) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRECT_WET);
-            const pussyWet = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PUSSY_TERMS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, WET_TERMS);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!directWet && !pussyWet)
-                return false;
-            logger.debug(`[WetStatus] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.wetStatusReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_climax_cumming_expression',
-        priority: 155,
-        scope: 'all',
-        description: 'Climax/cumming expressions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'pain', 'infection', 'tablet', 'medicine',
-                'payment', 'paisa', 'money', 'amount', 'today', 'tomorrow', 'over', 'home',
-                'back', 'work', 'office', 'release date', 'press release',
-                'cumber', 'cumin powder', 'cumin seed', 'cumin tea', 'cumul',
-                'cummins', 'accum', 'scum', 'succumb',
-            ];
-            const DIRECT_CLIMAX = ['cum', 'climax', 'orgasm', 'varunnu', 'barthide', 'vanthuten'];
-            const FINISH_ACTIONS = ['come', 'coming', 'finish', 'release'];
-            const SEXUAL_CONTEXT = [
-                'dick', 'cock', 'penis', 'lund', 'lulli', 'modda', 'sullu',
-                'pussy', 'pusi', 'pooku', 'poku', 'puku', 'chut',
-                'horny', 'inside', 'together', 'load', 'sex',
-            ];
-            const directClimax = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRECT_CLIMAX);
-            const contextualFinish = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, FINISH_ACTIONS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SEXUAL_CONTEXT);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!directClimax && !contextualFinish)
-                return false;
-            logger.debug(`[Climax] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.climaxReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_control_loss_cant_control',
-        priority: 154,
-        scope: 'all',
-        description: 'Loss of control expressions',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'remote control', 'control room', 'control panel', 'quality control',
-                'stop payment', 'payment stop', 'hold payment', 'payment hold',
-                'stop message', 'stop texting', 'lost phone', 'lost money',
-            ];
-            const CONTROL_LOSS = [
-                'cant control', "can't control", 'cannot control', 'can not control',
-                'unable to control', 'losing control', 'lost control', 'control nahi',
-                'control nhi', 'control nai', 'control ledu',
-            ];
-            const STOP_HOLD_LOSS = [
-                'cant stop', "can't stop", 'cannot stop', 'can not stop', 'unable to stop',
-                'cant hold', "can't hold", 'cannot hold', 'can not hold', 'unable to hold',
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CONTROL_LOSS) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, STOP_HOLD_LOSS))
-                return false;
-            logger.debug(`[ControlLoss] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.controlLossReplies), true);
-            return true;
-        }
-    },
-    {
-        // General arousal/mood ("turned on", "so aroused") not tied to a body part.
-        // Lowest priority among the horny sub-types so the 5 specific ones win first.
-        id: 'user_general_horny_aroused_mood',
-        priority: 153,
-        scope: 'all',
-        description: 'Generic arousal/mood expressions not tied to a specific body part',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'doctor', 'medical', 'hospital', 'tablet', 'medicine',
-                'turn on light', 'turned on light', 'turned on the light',
-                'turn on fan', 'turned on fan', 'power on', 'switch on', 'device on',
-            ];
-            const AROUSAL_MOOD = ['turned on', 'turn me on', 'turned me on', 'turns me on', 'turning me on', 'arous'];
-            const WANT_YOU_DESIRE = [
-                'want you so bad', 'want you badly', 'want you so much',
-                'want you right now', 'want you rn',
-            ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, AROUSAL_MOOD) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, WANT_YOU_DESIRE))
-                return false;
-            logger.debug(`[GeneralHorny] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.naturalHornyReplies), true);
-            return true;
-        }
-    },
-    // ===== DIRTY TALK - SEPARATED FOR FOCUSED RESPONSES =====
-    {
-        id: 'user_explicit_dirty_words_slang',
-        priority: 152,
-        scope: 'all',
-        description: 'Explicit dirty words/slang',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXPLICIT_WORDS = [
-                'slut', 'whore', 'bitch', 'randi', 'kutiya', 'saali',
-                'lanja', 'boothu', 'bothu', 'gandi', 'gndi', 'mulugu',
-            ];
-            const DIRTY_WORD_TONE = ['dirty', 'drty', 'gandi', 'gndi', 'slutty'];
-            const WORD_TARGETS = ['word', 'slang', 'gaali', 'gali'];
-            const dirtyWordRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRTY_WORD_TONE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, WORD_TARGETS);
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXPLICIT_WORDS) && !dirtyWordRequest)
-                return false;
-            logger.debug(`[ExplicitWords] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.explicitWordsReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_dirty_talk_conversation_request',
-        priority: 151,
-        scope: 'all',
-        description: 'Dirty talk conversation requests',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = ['dirty shirt', 'dirty cloth', 'dirty dress', 'dirty room', 'dirty water', 'dirty floor', 'dirty hands'];
-            const DIRTY_TALK_TONE = ['dirty', 'drty', 'gandi', 'gndi', 'sex', 'hot', 'naughty', 'wild', 'boothu', 'bothu'];
-            const TALK_TARGETS = ['talk', 'chat', 'conversation', 'baat', 'matl'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRTY_TALK_TONE) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TALK_TARGETS))
-                return false;
-            logger.debug(`[DirtyTalkRequest] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.talkRequestReplies), true);
-            return true;
-        }
-    },
-    {
-        // Generic dirty/naughty request ("say something dirty", "be naughty with me")
-        // not paired with a talk word. Lowest priority among dirty sub-types.
-        id: 'user_general_dirty_naughty_request',
-        priority: 150,
-        scope: 'all',
-        description: 'Generic dirty/naughty talk requests not tied to a specific talk word',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = [
-                'bad network', 'feeling bad', 'dirty shirt', 'dirty cloth',
-                'dirty dress', 'dirty room', 'dirty water', 'dirty floor',
-                'dirty hands', 'dirty mind problem',
-            ];
-            const GENERAL_DIRTY = ['dirty', 'drty', 'naughty', 'kinky', 'nasty', 'gandi', 'gndi', 'boothu', 'bothu'];
-            const BAD_ROLEPLAY = ['be bad', 'act bad', 'talk bad', 'say bad', 'tell bad', 'bad baby', 'bad babe'];
-            const generalDirty = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, GENERAL_DIRTY);
-            const roleplayDirty = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BAD_ROLEPLAY);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
-                return false;
-            if (!generalDirty && !roleplayDirty)
-                return false;
-            logger.debug(`[GeneralDirty] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.naturalDirtyTalkReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_moan_sound_audio_request',
-        priority: 188,
-        scope: 'all',
-        description: 'Moaning/sound requests',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            const BLOCKED_CONTEXT = ['price', 'rate', 'cost', 'kitna', 'how much', 'payment', 'paid', 'demo'];
-            const MOAN_CUES = ['moan', 'awaz', 'siskiyan', 'noise', 'sound', 'voice sex'];
-            const PLEASURE_CUES = ['sex', 'pleasure', 'orgasm', 'climax'];
-            const moanPleasure = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MOAN_CUES) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PLEASURE_CUES);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, BLOCKED_CONTEXT))
-                return false;
-            if (!moanPleasure && !isMoanDirectOrContinuation(text, allMsg))
-                return false;
-            logger.debug(`[MoanRequest] Detected in: "${text}"`);
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.moanRequestReplies), true);
-            return true;
-        }
-    },
-    {
-        id: 'user_dick_compliment_size_question',
-        priority: 170,
-        scope: 'all',
-        description: 'User asking about their dick - seductive compliments',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            // Also catch the user bragging/asking about HIS dick ("my dick is big",
-            // "my cock", "mera lund bada") — a dick-compliment cue even without a question.
-            // Exclude show/send requests ("can i show you my dick") — those are media intents.
-            const EXCLUDED_CONTEXT = ['cocktail', 'peacock', 'myth'];
-            const SHOW_GUARD = ['show', 'send', 'dikha', 'dekho', 'see', 'watch', 'bhej', 'pic', 'photo', 'video', 'image', 'img'];
-            const DICK = ['dick', 'dik', 'dck', 'cock', 'lund', 'lauda', 'penis'];
-            const POSSESSIVE = ['my', 'mera', 'mere'];
-            const QUALITY = ['big', 'bada', 'huge', 'hard', 'long', 'size', 'mota'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_GUARD))
-                return false;
-            const possessiveDick = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, POSSESSIVE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DICK);
-            const dickQuality = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DICK) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, QUALITY);
-            const myDick = possessiveDick || dickQuality;
-            if (isDickQuestion(text) || myDick) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.dickComplimentReplies), true);
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🍆');
-                // Follow up with encouragement to show/pay
-                if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                        kind: 'respond', text: "Show me now in **video call** baby! 😉\n\n" + (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.PayMsgArray),
-                    }, { label: 'common.dick.videoCall' });
-                }
-                return true;
-            }
-            return false;
-        }
-    },
-    {
-        id: 'user_can_show_private_parts_question',
-        priority: 181,
-        scope: 'all',
-        description: 'User asking if they can show their private parts',
-        handler: async (event, text, allMsg, userDetails, context) => {
-            if (isCanShowPrivatePartsQuestion(text)) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_7__.canShowReplies), true);
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '👀');
-                // Follow up with video call encouragement
-                if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                        kind: 'respond', text: "Let's do **video call** so I can see you **live**! 😈\n\n" + (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)),
-                    }, { label: 'common.canShow.videoCall' });
-                }
-                return true;
-            }
-            return false;
-        }
-    },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/common/small-talk-patterns.ts"
+/*!************************************************************!*\
+  !*** ./src/pattern-handlers/common/small-talk-patterns.ts ***!
+  \************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   smallTalkPatterns: () => (/* binding */ smallTalkPatterns)
+/* harmony export */ });
+/* harmony import */ var _conversation_respond__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../conversation/respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../calls/voice-proof */ "./src/calls/voice-proof.ts");
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/** Common patterns, part of commonPatterns (order matters within equal priorities): Interests, what-are-you-doing, how-are-you, hmm, DP / QR / demo / voice-call / full-service questions. */
+
+
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:common-patterns");
+const smallTalkPatterns = [
     {
         id: 'user_personal_interests_lifestyle_question',
         priority: 141,
@@ -75686,17 +76124,17 @@ const commonPatterns = [
             const PERSONAL_CONTEXT = ['you', 'your', 'ur ', 'nuvvu', 'em', 'kya', 'did', 'have'];
             const SLEEP_WORDS = ['sleep', 'paduko'];
             const SLEEP_CONTEXT = ['you', 'your', 'ur ', 'going', 'not'];
-            const isEating = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EATING_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PERSONAL_CONTEXT);
-            const isSleeping = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SLEEP_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SLEEP_CONTEXT);
+            const isEating = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EATING_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PERSONAL_CONTEXT);
+            const isSleeping = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SLEEP_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SLEEP_CONTEXT);
             if (isEating) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                     "Ate lunch! 😋\n\nNow feeling naughty... 😉",
                     "Just finished eating! 🍽️\n\nCraving something else now... 🔥"
                 ]), true);
                 return true;
             }
             if (isSleeping) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                     "Can't sleep...\n\ntoo horny! 🙈💦",
                     "Wide awake...\n\nthinking of you! 😏"
                 ]), true);
@@ -75721,12 +76159,12 @@ const commonPatterns = [
             ];
             const DOING_CUES = ['doing', 'dng', 'doi', 'kar rah', 'kr rh', 'online'];
             const QUESTION_CONTEXT = ['what', 'wht', 'wat', 'you', 'em', 'emi', 'kya', 'active'];
-            const teluguDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, TELUGU_DOING) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, FUTURE_TELUGU);
-            const directDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIRECT_DOING_QUESTIONS);
-            const contextualDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DOING_CUES) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, QUESTION_CONTEXT);
+            const teluguDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, TELUGU_DOING) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FUTURE_TELUGU);
+            const directDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIRECT_DOING_QUESTIONS);
+            const contextualDoing = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DOING_CUES) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, QUESTION_CONTEXT);
             const isWhatDoing = teluguDoing || directDoing || contextualDoing;
             if (isWhatDoing) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.doing, true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.doing, true);
                 return true;
             }
             return false;
@@ -75744,13 +76182,13 @@ const commonPatterns = [
             // SPECIFIC "what do you do"/"what you do" forms instead of a bare "you do".
             const EXCLUDED_CONTEXT = ['blowjob', 'handjob', 'jobless'];
             const STUDY_WORDS = ['stud', 'chaduv', 'chadhuv', 'padh', 'kya karti', 'kya karte', 'job', 'work kya', 'occupation', 'profession'];
-            const isOccupationQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what do you do', 'what you do', 'wht do u do', 'what is your work', 'whats your work', 'kya kaam']);
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+            const isOccupationQuestion = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['what do you do', 'what you do', 'wht do u do', 'what is your work', 'whats your work', 'kya kaam']);
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
-            const isStudyWord = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, STUDY_WORDS);
+            const isStudyWord = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, STUDY_WORDS);
             if (isStudyWord || isOccupationQuestion) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
-                    _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.study,
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
+                    _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.study,
                     "I'm doing my **M.Tech** baby! 🎓",
                     "M.Tech kar rahi hu reyy! 🙈",
                 ]));
@@ -75765,7 +76203,7 @@ const commonPatterns = [
         scope: 'all',
         description: 'How are you queries',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = ['how are your', 'old', 'age', 'years', 'yrs', 'good', 'pay', ...BODY_PART_TERMS];
+            const EXCLUDED_CONTEXT = ['how are your', 'old', 'age', 'years', 'yrs', 'good', 'pay', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.BODY_PART_TERMS];
             const trimmed = text.trim().toLowerCase();
             const HOW_EXACT = [
                 'how are you', 'how are you?', 'how are you!', 'how r u', 'how r u?', 'hru?',
@@ -75776,11 +76214,11 @@ const commonPatterns = [
                 'how are you ', 'how r u ', 'hows you ', 'kaise ', 'kaisi ho',
                 'ela vunnavu', 'ela unna', 'hegiddira', 'eppadi irukkenga', 'eppadi iruka',
             ];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
-            if (HOW_EXACT.includes(trimmed) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HOW_PHRASES) ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['hw', 'how']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [' u', 'you']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [' r ', 'are ']))) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.fine, true);
+            if (HOW_EXACT.includes(trimmed) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HOW_PHRASES) ||
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['hw', 'how']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [' u', 'you']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [' r ', 'are ']))) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.fine, true);
                 return true;
             }
             return false;
@@ -75798,9 +76236,9 @@ const commonPatterns = [
             }
             const HMM_EXACT = ['hm', 'hmm', 'hmmm', 'hmmmm', 'hmmmmm'];
             const HMM_START = ['hm ', 'hmm ', 'hmmm ', 'hmmmm ', 'hmmmmm '];
-            if (!HMM_EXACT.includes(normalized) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, HMM_START))
+            if (!HMM_EXACT.includes(normalized) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, HMM_START))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(["Hmm", "Hmm 🙈", "Hmmm...", "Haan baby"]));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(["Hmm", "Hmm 🙈", "Hmmm...", "Haan baby"]));
             return true;
         }
     },
@@ -75820,20 +76258,20 @@ const commonPatterns = [
             const SEXUAL_INTENT = ['nude', 'naked', 'boob', 'pussy', 'sexy', 'explicit'];
             const SEXUAL_WORD_INTENT = [' sex ', ' hot ', ' full ', ' extra ', ' more '];
             const MODAL_INTENT = [' can ', ' could ', ' will ', ' would ', ' please ', ' pls ', ' plz ', ' kar ', ' karo ', ' chahiye ', ' want ', ' need '];
-            const isDisallowed = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, REQUEST_INTENT) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, ACTION_INTENT) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SEXUAL_INTENT) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SEXUAL_WORD_INTENT) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, MODAL_INTENT);
+            const isDisallowed = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, REQUEST_INTENT) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, ACTION_INTENT) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SEXUAL_INTENT) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, SEXUAL_WORD_INTENT) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, MODAL_INTENT);
             if (isDisallowed)
                 return false;
-            const hasDp = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, DP_WORDS);
-            const hasYou = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, YOU_WORDS);
-            const hasExistenceVerb = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, EXISTENCE_VERBS);
+            const hasDp = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, DP_WORDS);
+            const hasYou = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, YOU_WORDS);
+            const hasExistenceVerb = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, EXISTENCE_VERBS);
             const isVerificationIntent = hasDp && hasYou && hasExistenceVerb;
             if (isVerificationIntent) {
                 logger.debug(`[DP_Profile] Grammar-agnostic match: "${text}"`);
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.pp, true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pp, true);
                 return true;
             }
             return false;
@@ -75845,8 +76283,8 @@ const commonPatterns = [
         scope: 'all',
         description: 'QR code/scanner requests',
         handler: async (event, text, allMsg, userDetails, context) => {
-            if (!isPaymentAccessIssue(text) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['scan', 'qr', 'barcode', 'bar code'])) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_12__.pushToReplies)(event, context.chatId, `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.qr}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.link}`, './QR.jpg');
+            if (!(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.isPaymentAccessIssue)(text) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['scan', 'qr', 'barcode', 'bar code'])) {
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.qr}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.link}`, './QR.jpg');
                 return true;
             }
             return false;
@@ -75860,9 +76298,9 @@ const commonPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             const MANY_QUESTION = ['how many', 'hw many'];
             const EXCLUDED_CONTEXT = ['time', 'min', 'minute', 'hour', 'hr ', 'day', 'long', 'price', 'rate', 'cost', 'amount', 'rupee', 'rs'];
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MANY_QUESTION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MANY_QUESTION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                 "Demo 4 Pics\n\n30 Full Nude Pics: **200₹/-**",
                 "Demo is **4 Pics** baby!\n\nFull **30 Nude Pics** for **200₹/-** na 🙈",
                 "4 Pics in Demo reyy!\n\n**30 Full Nude Pics** = **200₹/-** 💸",
@@ -75884,7 +76322,7 @@ const commonPatterns = [
             const OI_GREETING = ['oi', 'oy', 'oii', 'oyy', 'oye', 'oyee'];
             if (normalized.length > 16 || !OI_GREETING.includes(firstWord))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(['haaa....', 'haaa baby....', 'haan reyy...', 'haaa 🙈']));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['haaa....', 'haaa baby....', 'haan reyy...', 'haaa 🙈']));
             return true;
         }
     },
@@ -75900,11 +76338,11 @@ const commonPatterns = [
             const EXCLUDED_CONTEXT = ['fake', 'frau', 'scam', 'reco'];
             const ACCOUNT_CUES = ['banking', 'ravva', 'lk pvt', 'community', 'girls comm', 'lakshmi', 'laxmi'];
             const CONFIRMATION_CUES = ['is this right', 'this one', 'is this correct', 'right account', 'right number', 'sahi hai', 'correct hai'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT))
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ACCOUNT_CUES) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, CONFIRMATION_CUES) && !text.trim().startsWith('.'))
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ACCOUNT_CUES) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, CONFIRMATION_CUES) && !text.trim().startsWith('.'))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.yesMsgs));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.yesMsgs));
             return true;
         }
     },
@@ -75921,15 +76359,15 @@ const commonPatterns = [
             const padded = ` ${normalized} `;
             const EXCLUDED_CONTEXT = ['not really', 'really not'];
             const REALLY_CUES = [' really ', ' sach me ', ' sach mein ', ' pakka ', ' seriously '];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, REALLY_CUES))
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, REALLY_CUES))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                 '**Try Demo and See...!!**,\nU will Only Understand!!🙃🙃',
                 '**Take a Demo na baby!!**\nThen you will understand reyy! 🙃',
                 'Just **try the Demo** once baby!\nYou\'ll see na... trust me! 🙈',
             ]));
-            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, {
-                kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_9__.getUpsellMessage)(userDetails.payAmount)),
+            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 15000, {
+                kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage)(userDetails.payAmount)),
             }, { label: 'common.really.upsell' });
             return true;
         }
@@ -75944,9 +76382,9 @@ const commonPatterns = [
             const EXTRA_CONTEXT = ['secur', 'room', 'extra', 'xtra', 'hidden'];
             const MONEY_CONTEXT = ['money', 'ask', 'charg', 'pric', 'cost', 'amount'];
             const ANY_OTHER_CHARGE = [' any ', ' other '];
-            const isAnyOtherCharge = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, ANY_OTHER_CHARGE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['charg', 'cost']);
-            if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXTRA_CONTEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MONEY_CONTEXT)) || isAnyOtherCharge) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+            const isAnyOtherCharge = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, ANY_OTHER_CHARGE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['charg', 'cost']);
+            if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXTRA_CONTEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MONEY_CONTEXT)) || isAnyOtherCharge) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                     "No Other Charges at all!!",
                     "No extra charges baby, promise! 😊",
                     "Nothing extra reyy... only the plan amount! 🙈",
@@ -75969,14 +76407,14 @@ const commonPatterns = [
             const DEMO = ['demo', 'dmo', 'demu', 'sampl', 'trail', 'tril', 'proof', 'prf', 'trial'];
             const PRICE_EXCLUSION = ['pric', 'prce', 'prc', 'rate', 'cost', 'cst', 'charge', 'kitn', 'how much', 'amount']; // guard: price questions route elsewhere
             const PAYMENT_PROOF_EXCLUSION = ['payment', 'paid', 'pay ', 'screenshot', 'screen shot', 'ss ', 'utr', 'txn', 'transaction'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_EXCLUSION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAYMENT_PROOF_EXCLUSION)) {
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_EXCLUSION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_PROOF_EXCLUSION)) {
                 return false; // guard: "demo price" is a price question, not a demo request
             }
-            const hasDemoAction = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, DEMO_ACTION_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DEMO_ACTION_TEXT);
-            const isGiveDemo = hasDemoAction && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DEMO);
+            const hasDemoAction = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, DEMO_ACTION_WORDS) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO_ACTION_TEXT);
+            const isGiveDemo = hasDemoAction && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO);
             if (isGiveDemo) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([`**Trust Me** Once and **Take Demo!!**\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.just50, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.just50two])}`]));
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 17000, { kind: 'reply', text: '', file: './fifty.mp3' }, { label: 'common.giveDemo.fifty' });
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([`**Trust Me** Once and **Take Demo!!**\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50two])}`]));
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 17000, { kind: 'reply', text: '', file: './fifty.mp3' }, { label: 'common.giveDemo.fifty' });
                 return true;
             }
             return false;
@@ -75995,9 +76433,9 @@ const commonPatterns = [
             const padded = ` ${normalized} `;
             const EXCLUDED_CONTEXT = ['payment', 'link', 'there is', 'there are'];
             const THERE_QUESTIONS = [' are you there ', ' are u there ', ' r u there ', ' you there ', ' u there ', ' unnava '];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, EXCLUDED_CONTEXT) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, THERE_QUESTIONS))
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT) || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, THERE_QUESTIONS))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([`Haaa... Tell!!`]));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([`Haaa... Tell!!`]));
             return true;
         }
     },
@@ -76040,20 +76478,20 @@ const commonPatterns = [
             const ACTION_TEXT = ['want', 'chahiye', 'start', 'this time', 'now', 'call', 'message', 'note', 'lets', "let's"];
             const ACTION_WORDS = [' do ', ' kar ', ' karo ', ' karu ', ' msg '];
             const STANDALONE_VOICE = ['voice', 'voic', 'vois', 'voc', 'audio', 'awaz', 'awaaz', 'awj', 'vn', 'v.n'];
-            const hasVoice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, VOICE_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, VOICE_WORDS);
-            const hasShowSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SHOW_SEND) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SHOW_SEND_WORDS);
-            const hasRecording = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, RECORDING) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, RECORDING_WORDS);
-            const hasPolite = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, POLITE_WORDS);
-            const hasPersonal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PERSONAL_WORDS);
-            const isAction = hasVoice && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ACTION_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, ACTION_WORDS));
+            const hasVoice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, VOICE_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, VOICE_WORDS);
+            const hasShowSend = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SHOW_SEND) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, SHOW_SEND_WORDS);
+            const hasRecording = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, RECORDING) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, RECORDING_WORDS);
+            const hasPolite = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, POLITE_WORDS);
+            const hasPersonal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, PERSONAL_WORDS);
+            const isAction = hasVoice && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ACTION_TEXT) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, ACTION_WORDS));
             const politeRequest = hasPolite && hasShowSend;
-            const hasModalityChoice = hasVoice && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, VIDEO_CALL_TEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, CHOICE_WORDS);
+            const hasModalityChoice = hasVoice && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, VIDEO_CALL_TEXT) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, CHOICE_WORDS);
             let voiceType = null;
             if (!hasVoice ||
                 hasModalityChoice ||
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, COMPLIMENT) && hasVoice) ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, HARD_EXCLUSION) ||
-                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, SOFT_EXCLUSION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, SOFT_WORD_EXCLUSION)) && !isAction && !politeRequest)) {
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, COMPLIMENT) && hasVoice) ||
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, HARD_EXCLUSION) ||
+                (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, SOFT_EXCLUSION) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, SOFT_WORD_EXCLUSION)) && !isAction && !politeRequest)) {
                 voiceType = null;
             }
             else if (politeRequest) {
@@ -76072,22 +76510,22 @@ const commonPatterns = [
                 logger.debug(`[VoiceCall] Detected voice call mention in: "${text}" (type: ${voiceType})`);
                 // Asked again for the voice (or proof): ring them and play it instead of another voice note.
                 // Falls back to the voice message below (first request, busy, limits, privacy, off).
-                const calling = await (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_13__.tryVoiceProofCall)(context.chatId, {
+                const calling = await (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__.tryVoiceProofCall)(context.chatId, {
                     followUp: (Number(userDetails.payAmount) || 0) < 15,
-                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_12__.pushToReplies)(event, context.chatId, '', './voice.mp3'),
+                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, '', './voice.mp3'),
                 });
                 if (calling)
                     return true;
                 // Sub-type aware text intro before the voice sample (pools, never single line).
                 if (voiceType === 'explicit_command') {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                         "Mmm you wanna hear my voice baby? 😘\n\nListen...",
                         "Okay baby, sending my **sexy voice** now... 🙈",
                         "Sun na baby... my voice just for you 💋",
                     ]), true);
                 }
                 else if (voiceType === 'polite_request') {
-                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([
+                    await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                         "Aww so sweet baby 🙈\n\nHere, listen to my voice...",
                         "Okay dear, just for you... 💕🎤",
                         "Achha baby, sending... sun lo 😚",
@@ -76106,7 +76544,7 @@ const commonPatterns = [
                 }
                 // Send voice sample after delay
                 // Relative path - FileSender resolves it. A failure is logged by the follow-up job.
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_16__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './voice.mp3' }, { label: 'common.voiceCall.sample' });
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './voice.mp3' }, { label: 'common.voiceCall.sample' });
                 return true;
             }
             return false;
@@ -76124,19 +76562,19 @@ const commonPatterns = [
             const FULL_SERVICE = ['total', 'full', 'complete', 'whole', 'all', 'not only demo', 'only demo', 'not demo'];
             const PRICE_WORDS = ['pric', 'prce', 'prc', 'cost', 'cst', 'rate', 'charge', 'amount', 'how much', 'kitn'];
             const SERVICE_CONTEXT = ['vc', 'video', 'call', 'service', 'min', 'minute'];
-            const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['much', 'mch']);
-            const hasDurationUnit = containsPadded(text, ['min', 'mins', 'minute', 'minutes']);
-            const asksFullPrice = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, FULL_SERVICE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_WORDS))
-                || (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_WORDS) || hasHowMuchPrice) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_CONTEXT));
+            const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
+            const hasDurationUnit = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['min', 'mins', 'minute', 'minutes']);
+            const asksFullPrice = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_SERVICE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_WORDS))
+                || (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_WORDS) || hasHowMuchPrice) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SERVICE_CONTEXT));
             const HOW_MUCH_FULL_EXCLUSION = ['how much full', 'how much for full', 'how much is full', 'how much in full'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, HOW_MUCH_FULL_EXCLUSION))
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HOW_MUCH_FULL_EXCLUSION))
                 return false;
             // "voice or video?" is a MODALITY-choice question
-            const hasModalityChoice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['voice', 'audio']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['video', 'call']) &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' or ', ' ya ']);
+            const hasModalityChoice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['voice', 'audio']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['video', 'call']) &&
+                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, [' or ', ' ya ']);
             if (hasModalityChoice) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_6__.modalityChoiceIntroMsgs)}`);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.modalityChoiceIntroMsgs)}`);
                 return true;
             }
             // Installment / pay-in-parts intent
@@ -76144,32 +76582,32 @@ const commonPatterns = [
             const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
             const MINUTE_WORDS = ['min', 'minute'];
             const DAILY_WORDS = ['daily', 'day', 'roz'];
-            const isInstallment = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, INSTALLMENT)
-                || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DIGITS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, MINUTE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DAILY_WORDS)); // guard: "15 min daily" / "daily 15 min"
+            const isInstallment = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, INSTALLMENT)
+                || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DIGITS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MINUTE_WORDS) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DAILY_WORDS)); // guard: "15 min daily" / "daily 15 min"
             if (isInstallment) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.installments);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.installments);
                 return true;
             }
             const specificDurationPriceAsk = (hasHowMuchPrice && hasDurationUnit) ||
-                ((0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstNumberFromText)(text) > 0 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) && hasDurationUnit);
+                ((0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_10__.firstNumberFromText)(text) > 0 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) && hasDurationUnit);
             if (specificDurationPriceAsk) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.pricelist, ..._conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.pricelistArray]));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelist, ..._conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray]));
                 return true;
             }
             // Duration question
             const DURATION = ['how long', 'how much time', 'kitna time', 'kitni der', 'duration', 'time milega', 'how many min'];
             const DURATION_Q = ['how', 'kitna', 'kitne', 'kitni', 'kithna', 'kithne', 'kithni', 'entha', 'ethra', 'how much'];
-            const hasTimeWord = hasDurationUnit || containsPadded(text, ['time', 'duration', 'der', 'long']);
-            const isDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DURATION)
-                || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, DURATION_Q) && hasTimeWord);
+            const hasTimeWord = hasDurationUnit || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['time', 'duration', 'der', 'long']);
+            const isDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DURATION)
+                || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DURATION_Q) && hasTimeWord);
             if (isDuration) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.time);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.time);
                 return true;
             }
             // Full service pricelist
             const FULL_CONTEXT = ['full ', 'cost', 'serv', '1 hr', 'hour', 'hr ', 'what options', 'what plans'];
-            if (asksFullPrice || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, FULL_CONTEXT)) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.pricelist, ..._conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.pricelistArray]));
+            if (asksFullPrice || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_CONTEXT)) {
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelist, ..._conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray]));
                 return true;
             }
             // Bare price ask -> demo/price menu
@@ -76181,15 +76619,73 @@ const commonPatterns = [
             const PRICE_TARGETS = ['pric', 'prce', 'prc', 'rate', 'cost', 'cst', 'charge'];
             const PRICE_QUESTION_CUES = ['wat', 'what', 'whats', 'how much', 'tell', 'bata', 'bol', 'kitna', 'kitni', 'kya'];
             const PRICE_OWNER_WORDS = [' ur ', ' your '];
-            const isPriceAsk = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, PRICE_TARGETS) &&
-                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, PRICE_QUESTION_CUES) || hasHowMuchPrice || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, PRICE_OWNER_WORDS));
+            const isPriceAsk = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, PRICE_TARGETS) &&
+                ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, PRICE_QUESTION_CUES) || hasHowMuchPrice || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(padded, PRICE_OWNER_WORDS));
             if (BARE_PRICE_START.includes(firstWord) || isPriceAsk) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.noFreeDemo + "\n\n" + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_8__.demo);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.noFreeDemo + "\n\n" + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.demo);
                 return true;
             }
             return false;
         }
     },
+];
+
+
+/***/ },
+
+/***/ "./src/pattern-handlers/commonPatterns.ts"
+/*!************************************************!*\
+  !*** ./src/pattern-handlers/commonPatterns.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   commonPatterns: () => (/* binding */ commonPatterns),
+/* harmony export */   isBotAccusation: () => (/* reexport safe */ _common_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.isBotAccusation)
+/* harmony export */ });
+/* harmony import */ var _common_opening_and_fallback_patterns__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./common/opening-and-fallback-patterns */ "./src/pattern-handlers/common/opening-and-fallback-patterns.ts");
+/* harmony import */ var _common_payment_status_patterns__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./common/payment-status-patterns */ "./src/pattern-handlers/common/payment-status-patterns.ts");
+/* harmony import */ var _common_service_and_persona_patterns__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./common/service-and-persona-patterns */ "./src/pattern-handlers/common/service-and-persona-patterns.ts");
+/* harmony import */ var _common_payment_method_patterns__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./common/payment-method-patterns */ "./src/pattern-handlers/common/payment-method-patterns.ts");
+/* harmony import */ var _common_personal_question_patterns__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./common/personal-question-patterns */ "./src/pattern-handlers/common/personal-question-patterns.ts");
+/* harmony import */ var _common_sexual_patterns__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./common/sexual-patterns */ "./src/pattern-handlers/common/sexual-patterns.ts");
+/* harmony import */ var _common_body_patterns__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./common/body-patterns */ "./src/pattern-handlers/common/body-patterns.ts");
+/* harmony import */ var _common_horny_patterns__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./common/horny-patterns */ "./src/pattern-handlers/common/horny-patterns.ts");
+/* harmony import */ var _common_dirty_talk_patterns__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./common/dirty-talk-patterns */ "./src/pattern-handlers/common/dirty-talk-patterns.ts");
+/* harmony import */ var _common_small_talk_patterns__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./common/small-talk-patterns */ "./src/pattern-handlers/common/small-talk-patterns.ts");
+/* harmony import */ var _common_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./common/pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Common patterns that work for both paid and unpaid users
+ * Priority ranges:
+ * - 90-100: Critical/High priority (greetings, payment done, etc.)
+ * - 70-89: Medium-high priority (common queries)
+ * - 50-69: Medium priority (general responses)
+ * - 30-49: Low priority (fallback patterns)
+ */
+const commonPatterns = [
+    ..._common_opening_and_fallback_patterns__WEBPACK_IMPORTED_MODULE_0__.openingAndFallbackPatterns,
+    ..._common_payment_status_patterns__WEBPACK_IMPORTED_MODULE_1__.paymentStatusPatterns,
+    ..._common_service_and_persona_patterns__WEBPACK_IMPORTED_MODULE_2__.serviceAndPersonaPatterns,
+    ..._common_payment_method_patterns__WEBPACK_IMPORTED_MODULE_3__.paymentMethodPatterns,
+    ..._common_personal_question_patterns__WEBPACK_IMPORTED_MODULE_4__.personalQuestionPatterns,
+    ..._common_sexual_patterns__WEBPACK_IMPORTED_MODULE_5__.sexualPatterns,
+    ..._common_body_patterns__WEBPACK_IMPORTED_MODULE_6__.bodyPatterns,
+    ..._common_horny_patterns__WEBPACK_IMPORTED_MODULE_7__.hornyPatterns,
+    ..._common_dirty_talk_patterns__WEBPACK_IMPORTED_MODULE_8__.dirtyTalkPatterns,
+    ..._common_small_talk_patterns__WEBPACK_IMPORTED_MODULE_9__.smallTalkPatterns,
 ];
 
 
@@ -89438,38 +89934,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var express__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! express */ "express");
 /* harmony import */ var express__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(express__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _media_client_file_path__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../media/client-file-path */ "./src/media/client-file-path.ts");
-/* harmony import */ var _telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/mark-as-read */ "./src/telegram/mark-as-read.ts");
-/* harmony import */ var _media_profile_pic__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../media/profile-pic */ "./src/media/profile-pic.ts");
-/* harmony import */ var _conversation_llm_gemini__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../conversation/llm/gemini */ "./src/conversation/llm/gemini.ts");
-/* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
-/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
-/* harmony import */ var _conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/messages/payment-links */ "./src/conversation/messages/payment-links.ts");
-/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
-/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
-/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
-/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../http/middlewares/leader.middleware */ "./src/http/middlewares/leader.middleware.ts");
-/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_23___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_23__);
-/* harmony import */ var _diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../diagnostics/memory-diagnostics */ "./src/diagnostics/memory-diagnostics.ts");
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _config_redis_uri__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../config/redis-uri */ "./src/config/redis-uri.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../http/middlewares/leader.middleware */ "./src/http/middlewares/leader.middleware.ts");
+/* harmony import */ var _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./system/process-handlers */ "./src/routes/system/process-handlers.ts");
+/* harmony import */ var _system_upi_handlers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./system/upi-handlers */ "./src/routes/system/upi-handlers.ts");
+/* harmony import */ var _system_file_handlers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./system/file-handlers */ "./src/routes/system/file-handlers.ts");
+/* harmony import */ var _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./system/connection-handlers */ "./src/routes/system/connection-handlers.ts");
+/* harmony import */ var _system_env_handlers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./system/env-handlers */ "./src/routes/system/env-handlers.ts");
+/* harmony import */ var _system_message_handlers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./system/message-handlers */ "./src/routes/system/message-handlers.ts");
+/* harmony import */ var _system_memory_handlers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./system/memory-handlers */ "./src/routes/system/memory-handlers.ts");
+/* harmony import */ var _system_redis_handlers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./system/redis-handlers */ "./src/routes/system/redis-handlers.ts");
+/* harmony import */ var _system_reaction_handlers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./system/reaction-handlers */ "./src/routes/system/reaction-handlers.ts");
 
 
 
@@ -89481,571 +89955,76 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__.Logger("tg-aut:system-routes");
+// Route table. Registration order is Express match order; handlers live in ./system/.
 const router = (0,express__WEBPACK_IMPORTED_MODULE_0__.Router)();
-function buildRouteMessages() {
-    const rawMessages = {
-        demoFeedback: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.demoFeedback,
-        feedbackQuestions: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.feedbackQuestions,
-        offerMsgs: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.offerMsgs,
-        initMsgs: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.initMsgs,
-        thanksArray: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.thanksArray,
-        awayMessges: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.awayMessages,
-        singleReact: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_12__.singleReact,
-        bargainMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.bargainMsgs,
-        privacyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.privacyMsgs,
-        urgencyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.urgencyMsgs,
-        refundMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.refundMsgs,
-        refundPolicyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.refundPolicyMsgs,
-        refundMoneyBackMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.refundMoneyBackMsgs,
-        refundSatisfactionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.refundSatisfactionMsgs,
-        processMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.processMsgs,
-        processAfterPaymentMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.processAfterPaymentMsgs,
-        processBookingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.processBookingMsgs,
-        processNextStepMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.processNextStepMsgs,
-        paidProcessProofMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paidProcessProofMsgs,
-        paymentHelpMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentHelpMsgs,
-        serviceDescriptionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.serviceDescriptionMsgs,
-        serviceIncludedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.serviceIncludedMsgs,
-        serviceShowMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.serviceShowMsgs,
-        serviceModalityMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.serviceModalityMsgs,
-        hesitationMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.hesitationMsgs,
-        paymentPendingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentPendingMsgs,
-        paymentProofReceivedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentProofReceivedMsgs,
-        paymentReferenceReceivedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentReferenceReceivedMsgs,
-        paymentNoServiceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentNoServiceMsgs,
-        paymentDeductedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.paymentDeductedMsgs,
-        repeatServiceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.repeatServiceMsgs,
-        repeatRecoveryMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.repeatRecoveryMsgs,
-        doingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.doingMsgs,
-        proofRequestIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.proofRequestIntroMsgs,
-        trustDoubtIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.trustDoubtIntroMsgs,
-        trustProofRepeatMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.trustProofRepeatMsgs,
-        trustReassuranceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.trustReassuranceMsgs,
-        demoRepeatNudgeMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.demoRepeatNudgeMsgs,
-        marriedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.marriedMsgs,
-        relationshipMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.relationshipMsgs,
-        affectionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.affectionMsgs,
-        priceAskIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.priceAskIntroMsgs,
-        budgetOfferIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.budgetOfferIntroMsgs,
-        namedAppPayMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.namedAppPayMsgs,
-        whichAppMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.whichAppMsgs,
-        modalityChoiceIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.modalityChoiceIntroMsgs,
-        recordingDenialMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_13__.recordingDenialMsgs,
-        followUpPrice: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.followUpPrice,
-        followUpDemo: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.followUpDemo,
-        upsell50: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.upsell50,
-        upsell150: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.upsell150,
-        upsell350: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.upsell350,
-        upsell600: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.upsell600,
-        upsellVoice: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.upsellVoice,
-        callOverMessages: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.callOverMessages,
-        paidShortDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.paidShortDurationPriceMsgs,
-        paidTenMinuteDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.paidTenMinuteDurationPriceMsgs,
-        paidThirtyMinuteDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.paidThirtyMinuteDurationPriceMsgs,
-        paidHourDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_18__.paidHourDurationPriceMsgs,
-        finishPaymentMsgs: _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_15__.finishPaymentMsgs,
-        PayMsgArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.PayMsgArray,
-        assureMSgArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.assureMsgArray,
-        naturalSexChatReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.naturalSexChatReplies,
-        naturalBodyReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.naturalBodyReplies,
-        naturalHornyReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.naturalHornyReplies,
-        naturalDirtyTalkReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.naturalDirtyTalkReplies,
-        bodyComplimentsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.bodyComplimentsReplies,
-        bodySizeReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.bodySizeReplies,
-        bodyShowDesireReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.bodyShowDesireReplies,
-        bodyTouchActionsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.bodyTouchActionsReplies,
-        clothingRemovalReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.clothingRemovalReplies,
-        explicitArousalReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.explicitArousalReplies,
-        hardStatusReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.hardStatusReplies,
-        wetStatusReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.wetStatusReplies,
-        climaxReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.climaxReplies,
-        controlLossReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.controlLossReplies,
-        explicitWordsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.explicitWordsReplies,
-        talkRequestReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.talkRequestReplies,
-        moanRequestReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.moanRequestReplies,
-        availableReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.availableReplies,
-        dickComplimentReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.dickComplimentReplies,
-        canShowReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.canShowReplies,
-        urgencyRequestUnpaid: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.urgencyRequestUnpaid,
-        urgencyRequestPaid: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_16__.urgencyRequestPaid,
-        nmns: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.nmns,
-        bye: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.bye,
-        cantPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.cantPay,
-        time: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.time,
-        wait: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.wait,
-        screenshot: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.screenshot,
-        qr: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.qr,
-        qr1: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.qr1,
-        pynw: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.getPynw(),
-        demo: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.demo,
-        noFreeDemo: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.noFreeDemo,
-        installments: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.installments,
-        daily100: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.daily100,
-        just50: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.just50,
-        just50two: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.just50two,
-        link: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.link,
-        dir: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.dir,
-        upiID: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.upiID,
-        pricelist: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.pricelist,
-        pricelistArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.pricelistArray,
-        botArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.botArray,
-        thanksNdPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.thanksNdPay,
-        ntnw: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.ntnw,
-        doing: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.doing,
-        fine: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.fine,
-        aut: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.aut,
-        okayPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.okayPay,
-        dp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.dp,
-        allDp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.allDp,
-        notVirgin: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.notVirgin,
-        age: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.age,
-        language: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.language,
-        notMarried: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.notMarried,
-        number: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.number,
-        study: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.study,
-        nameGreet: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.getNameGreet(),
-        channelLinks: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.getChannelLinks(),
-        pp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_17__.pp,
-    };
-    return Object.fromEntries(Object.entries(rawMessages).filter(([, value]) => value !== undefined));
-}
-function requiredHealthCheck(snapshot, component) {
-    const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.findHealthCheck)(snapshot, component);
-    if (!check) {
-        throw new Error(`${component} health check is missing from service health snapshot`);
-    }
-    return check;
-}
-function sendTelegramReconnectFailure(res, options) {
-    const cause = new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: options.requestId,
-        component: "telegram.connection",
-        owner: "telegram",
-        summary: "Manual Telegram reconnect failed",
-        error: cause,
-        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthFailureAction)(cause, "recover"),
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation: "telegram-reconnect",
-        readOnly: false,
-        error: options.error,
-        message: options.message ?? options.error,
-        evidence,
-        extra: {
-            ...(options.beforeHealth ? { beforeHealth: options.beforeHealth } : {}),
-            ...(options.beforeCheck ? { beforeCheck: options.beforeCheck } : {}),
-        },
-        requestId: options.requestId,
-    });
-}
-function sendMongoConnectFailure(res, options) {
-    const cause = new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: options.requestId,
-        component: "database.mongo",
-        owner: "database",
-        summary: "Manual Mongo connect failed",
-        error: cause,
-        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthFailureAction)(cause, "recover"),
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation: "mongo-connect",
-        readOnly: false,
-        error: options.error,
-        message: options.message ?? options.error,
-        evidence,
-        extra: {
-            ...(options.beforeHealth ? { beforeHealth: options.beforeHealth } : {}),
-            ...(options.beforeCheck ? { beforeCheck: options.beforeCheck } : {}),
-            ...(options.afterHealth ? { afterHealth: options.afterHealth } : {}),
-            ...(options.afterCheck ? { afterCheck: options.afterCheck } : {}),
-        },
-        requestId: options.requestId,
-    });
-}
-async function sendDatabaseSystemUnavailable(req, res, operation, error, message) {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly: false,
-        error,
-        message,
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendDatabaseSystemFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: "database.mongo",
-        owner: "database",
-        summary,
-        error,
-        action: "manual",
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly: false,
-        error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
-        evidence,
-        requestId: req.requestId,
-    });
-}
-async function sendTelegramConnectionUnavailable(req, res, operation, error, readOnly) {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly,
-        error,
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendTelegramOperationFailure(req, res, operation, error, errorText, summary, readOnly) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: "telegram.connection",
-        owner: "telegram",
-        summary,
-        error,
-        action: "manual",
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly,
-        error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendStorageOperationFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: "cloudinary",
-        owner: "storage",
-        summary,
-        error,
-        action: "recover",
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly: false,
-        error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendReactionOperationFailure(req, res, options) {
-    const cause = options.cause ?? new Error(options.message ?? options.error);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: "reaction.service",
-        owner: "reaction",
-        summary: options.summary,
-        error: cause,
-        action: options.action,
-        metadata: options.metadata,
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation: options.operation,
-        readOnly: options.readOnly,
-        error: options.error,
-        message: options.message ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(cause),
-        evidence,
-        extra: options.extra,
-        requestId: req.requestId,
-    });
-}
-function sendSystemOperationFailure(req, res, options) {
-    if (res.headersSent) {
-        return;
-    }
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: options.component,
-        owner: options.owner,
-        summary: options.summary,
-        error: options.cause,
-        action: options.action,
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
-        operation: options.operation,
-        readOnly: options.readOnly,
-        error: options.errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(options.cause),
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendRouteOperationSuccess(req, res, operation, message, payload = {}) {
-    res.status(200).json({
-        operation,
-        readOnly: false,
-        success: true,
-        message,
-        ...payload,
-        requestId: req.requestId,
-    });
-}
-function sendRouteValidationFailure(req, res, operation, error, statusCode = 400) {
-    res.status(statusCode).json({
-        operation,
-        readOnly: false,
-        success: false,
-        error,
-        requestId: req.requestId,
-    });
-}
-/**
- * @swagger
- * /exit:
- *   get:
- *     summary: Exit service
- *     description: Gracefully shuts down the service
- *     tags: [System]
- *     responses:
- *       200:
- *         description: Service shutdown initiated
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "EXITTING SERVICE"
- */
-router.get("/exit", async (req, res) => {
-    logger.warn("[System] Received request for exit; responding and starting forced shutdown flow");
-    res.status(200).send("EXITTING SERVICE");
-    setTimeout(() => {
-        (0,_bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_2__.shutdown)("Exit Request").catch((error) => {
-            logger.error("[System] /exit shutdown flow failed before process exit:", error);
-            process.exit(1);
-        });
-    }, 0).unref();
-});
-/**
- * @swagger
- * /refreshupis:
- *   get:
- *     summary: Refresh UPI IDs
- *     description: Refreshes the UPI IDs from the database
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: UPI IDs refreshed successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "Refreshing UPI Ids"
- */
-router.get("/refreshupis", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_6__.setUpiIds)();
-    logger.log(_payments_upi__WEBPACK_IMPORTED_MODULE_6__.UpiIds.qrId);
-    res.send("Refreshing UPI Ids");
-});
-/**
- * @swagger
- * /upiids:
- *   get:
- *     summary: Get UPI IDs
- *     description: Retrieves all UPI IDs
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: UPI IDs retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: string
- */
-router.get("/upiids", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    res.send(_payments_upi__WEBPACK_IMPORTED_MODULE_6__.UpiIds.allIds);
-});
-/**
- * @swagger
- * /downloadprofilepic/{index}:
- *   get:
- *     summary: Download profile picture
- *     description: Downloads a profile picture by index
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: index
- *         required: true
- *         schema:
- *           type: integer
- *         description: Profile picture index
- *     responses:
- *       200:
- *         description: Profile picture downloaded successfully
- *         content:
- *           application/octet-stream:
- *             schema:
- *               type: string
- *               format: binary
- *       400:
- *         description: Invalid index provided
- *       404:
- *         description: Profile photo not found
- *       500:
- *         description: Error downloading profile picture
- */
-router.get("/downloadprofilepic/:index", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const rawIndex = req.params.index;
-    if (!/^\d+$/.test(rawIndex)) {
-        res.status(400).send("Invalid index provided.");
-        return;
-    }
-    const index = Number.parseInt(rawIndex, 10);
-    try {
-        const filePath = await (0,_media_profile_pic__WEBPACK_IMPORTED_MODULE_10__.downloadProfilePic)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient(), index);
-        if (res.headersSent) {
-            if (filePath) {
-                fs__WEBPACK_IMPORTED_MODULE_23__.unlink(filePath, (err) => {
-                    if (err) {
-                        logger.error("Error deleting the file:", err);
-                    }
-                });
-            }
-            return;
-        }
-        if (!filePath) {
-            res.status(404).send("Profile photo not found.");
-            return;
-        }
-        res.download(filePath, "profile_pic.jpg", (err) => {
-            if (err) {
-                logger.error("Error sending the file:", err);
-                sendSystemOperationFailure(req, res, {
-                    operation: "download-profile-pic",
-                    readOnly: true,
-                    component: "telegram.connection",
-                    owner: "telegram",
-                    errorText: "Error downloading the file.",
-                    summary: "Profile photo download failed",
-                    cause: err,
-                    action: "manual",
-                });
-            }
-            fs__WEBPACK_IMPORTED_MODULE_23__.unlink(filePath, (err) => {
-                if (err) {
-                    logger.error("Error deleting the file:", err);
-                }
-            });
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /downloadProfilePic endpoint");
-        sendSystemOperationFailure(req, res, {
-            operation: "download-profile-pic",
-            readOnly: true,
-            component: "telegram.connection",
-            owner: "telegram",
-            errorText: "Failed to download profile picture",
-            summary: "Profile photo download failed",
-            cause: error,
-            action: "manual",
-        });
-    }
-});
-/**
- * @swagger
- * /ls:
- *   get:
- *     summary: List directory contents
- *     description: Lists the contents of the current directory
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Directory contents listed successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- */
-router.get("/ls", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    res.send((0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)("ls").toString());
-});
-/**
- * @swagger
- * /deletefiles:
- *   get:
- *     summary: Delete files
- *     description: Deletes all .mp3 and .jpg files from the parent directory
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Files deleted successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "HEllo"
- */
-router.get("/deletefiles", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)("cd ../../"));
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)("rm -rf *.mp3"));
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)("rm -rf *.jpg"));
-    res.send("HEllo");
-});
-/**
- * @swagger
- * /getip:
- *   get:
- *     summary: Get public IP address
- *     description: Retrieves the public IP address of the server
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Public IP address retrieved successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- */
-router.get("/getip", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, (req, res) => {
-    const publicIP = (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_22__.getPublicIPAddress)();
-    res.send(publicIP || "IP not available");
-});
+router.get("/exit", _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.handleExit);
+router.get("/refreshupis", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_upi_handlers__WEBPACK_IMPORTED_MODULE_3__.handleRefreshupis);
+router.get("/upiids", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_upi_handlers__WEBPACK_IMPORTED_MODULE_3__.handleUpiids);
+router.get("/downloadprofilepic/:index", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_file_handlers__WEBPACK_IMPORTED_MODULE_4__.handleDownloadprofilepic);
+router.get("/ls", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_file_handlers__WEBPACK_IMPORTED_MODULE_4__.handleLs);
+router.get("/deletefiles", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_file_handlers__WEBPACK_IMPORTED_MODULE_4__.handleDeletefiles);
+router.get("/getip", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetip);
+router.get("/cleanupchannels", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__.handleCleanupchannels);
+router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__.handleReconnect);
+router.get("/exec/:cmd", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.handleExec);
+router.get("/getenv", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_env_handlers__WEBPACK_IMPORTED_MODULE_6__.handleGetenv);
+router.get("/getpid", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.handleGetpid);
+router.get("/refreshenv", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_env_handlers__WEBPACK_IMPORTED_MODULE_6__.handleRefreshenv);
+router.get("/getmsgs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_message_handlers__WEBPACK_IMPORTED_MODULE_7__.handleGetmsgs);
+router.get("/getlinks", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_message_handlers__WEBPACK_IMPORTED_MODULE_7__.handleGetlinks);
+router.get("/connecttomongo", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__.handleConnecttomongo);
+router.get("/disconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__.handleDisconnect);
+router.get("/markasread", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_message_handlers__WEBPACK_IMPORTED_MODULE_7__.handleMarkasread);
+router.get("/dsudostop", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.handleDsudostop, _system_process_handlers__WEBPACK_IMPORTED_MODULE_2__.rebootAfterDsudostop);
+router.get("/connect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_connection_handlers__WEBPACK_IMPORTED_MODULE_5__.handleConnect);
+router.get("/getnewfiles", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_file_handlers__WEBPACK_IMPORTED_MODULE_4__.handleGetnewfiles);
+router.get("/set-model/:modelName", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_env_handlers__WEBPACK_IMPORTED_MODULE_6__.handleSetModel);
+router.get("/setactiveqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_upi_handlers__WEBPACK_IMPORTED_MODULE_3__.handleSetactiveqr);
+router.get("/refreshqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_upi_handlers__WEBPACK_IMPORTED_MODULE_3__.handleRefreshqr);
+router.get("/memory-diagnostics", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_memory_handlers__WEBPACK_IMPORTED_MODULE_8__.handleMemoryDiagnostics);
+router.get("/memory-diagnostics/log", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_memory_handlers__WEBPACK_IMPORTED_MODULE_8__.handleMemoryDiagnosticsLog);
+router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_redis_handlers__WEBPACK_IMPORTED_MODULE_9__.handleRedisHealth);
+router.post("/redis/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_redis_handlers__WEBPACK_IMPORTED_MODULE_9__.handleRedisReconnect);
+router.get("/reactions/stats", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_reaction_handlers__WEBPACK_IMPORTED_MODULE_10__.handleReactionsStats);
+router.post("/reactions/clear-restricted", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_reaction_handlers__WEBPACK_IMPORTED_MODULE_10__.handleReactionsClearRestricted);
+router.post("/reactions/restart", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _system_reaction_handlers__WEBPACK_IMPORTED_MODULE_10__.handleReactionsRestart);
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (router);
+
+
+/***/ },
+
+/***/ "./src/routes/system/connection-handlers.ts"
+/*!**************************************************!*\
+  !*** ./src/routes/system/connection-handlers.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleCleanupchannels: () => (/* binding */ handleCleanupchannels),
+/* harmony export */   handleConnect: () => (/* binding */ handleConnect),
+/* harmony export */   handleConnecttomongo: () => (/* binding */ handleConnecttomongo),
+/* harmony export */   handleDisconnect: () => (/* binding */ handleDisconnect),
+/* harmony export */   handleReconnect: () => (/* binding */ handleReconnect)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:system-routes");
 /**
  * @swagger
  * /cleanupchannels:
@@ -90069,27 +90048,27 @@ router.get("/getip", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/cleanupchannels", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleCleanupchannels = async (req, res) => {
     try {
-        if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist()) {
-            const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
+        if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist()) {
+            const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getClient();
             if (client) {
                 const me = await client.getMe();
                 res.json(me);
             }
             else {
-                await sendTelegramConnectionUnavailable(req, res, "channel-cleanup", "Telegram client not available", true);
+                await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramConnectionUnavailable)(req, res, "channel-cleanup", "Telegram client not available", true);
             }
         }
         else {
-            await sendTelegramConnectionUnavailable(req, res, "channel-cleanup", "TelegramManager instance does not exist", true);
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramConnectionUnavailable)(req, res, "channel-cleanup", "TelegramManager instance does not exist", true);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /cleanupChannels endpoint");
-        sendTelegramOperationFailure(req, res, "channel-cleanup", error, "Failed to get channel info", "Channel cleanup diagnostics failed", true);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /cleanupChannels endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, "channel-cleanup", error, "Failed to get channel info", "Channel cleanup diagnostics failed", true);
     }
-});
+};
 /**
  * @swagger
  * /reconnect:
@@ -90116,15 +90095,15 @@ router.get("/cleanupchannels", _http_middlewares_leader_middleware__WEBPACK_IMPO
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleReconnect = async (req, res) => {
     let beforeHealth;
     let beforeCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(beforeHealth);
-        beforeCheck = requiredHealthCheck(beforeHealth, "telegram.connection");
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-            sendTelegramReconnectFailure(res, {
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(beforeHealth);
+        beforeCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(beforeHealth, "telegram.connection");
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist())) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramReconnectFailure)(res, {
                 requestId: req.requestId,
                 error: "TelegramManager instance does not exist",
                 beforeHealth,
@@ -90132,9 +90111,9 @@ router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
             });
             return;
         }
-        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
+        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getClient();
         if (!client) {
-            sendTelegramReconnectFailure(res, {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramReconnectFailure)(res, {
                 requestId: req.requestId,
                 error: "Telegram client not available",
                 beforeHealth,
@@ -90146,10 +90125,10 @@ router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
             const connection = client._sender?._connection;
             await client._sender?.disconnect();
             const result = await client._sender?.connect(connection, true);
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-            const afterCheck = requiredHealthCheck(afterHealth, "telegram.connection");
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth);
-            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(afterCheck);
+            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+            const afterCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(afterHealth, "telegram.connection");
+            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(afterHealth);
+            const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.healthCheckHttpStatus)(afterCheck);
             const success = statusCode === 200;
             const message = success
                 ? `Reconnected successfully | Result: ${result}`
@@ -90175,7 +90154,7 @@ router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
         }
         else {
             logger.log("No sender object found on client");
-            sendTelegramReconnectFailure(res, {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramReconnectFailure)(res, {
                 requestId: req.requestId,
                 error: "No sender object found on client",
                 beforeHealth,
@@ -90184,258 +90163,16 @@ router.get("/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /reconnect endpoint");
-        sendTelegramReconnectFailure(res, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /reconnect endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramReconnectFailure)(res, {
             requestId: req.requestId,
             error: "Failed to reconnect",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthErrorMessage)(error),
             beforeHealth,
             beforeCheck,
         });
     }
-});
-/**
- * @swagger
- * /exec/{cmd}:
- *   get:
- *     summary: Execute command
- *     description: Executes a system command
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: cmd
- *         required: true
- *         schema:
- *           type: string
- *         description: Command to execute
- *     responses:
- *       200:
- *         description: Command executed successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- */
-router.get("/exec/:cmd", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const cmd = req.params.cmd;
-    logger.log(`executing: `, cmd);
-    try {
-        const result = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)(cmd).toString();
-        logger.log(result);
-        res.send(result);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /exec/:cmd endpoint");
-        sendSystemOperationFailure(req, res, {
-            operation: "exec-command",
-            readOnly: false,
-            component: "service.health",
-            owner: "system",
-            errorText: "Command execution failed",
-            summary: "Manual command execution failed",
-            cause: error,
-            action: "manual",
-        });
-    }
-});
-/**
- * @swagger
- * /getenv:
- *   get:
- *     summary: Get environment variables
- *     description: Logs and returns environment variables
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Environment variables retrieved
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "hii"
- */
-router.get("/getenv", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        logger.log(process.env);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /getenv endpoint");
-    }
-    res.send("hii");
-});
-/**
- * @swagger
- * /getpid:
- *   get:
- *     summary: Get process ID
- *     description: Returns the current process ID
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Process ID retrieved
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "hii"
- */
-router.get("/getpid", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        logger.log(process.pid);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /getpid endpoint");
-    }
-    res.send("hii");
-});
-/**
- * @swagger
- * /refreshenv:
- *   get:
- *     summary: Refresh environment variables
- *     description: Refreshes environment variables from remote configuration
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Environment variables refreshed successfully
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "hello"
- */
-router.get("/refreshenv", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        logger.log(`[refreshenv] Before refresh - REDIS_URI: ${(0,_config_redis_uri__WEBPACK_IMPORTED_MODULE_27__.describeRedisUri)()}`);
-        await (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_5__.getDataAndSetEnvVariables)((0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_5__.buildClientConfigUrl)());
-        await (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_5__.getDataAndSetEnvVariables)((0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_5__.buildSharedConfigUrl)());
-        logger.log(`[refreshenv] After refresh - REDIS_URI: ${(0,_config_redis_uri__WEBPACK_IMPORTED_MODULE_27__.describeRedisUri)()}`);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /refreshenv endpoint");
-        sendSystemOperationFailure(req, res, {
-            operation: "refresh-environment",
-            readOnly: false,
-            component: "service.health",
-            owner: "system",
-            errorText: "Failed to refresh environment",
-            summary: "Environment refresh failed",
-            cause: error,
-            action: "manual",
-        });
-        return;
-    }
-    try {
-        if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.isInstanceExist()) {
-            await sendDatabaseSystemUnavailable(req, res, "refresh-environment", "MongoDB instance does not exist", "Environment variables refreshed, but promotion runtime refresh could not run because Mongo is unavailable");
-            return;
-        }
-        const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance();
-        if (!db.isConnected) {
-            await sendDatabaseSystemUnavailable(req, res, "refresh-environment", "MongoDB connection is not active", "Environment variables refreshed, but promotion runtime refresh could not run because Mongo is disconnected");
-            return;
-        }
-        if (db.isConnected) {
-            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist()
-                ? _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance().promotorInstance
-                : null;
-            const promotionState = await db.readPromoteStatsTime();
-            const shouldRestartPromotions = (promotor?.isPromotionActive() ?? false) || promotionState?.isActive === true;
-            if (promotor) {
-                await promotor.stopPromotions();
-            }
-            const runtimeReady = await db.refreshPromotionRuntime();
-            if (shouldRestartPromotions && runtimeReady && promotor) {
-                await promotor.startPromotion({ force: true });
-            }
-            else if (shouldRestartPromotions && runtimeReady) {
-                logger.warn("[refreshenv] Promotion runtime refreshed but promotor instance is not available; promotions will not restart locally");
-            }
-            else if (shouldRestartPromotions) {
-                logger.warn("[refreshenv] Promotion runtime refresh failed; promotions will not restart");
-            }
-        }
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error refreshing promotion runtime in /refreshenv endpoint");
-        sendDatabaseSystemFailure(req, res, "refresh-environment", error, "Failed to refresh promotion runtime", "Promotion runtime refresh failed after environment update");
-        return;
-    }
-    res.send("hello");
-});
-/**
- * @swagger
- * /getmsgs:
- *   get:
- *     summary: Get messages
- *     description: Retrieves messages by key or all messages
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: query
- *         name: k
- *         schema:
- *           type: string
- *         description: Message key (optional)
- *     responses:
- *       200:
- *         description: Messages retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- */
-router.get("/getmsgs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const key = req.query.k;
-    const routeMessages = buildRouteMessages();
-    if (key) {
-        res.send(routeMessages[key]);
-    }
-    else {
-        res.json(routeMessages);
-    }
-});
-/**
- * @swagger
- * /getlinks:
- *   get:
- *     summary: Get links
- *     description: Retrieves links by key or all links
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: query
- *         name: k
- *         schema:
- *           type: string
- *         description: Link key (optional)
- *     responses:
- *       200:
- *         description: Links retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- */
-router.get("/getlinks", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const key = req.query.k;
-    if (key) {
-        res.send(_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_14__.links2[key]);
-    }
-    else {
-        res.json(_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_14__.links2);
-    }
-});
+};
 /**
  * @swagger
  * /connecttomongo:
@@ -90453,22 +90190,22 @@ router.get("/getlinks", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MO
  *             schema:
    *               type: object
  */
-router.get("/connecttomongo", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleConnecttomongo = async (req, res) => {
     let beforeHealth;
     let beforeCheck;
     let afterHealth;
     let afterCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        beforeCheck = requiredHealthCheck(beforeHealth, "database.mongo");
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(beforeHealth);
-        const userDataDtoCrud = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance();
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        beforeCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(beforeHealth, "database.mongo");
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(beforeHealth);
+        const userDataDtoCrud = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
         const wasConnected = userDataDtoCrud.isConnected;
         const result = wasConnected ? true : await userDataDtoCrud.connect();
-        afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        afterCheck = requiredHealthCheck(afterHealth, "database.mongo");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth);
-        const healthStatusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(afterCheck);
+        afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        afterCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(afterHealth, "database.mongo");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(afterHealth);
+        const healthStatusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.healthCheckHttpStatus)(afterCheck);
         const success = Boolean(result) && healthStatusCode === 200;
         if (res.headersSent) {
             return;
@@ -90494,18 +90231,18 @@ router.get("/connecttomongo", _http_middlewares_leader_middleware__WEBPACK_IMPOR
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /connectToMongo endpoint");
-        sendMongoConnectFailure(res, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /connectToMongo endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendMongoConnectFailure)(res, {
             requestId: req.requestId,
             error: "Failed to connect to MongoDB",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthErrorMessage)(error),
             beforeHealth,
             beforeCheck,
             afterHealth,
             afterCheck,
         });
     }
-});
+};
 /**
  * @swagger
  * /disconnect:
@@ -90519,16 +90256,16 @@ router.get("/connecttomongo", _http_middlewares_leader_middleware__WEBPACK_IMPOR
  *       200:
  *         description: Telegram disconnected successfully
  */
-router.get("/disconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleDisconnect = async (req, res) => {
     logger.log("Received request for disconnect!");
     let beforeHealth;
     let beforeCheck;
     try {
-        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        beforeCheck = requiredHealthCheck(beforeHealth, "telegram.connection");
-        await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.deleteInstance();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = requiredHealthCheck(afterHealth, "telegram.connection");
+        beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        beforeCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(beforeHealth, "telegram.connection");
+        await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.deleteInstance();
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(afterHealth, "telegram.connection");
         res.status(200).json({
             operation: "telegram-disconnect",
             readOnly: false,
@@ -90538,14 +90275,14 @@ router.get("/disconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_
             afterHealth,
             beforeCheck,
             afterCheck,
-            beforeRecoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(beforeHealth),
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth),
+            beforeRecoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(beforeHealth),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(afterHealth),
             requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /disconnect endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /disconnect endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
@@ -90558,7 +90295,7 @@ router.get("/disconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_
             readOnly: false,
             success: false,
             error: "Failed to disconnect",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthErrorMessage)(error),
             ...(beforeHealth ? { beforeHealth } : {}),
             ...(beforeCheck ? { beforeCheck } : {}),
             health: evidence.health,
@@ -90567,92 +90304,7 @@ router.get("/disconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_
             requestId: req.requestId,
         });
     }
-});
-/**
- * @swagger
- * /markasread:
- *   get:
- *     summary: Mark messages as read
- *     description: Marks messages as read for all chats or specific chats
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: query
- *         name: all
- *         schema:
- *           type: boolean
- *         description: Mark all messages as read
- *     responses:
- *       200:
- *         description: Messages marked as read successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 operation:
- *                   type: string
- *                 success:
- *                   type: boolean
- */
-router.get("/markasread", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        logger.log("Received MarkasRead Req");
-        // Strict, type-safe extraction of `all` query parameter
-        const { all } = req.query;
-        let markAll = false;
-        if (typeof all === "string") {
-            markAll = all === "true";
-        }
-        else if (typeof all === "boolean") {
-            markAll = all;
-        }
-        else if (Array.isArray(all)) {
-            // If multiple all= are sent, check any truthy
-            markAll = all.includes("true");
-        }
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-            await sendTelegramConnectionUnavailable(req, res, "mark-as-read", "TelegramManager instance does not exist", false);
-            return;
-        }
-        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
-        if (!client) {
-            await sendTelegramConnectionUnavailable(req, res, "mark-as-read", "Telegram client not available", false);
-            return;
-        }
-        await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_9__.MarkAsRead)(client, markAll);
-        sendRouteOperationSuccess(req, res, "mark-as-read", "Mark-as-read completed", { markAll });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /markasread endpoint");
-        sendTelegramOperationFailure(req, res, "mark-as-read", error, "Failed to mark chats read", "Manual mark-as-read failed", false);
-    }
-});
-/**
- * @swagger
- * /dsudostop:
- *   get:
- *     summary: Reboot system
- *     description: Initiates a system reboot
- *     tags: [System]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: Reboot initiated
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- *               example: "REBOOT INITIATED"
- */
-router.get("/dsudostop", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res, next) => {
-    res.send("REBOOT INITIATED");
-    next();
-}, async (req, res) => {
-    (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)("reboot");
-});
+};
 /**
  * @swagger
  * /connect:
@@ -90679,50 +90331,150 @@ router.get("/dsudostop", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/connect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleConnect = async (req, res) => {
     res.status(410).json({
         error: "Deprecated endpoint",
         detail: "Use /trytoconnect/:num as the single connection initiation entry point.",
     });
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/env-handlers.ts"
+/*!*******************************************!*\
+  !*** ./src/routes/system/env-handlers.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleGetenv: () => (/* binding */ handleGetenv),
+/* harmony export */   handleRefreshenv: () => (/* binding */ handleRefreshenv),
+/* harmony export */   handleSetModel: () => (/* binding */ handleSetModel)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _conversation_llm_gemini__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/llm/gemini */ "./src/conversation/llm/gemini.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _config_redis_uri__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../config/redis-uri */ "./src/config/redis-uri.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:system-routes");
 /**
  * @swagger
- * /getnewfiles:
+ * /getenv:
  *   get:
- *     summary: Get new files
- *     description: Retrieves new files from Cloudinary
+ *     summary: Get environment variables
+ *     description: Logs and returns environment variables
  *     tags: [System]
  *     security:
  *       - ApiKeyAuth: []
  *     responses:
  *       200:
- *         description: New files retrieved successfully
+ *         description: Environment variables retrieved
  *         content:
- *           application/json:
+ *           text/plain:
  *             schema:
- *               type: object
- *               properties:
- *                 operation:
- *                   type: string
- *                 success:
- *                   type: boolean
+ *               type: string
+ *               example: "hii"
  */
-router.get("/getnewfiles", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleGetenv = async (req, res) => {
     try {
-        const instance = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__["default"].getInstance();
-        if (!instance) {
-            sendStorageOperationFailure(req, res, "get-new-files", new Error("Cloudinary service not available"), "Cloudinary service not available", "Cloudinary initialization failed");
-            return;
-        }
-        sendRouteOperationSuccess(req, res, "get-new-files", "Cloudinary service initialized", {
-            initialized: true,
-        });
+        logger.log(process.env);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /getnewfiles endpoint");
-        sendStorageOperationFailure(req, res, "get-new-files", error, "Failed to initialize Cloudinary service", "Cloudinary initialization failed");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /getenv endpoint");
     }
-});
+    res.send("hii");
+};
+/**
+ * @swagger
+ * /refreshenv:
+ *   get:
+ *     summary: Refresh environment variables
+ *     description: Refreshes environment variables from remote configuration
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Environment variables refreshed successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "hello"
+ */
+const handleRefreshenv = async (req, res) => {
+    try {
+        logger.log(`[refreshenv] Before refresh - REDIS_URI: ${(0,_config_redis_uri__WEBPACK_IMPORTED_MODULE_6__.describeRedisUri)()}`);
+        await (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_2__.getDataAndSetEnvVariables)((0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_2__.buildClientConfigUrl)());
+        await (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_2__.getDataAndSetEnvVariables)((0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_2__.buildSharedConfigUrl)());
+        logger.log(`[refreshenv] After refresh - REDIS_URI: ${(0,_config_redis_uri__WEBPACK_IMPORTED_MODULE_6__.describeRedisUri)()}`);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /refreshenv endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendSystemOperationFailure)(req, res, {
+            operation: "refresh-environment",
+            readOnly: false,
+            component: "service.health",
+            owner: "system",
+            errorText: "Failed to refresh environment",
+            summary: "Environment refresh failed",
+            cause: error,
+            action: "manual",
+        });
+        return;
+    }
+    try {
+        if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.isInstanceExist()) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendDatabaseSystemUnavailable)(req, res, "refresh-environment", "MongoDB instance does not exist", "Environment variables refreshed, but promotion runtime refresh could not run because Mongo is unavailable");
+            return;
+        }
+        const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
+        if (!db.isConnected) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendDatabaseSystemUnavailable)(req, res, "refresh-environment", "MongoDB connection is not active", "Environment variables refreshed, but promotion runtime refresh could not run because Mongo is disconnected");
+            return;
+        }
+        if (db.isConnected) {
+            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist()
+                ? _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance().promotorInstance
+                : null;
+            const promotionState = await db.readPromoteStatsTime();
+            const shouldRestartPromotions = (promotor?.isPromotionActive() ?? false) || promotionState?.isActive === true;
+            if (promotor) {
+                await promotor.stopPromotions();
+            }
+            const runtimeReady = await db.refreshPromotionRuntime();
+            if (shouldRestartPromotions && runtimeReady && promotor) {
+                await promotor.startPromotion({ force: true });
+            }
+            else if (shouldRestartPromotions && runtimeReady) {
+                logger.warn("[refreshenv] Promotion runtime refreshed but promotor instance is not available; promotions will not restart locally");
+            }
+            else if (shouldRestartPromotions) {
+                logger.warn("[refreshenv] Promotion runtime refresh failed; promotions will not restart");
+            }
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error refreshing promotion runtime in /refreshenv endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendDatabaseSystemFailure)(req, res, "refresh-environment", error, "Failed to refresh promotion runtime", "Promotion runtime refresh failed after environment update");
+        return;
+    }
+    res.send("hello");
+};
 /**
  * @swagger
  * /set-model/{modelName}:
@@ -90763,9 +90515,9 @@ router.get("/getnewfiles", _http_middlewares_leader_middleware__WEBPACK_IMPORTED
  *                 message:
  *                   type: string
  */
-router.get("/set-model/:modelName", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, (req, res) => {
+const handleSetModel = (req, res) => {
     const { modelName } = req.params;
-    const success = (0,_conversation_llm_gemini__WEBPACK_IMPORTED_MODULE_11__.setGeminiModel)(modelName);
+    const success = (0,_conversation_llm_gemini__WEBPACK_IMPORTED_MODULE_3__.setGeminiModel)(modelName);
     if (success) {
         res.json({
             status: "success",
@@ -90775,69 +90527,189 @@ router.get("/set-model/:modelName", _http_middlewares_leader_middleware__WEBPACK
     else {
         res.status(400).json({ status: "error", message: "Invalid model name" });
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/file-handlers.ts"
+/*!********************************************!*\
+  !*** ./src/routes/system/file-handlers.ts ***!
+  \********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleDeletefiles: () => (/* binding */ handleDeletefiles),
+/* harmony export */   handleDownloadprofilepic: () => (/* binding */ handleDownloadprofilepic),
+/* harmony export */   handleGetnewfiles: () => (/* binding */ handleGetnewfiles),
+/* harmony export */   handleLs: () => (/* binding */ handleLs)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _media_profile_pic__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../media/profile-pic */ "./src/media/profile-pic.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_6___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_6__);
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:system-routes");
 /**
  * @swagger
- * /setactiveqr:
+ * /downloadprofilepic/{index}:
  *   get:
- *     summary: Set active QR code
- *     description: Sets an active QR code for UPI payments
+ *     summary: Download profile picture
+ *     description: Downloads a profile picture by index
  *     tags: [System]
  *     security:
  *       - ApiKeyAuth: []
  *     parameters:
- *       - in: query
- *         name: upi
+ *       - in: path
+ *         name: index
  *         required: true
  *         schema:
- *           type: string
- *         description: UPI ID
+ *           type: integer
+ *         description: Profile picture index
  *     responses:
  *       200:
- *         description: Active QR code set successfully
+ *         description: Profile picture downloaded successfully
  *         content:
- *           application/json:
+ *           application/octet-stream:
  *             schema:
- *               type: object
- *               properties:
- *                 operation:
- *                   type: string
- *                 success:
- *                   type: boolean
+ *               type: string
+ *               format: binary
+ *       400:
+ *         description: Invalid index provided
+ *       404:
+ *         description: Profile photo not found
+ *       500:
+ *         description: Error downloading profile picture
  */
-router.get("/setactiveqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleDownloadprofilepic = async (req, res) => {
+    const rawIndex = req.params.index;
+    if (!/^\d+$/.test(rawIndex)) {
+        res.status(400).send("Invalid index provided.");
+        return;
+    }
+    const index = Number.parseInt(rawIndex, 10);
     try {
-        const upi = typeof req.query.upi === "string" ? req.query.upi.trim() : "";
-        if (!upi) {
-            sendRouteValidationFailure(req, res, "set-active-qr", "upi query parameter is required");
+        const filePath = await (0,_media_profile_pic__WEBPACK_IMPORTED_MODULE_3__.downloadProfilePic)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient(), index);
+        if (res.headersSent) {
+            if (filePath) {
+                fs__WEBPACK_IMPORTED_MODULE_6__.unlink(filePath, (err) => {
+                    if (err) {
+                        logger.error("Error deleting the file:", err);
+                    }
+                });
+            }
             return;
         }
-        logger.log("upi = ", upi);
-        const filePath = (0,_media_client_file_path__WEBPACK_IMPORTED_MODULE_8__.getClientFilePath)("QR.jpg");
-        const result = await (0,_services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__.setQR)(upi, filePath);
-        if (!result) {
-            sendStorageOperationFailure(req, res, "set-active-qr", new Error("setQR returned false"), "Failed to set active QR code", "QR generation failed");
+        if (!filePath) {
+            res.status(404).send("Profile photo not found.");
             return;
         }
-        sendRouteOperationSuccess(req, res, "set-active-qr", "Active QR code updated", { upi, filePath });
+        res.download(filePath, "profile_pic.jpg", (err) => {
+            if (err) {
+                logger.error("Error sending the file:", err);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendSystemOperationFailure)(req, res, {
+                    operation: "download-profile-pic",
+                    readOnly: true,
+                    component: "telegram.connection",
+                    owner: "telegram",
+                    errorText: "Error downloading the file.",
+                    summary: "Profile photo download failed",
+                    cause: err,
+                    action: "manual",
+                });
+            }
+            fs__WEBPACK_IMPORTED_MODULE_6__.unlink(filePath, (err) => {
+                if (err) {
+                    logger.error("Error deleting the file:", err);
+                }
+            });
+        });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /setactiveqr endpoint");
-        sendStorageOperationFailure(req, res, "set-active-qr", error, "Failed to set active QR code", "QR generation failed");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /downloadProfilePic endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendSystemOperationFailure)(req, res, {
+            operation: "download-profile-pic",
+            readOnly: true,
+            component: "telegram.connection",
+            owner: "telegram",
+            errorText: "Failed to download profile picture",
+            summary: "Profile photo download failed",
+            cause: error,
+            action: "manual",
+        });
     }
-});
+};
 /**
  * @swagger
- * /refreshqr:
+ * /ls:
  *   get:
- *     summary: Refresh QR code
- *     description: Refreshes the QR code using the current QR ID
+ *     summary: List directory contents
+ *     description: Lists the contents of the current directory
  *     tags: [System]
  *     security:
  *       - ApiKeyAuth: []
  *     responses:
  *       200:
- *         description: QR code refreshed successfully
+ *         description: Directory contents listed successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ */
+const handleLs = async (req, res) => {
+    res.send((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("ls").toString());
+};
+/**
+ * @swagger
+ * /deletefiles:
+ *   get:
+ *     summary: Delete files
+ *     description: Deletes all .mp3 and .jpg files from the parent directory
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Files deleted successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "HEllo"
+ */
+const handleDeletefiles = async (req, res) => {
+    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("cd ../../"));
+    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("rm -rf *.mp3"));
+    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("rm -rf *.jpg"));
+    res.send("HEllo");
+};
+/**
+ * @swagger
+ * /getnewfiles:
+ *   get:
+ *     summary: Get new files
+ *     description: Retrieves new files from Cloudinary
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: New files retrieved successfully
  *         content:
  *           application/json:
  *             schema:
@@ -90848,26 +90720,44 @@ router.get("/setactiveqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED
  *                 success:
  *                   type: boolean
  */
-router.get("/refreshqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleGetnewfiles = async (req, res) => {
     try {
-        const qrId = _payments_upi__WEBPACK_IMPORTED_MODULE_6__.UpiIds["qrId"]?.trim();
-        if (!qrId) {
-            sendRouteValidationFailure(req, res, "refresh-qr", "QR ID is not configured", 500);
+        const instance = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_2__["default"].getInstance();
+        if (!instance) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendStorageOperationFailure)(req, res, "get-new-files", new Error("Cloudinary service not available"), "Cloudinary service not available", "Cloudinary initialization failed");
             return;
         }
-        const filePath = (0,_media_client_file_path__WEBPACK_IMPORTED_MODULE_8__.getClientFilePath)("QR.jpg");
-        const result = await (0,_services_cloudinaryService__WEBPACK_IMPORTED_MODULE_7__.setQR)(qrId, filePath);
-        if (!result) {
-            sendStorageOperationFailure(req, res, "refresh-qr", new Error("setQR returned false"), "Failed to refresh QR code", "QR refresh failed");
-            return;
-        }
-        sendRouteOperationSuccess(req, res, "refresh-qr", "QR code refreshed", { upi: qrId, filePath });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendRouteOperationSuccess)(req, res, "get-new-files", "Cloudinary service initialized", {
+            initialized: true,
+        });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /refreshqr endpoint");
-        sendStorageOperationFailure(req, res, "refresh-qr", error, "Failed to refresh QR code", "QR refresh failed");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /getnewfiles endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendStorageOperationFailure)(req, res, "get-new-files", error, "Failed to initialize Cloudinary service", "Cloudinary initialization failed");
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/memory-handlers.ts"
+/*!**********************************************!*\
+  !*** ./src/routes/system/memory-handlers.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleMemoryDiagnostics: () => (/* binding */ handleMemoryDiagnostics),
+/* harmony export */   handleMemoryDiagnosticsLog: () => (/* binding */ handleMemoryDiagnosticsLog)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../diagnostics/memory-diagnostics */ "./src/diagnostics/memory-diagnostics.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
 /**
  * @swagger
  * /memory-diagnostics:
@@ -90891,14 +90781,14 @@ router.get("/refreshqr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_M
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get("/memory-diagnostics", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleMemoryDiagnostics = async (req, res) => {
     try {
-        const diagnostics = await (0,_diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_24__.collectMemoryDiagnostics)();
+        const diagnostics = await (0,_diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_1__.collectMemoryDiagnostics)();
         res.json(diagnostics);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /memory-diagnostics endpoint");
-        sendSystemOperationFailure(req, res, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error in /memory-diagnostics endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_2__.sendSystemOperationFailure)(req, res, {
             operation: "memory-diagnostics",
             readOnly: true,
             component: "service.health",
@@ -90909,7 +90799,7 @@ router.get("/memory-diagnostics", _http_middlewares_leader_middleware__WEBPACK_I
             action: "manual",
         });
     }
-});
+};
 /**
  * @swagger
  * /memory-diagnostics/log:
@@ -90928,14 +90818,14 @@ router.get("/memory-diagnostics", _http_middlewares_leader_middleware__WEBPACK_I
  *               type: string
  *               example: "Memory diagnostics logged"
  */
-router.get("/memory-diagnostics/log", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleMemoryDiagnosticsLog = async (req, res) => {
     try {
-        await (0,_diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_24__.logMemoryDiagnostics)();
+        await (0,_diagnostics_memory_diagnostics__WEBPACK_IMPORTED_MODULE_1__.logMemoryDiagnostics)();
         res.send("Memory diagnostics logged");
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error in /memory-diagnostics/log endpoint");
-        sendSystemOperationFailure(req, res, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error in /memory-diagnostics/log endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_2__.sendSystemOperationFailure)(req, res, {
             operation: "memory-diagnostics-log",
             readOnly: true,
             component: "service.health",
@@ -90946,7 +90836,758 @@ router.get("/memory-diagnostics/log", _http_middlewares_leader_middleware__WEBPA
             action: "manual",
         });
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/message-handlers.ts"
+/*!***********************************************!*\
+  !*** ./src/routes/system/message-handlers.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildRouteMessages: () => (/* binding */ buildRouteMessages),
+/* harmony export */   handleGetlinks: () => (/* binding */ handleGetlinks),
+/* harmony export */   handleGetmsgs: () => (/* binding */ handleGetmsgs),
+/* harmony export */   handleMarkasread: () => (/* binding */ handleMarkasread)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/mark-as-read */ "./src/telegram/mark-as-read.ts");
+/* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
+/* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
+/* harmony import */ var _conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/payment-links */ "./src/conversation/messages/payment-links.ts");
+/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
+/* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:system-routes");
+function buildRouteMessages() {
+    const rawMessages = {
+        demoFeedback: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.demoFeedback,
+        feedbackQuestions: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.feedbackQuestions,
+        offerMsgs: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.offerMsgs,
+        initMsgs: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.initMsgs,
+        thanksArray: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.thanksArray,
+        awayMessges: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.awayMessages,
+        singleReact: _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_2__.singleReact,
+        bargainMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.bargainMsgs,
+        privacyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.privacyMsgs,
+        urgencyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.urgencyMsgs,
+        refundMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.refundMsgs,
+        refundPolicyMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.refundPolicyMsgs,
+        refundMoneyBackMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.refundMoneyBackMsgs,
+        refundSatisfactionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.refundSatisfactionMsgs,
+        processMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.processMsgs,
+        processAfterPaymentMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.processAfterPaymentMsgs,
+        processBookingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.processBookingMsgs,
+        processNextStepMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.processNextStepMsgs,
+        paidProcessProofMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paidProcessProofMsgs,
+        paymentHelpMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentHelpMsgs,
+        serviceDescriptionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.serviceDescriptionMsgs,
+        serviceIncludedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.serviceIncludedMsgs,
+        serviceShowMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.serviceShowMsgs,
+        serviceModalityMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.serviceModalityMsgs,
+        hesitationMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.hesitationMsgs,
+        paymentPendingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentPendingMsgs,
+        paymentProofReceivedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentProofReceivedMsgs,
+        paymentReferenceReceivedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentReferenceReceivedMsgs,
+        paymentNoServiceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentNoServiceMsgs,
+        paymentDeductedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.paymentDeductedMsgs,
+        repeatServiceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.repeatServiceMsgs,
+        repeatRecoveryMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.repeatRecoveryMsgs,
+        doingMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.doingMsgs,
+        proofRequestIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.proofRequestIntroMsgs,
+        trustDoubtIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.trustDoubtIntroMsgs,
+        trustProofRepeatMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.trustProofRepeatMsgs,
+        trustReassuranceMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.trustReassuranceMsgs,
+        demoRepeatNudgeMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.demoRepeatNudgeMsgs,
+        marriedMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.marriedMsgs,
+        relationshipMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.relationshipMsgs,
+        affectionMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.affectionMsgs,
+        priceAskIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.priceAskIntroMsgs,
+        budgetOfferIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.budgetOfferIntroMsgs,
+        namedAppPayMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.namedAppPayMsgs,
+        whichAppMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.whichAppMsgs,
+        modalityChoiceIntroMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.modalityChoiceIntroMsgs,
+        recordingDenialMsgs: _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__.recordingDenialMsgs,
+        followUpPrice: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.followUpPrice,
+        followUpDemo: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.followUpDemo,
+        upsell50: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.upsell50,
+        upsell150: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.upsell150,
+        upsell350: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.upsell350,
+        upsell600: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.upsell600,
+        upsellVoice: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.upsellVoice,
+        callOverMessages: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.callOverMessages,
+        paidShortDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.paidShortDurationPriceMsgs,
+        paidTenMinuteDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.paidTenMinuteDurationPriceMsgs,
+        paidThirtyMinuteDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.paidThirtyMinuteDurationPriceMsgs,
+        paidHourDurationPriceMsgs: _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_8__.paidHourDurationPriceMsgs,
+        finishPaymentMsgs: _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_5__.finishPaymentMsgs,
+        PayMsgArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.PayMsgArray,
+        assureMSgArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.assureMsgArray,
+        naturalSexChatReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.naturalSexChatReplies,
+        naturalBodyReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.naturalBodyReplies,
+        naturalHornyReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.naturalHornyReplies,
+        naturalDirtyTalkReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.naturalDirtyTalkReplies,
+        bodyComplimentsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.bodyComplimentsReplies,
+        bodySizeReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.bodySizeReplies,
+        bodyShowDesireReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.bodyShowDesireReplies,
+        bodyTouchActionsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.bodyTouchActionsReplies,
+        clothingRemovalReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.clothingRemovalReplies,
+        explicitArousalReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.explicitArousalReplies,
+        hardStatusReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.hardStatusReplies,
+        wetStatusReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.wetStatusReplies,
+        climaxReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.climaxReplies,
+        controlLossReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.controlLossReplies,
+        explicitWordsReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.explicitWordsReplies,
+        talkRequestReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.talkRequestReplies,
+        moanRequestReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.moanRequestReplies,
+        availableReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.availableReplies,
+        dickComplimentReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.dickComplimentReplies,
+        canShowReplies: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.canShowReplies,
+        urgencyRequestUnpaid: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.urgencyRequestUnpaid,
+        urgencyRequestPaid: _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_6__.urgencyRequestPaid,
+        nmns: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.nmns,
+        bye: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.bye,
+        cantPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.cantPay,
+        time: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.time,
+        wait: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.wait,
+        screenshot: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.screenshot,
+        qr: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.qr,
+        qr1: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.qr1,
+        pynw: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.getPynw(),
+        demo: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.demo,
+        noFreeDemo: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.noFreeDemo,
+        installments: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.installments,
+        daily100: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.daily100,
+        just50: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.just50,
+        just50two: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.just50two,
+        link: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.link,
+        dir: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.dir,
+        upiID: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.upiID,
+        pricelist: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.pricelist,
+        pricelistArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.pricelistArray,
+        botArray: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.botArray,
+        thanksNdPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.thanksNdPay,
+        ntnw: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.ntnw,
+        doing: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.doing,
+        fine: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.fine,
+        aut: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.aut,
+        okayPay: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.okayPay,
+        dp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.dp,
+        allDp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.allDp,
+        notVirgin: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.notVirgin,
+        age: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.age,
+        language: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.language,
+        notMarried: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.notMarried,
+        number: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.number,
+        study: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.study,
+        nameGreet: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.getNameGreet(),
+        channelLinks: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.getChannelLinks(),
+        pp: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_7__.pp,
+    };
+    return Object.fromEntries(Object.entries(rawMessages).filter(([, value]) => value !== undefined));
+}
+/**
+ * @swagger
+ * /getmsgs:
+ *   get:
+ *     summary: Get messages
+ *     description: Retrieves messages by key or all messages
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: k
+ *         schema:
+ *           type: string
+ *         description: Message key (optional)
+ *     responses:
+ *       200:
+ *         description: Messages retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
+const handleGetmsgs = async (req, res) => {
+    const key = req.query.k;
+    const routeMessages = buildRouteMessages();
+    if (key) {
+        res.send(routeMessages[key]);
+    }
+    else {
+        res.json(routeMessages);
+    }
+};
+/**
+ * @swagger
+ * /getlinks:
+ *   get:
+ *     summary: Get links
+ *     description: Retrieves links by key or all links
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: k
+ *         schema:
+ *           type: string
+ *         description: Link key (optional)
+ *     responses:
+ *       200:
+ *         description: Links retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
+const handleGetlinks = async (req, res) => {
+    const key = req.query.k;
+    if (key) {
+        res.send(_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.links2[key]);
+    }
+    else {
+        res.json(_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.links2);
+    }
+};
+/**
+ * @swagger
+ * /markasread:
+ *   get:
+ *     summary: Mark messages as read
+ *     description: Marks messages as read for all chats or specific chats
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: all
+ *         schema:
+ *           type: boolean
+ *         description: Mark all messages as read
+ *     responses:
+ *       200:
+ *         description: Messages marked as read successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 operation:
+ *                   type: string
+ *                 success:
+ *                   type: boolean
+ */
+const handleMarkasread = async (req, res) => {
+    try {
+        logger.log("Received MarkasRead Req");
+        // Strict, type-safe extraction of `all` query parameter
+        const { all } = req.query;
+        let markAll = false;
+        if (typeof all === "string") {
+            markAll = all === "true";
+        }
+        else if (typeof all === "boolean") {
+            markAll = all;
+        }
+        else if (Array.isArray(all)) {
+            // If multiple all= are sent, check any truthy
+            markAll = all.includes("true");
+        }
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist())) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramConnectionUnavailable)(req, res, "mark-as-read", "TelegramManager instance does not exist", false);
+            return;
+        }
+        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getClient();
+        if (!client) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramConnectionUnavailable)(req, res, "mark-as-read", "Telegram client not available", false);
+            return;
+        }
+        await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_1__.MarkAsRead)(client, markAll);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendRouteOperationSuccess)(req, res, "mark-as-read", "Mark-as-read completed", { markAll });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, "Error in /markasread endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, "mark-as-read", error, "Failed to mark chats read", "Manual mark-as-read failed", false);
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/process-handlers.ts"
+/*!***********************************************!*\
+  !*** ./src/routes/system/process-handlers.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleDsudostop: () => (/* binding */ handleDsudostop),
+/* harmony export */   handleExec: () => (/* binding */ handleExec),
+/* harmony export */   handleExit: () => (/* binding */ handleExit),
+/* harmony export */   handleGetip: () => (/* binding */ handleGetip),
+/* harmony export */   handleGetpid: () => (/* binding */ handleGetpid),
+/* harmony export */   rebootAfterDsudostop: () => (/* binding */ rebootAfterDsudostop)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:system-routes");
+/**
+ * @swagger
+ * /exit:
+ *   get:
+ *     summary: Exit service
+ *     description: Gracefully shuts down the service
+ *     tags: [System]
+ *     responses:
+ *       200:
+ *         description: Service shutdown initiated
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "EXITTING SERVICE"
+ */
+const handleExit = async (req, res) => {
+    logger.warn("[System] Received request for exit; responding and starting forced shutdown flow");
+    res.status(200).send("EXITTING SERVICE");
+    setTimeout(() => {
+        (0,_bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_1__.shutdown)("Exit Request").catch((error) => {
+            logger.error("[System] /exit shutdown flow failed before process exit:", error);
+            process.exit(1);
+        });
+    }, 0).unref();
+};
+/**
+ * @swagger
+ * /getip:
+ *   get:
+ *     summary: Get public IP address
+ *     description: Retrieves the public IP address of the server
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Public IP address retrieved successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ */
+const handleGetip = (req, res) => {
+    const publicIP = (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_4__.getPublicIPAddress)();
+    res.send(publicIP || "IP not available");
+};
+/**
+ * @swagger
+ * /exec/{cmd}:
+ *   get:
+ *     summary: Execute command
+ *     description: Executes a system command
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: cmd
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Command to execute
+ *     responses:
+ *       200:
+ *         description: Command executed successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ */
+const handleExec = async (req, res) => {
+    const cmd = req.params.cmd;
+    logger.log(`executing: `, cmd);
+    try {
+        const result = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)(cmd).toString();
+        logger.log(result);
+        res.send(result);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /exec/:cmd endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendSystemOperationFailure)(req, res, {
+            operation: "exec-command",
+            readOnly: false,
+            component: "service.health",
+            owner: "system",
+            errorText: "Command execution failed",
+            summary: "Manual command execution failed",
+            cause: error,
+            action: "manual",
+        });
+    }
+};
+/**
+ * @swagger
+ * /getpid:
+ *   get:
+ *     summary: Get process ID
+ *     description: Returns the current process ID
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Process ID retrieved
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "hii"
+ */
+const handleGetpid = async (req, res) => {
+    try {
+        logger.log(process.pid);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Error in /getpid endpoint");
+    }
+    res.send("hii");
+};
+/**
+ * @swagger
+ * /dsudostop:
+ *   get:
+ *     summary: Reboot system
+ *     description: Initiates a system reboot
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Reboot initiated
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "REBOOT INITIATED"
+ */
+const handleDsudostop = async (req, res, next) => {
+    res.send("REBOOT INITIATED");
+    next();
+};
+const rebootAfterDsudostop = async (req, res) => {
+    (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("reboot");
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/reaction-handlers.ts"
+/*!************************************************!*\
+  !*** ./src/routes/system/reaction-handlers.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleReactionsClearRestricted: () => (/* binding */ handleReactionsClearRestricted),
+/* harmony export */   handleReactionsRestart: () => (/* binding */ handleReactionsRestart),
+/* harmony export */   handleReactionsStats: () => (/* binding */ handleReactionsStats)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:system-routes");
+/**
+ * @swagger
+ * /reactions/stats:
+ *   get:
+ *     summary: Get reaction statistics
+ *     description: Get current reaction service statistics
+ *     tags: [System]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Reaction statistics
+ */
+const handleReactionsStats = async (req, res) => {
+    try {
+        const reactor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance().reactorInstance;
+        if (!reactor) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendReactionOperationFailure)(req, res, {
+                operation: "reaction-stats",
+                readOnly: true,
+                error: "Reaction service not initialized",
+                message: "Reaction service instance is missing",
+                summary: "Reaction stats unavailable because reaction service is not initialized",
+                action: "recover",
+            });
+            return;
+        }
+        const stats = reactor.getStats();
+        res.json(stats);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting reaction stats");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendReactionOperationFailure)(req, res, {
+            operation: "reaction-stats",
+            readOnly: true,
+            error: "Failed to get reaction stats",
+            summary: "Reaction stats retrieval failed",
+            cause: error,
+            action: "recover",
+        });
+    }
+};
+/**
+ * @swagger
+ * /reactions/clear-restricted:
+ *   post:
+ *     summary: Clear restricted channels
+ *     description: Clear all dynamically added restricted channels (keeps hardcoded ones)
+ *     tags: [System]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Restricted channels cleared
+ */
+const handleReactionsClearRestricted = async (req, res) => {
+    try {
+        const reactor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance().reactorInstance;
+        if (!reactor) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendReactionOperationFailure)(req, res, {
+                operation: "reaction-clear-restricted",
+                readOnly: false,
+                error: "Reaction service not initialized",
+                message: "Reaction service instance is missing",
+                summary: "Restricted reaction channels cannot be cleared because reaction service is not initialized",
+                action: "recover",
+            });
+            return;
+        }
+        const beforeRestricted = reactor.getRestrictedChannels();
+        if (typeof reactor.clearRestrictedChannels !== "function") {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendReactionOperationFailure)(req, res, {
+                operation: "reaction-clear-restricted",
+                readOnly: false,
+                error: "Reaction restricted-channel clear is unavailable",
+                message: "Reaction service does not expose clearRestrictedChannels",
+                summary: "Reaction restricted-channel clear API is missing",
+                action: "manual",
+                metadata: {
+                    beforeTotal: beforeRestricted.length,
+                    total: beforeRestricted.length,
+                },
+                extra: {
+                    beforeTotal: beforeRestricted.length,
+                    total: beforeRestricted.length,
+                    note: "Manual clear requires the canonical ReactionService clear API.",
+                },
+            });
+            return;
+        }
+        const clearResult = reactor.clearRestrictedChannels();
+        const afterRestricted = reactor.getRestrictedChannels();
+        const cleared = Number(clearResult?.cleared ?? Math.max(0, beforeRestricted.length - afterRestricted.length));
+        logger.log(`✅ Restricted channels cleared: ${cleared} cleared, ${afterRestricted.length} remaining`);
+        res.json({
+            success: true,
+            cleared,
+            message: `Cleared ${cleared} dynamic restricted channels`,
+            beforeTotal: beforeRestricted.length,
+            total: afterRestricted.length,
+            note: "Hardcoded restricted channels remain protected. REACTION_INVALID clears reaction cache instead."
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error clearing restricted reaction channels");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.sendReactionOperationFailure)(req, res, {
+            operation: "reaction-clear-restricted",
+            readOnly: false,
+            error: "Failed to clear restricted reaction channels",
+            summary: "Restricted reaction channel clear failed",
+            cause: error,
+            action: "recover",
+        });
+    }
+};
+/**
+ * @swagger
+ * /reactions/restart:
+ *   post:
+ *     summary: Restart reaction service
+ *     description: Restart the reaction service
+ *     tags: [System]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Reaction service restarted
+ */
+const handleReactionsRestart = async (req, res) => {
+    try {
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.requiredHealthCheck)(beforeHealth, "reaction.service");
+        const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance();
+        let reactor = telegramManager.reactorInstance;
+        if (!reactor) {
+            logger.warn("Reaction service not initialized; attempting manual recreation before restart");
+            const recreated = telegramManager.ensureReactionService();
+            reactor = telegramManager.reactorInstance;
+            if (!recreated || !reactor) {
+                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildTgAutHealthSnapshot)(req.requestId);
+                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(afterHealth, "reaction.service") ?? beforeCheck;
+                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.createHealthRecoveryPlan)(afterHealth);
+                res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.healthCheckHttpStatus)(afterCheck)).json({
+                    operation: "reaction-restart",
+                    readOnly: false,
+                    success: false,
+                    error: "Reaction service not initialized",
+                    message: "Reaction service could not be recreated for manual restart",
+                    recoveryPlan,
+                    beforeRecoveryPlan,
+                    beforeHealth,
+                    afterHealth,
+                    beforeCheck,
+                    afterCheck,
+                    requestId: req.requestId,
+                });
+                return;
+            }
+        }
+        await reactor.restart();
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_6__.requiredHealthCheck)(afterHealth, "reaction.service");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.healthCheckHttpStatus)(afterCheck);
+        const success = statusCode === 200;
+        if (success) {
+            logger.log("✅ Reaction service restarted");
+        }
+        else {
+            logger.error("❌ Reaction restart completed but canonical reaction health is still unhealthy");
+        }
+        res.status(success ? statusCode : 503).json({
+            operation: "reaction-restart",
+            readOnly: false,
+            success,
+            message: success
+                ? "Reaction service restarted"
+                : "Reaction restart completed but reaction service health is still unhealthy",
+            recoveryPlan,
+            beforeRecoveryPlan,
+            beforeHealth,
+            afterHealth,
+            beforeCheck,
+            afterCheck,
+            requestId: req.requestId,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error restarting reaction service");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.createRouteComponentFailureEvidence)({
+            requestId: req.requestId,
+            component: "reaction.service",
+            owner: "reaction",
+            summary: "Manual reaction service restart failed",
+            error,
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.routeHealthFailureAction)(error, "recover"),
+        });
+        res.status(evidence.statusCode).json({
+            operation: "reaction-restart",
+            readOnly: false,
+            success: false,
+            error: "Failed to restart reaction service",
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_5__.routeHealthErrorMessage)(error),
+            health: evidence.health,
+            check: evidence.check,
+            recoveryPlan: evidence.recoveryPlan,
+            requestId: req.requestId,
+        });
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/redis-handlers.ts"
+/*!*********************************************!*\
+  !*** ./src/routes/system/redis-handlers.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleRedisHealth: () => (/* binding */ handleRedisHealth),
+/* harmony export */   handleRedisReconnect: () => (/* binding */ handleRedisReconnect)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:system-routes");
 /**
  * @swagger
  * /redis/health:
@@ -90960,19 +91601,19 @@ router.get("/memory-diagnostics/log", _http_middlewares_leader_middleware__WEBPA
  *       200:
  *         description: Redis health status
  */
-router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleRedisHealth = async (req, res) => {
     const active = req.query.active === "true";
     try {
         if (active) {
-            const passiveHealth = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_25__.RedisClient.getConnectionStatus();
-            const activeHealth = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_25__.RedisClient.checkHealth();
+            const passiveHealth = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_2__.RedisClient.getConnectionStatus();
+            const activeHealth = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_2__.RedisClient.checkHealth();
             let check;
             let evidence;
             if (activeHealth.connected) {
-                const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-                check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.findHealthCheck)(snapshot, "redis.connection");
+                const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+                check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.findHealthCheck)(snapshot, "redis.connection");
                 if (!check) {
-                    evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+                    evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
                         requestId: req.requestId,
                         component: "redis.connection",
                         owner: "redis",
@@ -90985,7 +91626,7 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
                 }
             }
             else {
-                evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+                evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
                     requestId: req.requestId,
                     component: "redis.connection",
                     owner: "redis",
@@ -90996,7 +91637,7 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
                 });
                 check = evidence.check;
             }
-            res.status(check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(check) : 503).json({
+            res.status(check ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.healthCheckHttpStatus)(check) : 503).json({
                 operation: "active-redis-health-check",
                 readOnly: false,
                 ...passiveHealth,
@@ -91012,10 +91653,10 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
             });
             return;
         }
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.findHealthCheck)(snapshot, "redis.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.findHealthCheck)(snapshot, "redis.connection");
         if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "redis.connection",
                 owner: "redis",
@@ -91038,21 +91679,21 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
         }
         const metadata = check.metadata ?? {};
         const connected = typeof metadata.connected === "boolean" ? metadata.connected : check.status === "healthy";
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(check)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.healthCheckHttpStatus)(check)).json({
             operation: "redis-health",
             readOnly: true,
             connected,
             health: snapshot,
             healthStatus: check.status,
             check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(snapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(snapshot),
             requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error checking Redis health");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error checking Redis health");
         if (!active) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "redis.connection",
                 owner: "redis",
@@ -91073,13 +91714,13 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
             });
             return;
         }
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "redis.connection",
             owner: "redis",
             summary: "Active Redis health check failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -91095,7 +91736,7 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
             requestId: req.requestId,
         });
     }
-});
+};
 /**
  * @swagger
  * /redis/reconnect:
@@ -91109,18 +91750,18 @@ router.get("/redis/health", _http_middlewares_leader_middleware__WEBPACK_IMPORTE
  *       200:
  *         description: Redis reconnection result
  */
-router.post("/redis/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleRedisReconnect = async (req, res) => {
     try {
         logger.log("API: Force reconnecting to Redis...");
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(beforeHealth);
-        const beforeCheck = requiredHealthCheck(beforeHealth, "redis.connection");
-        const result = await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.forceReconnectRedis();
-        const syncStatus = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.getSyncStatus();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = requiredHealthCheck(afterHealth, "redis.connection");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(afterCheck);
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(beforeHealth, "redis.connection");
+        const result = await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_3__.stateManager.forceReconnectRedis();
+        const syncStatus = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_3__.stateManager.getSyncStatus();
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.requiredHealthCheck)(afterHealth, "redis.connection");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_5__.healthCheckHttpStatus)(afterCheck);
         const success = Boolean(result.success) && statusCode === 200;
         if (success) {
             logger.log(`✅ Redis reconnected. Synced ${result.dirtyUsers} users.`);
@@ -91164,240 +91805,417 @@ router.post("/redis/reconnect", _http_middlewares_leader_middleware__WEBPACK_IMP
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error reconnecting to Redis");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error reconnecting to Redis");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "redis.connection",
             owner: "redis",
             summary: "Manual Redis reconnect failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthFailureAction)(error, "recover"),
         });
         res.status(evidence.statusCode).json({
             operation: "redis-reconnect",
             readOnly: false,
             success: false,
             error: "Failed to reconnect to Redis",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_6__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
             requestId: req.requestId,
         });
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/system/route-responses.ts"
+/*!**********************************************!*\
+  !*** ./src/routes/system/route-responses.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   requiredHealthCheck: () => (/* binding */ requiredHealthCheck),
+/* harmony export */   sendDatabaseSystemFailure: () => (/* binding */ sendDatabaseSystemFailure),
+/* harmony export */   sendDatabaseSystemUnavailable: () => (/* binding */ sendDatabaseSystemUnavailable),
+/* harmony export */   sendMongoConnectFailure: () => (/* binding */ sendMongoConnectFailure),
+/* harmony export */   sendReactionOperationFailure: () => (/* binding */ sendReactionOperationFailure),
+/* harmony export */   sendRouteOperationSuccess: () => (/* binding */ sendRouteOperationSuccess),
+/* harmony export */   sendRouteValidationFailure: () => (/* binding */ sendRouteValidationFailure),
+/* harmony export */   sendStorageOperationFailure: () => (/* binding */ sendStorageOperationFailure),
+/* harmony export */   sendSystemOperationFailure: () => (/* binding */ sendSystemOperationFailure),
+/* harmony export */   sendTelegramConnectionUnavailable: () => (/* binding */ sendTelegramConnectionUnavailable),
+/* harmony export */   sendTelegramOperationFailure: () => (/* binding */ sendTelegramOperationFailure),
+/* harmony export */   sendTelegramReconnectFailure: () => (/* binding */ sendTelegramReconnectFailure)
+/* harmony export */ });
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+
+
+function requiredHealthCheck(snapshot, component) {
+    const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_0__.findHealthCheck)(snapshot, component);
+    if (!check) {
+        throw new Error(`${component} health check is missing from service health snapshot`);
+    }
+    return check;
+}
+function sendTelegramReconnectFailure(res, options) {
+    const cause = new Error(options.message ?? options.error);
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: options.requestId,
+        component: "telegram.connection",
+        owner: "telegram",
+        summary: "Manual Telegram reconnect failed",
+        error: cause,
+        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthFailureAction)(cause, "recover"),
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation: "telegram-reconnect",
+        readOnly: false,
+        error: options.error,
+        message: options.message ?? options.error,
+        evidence,
+        extra: {
+            ...(options.beforeHealth ? { beforeHealth: options.beforeHealth } : {}),
+            ...(options.beforeCheck ? { beforeCheck: options.beforeCheck } : {}),
+        },
+        requestId: options.requestId,
+    });
+}
+function sendMongoConnectFailure(res, options) {
+    const cause = new Error(options.message ?? options.error);
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: options.requestId,
+        component: "database.mongo",
+        owner: "database",
+        summary: "Manual Mongo connect failed",
+        error: cause,
+        action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthFailureAction)(cause, "recover"),
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation: "mongo-connect",
+        readOnly: false,
+        error: options.error,
+        message: options.message ?? options.error,
+        evidence,
+        extra: {
+            ...(options.beforeHealth ? { beforeHealth: options.beforeHealth } : {}),
+            ...(options.beforeCheck ? { beforeCheck: options.beforeCheck } : {}),
+            ...(options.afterHealth ? { afterHealth: options.afterHealth } : {}),
+            ...(options.afterCheck ? { afterCheck: options.afterCheck } : {}),
+        },
+        requestId: options.requestId,
+    });
+}
+async function sendDatabaseSystemUnavailable(req, res, operation, error, message) {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly: false,
+        error,
+        message,
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendDatabaseSystemFailure(req, res, operation, error, errorText, summary) {
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: "database.mongo",
+        owner: "database",
+        summary,
+        error,
+        action: "manual",
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly: false,
+        error: errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthErrorMessage)(error),
+        evidence,
+        requestId: req.requestId,
+    });
+}
+async function sendTelegramConnectionUnavailable(req, res, operation, error, readOnly) {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly,
+        error,
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendTelegramOperationFailure(req, res, operation, error, errorText, summary, readOnly) {
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: "telegram.connection",
+        owner: "telegram",
+        summary,
+        error,
+        action: "manual",
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly,
+        error: errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthErrorMessage)(error),
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendStorageOperationFailure(req, res, operation, error, errorText, summary) {
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: "cloudinary",
+        owner: "storage",
+        summary,
+        error,
+        action: "recover",
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly: false,
+        error: errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthErrorMessage)(error),
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendReactionOperationFailure(req, res, options) {
+    const cause = options.cause ?? new Error(options.message ?? options.error);
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: "reaction.service",
+        owner: "reaction",
+        summary: options.summary,
+        error: cause,
+        action: options.action,
+        metadata: options.metadata,
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation: options.operation,
+        readOnly: options.readOnly,
+        error: options.error,
+        message: options.message ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthErrorMessage)(cause),
+        evidence,
+        extra: options.extra,
+        requestId: req.requestId,
+    });
+}
+function sendSystemOperationFailure(req, res, options) {
+    if (res.headersSent) {
+        return;
+    }
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: options.component,
+        owner: options.owner,
+        summary: options.summary,
+        error: options.cause,
+        action: options.action,
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.sendRouteHealthFailureResponse)(res, {
+        operation: options.operation,
+        readOnly: options.readOnly,
+        error: options.errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_1__.routeHealthErrorMessage)(options.cause),
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendRouteOperationSuccess(req, res, operation, message, payload = {}) {
+    res.status(200).json({
+        operation,
+        readOnly: false,
+        success: true,
+        message,
+        ...payload,
+        requestId: req.requestId,
+    });
+}
+function sendRouteValidationFailure(req, res, operation, error, statusCode = 400) {
+    res.status(statusCode).json({
+        operation,
+        readOnly: false,
+        success: false,
+        error,
+        requestId: req.requestId,
+    });
+}
+
+
+/***/ },
+
+/***/ "./src/routes/system/upi-handlers.ts"
+/*!*******************************************!*\
+  !*** ./src/routes/system/upi-handlers.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleRefreshqr: () => (/* binding */ handleRefreshqr),
+/* harmony export */   handleRefreshupis: () => (/* binding */ handleRefreshupis),
+/* harmony export */   handleSetactiveqr: () => (/* binding */ handleSetactiveqr),
+/* harmony export */   handleUpiids: () => (/* binding */ handleUpiids)
+/* harmony export */ });
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _media_client_file_path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../media/client-file-path */ "./src/media/client-file-path.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-responses */ "./src/routes/system/route-responses.ts");
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:system-routes");
 /**
  * @swagger
- * /reactions/stats:
+ * /refreshupis:
  *   get:
- *     summary: Get reaction statistics
- *     description: Get current reaction service statistics
+ *     summary: Refresh UPI IDs
+ *     description: Refreshes the UPI IDs from the database
  *     tags: [System]
  *     security:
- *       - bearerAuth: []
+ *       - ApiKeyAuth: []
  *     responses:
  *       200:
- *         description: Reaction statistics
+ *         description: UPI IDs refreshed successfully
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: "Refreshing UPI Ids"
  */
-router.get("/reactions/stats", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        const reactor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance().reactorInstance;
-        if (!reactor) {
-            sendReactionOperationFailure(req, res, {
-                operation: "reaction-stats",
-                readOnly: true,
-                error: "Reaction service not initialized",
-                message: "Reaction service instance is missing",
-                summary: "Reaction stats unavailable because reaction service is not initialized",
-                action: "recover",
-            });
-            return;
-        }
-        const stats = reactor.getStats();
-        res.json(stats);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error getting reaction stats");
-        sendReactionOperationFailure(req, res, {
-            operation: "reaction-stats",
-            readOnly: true,
-            error: "Failed to get reaction stats",
-            summary: "Reaction stats retrieval failed",
-            cause: error,
-            action: "recover",
-        });
-    }
-});
+const handleRefreshupis = async (req, res) => {
+    await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_0__.setUpiIds)();
+    logger.log(_payments_upi__WEBPACK_IMPORTED_MODULE_0__.UpiIds.qrId);
+    res.send("Refreshing UPI Ids");
+};
 /**
  * @swagger
- * /reactions/clear-restricted:
- *   post:
- *     summary: Clear restricted channels
- *     description: Clear all dynamically added restricted channels (keeps hardcoded ones)
+ * /upiids:
+ *   get:
+ *     summary: Get UPI IDs
+ *     description: Retrieves all UPI IDs
  *     tags: [System]
  *     security:
- *       - bearerAuth: []
+ *       - ApiKeyAuth: []
  *     responses:
  *       200:
- *         description: Restricted channels cleared
+ *         description: UPI IDs retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: string
  */
-router.post("/reactions/clear-restricted", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        const reactor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance().reactorInstance;
-        if (!reactor) {
-            sendReactionOperationFailure(req, res, {
-                operation: "reaction-clear-restricted",
-                readOnly: false,
-                error: "Reaction service not initialized",
-                message: "Reaction service instance is missing",
-                summary: "Restricted reaction channels cannot be cleared because reaction service is not initialized",
-                action: "recover",
-            });
-            return;
-        }
-        const beforeRestricted = reactor.getRestrictedChannels();
-        if (typeof reactor.clearRestrictedChannels !== "function") {
-            sendReactionOperationFailure(req, res, {
-                operation: "reaction-clear-restricted",
-                readOnly: false,
-                error: "Reaction restricted-channel clear is unavailable",
-                message: "Reaction service does not expose clearRestrictedChannels",
-                summary: "Reaction restricted-channel clear API is missing",
-                action: "manual",
-                metadata: {
-                    beforeTotal: beforeRestricted.length,
-                    total: beforeRestricted.length,
-                },
-                extra: {
-                    beforeTotal: beforeRestricted.length,
-                    total: beforeRestricted.length,
-                    note: "Manual clear requires the canonical ReactionService clear API.",
-                },
-            });
-            return;
-        }
-        const clearResult = reactor.clearRestrictedChannels();
-        const afterRestricted = reactor.getRestrictedChannels();
-        const cleared = Number(clearResult?.cleared ?? Math.max(0, beforeRestricted.length - afterRestricted.length));
-        logger.log(`✅ Restricted channels cleared: ${cleared} cleared, ${afterRestricted.length} remaining`);
-        res.json({
-            success: true,
-            cleared,
-            message: `Cleared ${cleared} dynamic restricted channels`,
-            beforeTotal: beforeRestricted.length,
-            total: afterRestricted.length,
-            note: "Hardcoded restricted channels remain protected. REACTION_INVALID clears reaction cache instead."
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error clearing restricted reaction channels");
-        sendReactionOperationFailure(req, res, {
-            operation: "reaction-clear-restricted",
-            readOnly: false,
-            error: "Failed to clear restricted reaction channels",
-            summary: "Restricted reaction channel clear failed",
-            cause: error,
-            action: "recover",
-        });
-    }
-});
+const handleUpiids = async (req, res) => {
+    res.send(_payments_upi__WEBPACK_IMPORTED_MODULE_0__.UpiIds.allIds);
+};
 /**
  * @swagger
- * /reactions/restart:
- *   post:
- *     summary: Restart reaction service
- *     description: Restart the reaction service
+ * /setactiveqr:
+ *   get:
+ *     summary: Set active QR code
+ *     description: Sets an active QR code for UPI payments
  *     tags: [System]
  *     security:
- *       - bearerAuth: []
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: upi
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: UPI ID
  *     responses:
  *       200:
- *         description: Reaction service restarted
+ *         description: Active QR code set successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 operation:
+ *                   type: string
+ *                 success:
+ *                   type: boolean
  */
-router.post("/reactions/restart", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleSetactiveqr = async (req, res) => {
     try {
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(beforeHealth);
-        const beforeCheck = requiredHealthCheck(beforeHealth, "reaction.service");
-        const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
-        let reactor = telegramManager.reactorInstance;
-        if (!reactor) {
-            logger.warn("Reaction service not initialized; attempting manual recreation before restart");
-            const recreated = telegramManager.ensureReactionService();
-            reactor = telegramManager.reactorInstance;
-            if (!recreated || !reactor) {
-                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.findHealthCheck)(afterHealth, "reaction.service") ?? beforeCheck;
-                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth);
-                res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(afterCheck)).json({
-                    operation: "reaction-restart",
-                    readOnly: false,
-                    success: false,
-                    error: "Reaction service not initialized",
-                    message: "Reaction service could not be recreated for manual restart",
-                    recoveryPlan,
-                    beforeRecoveryPlan,
-                    beforeHealth,
-                    afterHealth,
-                    beforeCheck,
-                    afterCheck,
-                    requestId: req.requestId,
-                });
-                return;
-            }
+        const upi = typeof req.query.upi === "string" ? req.query.upi.trim() : "";
+        if (!upi) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendRouteValidationFailure)(req, res, "set-active-qr", "upi query parameter is required");
+            return;
         }
-        await reactor.restart();
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_28__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = requiredHealthCheck(afterHealth, "reaction.service");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_29__.healthCheckHttpStatus)(afterCheck);
-        const success = statusCode === 200;
-        if (success) {
-            logger.log("✅ Reaction service restarted");
+        logger.log("upi = ", upi);
+        const filePath = (0,_media_client_file_path__WEBPACK_IMPORTED_MODULE_2__.getClientFilePath)("QR.jpg");
+        const result = await (0,_services_cloudinaryService__WEBPACK_IMPORTED_MODULE_1__.setQR)(upi, filePath);
+        if (!result) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendStorageOperationFailure)(req, res, "set-active-qr", new Error("setQR returned false"), "Failed to set active QR code", "QR generation failed");
+            return;
         }
-        else {
-            logger.error("❌ Reaction restart completed but canonical reaction health is still unhealthy");
-        }
-        res.status(success ? statusCode : 503).json({
-            operation: "reaction-restart",
-            readOnly: false,
-            success,
-            message: success
-                ? "Reaction service restarted"
-                : "Reaction restart completed but reaction service health is still unhealthy",
-            recoveryPlan,
-            beforeRecoveryPlan,
-            beforeHealth,
-            afterHealth,
-            beforeCheck,
-            afterCheck,
-            requestId: req.requestId,
-        });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendRouteOperationSuccess)(req, res, "set-active-qr", "Active QR code updated", { upi, filePath });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error restarting reaction service");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
-            requestId: req.requestId,
-            component: "reaction.service",
-            owner: "reaction",
-            summary: "Manual reaction service restart failed",
-            error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthFailureAction)(error, "recover"),
-        });
-        res.status(evidence.statusCode).json({
-            operation: "reaction-restart",
-            readOnly: false,
-            success: false,
-            error: "Failed to restart reaction service",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(error),
-            health: evidence.health,
-            check: evidence.check,
-            recoveryPlan: evidence.recoveryPlan,
-            requestId: req.requestId,
-        });
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error in /setactiveqr endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendStorageOperationFailure)(req, res, "set-active-qr", error, "Failed to set active QR code", "QR generation failed");
     }
-});
-/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (router);
+};
+/**
+ * @swagger
+ * /refreshqr:
+ *   get:
+ *     summary: Refresh QR code
+ *     description: Refreshes the QR code using the current QR ID
+ *     tags: [System]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: QR code refreshed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 operation:
+ *                   type: string
+ *                 success:
+ *                   type: boolean
+ */
+const handleRefreshqr = async (req, res) => {
+    try {
+        const qrId = _payments_upi__WEBPACK_IMPORTED_MODULE_0__.UpiIds["qrId"]?.trim();
+        if (!qrId) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendRouteValidationFailure)(req, res, "refresh-qr", "QR ID is not configured", 500);
+            return;
+        }
+        const filePath = (0,_media_client_file_path__WEBPACK_IMPORTED_MODULE_2__.getClientFilePath)("QR.jpg");
+        const result = await (0,_services_cloudinaryService__WEBPACK_IMPORTED_MODULE_1__.setQR)(qrId, filePath);
+        if (!result) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendStorageOperationFailure)(req, res, "refresh-qr", new Error("setQR returned false"), "Failed to refresh QR code", "QR refresh failed");
+            return;
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendRouteOperationSuccess)(req, res, "refresh-qr", "QR code refreshed", { upi: qrId, filePath });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error in /refreshqr endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendStorageOperationFailure)(req, res, "refresh-qr", error, "Failed to refresh QR code", "QR refresh failed");
+    }
+};
 
 
 /***/ },
@@ -91412,49 +92230,17 @@ router.post("/reactions/restart", _http_middlewares_leader_middleware__WEBPACK_I
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__),
-/* harmony export */   runVcLinkFollowup: () => (/* binding */ runVcLinkFollowup)
+/* harmony export */   runVcLinkFollowup: () => (/* reexport safe */ _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.runVcLinkFollowup)
 /* harmony export */ });
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! express */ "express");
-/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(express__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
-/* harmony import */ var _telegram_chat_history__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/chat-history */ "./src/telegram/chat-history.ts");
-/* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../calls */ "./src/calls/index.ts");
-/* harmony import */ var _calls_event_ladder_event_cleanup__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../calls/event-ladder/event-cleanup */ "./src/calls/event-ladder/event-cleanup.ts");
-/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
-/* harmony import */ var _calls_service_completion__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../calls/service-completion */ "./src/calls/service-completion.ts");
-/* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/file-sender */ "./src/telegram/file-sender.ts");
-/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/send-message */ "./src/telegram/send-message.ts");
-/* harmony import */ var _telegram_chat_actions__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram/chat-actions */ "./src/telegram/chat-actions.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../http/middlewares/leader.middleware */ "./src/http/middlewares/leader.middleware.ts");
-/* harmony import */ var _calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../calls/inhouse/switch */ "./src/calls/inhouse/switch.ts");
-/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
-/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_27___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_27__);
-/* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../http/api-response */ "./src/http/api-response.ts");
-
-
-
-
-
-
-
-
-// Shared bad-target predicate (single source of truth in @tg/events) — a per-request 4xx
-// condition (peer not found / blocked / invalid id / peer-flood), NOT a connection outage.
+/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! express */ "express");
+/* harmony import */ var express__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(express__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../http/middlewares/leader.middleware */ "./src/http/middlewares/leader.middleware.ts");
+/* harmony import */ var _telegram_service_handlers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./telegram/service-handlers */ "./src/routes/telegram/service-handlers.ts");
+/* harmony import */ var _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./telegram/call-handlers */ "./src/routes/telegram/call-handlers.ts");
+/* harmony import */ var _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./telegram/chat-handlers */ "./src/routes/telegram/chat-handlers.ts");
+/* harmony import */ var _telegram_message_handlers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./telegram/message-handlers */ "./src/routes/telegram/message-handlers.ts");
+/* harmony import */ var _telegram_health_handlers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./telegram/health-handlers */ "./src/routes/telegram/health-handlers.ts");
+/* harmony import */ var _telegram_dialog_handlers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./telegram/dialog-handlers */ "./src/routes/telegram/dialog-handlers.ts");
 
 
 
@@ -91464,577 +92250,14 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:telegram-routes");
-const router = (0,express__WEBPACK_IMPORTED_MODULE_2__.Router)();
-/** The /sendvclink follow-up: the same link again 10 s later, as a delayed record (survives a restart). */
-const VC_LINK_FOLLOWUP_MS = 10000;
-/** Delayed record 'vcLink'. */
-async function runVcLinkFollowup(tg, chatId) {
-    try {
-        const payload = { message: `https://zomCall.netlify.app/${process.env.clientId}/${chatId}`, linkPreview: false };
-        const peer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_11__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
-        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, payload), { chatId, label: "sendvclink.followUp", kind: "link", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error sending delayed video call link");
-    }
-}
-/** How long an HTTP request waits for its queued send before answering `queued` (never hold a request for minutes). */
-const ROUTE_SEND_WAIT_MS = 15000;
-/**
- * A route's send goes through the OutboundQueue. If it settles within ROUTE_SEND_WAIT_MS the route answers
- * exactly as before (including an immediate failure); otherwise the send carries on in the background
- * (flood pause / retry / ordering) and the final failure is logged.
- */
-async function sendOrQueued(send, context) {
-    let timer;
-    const pending = new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ queued: true }), ROUTE_SEND_WAIT_MS);
-        timer?.unref?.();
-    });
-    try {
-        const outcome = await Promise.race([send.then((value) => ({ queued: false, value })), pending]);
-        if (outcome.queued)
-            void send.catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${context}.queued`));
-        return outcome;
-    }
-    finally {
-        if (timer)
-            clearTimeout(timer);
-    }
-}
-function parseOptionalNonNegativeInteger(value, fallback) {
-    const raw = Array.isArray(value) ? value[0] : value;
-    if (raw == null) {
-        return fallback;
-    }
-    const text = String(raw).trim();
-    if (!/^\d+$/.test(text)) {
-        return null;
-    }
-    const parsed = Number(text);
-    return Number.isSafeInteger(parsed) ? parsed : null;
-}
-function peerIdText(peer) {
-    if (!peer) {
-        return null;
-    }
-    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.PeerChannel) {
-        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_23__.getPeerDialogId)(peer) ?? null;
-    }
-    if (typeof peer === "object" && "id" in peer) {
-        const id = peer.id;
-        if (typeof id === "string" || typeof id === "number" || typeof id === "bigint") {
-            const text = String(id).trim();
-            return text || null;
-        }
-    }
-    try {
-        const text = String(peer).trim();
-        return text && text !== "[object Object]" ? text : null;
-    }
-    catch {
-        return null;
-    }
-}
-function getCachedSenderInfo(messageFromId) {
-    const senderId = peerIdText(messageFromId);
-    if (!senderId) {
-        return null;
-    }
-    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_24__.EntityCacheManager.getInstance().get(senderId);
-    if (senderEntity?.className === "User") {
-        return {
-            id: senderEntity.id?.toString() ?? senderId,
-            username: senderEntity.username || null,
-            firstName: senderEntity.firstName || null,
-            lastName: senderEntity.lastName || null,
-            isBot: senderEntity.bot || false,
-        };
-    }
-    return {
-        id: senderId,
-        username: null,
-        firstName: null,
-        lastName: null,
-        isBot: false,
-    };
-}
-async function sendTelegramUnavailable(req, res, operation, readOnly = true, errorText = "TelegramManager instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly,
-        error: errorText,
-        evidence,
-        requestId: req.requestId,
-    });
-}
-/**
- * A Telegram OPERATION failed AFTER the connection was already confirmed up (the pre-flight
- * getTelegramClientForOperation guard passed). Such failures are about the request/target, NOT the
- * service — so we must NOT return 503 or mark telegram.connection unhealthy (that made the whole
- * service look down and spammed HTTP_FAILURES for a single unreachable recipient / bad peer).
- *
- * Instead: surface the ORIGINAL Telegram error verbatim, with a request-level status —
- *   422 for an unresolvable/inaccessible target (peer not found, blocked, invalid id, peer-flood),
- *   500 for anything else that went wrong mid-operation.
- * The only 503s left are the genuine "dependency down" pre-flight checks (instance/DB unavailable).
- */
-function sendTelegramOperationFailure(req, res, operation, error, errorText, _summary, _readOnly = true) {
-    const status = (0,_tg_events__WEBPACK_IMPORTED_MODULE_8__.isBadTargetError)(error) ? 404 : 500;
-    res.status(status).json({
-        operation,
-        readOnly: false,
-        success: false,
-        sent: false,
-        error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
-        requestId: req.requestId,
-    });
-}
-async function sendDatabaseUnavailable(req, res, operation, readOnly = true, errorText = "MongoDB instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly,
-        error: errorText,
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendDatabaseOperationFailure(req, res, operation, error, errorText, summary, readOnly = true) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.createRouteComponentFailureEvidence)({
-        requestId: req.requestId,
-        component: "database.mongo",
-        owner: "database",
-        summary,
-        error,
-        action: "manual",
-    });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.sendRouteHealthFailureResponse)(res, {
-        operation,
-        readOnly,
-        error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.routeHealthErrorMessage)(error),
-        evidence,
-        requestId: req.requestId,
-    });
-}
-function sendTelegramOperationSuccess(req, res, operation, message, payload = {}) {
-    res.status(200).json({
-        operation,
-        readOnly: false,
-        success: true,
-        message,
-        ...payload,
-        requestId: req.requestId,
-    });
-}
-async function getTelegramClientForOperation(req, res, operation, readOnly = false) {
-    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-        await sendTelegramUnavailable(req, res, operation, readOnly);
-        return null;
-    }
-    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
-    if (!client) {
-        await sendTelegramUnavailable(req, res, operation, readOnly, "Telegram client instance not available");
-        return null;
-    }
-    return client;
-}
-async function getTelegramManagerForOperation(req, res, operation, readOnly = false) {
-    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-        await sendTelegramUnavailable(req, res, operation, readOnly);
-        return null;
-    }
-    return _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
-}
-function buildTelegramRouteData(req) {
-    const data = {};
-    const body = req.body && typeof req.body === 'object'
-        ? req.body
-        : {};
-    for (const key of ['duration', 'video', 'count', 'endCall', 'percentage', 'retryCount']) {
-        if (body[key] !== undefined)
-            data[key] = body[key];
-        else if (req.query[key] !== undefined)
-            data[key] = req.query[key];
-    }
-    return data;
-}
-async function resetRecentUserAfterService(chatId) {
-    try {
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_18__.fetchWithTimeout)(`https://ums.paidgirls.site/resetRecentUser?chatId=${encodeURIComponent(chatId)}`, { timeout: 5000 }, 1);
-        if (!response) {
-            logger.warn(`Completed service for ${chatId}, but resetRecentUser did not return a response`);
-        }
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `resetRecentUserAfterService.${chatId}`, false);
-    }
-}
-async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
-    const operation = longShow ? "execute-long-handshake" : "execute-handshake";
-    try {
-        const chatId = req.params.chatId;
-        const tg = await getTelegramClientForOperation(req, res, operation);
-        if (!tg)
-            return;
-        const data = buildTelegramRouteData(req);
-        const playback = longShow
-            ? await (0,_calls_service_completion__WEBPACK_IMPORTED_MODULE_9__.executehsl)(tg, chatId, data)
-            : await (0,_calls_service_completion__WEBPACK_IMPORTED_MODULE_9__.executehs)(tg, chatId, data);
-        if (resetRecentUser && playback.recorded) {
-            await resetRecentUserAfterService(chatId);
-        }
-        sendTelegramOperationSuccess(req, res, operation, longShow ? "Long handshake execution completed" : "Handshake execution completed", {
-            chatId,
-            data,
-            serviceRecorded: playback.recorded,
-            playbackReason: playback.reason,
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, longShow ? "Error in /executehsl endpoint" : "Error in /executehs endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, longShow ? "Failed to execute long handshake" : "Failed to execute handshake", longShow ? "Telegram long handshake execution failed" : "Telegram handshake execution failed", false);
-    }
-}
-/**
- * @swagger
- * /requestcall/{chatId}:
- *   get:
- *     summary: Request a call
- *     description: Initiates a call request for a specific chat
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *       - in: query
- *         name: force
- *         schema:
- *           type: boolean
- *         description: Force the call request
- *     responses:
- *       200:
- *         description: Call request initiated
- *         content:
- *           application/json:
- *             schema:
- *               type: boolean
- */
-router.get("/requestcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "request-call";
-    const chatId = req.params.chatId?.trim();
-    const force = req.query.force === "true";
-    if (!chatId) {
-        logger.warn("Invalid chatId for call request");
-        res.status(400).json({
-            operation,
-            readOnly: false,
-            success: false,
-            requested: false,
-            error: "chatId is required",
-            requestId: req.requestId,
-        });
-        return;
-    }
-    try {
-        if (!(await getTelegramManagerForOperation(req, res, operation)))
-            return;
-        const requested = Boolean(await (0,_calls__WEBPACK_IMPORTED_MODULE_6__.requestCall)(chatId, force, "API"));
-        res.status(200).json({
-            operation,
-            readOnly: false,
-            success: requested,
-            requested,
-            chatId,
-            force,
-            requestId: req.requestId,
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to request call", "Telegram call request failed", false);
-    }
-});
-/**
- * @swagger
- * /operatorcall/{chatId}:
- *   get:
- *     summary: Operator call (tgchats call button; POST works too)
- *     description: Queues a real in-house video call with the user's next video. Never a legacy blind ring; returns a reason when no video call can be made.
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: "{ called: true } or { called: false, reason }"
- */
-async function handleOperatorCall(req, res) {
-    const operation = "operator-call";
-    const chatId = req.params.chatId?.trim();
-    if (!chatId) {
-        res.status(400).json({ operation, readOnly: false, success: false, called: false, error: "chatId is required", requestId: req.requestId });
-        return;
-    }
-    try {
-        if (!(await getTelegramManagerForOperation(req, res, operation)))
-            return;
-        const result = await (0,_calls__WEBPACK_IMPORTED_MODULE_6__.operatorCall)(chatId);
-        res.status(200).json({ operation, readOnly: false, success: result.called, ...result, chatId, requestId: req.requestId });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Error in /operatorcall endpoint, ${chatId}`);
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to start operator call", "Telegram operator call failed", false);
-    }
-}
-router.get("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, handleOperatorCall);
-router.post("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, handleOperatorCall);
-/**
- * @swagger
- * /chat/{chatId}:
- *   get:
- *     summary: Get chat messages
- *     description: Retrieves messages from a specific chat
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *       - in: query
- *         name: offset
- *         schema:
- *           type: integer
- *           default: 0
- *         description: Message offset
- *       - in: query
- *         name: minId
- *         schema:
- *           type: integer
- *           default: 0
- *         description: Minimum message ID
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 15
- *         description: Maximum number of messages to retrieve
- *     responses:
- *       200:
- *         description: Messages retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- */
-router.get("/chat/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "chat-history";
-    try {
-        const chatId = req.params.chatId;
-        const requestId = req.requestId || "unknown";
-        if (!chatId || chatId.trim() === "") {
-            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_28__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
-            return;
-        }
-        const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
-        const minId = parseOptionalNonNegativeInteger(req.query.minId, 0);
-        const limit = parseOptionalNonNegativeInteger(req.query.limit, 20);
-        const maxId = parseOptionalNonNegativeInteger(req.query.maxId, 0);
-        const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
-        // Validate parameters
-        if (offset === null || minId === null || limit === null || maxId === null || limit < 1) {
-            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_28__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
-            return;
-        }
-        // Validate limit to prevent abuse
-        const maxLimit = 100;
-        const safeLimit = Math.min(Math.max(limit, 1), maxLimit);
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-            logger.error("Telegram manager unavailable for chat history");
-            await sendTelegramUnavailable(req, res, operation, true, "Telegram client instance not available");
-            return;
-        }
-        logger.log(`ChatRequest: ${chatId}, offset: ${offset}, minId: ${minId}, maxId: ${maxId}, limit: ${safeLimit}`);
-        let messages = [];
-        let hasMore = false;
-        try {
-            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(() => (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_5__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
-                timeout: 30000,
-                errorMessage: `GetMessages timeout for chatId: ${chatId}`,
-                throwErr: true,
-            });
-            messages = result || [];
-            // Check if there are more messages
-            hasMore = messages.length === safeLimit;
-        }
-        catch (timeoutError) {
-            logger.warn(`[GetMessages] Timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
-            sendTelegramOperationFailure(req, res, operation, timeoutError, "Failed to retrieve messages within timeout period", "Telegram chat history timed out", true);
-            return;
-        }
-        // Send standardized paginated response
-        if (!res.headersSent) {
-            res.status(200).json({
-                success: true,
-                status: 200,
-                message: "Messages retrieved successfully",
-                data: messages,
-                pagination: {
-                    total: messages.length,
-                    limit: safeLimit,
-                    offset,
-                    hasMore,
-                    nextOffset: hasMore ? offset + safeLimit : null,
-                    minId: messages.length > 0 ? Math.min(...messages.map((m) => m.id)) : null,
-                    maxId: messages.length > 0 ? Math.max(...messages.map((m) => m.id)) : null
-                },
-                timestamp: new Date().toISOString(),
-                requestId
-            });
-            // MEMORY FIX: Clean up local data after response is sent
-            messages.length = 0; // Clear messages array to free memory
-            logger.debug(`[${requestId}] Cleared messages array after response (${chatId})`);
-        }
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /chat/:chatId endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
-    }
-});
-/**
- * @swagger
- * /deletecallrequest/{chatId}:
- *   get:
- *     summary: Delete call request
- *     description: Removes a call request from the queue for a specific chat
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *     responses:
- *       200:
- *         description: Call request deleted
- *         content:
- *           application/json:
- *             schema:
- *               type: boolean
- */
-router.get("/deletecallrequest/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "delete-call-request";
-    const chatId = req.params.chatId?.trim();
-    if (!chatId) {
-        logger.warn("Invalid chatId for delete call request");
-        res.status(400).json({
-            operation,
-            readOnly: false,
-            success: false,
-            removed: false,
-            error: "chatId is required",
-            requestId: req.requestId,
-        });
-        return;
-    }
-    try {
-        const manager = await getTelegramManagerForOperation(req, res, operation);
-        if (!manager)
-            return;
-        if (!manager.callManager || typeof manager.callManager.removeFromQueue !== "function") {
-            throw new Error("Telegram call manager not available");
-        }
-        const removed = typeof manager.callManager.cancelCallRequest === "function"
-            ? await manager.callManager.cancelCallRequest(chatId)
-            : Boolean(manager.callManager.removeFromQueue(chatId));
-        res.status(200).json({
-            operation,
-            readOnly: false,
-            success: removed,
-            removed,
-            chatId,
-            requestId: req.requestId,
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to delete call request", "Telegram call request cleanup failed", false);
-    }
-});
-/**
- * In-house video calls switch. GET /calls/inhouse → state; GET /calls/inhouse/:mode with
- * mode on|off|default sets a live override (default = follow INHOUSE_CALLS from config/env).
- * Takes effect for the next queued call; a call in progress finishes.
- */
-router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "in-house-calls-switch";
-    const mode = req.params.mode?.trim().toLowerCase();
-    if (mode !== undefined && !["on", "off", "default"].includes(mode)) {
-        res.status(400).json({ operation, success: false, error: "mode must be on, off or default", requestId: req.requestId });
-        return;
-    }
-    try {
-        if (mode)
-            (0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_22__.setInHouseCallsOverride)(mode);
-        const manager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance();
-        const callManager = manager?.callManager;
-        let supported = null;
-        if (callManager) {
-            if (mode === "on")
-                await callManager.startInHouse();
-            if (mode === "off")
-                await callManager.closeInHouse();
-            const inHouse = await callManager.getInHouse();
-            supported = inHouse ? await inHouse.isAvailable() : null;
-        }
-        res.status(200).json({
-            operation,
-            success: true,
-            ...(0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_22__.inHouseCallsSwitchState)(),
-            supported,
-            requestId: req.requestId,
-        });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /calls/inhouse endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to update in-house calls switch", "In-house calls switch failed", false);
-    }
-});
+// Route table. Registration order is Express match order; handlers live in ./telegram/.
+const router = (0,express__WEBPACK_IMPORTED_MODULE_0__.Router)();
+router.get("/requestcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleRequestcall);
+router.get("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleOperatorCall);
+router.post("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleOperatorCall);
+router.get("/chat/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleChat);
+router.get("/deletecallrequest/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleDeletecallrequest);
+router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleCallsInhouse);
 /**
  * @swagger
  * /executehs/{chatId}:
@@ -92110,10 +92333,10 @@ router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_
  *               type: object
  *               example: { operation: "execute-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehs/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, false));
+router.get("/executehs/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, async (req, res) => (0,_telegram_service_handlers__WEBPACK_IMPORTED_MODULE_2__.handleServiceCompletion)(req, res, false, false));
 // The VCUI uses POST + keepalive so this completion can finish after its
 // five-second call-ended screen redirects. GET remains unchanged for callers.
-router.post("/executehs/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, false, true));
+router.post("/executehs/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, async (req, res) => (0,_telegram_service_handlers__WEBPACK_IMPORTED_MODULE_2__.handleServiceCompletion)(req, res, false, true));
 /**
  * @swagger
  * /executehsl/{chatId}:
@@ -92189,65 +92412,79 @@ router.post("/executehs/:chatId", _http_middlewares_leader_middleware__WEBPACK_I
  *               type: object
  *               example: { operation: "execute-long-handshake", success: true, chatId: "12345" }
  */
-router.get("/executehsl/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, false));
-router.post("/executehsl/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => handleServiceCompletion(req, res, true, true));
-/**
- * @swagger
- * /senddmp/{chatId}:
- *   get:
- *     summary: Send demo media
- *     description: Sends demo media files to a specific chat
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *     responses:
- *       200:
- *         description: Demo media sent successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               example: { operation: "send-demo-media-package", success: true, chatId: "12345" }
- */
-router.get("/senddmp/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "send-demo-media-package";
+router.get("/executehsl/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, async (req, res) => (0,_telegram_service_handlers__WEBPACK_IMPORTED_MODULE_2__.handleServiceCompletion)(req, res, true, false));
+router.post("/executehsl/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, async (req, res) => (0,_telegram_service_handlers__WEBPACK_IMPORTED_MODULE_2__.handleServiceCompletion)(req, res, true, true));
+router.get("/senddmp/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleSenddmp);
+router.get("/deletechat/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleDeletechat);
+router.get("/blockuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleBlockuser);
+router.get("/unblockuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleUnblockuser);
+router.get("/sendmessage/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_message_handlers__WEBPACK_IMPORTED_MODULE_5__.handleSendmessage);
+router.get("/sendvclink/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleSendvclink);
+router.get("/checkhealth", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_health_handlers__WEBPACK_IMPORTED_MODULE_6__.handleCheckhealth);
+router.get("/getme", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_health_handlers__WEBPACK_IMPORTED_MODULE_6__.handleGetme);
+router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_dialog_handlers__WEBPACK_IMPORTED_MODULE_7__.handleDialogs);
+router.get("/dialog/:chatId/info", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_dialog_handlers__WEBPACK_IMPORTED_MODULE_7__.handleDialogInfo);
+router.post("/markasread/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_message_handlers__WEBPACK_IMPORTED_MODULE_5__.handleMarkasread);
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (router);
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/call-handlers.ts"
+/*!**********************************************!*\
+  !*** ./src/routes/telegram/call-handlers.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   VC_LINK_FOLLOWUP_MS: () => (/* binding */ VC_LINK_FOLLOWUP_MS),
+/* harmony export */   handleCallsInhouse: () => (/* binding */ handleCallsInhouse),
+/* harmony export */   handleDeletecallrequest: () => (/* binding */ handleDeletecallrequest),
+/* harmony export */   handleOperatorCall: () => (/* binding */ handleOperatorCall),
+/* harmony export */   handleRequestcall: () => (/* binding */ handleRequestcall),
+/* harmony export */   handleSendvclink: () => (/* binding */ handleSendvclink),
+/* harmony export */   runVcLinkFollowup: () => (/* binding */ runVcLinkFollowup)
+/* harmony export */ });
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _calls__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../calls */ "./src/calls/index.ts");
+/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../telegram/send-message */ "./src/telegram/send-message.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../calls/inhouse/switch */ "./src/calls/inhouse/switch.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:telegram-routes");
+/** The /sendvclink follow-up: the same link again 10 s later, as a delayed record (survives a restart). */
+const VC_LINK_FOLLOWUP_MS = 10000;
+/** Delayed record 'vcLink'. */
+async function runVcLinkFollowup(tg, chatId) {
     try {
-        const chatId = req.params.chatId;
-        const tg = await getTelegramClientForOperation(req, res, operation);
-        if (!tg)
-            return;
-        const files = await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_10__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
-        const peer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_11__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
-        const dmp = {
-            file: files,
-            message: "Take Demo Video Call, I Will show you Directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
-        };
-        // The files are fileSender handles: backed up by path and re-uploaded after a restart.
-        const sentDmp = await sendOrQueued((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, dmp), { chatId, label: "senddmp", kind: "media", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", dmp, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) }), "senddmp");
-        if (sentDmp.queued) {
-            sendTelegramOperationSuccess(req, res, operation, "Demo media package queued", { chatId, queued: true, sent: false, fileCount: files.length });
-            return;
-        }
-        sendTelegramOperationSuccess(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
+        const payload = { message: `https://zomCall.netlify.app/${process.env.clientId}/${chatId}`, linkPreview: false };
+        const peer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_3__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, payload), { chatId, label: "sendvclink.followUp", kind: "link", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error sending demo video call");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error sending delayed video call link");
     }
-});
+}
 /**
  * @swagger
- * /deletechat/{chatId}:
+ * /operatorcall/{chatId}:
  *   get:
- *     summary: Delete chat
- *     description: Deletes a chat for a specific chat ID
+ *     summary: Operator call (tgchats call button; POST works too)
+ *     description: Queues a real in-house video call with the user's next video. Never a legacy blind ring; returns a reason when no video call can be made.
  *     tags: [Telegram]
  *     security:
  *       - ApiKeyAuth: []
@@ -92257,39 +92494,34 @@ router.get("/senddmp/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPO
  *         required: true
  *         schema:
  *           type: string
- *         description: The chat ID
  *     responses:
  *       200:
- *         description: Chat deleted successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               example: { operation: "delete-chat", success: true, chatId: "12345" }
+ *         description: "{ called: true } or { called: false, reason }"
  */
-router.get("/deletechat/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "delete-chat";
+async function handleOperatorCall(req, res) {
+    const operation = "operator-call";
+    const chatId = req.params.chatId?.trim();
+    if (!chatId) {
+        res.status(400).json({ operation, readOnly: false, success: false, called: false, error: "chatId is required", requestId: req.requestId });
+        return;
+    }
     try {
-        const chatId = req.params.chatId;
-        if (!(await getTelegramClientForOperation(req, res, operation)))
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramManagerForOperation)(req, res, operation)))
             return;
-        const deleted = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_12__.deleteChat)(chatId);
-        if (deleted === false) {
-            throw new Error("deleteChat returned false");
-        }
-        sendTelegramOperationSuccess(req, res, operation, "Chat deleted", { chatId });
+        const result = await (0,_calls__WEBPACK_IMPORTED_MODULE_2__.operatorCall)(chatId);
+        res.status(200).json({ operation, readOnly: false, success: result.called, ...result, chatId, requestId: req.requestId });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /deletechat endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error in /operatorcall endpoint, ${chatId}`);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to start operator call", "Telegram operator call failed", false);
     }
-});
+}
 /**
  * @swagger
- * /blockuser/{chatId}:
+ * /requestcall/{chatId}:
  *   get:
- *     summary: Block user
- *     description: Blocks a user by chat ID
+ *     summary: Request a call
+ *     description: Initiates a call request for a specific chat
  *     tags: [Telegram]
  *     security:
  *       - ApiKeyAuth: []
@@ -92300,252 +92532,156 @@ router.get("/deletechat/:chatId", _http_middlewares_leader_middleware__WEBPACK_I
  *         schema:
  *           type: string
  *         description: The chat ID
- *     responses:
- *       200:
- *         description: User blocked successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               example: { operation: "block-user", success: true, chatId: "12345" }
- */
-router.get("/blockuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "block-user";
-    try {
-        const chatId = req.params.chatId;
-        if (!(await getTelegramClientForOperation(req, res, operation)))
-            return;
-        const blocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_12__.blockUser)(chatId);
-        if (blocked === false) {
-            throw new Error("blockUser returned false");
-        }
-        sendTelegramOperationSuccess(req, res, operation, "User blocked", { chatId });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /blockuser endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
-    }
-});
-/**
- * @swagger
- * /unblockuser/{chatId}:
- *   get:
- *     summary: Unblock user
- *     description: Unblocks a user by chat ID
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *     responses:
- *       200:
- *         description: User unblocked successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               example: { operation: "unblock-user", success: true, chatId: "12345" }
- */
-router.get("/unblockuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "unblock-user";
-    try {
-        const chatId = req.params.chatId;
-        if (!(await getTelegramClientForOperation(req, res, operation)))
-            return;
-        const unblocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_12__.unblockUser)(chatId);
-        if (unblocked === false) {
-            throw new Error("unblockUser returned false");
-        }
-        sendTelegramOperationSuccess(req, res, operation, "User unblock completed", { chatId });
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /unblockuser endpoint");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
-    }
-});
-/**
- * @swagger
- * /sendmessage/{chatId}:
- *   get:
- *     summary: Send message
- *     description: Sends a message to a specific chat
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     parameters:
- *       - in: path
- *         name: chatId
- *         required: true
- *         schema:
- *           type: string
- *         description: The chat ID
- *       - in: query
- *         name: msg
- *         required: true
- *         schema:
- *           type: string
- *         description: The message to send (URL encoded)
  *       - in: query
  *         name: force
  *         schema:
  *           type: boolean
- *         description: Force send the message
+ *         description: Force the call request
  *     responses:
  *       200:
- *         description: Message sent successfully
+ *         description: Call request initiated
  *         content:
  *           application/json:
  *             schema:
- *               type: object
+ *               type: boolean
  */
-router.get("/sendmessage/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    const operation = "send-external-message";
+const handleRequestcall = async (req, res) => {
+    const operation = "request-call";
     const chatId = req.params.chatId?.trim();
-    const rawMessage = typeof req.query.msg === "string" ? req.query.msg : "";
+    const force = req.query.force === "true";
     if (!chatId) {
+        logger.warn("Invalid chatId for call request");
         res.status(400).json({
             operation,
             readOnly: false,
             success: false,
-            sent: false,
+            requested: false,
             error: "chatId is required",
             requestId: req.requestId,
         });
         return;
     }
-    if (!rawMessage.trim()) {
+    try {
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramManagerForOperation)(req, res, operation)))
+            return;
+        const requested = Boolean(await (0,_calls__WEBPACK_IMPORTED_MODULE_2__.requestCall)(chatId, force, "API"));
+        res.status(200).json({
+            operation,
+            readOnly: false,
+            success: requested,
+            requested,
+            chatId,
+            force,
+            requestId: req.requestId,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error in /requestcall endpoint, ${chatId}`);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to request call", "Telegram call request failed", false);
+    }
+};
+/**
+ * @swagger
+ * /deletecallrequest/{chatId}:
+ *   get:
+ *     summary: Delete call request
+ *     description: Removes a call request from the queue for a specific chat
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *     responses:
+ *       200:
+ *         description: Call request deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: boolean
+ */
+const handleDeletecallrequest = async (req, res) => {
+    const operation = "delete-call-request";
+    const chatId = req.params.chatId?.trim();
+    if (!chatId) {
+        logger.warn("Invalid chatId for delete call request");
         res.status(400).json({
             operation,
             readOnly: false,
             success: false,
-            sent: false,
-            error: "msg query parameter is required",
-            chatId,
+            removed: false,
+            error: "chatId is required",
             requestId: req.requestId,
         });
         return;
     }
-    const msg = decodeURIComponent(rawMessage);
     try {
-        const tg = await getTelegramClientForOperation(req, res, operation);
-        if (!tg) {
+        const manager = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramManagerForOperation)(req, res, operation);
+        if (!manager)
             return;
+        if (!manager.callManager || typeof manager.callManager.removeFromQueue !== "function") {
+            throw new Error("Telegram call manager not available");
         }
-        let db;
-        let userDetail;
-        try {
-            if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.isInstanceExist()) {
-                await sendDatabaseUnavailable(req, res, operation, false);
-                return;
-            }
-            db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-            userDetail = await db.read(chatId);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
-            sendDatabaseOperationFailure(req, res, operation, error, "Failed to load user before sending message", "External message user lookup failed", false);
-            return;
-        }
-        if (!userDetail) {
-            res.status(404).json({
-                operation,
-                readOnly: false,
-                success: false,
-                sent: false,
-                error: "User not found",
-                chatId,
-                requestId: req.requestId,
-            });
-            return;
-        }
-        if (userDetail.canReply === 0) {
-            logger.log("User is banned, not sending message");
-            res.status(404).json({
-                operation,
-                readOnly: false,
-                success: false,
-                sent: false,
-                message: "Banned user",
-                reason: "banned-user",
-                chatId,
-                requestId: req.requestId,
-            });
-            return;
-        }
-        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
-            timeout: 5000,
-            errorMessage: "GetMessages Timeout",
-            throwErr: false,
-        })) || [{ fromId: null }];
-        logger.log("Recent msgs fetched, checking conditions...");
-        const hasOthersMsg = msgs.some((msg) => msg.fromId == null);
-        if (!hasOthersMsg && req.query.force !== "true") {
-            logger.log("No recent msgs from user, not sending message");
-            res.status(200).json({
-                operation,
-                readOnly: false,
-                success: false,
-                sent: false,
-                message: "Last few messages are mine",
-                reason: "no-recent-user-message",
-                chatId,
-                requestId: req.requestId,
-            });
-            return;
-        }
-        if (req.query.force !== "true" && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetail)) {
-            logger.log("Skipping Paid User Service Reply");
-            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__.notifyChat)(chatId, { title: 'Send failed', summary: msg });
-            await (0,_calls_event_ladder_event_cleanup__WEBPACK_IMPORTED_MODULE_7__.deleteEventsForChat)(chatId).catch((e) => logger.error("event delete failed", e instanceof Error ? e.message : String(e)));
-            try {
-                const updatedUserDetail = await db.update(chatId, { paidReply: true, limitTime: Date.now() });
-                Object.assign(userDetail, updatedUserDetail);
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
-                sendDatabaseOperationFailure(req, res, operation, error, "Failed to update user before sending message", "External message user state update failed", false);
-                return;
-            }
-            logger.log("Unwanted message to: ", chatId);
-            res.status(200).json({
-                operation,
-                readOnly: false,
-                success: false,
-                sent: false,
-                message: "unwanted message",
-                reason: "service-gate",
-                chatId,
-                requestId: req.requestId,
-            });
-            return;
-        }
-        logger.log("Sending External Message to: ", chatId);
-        // A deliberate operator send counts like the user writing: one real attempt even if the chat was
-        // refused by PEER_FLOOD (a failure marks it refused again).
-        _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__.floodGate.clearRefused(chatId);
-        const extPeer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_11__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
-        const extPayload = { message: msg, linkPreview: false };
-        const outcome = await sendOrQueued((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(extPeer, extPayload), { chatId, label: "sendMessage.route", kind: "general", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", extPayload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, extPeer)) }), "sendMessage.route");
-        if (outcome.queued) {
-            sendTelegramOperationSuccess(req, res, operation, "External message queued", { sent: false, queued: true, chatId });
-            return;
-        }
-        sendTelegramOperationSuccess(req, res, operation, "External message sent", {
-            sent: true,
+        const removed = typeof manager.callManager.cancelCallRequest === "function"
+            ? await manager.callManager.cancelCallRequest(chatId)
+            : Boolean(manager.callManager.removeFromQueue(chatId));
+        res.status(200).json({
+            operation,
+            readOnly: false,
+            success: removed,
+            removed,
             chatId,
-            result: outcome.value,
+            requestId: req.requestId,
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
-        sendTelegramOperationFailure(req, res, operation, error, "Send failed", "External message send failed", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error in /deletecallrequest endpoint, ${chatId}`);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to delete call request", "Telegram call request cleanup failed", false);
     }
-});
+};
+/**
+ * In-house video calls switch. GET /calls/inhouse → state; GET /calls/inhouse/:mode with
+ * mode on|off|default sets a live override (default = follow INHOUSE_CALLS from config/env).
+ * Takes effect for the next queued call; a call in progress finishes.
+ */
+const handleCallsInhouse = async (req, res) => {
+    const operation = "in-house-calls-switch";
+    const mode = req.params.mode?.trim().toLowerCase();
+    if (mode !== undefined && !["on", "off", "default"].includes(mode)) {
+        res.status(400).json({ operation, success: false, error: "mode must be on, off or default", requestId: req.requestId });
+        return;
+    }
+    try {
+        if (mode)
+            (0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_7__.setInHouseCallsOverride)(mode);
+        const manager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance();
+        const callManager = manager?.callManager;
+        let supported = null;
+        if (callManager) {
+            if (mode === "on")
+                await callManager.startInHouse();
+            if (mode === "off")
+                await callManager.closeInHouse();
+            const inHouse = await callManager.getInHouse();
+            supported = inHouse ? await inHouse.isAvailable() : null;
+        }
+        res.status(200).json({
+            operation,
+            success: true,
+            ...(0,_calls_inhouse_switch__WEBPACK_IMPORTED_MODULE_7__.inHouseCallsSwitchState)(),
+            supported,
+            requestId: req.requestId,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /calls/inhouse endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to update in-house calls switch", "In-house calls switch failed", false);
+    }
+};
 /**
  * @swagger
  * /sendvclink/{chatId}:
@@ -92571,159 +92707,449 @@ router.get("/sendmessage/:chatId", _http_middlewares_leader_middleware__WEBPACK_
  *               type: object
  *               example: { operation: "send-video-call-link", success: true, chatId: "12345" }
  */
-router.get("/sendvclink/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleSendvclink = async (req, res) => {
     const operation = "send-video-call-link";
     try {
         const chatId = req.params.chatId;
-        const tg = await getTelegramClientForOperation(req, res, operation);
+        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramClientForOperation)(req, res, operation);
         if (!tg)
             return;
         const message = `https://zomCall.netlify.app/${process.env.clientId}/${chatId}`;
         const payload = { message, linkPreview: false };
-        const firstPeer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_11__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
-        const firstSend = await sendOrQueued((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(firstPeer, payload), { chatId, label: "sendvclink", kind: "link", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, firstPeer)) }), "sendvclink");
+        const firstPeer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_3__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        const firstSend = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendOrQueued)((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(firstPeer, payload), { chatId, label: "sendvclink", kind: "link", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, firstPeer)) }), "sendvclink");
         // The first send answers the HTTP request immediately (no minutes-long hold). The follow-up is a
         // background timer, so it can wait out a flood limit.
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_17__.scheduleDelayed)(chatId, "vcLink", {}, VC_LINK_FOLLOWUP_MS);
-        sendTelegramOperationSuccess(req, res, operation, "Video call link sent and follow-up scheduled", {
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_5__.scheduleDelayed)(chatId, "vcLink", {}, VC_LINK_FOLLOWUP_MS);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationSuccess)(req, res, operation, "Video call link sent and follow-up scheduled", {
             chatId,
             followUpDelayMs: VC_LINK_FOLLOWUP_MS,
             ...(firstSend.queued ? { queued: true } : {}),
         });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error sending video call link");
-        sendTelegramOperationFailure(req, res, operation, error, "Failed to send video call link", "Telegram video call link send failed", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error sending video call link");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to send video call link", "Telegram video call link send failed", false);
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/chat-handlers.ts"
+/*!**********************************************!*\
+  !*** ./src/routes/telegram/chat-handlers.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleBlockuser: () => (/* binding */ handleBlockuser),
+/* harmony export */   handleChat: () => (/* binding */ handleChat),
+/* harmony export */   handleDeletechat: () => (/* binding */ handleDeletechat),
+/* harmony export */   handleSenddmp: () => (/* binding */ handleSenddmp),
+/* harmony export */   handleUnblockuser: () => (/* binding */ handleUnblockuser)
+/* harmony export */ });
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../telegram/chat-history */ "./src/telegram/chat-history.ts");
+/* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../telegram/file-sender */ "./src/telegram/file-sender.ts");
+/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../telegram/send-message */ "./src/telegram/send-message.ts");
+/* harmony import */ var _telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../telegram/chat-actions */ "./src/telegram/chat-actions.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:telegram-routes");
 /**
  * @swagger
- * /checkhealth:
+ * /chat/{chatId}:
  *   get:
- *     summary: Check Telegram health
- *     description: Checks the health status of the Telegram connection
+ *     summary: Get chat messages
+ *     description: Retrieves messages from a specific chat
  *     tags: [Telegram]
  *     security:
  *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Message offset
+ *       - in: query
+ *         name: minId
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Minimum message ID
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 15
+ *         description: Maximum number of messages to retrieve
  *     responses:
  *       200:
- *         description: Telegram health status
+ *         description: Messages retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ */
+const handleChat = async (req, res) => {
+    const operation = "chat-history";
+    try {
+        const chatId = req.params.chatId;
+        const requestId = req.requestId || "unknown";
+        if (!chatId || chatId.trim() === "") {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_9__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
+            return;
+        }
+        const offset = (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.parseOptionalNonNegativeInteger)(req.query.offset, 0);
+        const minId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.parseOptionalNonNegativeInteger)(req.query.minId, 0);
+        const limit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.parseOptionalNonNegativeInteger)(req.query.limit, 20);
+        const maxId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.parseOptionalNonNegativeInteger)(req.query.maxId, 0);
+        const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
+        // Validate parameters
+        if (offset === null || minId === null || limit === null || maxId === null || limit < 1) {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_9__.sendValidationError)(res, "Invalid query parameters", "offset, minId, and maxId must be >= 0, limit must be >= 1", requestId);
+            return;
+        }
+        // Validate limit to prevent abuse
+        const maxLimit = 100;
+        const safeLimit = Math.min(Math.max(limit, 1), maxLimit);
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
+            logger.error("Telegram manager unavailable for chat history");
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            return;
+        }
+        logger.log(`ChatRequest: ${chatId}, offset: ${offset}, minId: ${minId}, maxId: ${maxId}, limit: ${safeLimit}`);
+        let messages = [];
+        let hasMore = false;
+        try {
+            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
+                timeout: 30000,
+                errorMessage: `GetMessages timeout for chatId: ${chatId}`,
+                throwErr: true,
+            });
+            messages = result || [];
+            // Check if there are more messages
+            hasMore = messages.length === safeLimit;
+        }
+        catch (timeoutError) {
+            logger.warn(`[GetMessages] Timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to retrieve messages within timeout period", "Telegram chat history timed out", true);
+            return;
+        }
+        // Send standardized paginated response
+        if (!res.headersSent) {
+            res.status(200).json({
+                success: true,
+                status: 200,
+                message: "Messages retrieved successfully",
+                data: messages,
+                pagination: {
+                    total: messages.length,
+                    limit: safeLimit,
+                    offset,
+                    hasMore,
+                    nextOffset: hasMore ? offset + safeLimit : null,
+                    minId: messages.length > 0 ? Math.min(...messages.map((m) => m.id)) : null,
+                    maxId: messages.length > 0 ? Math.max(...messages.map((m) => m.id)) : null
+                },
+                timestamp: new Date().toISOString(),
+                requestId
+            });
+            // MEMORY FIX: Clean up local data after response is sent
+            messages.length = 0; // Clear messages array to free memory
+            logger.debug(`[${requestId}] Cleared messages array after response (${chatId})`);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /chat/:chatId endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
+    }
+};
+/**
+ * @swagger
+ * /senddmp/{chatId}:
+ *   get:
+ *     summary: Send demo media
+ *     description: Sends demo media files to a specific chat
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *     responses:
+ *       200:
+ *         description: Demo media sent successfully
  *         content:
  *           application/json:
  *             schema:
  *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   enum: [ALL_GOOD, DEFAULT, INSTANCE_NOT_EXIST, CONNECTION_NOT_EXIST, DANGER]
- *                 username:
- *                   type: string
+ *               example: { operation: "send-demo-media-package", success: true, chatId: "12345" }
  */
-router.get("/checkhealth", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleSenddmp = async (req, res) => {
+    const operation = "send-demo-media-package";
     try {
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_25__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(snapshot, "telegram.connection");
-        if (!check) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.createRouteComponentFailureEvidence)({
-                requestId: req.requestId,
-                component: "telegram.connection",
-                owner: "telegram",
-                summary: "Telegram health check is missing from service health snapshot",
-                error: new Error("Telegram health check is missing from service health snapshot"),
-                action: "manual",
-            });
-            const fallbackCheck = evidence.check;
-            res.status(503).json({
-                status: "DANGER",
-                username: process.env.username,
-                readOnly: true,
-                health: evidence.health,
-                healthStatus: fallbackCheck?.status ?? "unhealthy",
-                check: fallbackCheck,
-                recoveryPlan: evidence.recoveryPlan,
-                requestId: req.requestId,
-            });
+        const chatId = req.params.chatId;
+        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation);
+        if (!tg)
+            return;
+        const files = await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_3__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
+        const peer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_4__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        const dmp = {
+            file: files,
+            message: "Take Demo Video Call, I Will show you Directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
+        };
+        // The files are fileSender handles: backed up by path and re-uploaded after a restart.
+        const sentDmp = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendOrQueued)((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, dmp), { chatId, label: "senddmp", kind: "media", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", dmp, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) }), "senddmp");
+        if (sentDmp.queued) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package queued", { chatId, queued: true, sent: false, fileCount: files.length });
             return;
         }
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(check)).json({
-            status: toLegacyTelegramHealthStatus(check),
-            username: process.env.username,
-            readOnly: true,
-            health: snapshot,
-            healthStatus: check.status,
-            check,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(snapshot),
-            requestId: req.requestId,
-        });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /checkHealth endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.createRouteComponentFailureEvidence)({
-            requestId: req.requestId,
-            component: "telegram.connection",
-            owner: "telegram",
-            summary: "Error checking Telegram connection",
-            error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_26__.routeHealthFailureAction)(error, "recover"),
-        });
-        const check = evidence.check;
-        res.status(evidence.statusCode).json({
-            status: "DANGER",
-            username: process.env.username,
-            readOnly: true,
-            health: evidence.health,
-            healthStatus: check?.status ?? "unhealthy",
-            check,
-            recoveryPlan: evidence.recoveryPlan,
-            requestId: req.requestId,
-        });
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error sending demo video call");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
     }
-});
-function toLegacyTelegramHealthStatus(check) {
-    if (check.status === "healthy") {
-        return "ALL_GOOD";
+};
+/**
+ * @swagger
+ * /deletechat/{chatId}:
+ *   get:
+ *     summary: Delete chat
+ *     description: Deletes a chat for a specific chat ID
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *     responses:
+ *       200:
+ *         description: Chat deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               example: { operation: "delete-chat", success: true, chatId: "12345" }
+ */
+const handleDeletechat = async (req, res) => {
+    const operation = "delete-chat";
+    try {
+        const chatId = req.params.chatId;
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation)))
+            return;
+        const deleted = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.deleteChat)(chatId);
+        if (deleted === false) {
+            throw new Error("deleteChat returned false");
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "Chat deleted", { chatId });
     }
-    const metadata = check.metadata ?? {};
-    if (metadata.instanceExists === false) {
-        return "INSTANCE_NOT_EXIST";
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /deletechat endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
     }
-    if (metadata.hasClient === false || metadata.connected === false) {
-        return "CONNECTION_NOT_EXIST";
+};
+/**
+ * @swagger
+ * /blockuser/{chatId}:
+ *   get:
+ *     summary: Block user
+ *     description: Blocks a user by chat ID
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *     responses:
+ *       200:
+ *         description: User blocked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               example: { operation: "block-user", success: true, chatId: "12345" }
+ */
+const handleBlockuser = async (req, res) => {
+    const operation = "block-user";
+    try {
+        const chatId = req.params.chatId;
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation)))
+            return;
+        const blocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.blockUser)(chatId);
+        if (blocked === false) {
+            throw new Error("blockUser returned false");
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "User blocked", { chatId });
     }
-    return "DANGER";
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /blockuser endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
+    }
+};
+/**
+ * @swagger
+ * /unblockuser/{chatId}:
+ *   get:
+ *     summary: Unblock user
+ *     description: Unblocks a user by chat ID
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *     responses:
+ *       200:
+ *         description: User unblocked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               example: { operation: "unblock-user", success: true, chatId: "12345" }
+ */
+const handleUnblockuser = async (req, res) => {
+    const operation = "unblock-user";
+    try {
+        const chatId = req.params.chatId;
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation)))
+            return;
+        const unblocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.unblockUser)(chatId);
+        if (unblocked === false) {
+            throw new Error("unblockUser returned false");
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "User unblock completed", { chatId });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /unblockuser endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/dialog-handlers.ts"
+/*!************************************************!*\
+  !*** ./src/routes/telegram/dialog-handlers.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getCachedSenderInfo: () => (/* binding */ getCachedSenderInfo),
+/* harmony export */   handleDialogInfo: () => (/* binding */ handleDialogInfo),
+/* harmony export */   handleDialogs: () => (/* binding */ handleDialogs),
+/* harmony export */   peerIdText: () => (/* binding */ peerIdText)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/getPeerId */ "../../packages/tg-core/src/telegram-utils/getPeerId.ts");
+/* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_5__);
+/* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:telegram-routes");
+function peerIdText(peer) {
+    if (!peer) {
+        return null;
+    }
+    if (peer instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.PeerUser || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.PeerChat || peer instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.PeerChannel) {
+        return (0,_tg_core_telegram_utils_getPeerId__WEBPACK_IMPORTED_MODULE_3__.getPeerDialogId)(peer) ?? null;
+    }
+    if (typeof peer === "object" && "id" in peer) {
+        const id = peer.id;
+        if (typeof id === "string" || typeof id === "number" || typeof id === "bigint") {
+            const text = String(id).trim();
+            return text || null;
+        }
+    }
+    try {
+        const text = String(peer).trim();
+        return text && text !== "[object Object]" ? text : null;
+    }
+    catch {
+        return null;
+    }
 }
-/**
- * @swagger
- * /getme:
- *   get:
- *     summary: Get current user info
- *     description: Retrieves information about the current Telegram user
- *     tags: [Telegram]
- *     security:
- *       - ApiKeyAuth: []
- *     responses:
- *       200:
- *         description: User information retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- */
-router.get("/getme", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
-    try {
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.instanceExist())) {
-            await sendTelegramUnavailable(req, res, "telegram-get-me");
-            return;
-        }
-        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getClient();
-        const me = await client.getMe();
-        res.json(me);
+function getCachedSenderInfo(messageFromId) {
+    const senderId = peerIdText(messageFromId);
+    if (!senderId) {
+        return null;
     }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /getMe endpoint");
-        sendTelegramOperationFailure(req, res, "telegram-get-me", error, "Failed to get Telegram user", "Telegram getMe failed");
+    const senderEntity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_4__.EntityCacheManager.getInstance().get(senderId);
+    if (senderEntity?.className === "User") {
+        return {
+            id: senderEntity.id?.toString() ?? senderId,
+            username: senderEntity.username || null,
+            firstName: senderEntity.firstName || null,
+            lastName: senderEntity.lastName || null,
+            isBot: senderEntity.bot || false,
+        };
     }
-});
+    return {
+        id: senderId,
+        username: null,
+        firstName: null,
+        lastName: null,
+        isBot: false,
+    };
+}
 /**
  * @swagger
  * /dialogs:
@@ -92837,18 +93263,18 @@ router.get("/getme", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODUL
  *                   description:
  *                     type: string
  */
-router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleDialogs = async (req, res) => {
     const operation = "list-dialogs";
     try {
         const requestId = req.requestId || "unknown";
-        const telegramManager = await getTelegramManagerForOperation(req, res, operation, true);
+        const telegramManager = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.getTelegramManagerForOperation)(req, res, operation, true);
         if (!telegramManager)
             return;
         const dialogManager = telegramManager.dialogManager;
         if (!dialogManager) {
             logger.error("DialogManager not available");
             if (!res.headersSent) {
-                sendTelegramOperationFailure(req, res, operation, new Error("DialogManager not available"), "DialogManager not available", "Telegram dialog manager unavailable", true);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, new Error("DialogManager not available"), "DialogManager not available", "Telegram dialog manager unavailable", true);
             }
             return;
         }
@@ -92856,7 +93282,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         if (!dialogManager.isReady()) {
             logger.warn("DialogManager not initialized yet");
             if (!res.headersSent) {
-                sendTelegramOperationFailure(req, res, operation, new Error("DialogManager is still initializing"), "DialogManager is still initializing", "Telegram dialog manager is still initializing", true);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, new Error("DialogManager is still initializing"), "DialogManager is still initializing", "Telegram dialog manager is still initializing", true);
             }
             return;
         }
@@ -92865,10 +93291,10 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         const includeChannels = req.query.includeChannels === 'true';
         const includeBots = req.query.includeBots === 'true';
         const unreadOnly = req.query.unreadOnly === 'true';
-        const requestedLimit = parseOptionalNonNegativeInteger(req.query.limit, 100);
-        const offset = parseOptionalNonNegativeInteger(req.query.offset, 0);
+        const requestedLimit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.parseOptionalNonNegativeInteger)(req.query.limit, 100);
+        const offset = (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.parseOptionalNonNegativeInteger)(req.query.offset, 0);
         if (requestedLimit === null || offset === null) {
-            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_28__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendValidationError)(res, "Invalid query parameters", "limit and offset must be non-negative integers", requestId);
             return;
         }
         // MEMORY FIX: Enforce maximum limit to prevent excessive memory usage
@@ -92922,30 +93348,30 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                             try {
                                 // Keep this list endpoint cache-only. Live entity lookups can outlive
                                 // request timeouts and keep logging after the response has been sent.
-                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_24__.EntityCacheManager.getInstance().get(dialog.id);
+                                const entity = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_4__.EntityCacheManager.getInstance().get(dialog.id);
                                 if (entity) {
                                     // Extract comprehensive entity information
-                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.User) {
+                                    if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.User) {
                                         const user = entity;
                                         const userStatus = user.status;
                                         let wasOnline = null;
                                         // Extract wasOnline from different status types
-                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.UserStatusOffline) {
+                                        if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.UserStatusOffline) {
                                             wasOnline = userStatus.wasOnline || null;
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.UserStatusRecently) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.UserStatusRecently) {
                                             wasOnline = null; // Recently doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.UserStatusLastWeek) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.UserStatusLastWeek) {
                                             wasOnline = null; // LastWeek doesn't have wasOnline
                                         }
-                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.UserStatusLastMonth) {
+                                        else if (userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.UserStatusLastMonth) {
                                             wasOnline = null; // LastMonth doesn't have wasOnline
                                         }
                                         enhancedInfo = {
                                             username: user.username || null,
                                             phone: user.phone || null,
-                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.UserStatusOnline,
+                                            isOnline: userStatus instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.UserStatusOnline,
                                             lastSeen: wasOnline,
                                             isBot: user.bot || false,
                                             isVerified: user.verified || false,
@@ -92959,7 +93385,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                                             isFake: user.fake || false
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.Chat) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.Chat) {
                                         const chat = entity;
                                         enhancedInfo = {
                                             participantsCount: chat.participantsCount || null,
@@ -92968,7 +93394,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                                             migratedTo: chat.migratedTo ? String(chat.migratedTo) : null
                                         };
                                     }
-                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.Channel) {
+                                    else if (entity instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.Channel) {
                                         const channel = entity;
                                         enhancedInfo = {
                                             username: channel.username || null,
@@ -93017,7 +93443,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                             // MEMORY FIX: Limit entity fetches to prevent memory leaks
                             let senderInfo = null;
                             // Check if message is Api.Message (has fromId property)
-                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.Message;
+                            const isApiMessage = message instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.Message;
                             const messageFromId = isApiMessage ? message.fromId : null;
                             if (messageFromId && totalProcessed < MAX_ENTITY_FETCHES) {
                                 senderInfo = getCachedSenderInfo(messageFromId);
@@ -93081,7 +93507,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                         logger.warn(`Error enhancing dialog:`, error instanceof Error ? error.message : String(error));
                         // Return basic dialog info on error
                         const errorMessage = dialog.message;
-                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_27__.Api.Message;
+                        const isApiMessage = errorMessage instanceof telegram__WEBPACK_IMPORTED_MODULE_5__.Api.Message;
                         const errorMessageText = isApiMessage ? errorMessage.message || "" : "";
                         const errorMessageOut = isApiMessage ? errorMessage.out || false : false;
                         return {
@@ -93136,17 +93562,17 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         catch (error) {
             logger.warn("GetDialogs error:", error instanceof Error ? error.message : String(error));
             if (!res.headersSent) {
-                sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
             }
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /dialogs endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error in /dialogs endpoint");
         if (!res.headersSent) {
-            sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve dialogs", "Telegram dialog listing failed", true);
         }
     }
-});
+};
 /**
  * @swagger
  * /dialog/{chatId}/info:
@@ -93171,7 +93597,7 @@ router.get("/dialogs", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  *             schema:
  *               type: object
  */
-router.get("/dialog/:chatId/info", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleDialogInfo = async (req, res) => {
     const operation = "dialog-info";
     try {
         const chatId = req.params.chatId;
@@ -93185,19 +93611,19 @@ router.get("/dialog/:chatId/info", _http_middlewares_leader_middleware__WEBPACK_
             }
             return;
         }
-        const client = await getTelegramClientForOperation(req, res, operation, true);
+        const client = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.getTelegramClientForOperation)(req, res, operation, true);
         if (!client)
             return;
         try {
             // Get entity info — check cache first, then network
-            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_24__.EntityCacheManager.getInstance().get(chatId);
-            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(() => client.getEntity(chatId), {
+            const cached = _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_4__.EntityCacheManager.getInstance().get(chatId);
+            const entity = cached ?? await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__.withTimeout)(() => client.getEntity(chatId), {
                 timeout: 10000,
                 errorMessage: `GetEntity timeout for chatId: ${chatId}`,
                 throwErr: true,
             });
             if (!cached && entity) {
-                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_24__.EntityCacheManager.getInstance().put(chatId, entity);
+                _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_4__.EntityCacheManager.getInstance().put(chatId, entity);
             }
             // Type guards and safe property access
             const isUser = entity.className === "User";
@@ -93235,17 +93661,391 @@ router.get("/dialog/:chatId/info", _http_middlewares_leader_middleware__WEBPACK_
         catch (timeoutError) {
             logger.warn(`GetEntity timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
             if (!res.headersSent) {
-                sendTelegramOperationFailure(req, res, operation, timeoutError, "Failed to retrieve dialog info within timeout period", "Telegram dialog info timed out", true);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to retrieve dialog info within timeout period", "Telegram dialog info timed out", true);
             }
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error in /dialog/:chatId/info endpoint");
         if (!res.headersSent) {
-            sendTelegramOperationFailure(req, res, operation, error, "Failed to retrieve dialog info", "Telegram dialog info failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_7__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve dialog info", "Telegram dialog info failed", true);
         }
     }
-});
+};
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/health-handlers.ts"
+/*!************************************************!*\
+  !*** ./src/routes/telegram/health-handlers.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleCheckhealth: () => (/* binding */ handleCheckhealth),
+/* harmony export */   handleGetme: () => (/* binding */ handleGetme),
+/* harmony export */   toLegacyTelegramHealthStatus: () => (/* binding */ toLegacyTelegramHealthStatus)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+function toLegacyTelegramHealthStatus(check) {
+    if (check.status === "healthy") {
+        return "ALL_GOOD";
+    }
+    const metadata = check.metadata ?? {};
+    if (metadata.instanceExists === false) {
+        return "INSTANCE_NOT_EXIST";
+    }
+    if (metadata.hasClient === false || metadata.connected === false) {
+        return "CONNECTION_NOT_EXIST";
+    }
+    return "DANGER";
+}
+/**
+ * @swagger
+ * /checkhealth:
+ *   get:
+ *     summary: Check Telegram health
+ *     description: Checks the health status of the Telegram connection
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Telegram health status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   enum: [ALL_GOOD, DEFAULT, INSTANCE_NOT_EXIST, CONNECTION_NOT_EXIST, DANGER]
+ *                 username:
+ *                   type: string
+ */
+const handleCheckhealth = async (req, res) => {
+    try {
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_3__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.findHealthCheck)(snapshot, "telegram.connection");
+        if (!check) {
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.createRouteComponentFailureEvidence)({
+                requestId: req.requestId,
+                component: "telegram.connection",
+                owner: "telegram",
+                summary: "Telegram health check is missing from service health snapshot",
+                error: new Error("Telegram health check is missing from service health snapshot"),
+                action: "manual",
+            });
+            const fallbackCheck = evidence.check;
+            res.status(503).json({
+                status: "DANGER",
+                username: process.env.username,
+                readOnly: true,
+                health: evidence.health,
+                healthStatus: fallbackCheck?.status ?? "unhealthy",
+                check: fallbackCheck,
+                recoveryPlan: evidence.recoveryPlan,
+                requestId: req.requestId,
+            });
+            return;
+        }
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.healthCheckHttpStatus)(check)).json({
+            status: toLegacyTelegramHealthStatus(check),
+            username: process.env.username,
+            readOnly: true,
+            health: snapshot,
+            healthStatus: check.status,
+            check,
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_2__.createHealthRecoveryPlan)(snapshot),
+            requestId: req.requestId,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error in /checkHealth endpoint");
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.createRouteComponentFailureEvidence)({
+            requestId: req.requestId,
+            component: "telegram.connection",
+            owner: "telegram",
+            summary: "Error checking Telegram connection",
+            error,
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_4__.routeHealthFailureAction)(error, "recover"),
+        });
+        const check = evidence.check;
+        res.status(evidence.statusCode).json({
+            status: "DANGER",
+            username: process.env.username,
+            readOnly: true,
+            health: evidence.health,
+            healthStatus: check?.status ?? "unhealthy",
+            check,
+            recoveryPlan: evidence.recoveryPlan,
+            requestId: req.requestId,
+        });
+    }
+};
+/**
+ * @swagger
+ * /getme:
+ *   get:
+ *     summary: Get current user info
+ *     description: Retrieves information about the current Telegram user
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: User information retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
+const handleGetme = async (req, res) => {
+    try {
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist())) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendTelegramUnavailable)(req, res, "telegram-get-me");
+            return;
+        }
+        const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getClient();
+        const me = await client.getMe();
+        res.json(me);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error in /getMe endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendTelegramOperationFailure)(req, res, "telegram-get-me", error, "Failed to get Telegram user", "Telegram getMe failed");
+    }
+};
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/message-handlers.ts"
+/*!*************************************************!*\
+  !*** ./src/routes/telegram/message-handlers.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleMarkasread: () => (/* binding */ handleMarkasread),
+/* harmony export */   handleSendmessage: () => (/* binding */ handleSendmessage)
+/* harmony export */ });
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
+/* harmony import */ var _calls_event_ladder_event_cleanup__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../calls/event-ladder/event-cleanup */ "./src/calls/event-ladder/event-cleanup.ts");
+/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../telegram/send-message */ "./src/telegram/send-message.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:telegram-routes");
+/**
+ * @swagger
+ * /sendmessage/{chatId}:
+ *   get:
+ *     summary: Send message
+ *     description: Sends a message to a specific chat
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: chatId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The chat ID
+ *       - in: query
+ *         name: msg
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The message to send (URL encoded)
+ *       - in: query
+ *         name: force
+ *         schema:
+ *           type: boolean
+ *         description: Force send the message
+ *     responses:
+ *       200:
+ *         description: Message sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
+const handleSendmessage = async (req, res) => {
+    const operation = "send-external-message";
+    const chatId = req.params.chatId?.trim();
+    const rawMessage = typeof req.query.msg === "string" ? req.query.msg : "";
+    if (!chatId) {
+        res.status(400).json({
+            operation,
+            readOnly: false,
+            success: false,
+            sent: false,
+            error: "chatId is required",
+            requestId: req.requestId,
+        });
+        return;
+    }
+    if (!rawMessage.trim()) {
+        res.status(400).json({
+            operation,
+            readOnly: false,
+            success: false,
+            sent: false,
+            error: "msg query parameter is required",
+            chatId,
+            requestId: req.requestId,
+        });
+        return;
+    }
+    const msg = decodeURIComponent(rawMessage);
+    try {
+        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation);
+        if (!tg) {
+            return;
+        }
+        let db;
+        let userDetail;
+        try {
+            if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.UserDataDtoCrud.isInstanceExist()) {
+                await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendDatabaseUnavailable)(req, res, operation, false);
+                return;
+            }
+            db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.UserDataDtoCrud.getInstance();
+            userDetail = await db.read(chatId);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `Database lookup failed in /sendMessage endpoint, ${chatId}`);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendDatabaseOperationFailure)(req, res, operation, error, "Failed to load user before sending message", "External message user lookup failed", false);
+            return;
+        }
+        if (!userDetail) {
+            res.status(404).json({
+                operation,
+                readOnly: false,
+                success: false,
+                sent: false,
+                error: "User not found",
+                chatId,
+                requestId: req.requestId,
+            });
+            return;
+        }
+        if (userDetail.canReply === 0) {
+            logger.log("User is banned, not sending message");
+            res.status(404).json({
+                operation,
+                readOnly: false,
+                success: false,
+                sent: false,
+                message: "Banned user",
+                reason: "banned-user",
+                chatId,
+                requestId: req.requestId,
+            });
+            return;
+        }
+        const msgs = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => tg.getMessages(chatId, { limit: 8 }), {
+            timeout: 5000,
+            errorMessage: "GetMessages Timeout",
+            throwErr: false,
+        })) || [{ fromId: null }];
+        logger.log("Recent msgs fetched, checking conditions...");
+        const hasOthersMsg = msgs.some((msg) => msg.fromId == null);
+        if (!hasOthersMsg && req.query.force !== "true") {
+            logger.log("No recent msgs from user, not sending message");
+            res.status(200).json({
+                operation,
+                readOnly: false,
+                success: false,
+                sent: false,
+                message: "Last few messages are mine",
+                reason: "no-recent-user-message",
+                chatId,
+                requestId: req.requestId,
+            });
+            return;
+        }
+        if (req.query.force !== "true" && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(userDetail)) {
+            logger.log("Skipping Paid User Service Reply");
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_7__.notifyChat)(chatId, { title: 'Send failed', summary: msg });
+            await (0,_calls_event_ladder_event_cleanup__WEBPACK_IMPORTED_MODULE_3__.deleteEventsForChat)(chatId).catch((e) => logger.error("event delete failed", e instanceof Error ? e.message : String(e)));
+            try {
+                const updatedUserDetail = await db.update(chatId, { paidReply: true, limitTime: Date.now() });
+                Object.assign(userDetail, updatedUserDetail);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `Database update failed in /sendMessage endpoint, ${chatId}`);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendDatabaseOperationFailure)(req, res, operation, error, "Failed to update user before sending message", "External message user state update failed", false);
+                return;
+            }
+            logger.log("Unwanted message to: ", chatId);
+            res.status(200).json({
+                operation,
+                readOnly: false,
+                success: false,
+                sent: false,
+                message: "unwanted message",
+                reason: "service-gate",
+                chatId,
+                requestId: req.requestId,
+            });
+            return;
+        }
+        logger.log("Sending External Message to: ", chatId);
+        // A deliberate operator send counts like the user writing: one real attempt even if the chat was
+        // refused by PEER_FLOOD (a failure marks it refused again).
+        _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_1__.floodGate.clearRefused(chatId);
+        const extPeer = (await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_4__.resolveAutomatedPeer)(tg, chatId)) ?? chatId;
+        const extPayload = { message: msg, linkPreview: false };
+        const outcome = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendOrQueued)((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(extPeer, extPayload), { chatId, label: "sendMessage.route", kind: "general", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", extPayload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, extPeer)) }), "sendMessage.route");
+        if (outcome.queued) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "External message queued", { sent: false, queued: true, chatId });
+            return;
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationSuccess)(req, res, operation, "External message sent", {
+            sent: true,
+            chatId,
+            result: outcome.value,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `Error in /sendMessage endpoint, ${chatId}, ${msg}`);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Send failed", "External message send failed", false);
+    }
+};
 /**
  * @swagger
  * /markasread/{chatId}:
@@ -93273,7 +94073,7 @@ router.get("/dialog/:chatId/info", _http_middlewares_leader_middleware__WEBPACK_
  *                 success:
  *                   type: boolean
  */
-router.post("/markasread/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_21__.leaderOnlyMiddleware, async (req, res) => {
+const handleMarkasread = async (req, res) => {
     const operation = "mark-dialog-read";
     try {
         const chatId = req.params.chatId;
@@ -93287,11 +94087,11 @@ router.post("/markasread/:chatId", _http_middlewares_leader_middleware__WEBPACK_
             }
             return;
         }
-        const client = await getTelegramClientForOperation(req, res, operation, false);
+        const client = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation, false);
         if (!client)
             return;
         try {
-            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(() => client.markAsRead(chatId), {
+            await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(() => client.markAsRead(chatId), {
                 timeout: 10000,
                 errorMessage: `MarkAsRead timeout for chatId: ${chatId}`,
                 throwErr: true,
@@ -93303,18 +94103,253 @@ router.post("/markasread/:chatId", _http_middlewares_leader_middleware__WEBPACK_
         catch (timeoutError) {
             logger.warn(`MarkAsRead timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
             if (!res.headersSent) {
-                sendTelegramOperationFailure(req, res, operation, timeoutError, "Failed to mark as read within timeout period", "Telegram mark dialog read timed out", false);
+                (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to mark as read within timeout period", "Telegram mark dialog read timed out", false);
             }
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error in /markAsRead/:chatId endpoint");
         if (!res.headersSent) {
-            sendTelegramOperationFailure(req, res, operation, error, "Failed to mark dialog as read", "Telegram mark dialog read failed", false);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to mark dialog as read", "Telegram mark dialog read failed", false);
         }
     }
-});
-/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (router);
+};
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/route-responses.ts"
+/*!************************************************!*\
+  !*** ./src/routes/telegram/route-responses.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ROUTE_SEND_WAIT_MS: () => (/* binding */ ROUTE_SEND_WAIT_MS),
+/* harmony export */   buildTelegramRouteData: () => (/* binding */ buildTelegramRouteData),
+/* harmony export */   getTelegramClientForOperation: () => (/* binding */ getTelegramClientForOperation),
+/* harmony export */   getTelegramManagerForOperation: () => (/* binding */ getTelegramManagerForOperation),
+/* harmony export */   parseOptionalNonNegativeInteger: () => (/* binding */ parseOptionalNonNegativeInteger),
+/* harmony export */   sendDatabaseOperationFailure: () => (/* binding */ sendDatabaseOperationFailure),
+/* harmony export */   sendDatabaseUnavailable: () => (/* binding */ sendDatabaseUnavailable),
+/* harmony export */   sendOrQueued: () => (/* binding */ sendOrQueued),
+/* harmony export */   sendTelegramOperationFailure: () => (/* binding */ sendTelegramOperationFailure),
+/* harmony export */   sendTelegramOperationSuccess: () => (/* binding */ sendTelegramOperationSuccess),
+/* harmony export */   sendTelegramUnavailable: () => (/* binding */ sendTelegramUnavailable)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+
+
+
+
+/** How long an HTTP request waits for its queued send before answering `queued` (never hold a request for minutes). */
+const ROUTE_SEND_WAIT_MS = 15000;
+/**
+ * A route's send goes through the OutboundQueue. If it settles within ROUTE_SEND_WAIT_MS the route answers
+ * exactly as before (including an immediate failure); otherwise the send carries on in the background
+ * (flood pause / retry / ordering) and the final failure is logged.
+ */
+async function sendOrQueued(send, context) {
+    let timer;
+    const pending = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ queued: true }), ROUTE_SEND_WAIT_MS);
+        timer?.unref?.();
+    });
+    try {
+        const outcome = await Promise.race([send.then((value) => ({ queued: false, value })), pending]);
+        if (outcome.queued)
+            void send.catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `${context}.queued`));
+        return outcome;
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+}
+function parseOptionalNonNegativeInteger(value, fallback) {
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (raw == null) {
+        return fallback;
+    }
+    const text = String(raw).trim();
+    if (!/^\d+$/.test(text)) {
+        return null;
+    }
+    const parsed = Number(text);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+}
+async function sendTelegramUnavailable(req, res, operation, readOnly = true, errorText = "TelegramManager instance does not exist") {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly,
+        error: errorText,
+        evidence,
+        requestId: req.requestId,
+    });
+}
+/**
+ * A Telegram OPERATION failed AFTER the connection was already confirmed up (the pre-flight
+ * getTelegramClientForOperation guard passed). Such failures are about the request/target, NOT the
+ * service — so we must NOT return 503 or mark telegram.connection unhealthy (that made the whole
+ * service look down and spammed HTTP_FAILURES for a single unreachable recipient / bad peer).
+ *
+ * Instead: surface the ORIGINAL Telegram error verbatim, with a request-level status —
+ *   422 for an unresolvable/inaccessible target (peer not found, blocked, invalid id, peer-flood),
+ *   500 for anything else that went wrong mid-operation.
+ * The only 503s left are the genuine "dependency down" pre-flight checks (instance/DB unavailable).
+ */
+function sendTelegramOperationFailure(req, res, operation, error, errorText, _summary, _readOnly = true) {
+    const status = (0,_tg_events__WEBPACK_IMPORTED_MODULE_1__.isBadTargetError)(error) ? 404 : 500;
+    res.status(status).json({
+        operation,
+        readOnly: false,
+        success: false,
+        sent: false,
+        error: errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.routeHealthErrorMessage)(error), // original Telegram error, verbatim
+        requestId: req.requestId,
+    });
+}
+async function sendDatabaseUnavailable(req, res, operation, readOnly = true, errorText = "MongoDB instance does not exist") {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly,
+        error: errorText,
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendDatabaseOperationFailure(req, res, operation, error, errorText, summary, readOnly = true) {
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.createRouteComponentFailureEvidence)({
+        requestId: req.requestId,
+        component: "database.mongo",
+        owner: "database",
+        summary,
+        error,
+        action: "manual",
+    });
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.sendRouteHealthFailureResponse)(res, {
+        operation,
+        readOnly,
+        error: errorText,
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_3__.routeHealthErrorMessage)(error),
+        evidence,
+        requestId: req.requestId,
+    });
+}
+function sendTelegramOperationSuccess(req, res, operation, message, payload = {}) {
+    res.status(200).json({
+        operation,
+        readOnly: false,
+        success: true,
+        message,
+        ...payload,
+        requestId: req.requestId,
+    });
+}
+async function getTelegramClientForOperation(req, res, operation, readOnly = false) {
+    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist())) {
+        await sendTelegramUnavailable(req, res, operation, readOnly);
+        return null;
+    }
+    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getClient();
+    if (!client) {
+        await sendTelegramUnavailable(req, res, operation, readOnly, "Telegram client instance not available");
+        return null;
+    }
+    return client;
+}
+async function getTelegramManagerForOperation(req, res, operation, readOnly = false) {
+    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist())) {
+        await sendTelegramUnavailable(req, res, operation, readOnly);
+        return null;
+    }
+    return _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance();
+}
+function buildTelegramRouteData(req) {
+    const data = {};
+    const body = req.body && typeof req.body === 'object'
+        ? req.body
+        : {};
+    for (const key of ['duration', 'video', 'count', 'endCall', 'percentage', 'retryCount']) {
+        if (body[key] !== undefined)
+            data[key] = body[key];
+        else if (req.query[key] !== undefined)
+            data[key] = req.query[key];
+    }
+    return data;
+}
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/service-handlers.ts"
+/*!*************************************************!*\
+  !*** ./src/routes/telegram/service-handlers.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handleServiceCompletion: () => (/* binding */ handleServiceCompletion),
+/* harmony export */   resetRecentUserAfterService: () => (/* binding */ resetRecentUserAfterService)
+/* harmony export */ });
+/* harmony import */ var _calls_service_completion__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../calls/service-completion */ "./src/calls/service-completion.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:telegram-routes");
+async function resetRecentUserAfterService(chatId) {
+    try {
+        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_2__.fetchWithTimeout)(`https://ums.paidgirls.site/resetRecentUser?chatId=${encodeURIComponent(chatId)}`, { timeout: 5000 }, 1);
+        if (!response) {
+            logger.warn(`Completed service for ${chatId}, but resetRecentUser did not return a response`);
+        }
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, `resetRecentUserAfterService.${chatId}`, false);
+    }
+}
+async function handleServiceCompletion(req, res, longShow, resetRecentUser) {
+    const operation = longShow ? "execute-long-handshake" : "execute-handshake";
+    try {
+        const chatId = req.params.chatId;
+        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_4__.getTelegramClientForOperation)(req, res, operation);
+        if (!tg)
+            return;
+        const data = (0,_route_responses__WEBPACK_IMPORTED_MODULE_4__.buildTelegramRouteData)(req);
+        const playback = longShow
+            ? await (0,_calls_service_completion__WEBPACK_IMPORTED_MODULE_0__.executehsl)(tg, chatId, data)
+            : await (0,_calls_service_completion__WEBPACK_IMPORTED_MODULE_0__.executehs)(tg, chatId, data);
+        if (resetRecentUser && playback.recorded) {
+            await resetRecentUserAfterService(chatId);
+        }
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_4__.sendTelegramOperationSuccess)(req, res, operation, longShow ? "Long handshake execution completed" : "Handshake execution completed", {
+            chatId,
+            data,
+            serviceRecorded: playback.recorded,
+            playbackReason: playback.reason,
+        });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, longShow ? "Error in /executehsl endpoint" : "Error in /executehs endpoint");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_4__.sendTelegramOperationFailure)(req, res, operation, error, longShow ? "Failed to execute long handshake" : "Failed to execute handshake", longShow ? "Telegram long handshake execution failed" : "Telegram handshake execution failed", false);
+    }
+}
 
 
 /***/ },
