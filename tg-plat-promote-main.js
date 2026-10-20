@@ -29771,11 +29771,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./RuntimeRestrictionStore */ "../../packages/tg-reactions/src/RuntimeRestrictionStore.ts");
-/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_12___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_12__);
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_13___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_13__);
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
 
 
 
@@ -29806,6 +29807,7 @@ function selectRandomElements(array, n) {
 
 
 
+
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger( true ? __filename : 0);
 // Hardcoded restricted channels - shared across instances (Set for O(1) lookup)
 const HARDCODED_RESTRICTED_CHANNELS = new Set([
@@ -29825,7 +29827,7 @@ const HARDCODED_RESTRICTED_CHANNELS = new Set([
     "1780733848", "1685018515", "2057393918", "1887746719", "1916123414",
     "1970767061", "2057158588"
 ].filter(Boolean));
-const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_14__.DEFAULT_REACTION_CONFIG;
+const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_15__.DEFAULT_REACTION_CONFIG;
 /**
  * Reaction service that automatically reacts to messages in channels/groups
  * with adaptive rate limiting, human-like behavior, and proactive flood prevention.
@@ -29860,8 +29862,9 @@ class ReactionService {
          * Runtime (account-side) restrictions now EXPIRE — see RuntimeRestrictionStore. Previously a
          * plain Set, so any CHANNEL_RESTRICTED outcome dropped the channel for the life of the process
          * and the pool could only shrink (nidhi2 fell to 4 usable channels, meghana2 to 1).
+         * Backed up to `reactions::restricted::<mobile>` and reloaded in initializeAsync().
          */
-        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__.RuntimeRestrictionStore();
+        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__.RuntimeRestrictionStore({ mirrorKey: () => this.restrictionMirrorKey() });
         this.isRunning = false;
         this.isStopped = true;
         this.isDisposed = false;
@@ -29932,7 +29935,7 @@ class ReactionService {
         // Register this instance (replaces old entry)
         ReactionService.activeInstances.set(this.instanceId, this);
         // Initialize rate limiter
-        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_11__.ReactionRateLimiter({
+        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_12__.ReactionRateLimiter({
             instanceId: this.instanceId,
             minDelayMs: this.config.MIN_DELAY_MS,
             maxDelayMs: this.config.MAX_DELAY_MS,
@@ -29945,10 +29948,11 @@ class ReactionService {
         try {
             await Promise.all([
                 this.loadRestrictedChannels(),
-                this.rateLimiter.initialize()
+                this.rateLimiter.initialize(),
+                this.runtimeRestrictions.loadBackup()
             ]);
             // Generate per-instance emoticon preferences
-            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_14__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
+            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_15__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
             this.instanceId);
             logger.info(`[${this.instanceId}] Reaction service initialized`);
             if (!this.autoStart || this.isDisposed) {
@@ -30065,7 +30069,7 @@ class ReactionService {
         this.channels.length = 0;
         this.restrictedChannelIds.clear();
         this.dbRestrictedChannelIds.clear();
-        this.runtimeRestrictions.clear();
+        this.runtimeRestrictions.dispose();
         if (ReactionService.activeInstances.get(this.instanceId) === this) {
             ReactionService.activeInstances.delete(this.instanceId);
         }
@@ -30266,7 +30270,7 @@ class ReactionService {
             return 'success';
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, channel.id);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, channel.id);
             if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRuntimeFailure)(error)) {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return 'error';
@@ -30303,7 +30307,7 @@ class ReactionService {
                 useCache: false,
                 // Invalid/private targets must leave this account's rotation instead of being
                 // retried as an empty history on every reaction loop.
-                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
+                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
             });
             if (!messages || messages.length === 0) {
                 return null;
@@ -30337,7 +30341,7 @@ class ReactionService {
                 messages.length = 0;
                 messages = null;
             }
-            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
+            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
                 await this.onReactionError(error, chatId, undefined, chatLabel);
                 return null;
             }
@@ -30490,7 +30494,7 @@ class ReactionService {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return;
             }
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error, chatId, attemptedEmoticon);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId, attemptedEmoticon);
             const failureLine = `[${this.instanceId}] REACT failure | ${chatId} | ${chatLabel} | ${parsed.type} | ${attemptedEmoticon || 'unknown'}`;
             if (parsed.type === 'CHANNEL_RESTRICTED') {
                 logger.debug(failureLine);
@@ -30744,7 +30748,7 @@ class ReactionService {
         if (!entity || !('id' in entity)) {
             throw new Error('Invalid dialog entity');
         }
-        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_12___default()(entity.id);
+        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_13___default()(entity.id);
         // Decide by entity class, not dialog flags: GramJS sets isGroup for megagroups too, so checking
         // isGroup first turned every supergroup (a Channel) into a PeerChat with the channel's id.
         const className = entity.className;
@@ -30909,6 +30913,10 @@ class ReactionService {
         logger.warn(`[${this.instanceId}] [LIMIT] All ${this.channels.length} channels exhausted ` +
             `(restricted=${restrictedSkipped}, cooldown=${cooldownSkipped}, dailyLimit=${dailyLimitSkipped})`);
         return null;
+    }
+    /** Auto-generated ids (rs_<n>_<ts>) change every process: nothing to resume, so no backup. */
+    restrictionMirrorKey() {
+        return /^rs_\d+_\d+$/.test(this.instanceId) ? null : (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.stateKey)('reactions::restricted', this.instanceId);
     }
     async loadRestrictedChannels() {
         try {
@@ -31303,6 +31311,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RUNTIME_RESTRICTION_TTL_LADDER_MS: () => (/* binding */ RUNTIME_RESTRICTION_TTL_LADDER_MS),
 /* harmony export */   RuntimeRestrictionStore: () => (/* binding */ RuntimeRestrictionStore)
 /* harmony export */ });
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /**
  * Expiring store for RUNTIME reaction restrictions.
  *
@@ -31358,7 +31367,15 @@ __webpack_require__.r(__webpack_exports__);
  * opposite call — a limited account pushes HARDER, because Telegram's countdown runs on wall-clock
  * and throttling forfeits volume without shortening the limit (see pool/account-cap.ts). Reactions
  * may warrant the same treatment, but it has not been measured here. Do not assume either way.
+ *
+ * ── RESTART ────────────────────────────────────────────────────────────────────────────────────
+ * Memory is the working copy. Each change is backed up to one Redis hash per account
+ * (`reactions::restricted::<mobile>`, field = channelId, value = `expiresAt:strikes`) and read back
+ * once at boot (`loadBackup`), so a restart no longer hands a limited account its whole pool back at
+ * once. Lookups never touch Redis. Separate from promotion's `promote:chanblock` and from the DB
+ * `reactions_disabled` list.
  */
+
 /**
  * Escalating retry windows for repeat restrictions on the same channel.
  *
@@ -31407,6 +31424,40 @@ class RuntimeRestrictionStore {
         this.entries = new Map();
         this.maxEntries = Math.max(1, options.maxEntries ?? 2000);
         this.now = options.now ?? (() => Date.now());
+        this.mirror = options.mirrorKey
+            ? new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisHash(options.mirrorKey, MAX_RUNTIME_RESTRICTION_MS, 'reactions.restricted')
+            : null;
+    }
+    /**
+     * Boot: reload the windows still running from the backup (expired fields are skipped and pruned).
+     * A channel already restricted in memory keeps its in-memory entry. Returns how many were restored.
+     */
+    async loadBackup() {
+        const hash = await this.mirror?.loadRaw();
+        if (!hash)
+            return 0;
+        const now = this.now();
+        const stale = [];
+        let restored = 0;
+        for (const [channelId, raw] of Object.entries(hash)) {
+            const [expiresAt, strikes] = raw.split(':').map(Number);
+            if (!(expiresAt > now) || !(strikes >= 1)) {
+                stale.push(channelId);
+                continue;
+            }
+            if (this.entries.has(channelId))
+                continue;
+            this.entries.set(channelId, {
+                expiresAt: Math.min(expiresAt, now + MAX_RUNTIME_RESTRICTION_MS),
+                strikes,
+                reason: 'restored',
+            });
+            restored++;
+        }
+        if (stale.length)
+            void this.mirror?.delete(...stale);
+        this.evictIfNeeded();
+        return restored;
     }
     /**
      * Restrict a channel, escalating the window if it has been restricted before.
@@ -31425,7 +31476,9 @@ class RuntimeRestrictionStore {
         const strikes = insideActiveWindow ? existing.strikes : (existing?.strikes ?? 0) + 1;
         const rung = Math.min(strikes, RUNTIME_RESTRICTION_TTL_LADDER_MS.length) - 1;
         const ttl = Math.min(RUNTIME_RESTRICTION_TTL_LADDER_MS[rung] ?? RUNTIME_RESTRICTION_TTL_LADDER_MS[0], MAX_RUNTIME_RESTRICTION_MS);
-        this.entries.set(id, { expiresAt: this.now() + ttl, strikes, reason });
+        const expiresAt = this.now() + ttl;
+        this.entries.set(id, { expiresAt, strikes, reason });
+        void this.mirror?.set(id, `${expiresAt}:${strikes}`);
         this.evictIfNeeded();
         return ttl;
     }
@@ -31506,7 +31559,13 @@ class RuntimeRestrictionStore {
         }
         return ids;
     }
+    /** Forget everything, including the backup (an operator reset must not come back on restart). */
     clear() {
+        this.entries.clear();
+        void this.mirror?.clear();
+    }
+    /** Free memory on dispose; the backup stays for the next instance of this account. */
+    dispose() {
         this.entries.clear();
     }
     /**
@@ -31520,6 +31579,7 @@ class RuntimeRestrictionStore {
         for (const [id, entry] of this.entries) {
             if (entry.expiresAt <= now) {
                 this.entries.delete(id);
+                void this.mirror?.delete(id);
                 if (this.entries.size <= this.maxEntries)
                     return;
             }
@@ -31536,6 +31596,7 @@ class RuntimeRestrictionStore {
             if (!soonestId)
                 return;
             this.entries.delete(soonestId);
+            void this.mirror?.delete(soonestId);
         }
     }
 }
