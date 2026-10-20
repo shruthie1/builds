@@ -31098,7 +31098,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   app: () => (/* binding */ app)
 /* harmony export */ });
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
 /* harmony import */ var _core_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../core/connection */ "./src/core/connection.ts");
 /* harmony import */ var _config_app_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../config/app-config */ "./src/config/app-config.ts");
 /* harmony import */ var _server_routes__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../server/routes */ "./src/server/routes.ts");
@@ -31106,7 +31106,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _http_routes_heapdump_routes__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../http/routes/heapdump.routes */ "./src/http/routes/heapdump.routes.ts");
 /* harmony import */ var _jobs_scheduler__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../jobs/scheduler */ "./src/jobs/scheduler.ts");
 /* harmony import */ var _core_connection_service__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../core/connection-service */ "./src/core/connection-service.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _core_TelegramManager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../core/TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -31116,9 +31118,13 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("express");
-logger.info("ProcessID: ", _core_utils__WEBPACK_IMPORTED_MODULE_0__.prcessID);
-(0,_core_utils__WEBPACK_IMPORTED_MODULE_0__.getPublicIP)();
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("express");
+// mobile-manager / Telegram.service reach the TelegramManager statics through telegram/client-access.
+(0,_telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.registerTelegramManager)(_core_TelegramManager__WEBPACK_IMPORTED_MODULE_8__["default"]);
+logger.info("ProcessID: ", _process_info__WEBPACK_IMPORTED_MODULE_0__.prcessID);
+(0,_process_info__WEBPACK_IMPORTED_MODULE_0__.getPublicIP)();
 (0,_jobs_scheduler__WEBPACK_IMPORTED_MODULE_6__.setupExitHandlers)();
 const app = (0,_config_app_config__WEBPACK_IMPORTED_MODULE_2__.configureApp)();
 const port = process.env.PORT || 3000;
@@ -31135,6 +31141,44 @@ app.listen(port, () => {
 });
 // Export for testing or external use
 
+
+
+/***/ },
+
+/***/ "./src/bootstrap/process-info.ts"
+/*!***************************************!*\
+  !*** ./src/bootstrap/process-info.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getPublicIP: () => (/* binding */ getPublicIP),
+/* harmony export */   prcessID: () => (/* binding */ prcessID)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("utils");
+// Process ID for this instance
+const prcessID = Math.floor(Math.random() * 123);
+logger.info("ProcessID: ", prcessID);
+// IP utilities
+let ip = null;
+const getPublicIP = async () => {
+    if (ip)
+        return ip;
+    try {
+        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_0__.fetchWithTimeout)('https://api.ipify.org?format=json');
+        logger.info(`Your public IP address is: ${response.data.ip}`);
+        ip = response.data.ip;
+        return ip;
+    }
+    catch (error) {
+        logger.error('Error fetching the public IP address:', error.message);
+    }
+};
 
 
 /***/ },
@@ -31518,12 +31562,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TelegramService: () => (/* binding */ TelegramService)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
-/* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
-/* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./mobile-manager */ "./src/core/mobile-manager.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure.ts");
+/* harmony import */ var _shared_sleep__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../shared/sleep */ "./src/shared/sleep.ts");
+/* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./mobile-manager */ "./src/core/mobile-manager.ts");
+/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 
 
 
@@ -31531,15 +31576,16 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("Telegram.service");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("Telegram.service");
 function scheduleTelegramServiceTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_6__.scheduleUnrefTimeout)(() => callback().catch((error) => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_7__.scheduleUnrefTimeout)(() => callback().catch((error) => {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, context);
     }), delayMs);
 }
 class TelegramService {
     constructor() {
-        this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_3__.MobileManager.getInstance();
+        this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_4__.MobileManager.getInstance();
     }
     static getInstance() {
         if (!TelegramService.instance) {
@@ -31635,9 +31681,9 @@ class TelegramService {
             if (clientDetails) {
                 try {
                     const telegramManager = await this.createClient(clientDetails, false, true);
-                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date() });
+                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date() });
                     if (telegramManager && telegramManager.promoterInstance) {
-                        await (0,_utils__WEBPACK_IMPORTED_MODULE_2__.sleep)(27000);
+                        await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_3__.sleep)(27000);
                         await telegramManager.promoterInstance.startPromotion();
                         successCount++;
                         logger.info(`✅ Successfully connected ${mobile} (${successCount}/${mobiles.length})`);
@@ -31651,9 +31697,9 @@ class TelegramService {
                     failureCount++;
                     const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error creating client for ${mobile}`);
                     logger.error(`❌ Connection failed for ${mobile} (${failureCount} failures)`);
-                    if (await (0,_utils__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, mobile, false, 'TelegramService.connectAllClients')) {
+                    if (await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, mobile, false, 'TelegramService.connectAllClients')) {
                         logger.info(`💥 Critical error detected for ${mobile}, marking as inactive`);
-                        await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
+                        await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
                         await this.mobileManager.removeClient(mobile);
                     }
                 }
@@ -31776,7 +31822,7 @@ class TelegramService {
     }
     async createClient(clientDetails, autoDisconnect = false, handler = true) {
         // Check if instance already exists in TelegramManager's static map
-        const existingInstance = _TelegramManager__WEBPACK_IMPORTED_MODULE_1__["default"].getInstance(clientDetails.mobile);
+        const existingInstance = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__["default"].getInstance(clientDetails.mobile);
         if (existingInstance && !existingInstance.isDestroyed && existingInstance.client?.connected) {
             logger.info(`TelegramManager instance already exists for: ${clientDetails.mobile}`);
             return existingInstance;
@@ -31815,7 +31861,7 @@ class TelegramService {
                 this.mobileManager.removeTelegramManager(clientDetails.mobile);
             }
         }
-        const telegramManager = _TelegramManager__WEBPACK_IMPORTED_MODULE_1__["default"].getOrCreate(clientDetails);
+        const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__["default"].getOrCreate(clientDetails);
         try {
             const client = await telegramManager.createClient(handler);
             if (!client) {
@@ -31866,9 +31912,9 @@ class TelegramService {
             catch (destroyError) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(destroyError, `Failed to destroy failed client for ${clientDetails.mobile}:`);
             }
-            if (await (0,_utils__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, clientDetails.mobile, false, 'TelegramService.createClient')) {
+            if (await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, clientDetails.mobile, false, 'TelegramService.createClient')) {
                 const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Permanent Telegram failure for ${clientDetails.mobile}`);
-                await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.updatePromoteClient({ mobile: clientDetails.mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
+                await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile: clientDetails.mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
                 await this.mobileManager.removeClient(clientDetails.mobile);
             }
             return null;
@@ -34523,19 +34569,21 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _Telegram_service__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./Telegram.service */ "./src/core/Telegram.service.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./utils */ "./src/core/utils.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_5__);
-/* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./mobile-manager */ "./src/core/mobile-manager.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
-/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
-/* harmony import */ var _telegram_check_me__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/check-me */ "./src/telegram/check-me.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _diagnostics_memory_cleanup__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure.ts");
+/* harmony import */ var _shared_sleep__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../shared/sleep */ "./src/shared/sleep.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_6___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_6__);
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./mobile-manager */ "./src/core/mobile-manager.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
+/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
+/* harmony import */ var _telegram_check_me__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram/check-me */ "./src/telegram/check-me.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _diagnostics_memory_cleanup__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts");
 
 
 
@@ -34552,7 +34600,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("HealthMonitor");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__.Logger("HealthMonitor");
 const DEFAULT_HEALTH_CONFIG = {
     criticalFailureTimeoutMinutes: 5,
     systemHealthThreshold: 0.5, // 50%
@@ -34562,11 +34611,11 @@ const DEFAULT_HEALTH_CONFIG = {
 };
 async function sendHealthMonitorNotification(notification, failureContext) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Health monitor notification returned false", failureContext);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.logUnsentNotification)(sent, "Health monitor notification returned false", failureContext);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, failureContext, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, failureContext, false);
         return false;
     }
 }
@@ -34580,7 +34629,7 @@ class HealthMonitor {
         // Per-mobile debounce for the "stale/unhealthy but inbound still confident, skipping
         // replacement" warning — fires on every health tick otherwise (flood across many mobiles).
         this.lastSkipReplacementWarnAt = new Map();
-        this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_6__.MobileManager.getInstance();
+        this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_8__.MobileManager.getInstance();
         this.telegramService = _Telegram_service__WEBPACK_IMPORTED_MODULE_0__.TelegramService.getInstance();
         this.config = { ...DEFAULT_HEALTH_CONFIG, ...config };
     }
@@ -34618,7 +34667,7 @@ class HealthMonitor {
         logger.warn(`[${mobile}] Skip replacement: ${reason}, ${confidence} inbound confidence, last promo ${lastMsgAgoMin}m ago`);
         await sendHealthMonitorNotification({
             title: reason === 'stale' ? "Promotion stale but inbound active" : "Promotion unhealthy but inbound active",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.WARNING,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.WARNING,
             summary: "Promotion replacement skipped because recent inbound activity suggests the client is still useful.",
             fields: [
                 { label: "Mobile", value: mobile },
@@ -34652,7 +34701,7 @@ class HealthMonitor {
                     await this.collectHealthMetrics();
                 }
                 catch (error) {
-                    logger.warn("Health metrics collection failed; continuing shared recovery plan", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Health metrics collection failed during recovery plan"));
+                    logger.warn("Health metrics collection failed; continuing shared recovery plan", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Health metrics collection failed during recovery plan"));
                 }
             }
             else {
@@ -34683,7 +34732,7 @@ class HealthMonitor {
                     await this.performSystemRecovery();
                 }
                 catch (error) {
-                    logger.warn("System recovery failed; continuing individual recovery actions", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "System recovery failed during health plan"));
+                    logger.warn("System recovery failed; continuing individual recovery actions", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "System recovery failed during health plan"));
                 }
             }
             // Refresh mobile states
@@ -34691,7 +34740,7 @@ class HealthMonitor {
                 await this.mobileManager.refresh();
             }
             catch (error) {
-                logger.warn("Mobile manager refresh failed before individual health checks; continuing with current state", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Mobile manager refresh failed before health checks"));
+                logger.warn("Mobile manager refresh failed before individual health checks; continuing with current state", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Mobile manager refresh failed before health checks"));
             }
             // Check individual client health
             await this.checkIndividualClients(recoveryPlan);
@@ -34700,9 +34749,9 @@ class HealthMonitor {
                 && !this.mobileManager.isActive();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Health check failed - IP: ${await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.getPublicIP)()}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Health check failed - IP: ${await (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_7__.getPublicIP)()}`);
             logger.error('Critical health check error, exiting...');
-            await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(3000);
+            await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000);
             await this.exitAfterCleanup("Critical health check error", 1);
         }
         if (verifyActiveMobilesAfterRecovery) {
@@ -34727,12 +34776,12 @@ class HealthMonitor {
             // Random jitter 3-15s between mobiles to spread API calls across time
             // This prevents all 10 instances from hitting Telegram simultaneously
             const jitter = 3000 + Math.floor(Math.random() * 12000);
-            await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(jitter);
+            await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(jitter);
             try {
                 await this.checkClientHealth(mobile, clientData, recoveryPlan);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error checking client health: ${mobile}`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Error checking client health: ${mobile}`);
                 // Try to recover the client instead of exiting immediately
                 const recovered = await this.attemptClientRecovery(mobile, clientData, error);
                 if (!recovered) {
@@ -34751,7 +34800,7 @@ class HealthMonitor {
             return clientData ?? null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error loading promote client metadata for health check", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error loading promote client metadata for health check", false);
             logger.warn("Client metadata lookup failed during health check; using in-memory client details");
             return null;
         }
@@ -34803,7 +34852,7 @@ class HealthMonitor {
                 }
                 return; // Skip further checks for this cycle, let the recreated client stabilize.
             }
-            const me = await (0,_telegram_check_me__WEBPACK_IMPORTED_MODULE_11__.checkMe)(telegramManager.client, telegramManager.clientDetails);
+            const me = await (0,_telegram_check_me__WEBPACK_IMPORTED_MODULE_13__.checkMe)(telegramManager.client, telegramManager.clientDetails);
             const inboundSnapshot = this.mobileManager.getInboundActivitySnapshot(mobile);
             logger.info(`[${mobile}] Inbound activity confidence`, {
                 confidence: inboundSnapshot.confidence,
@@ -34827,7 +34876,7 @@ class HealthMonitor {
             await this.performMaintenanceTasks(telegramManager, mobile);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Client check failed for ${mobile}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Client check failed for ${mobile}`);
             throw error; // Re-throw to trigger recovery mechanisms
         }
     }
@@ -34852,7 +34901,7 @@ class HealthMonitor {
                     }
                 }
                 catch (error) {
-                    logger.warn(`[${mobile}] Promotion engine recreation threw`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Promotion engine recreation failed for ${mobile}`));
+                    logger.warn(`[${mobile}] Promotion engine recreation threw`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Promotion engine recreation failed for ${mobile}`));
                 }
                 if (!promoter) {
                     logger.warn(`[${mobile}] Promotion engine recreation failed or prerequisites are missing`);
@@ -34871,7 +34920,7 @@ class HealthMonitor {
             lastMessageTime = Number(promoter.getLastMsgTime());
         }
         catch (error) {
-            logger.warn(`[${mobile}] Promotion last-message read failed during health check`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Promotion last-message read failed for ${mobile}`));
+            logger.warn(`[${mobile}] Promotion last-message read failed during health check`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Promotion last-message read failed for ${mobile}`));
         }
         const actionLastMessageAgeMs = Number(promotionAction?.metadata?.lastMessageAgeMs);
         const lastMsgAgo = lastMessageTime !== null ? Date.now() - lastMessageTime : Infinity;
@@ -34889,7 +34938,7 @@ class HealthMonitor {
             messageStats = promoter.getStats();
         }
         catch (error) {
-            logger.warn(`[${mobile}] Promotion stats read failed during health check; continuing recovery plan`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Promotion stats read failed for ${mobile}`));
+            logger.warn(`[${mobile}] Promotion stats read failed during health check; continuing recovery plan`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Promotion stats read failed for ${mobile}`));
         }
         // Log promotion stats
         const promotionStatsLine = `Promotions: Last ${lastMsgAgoMin >= 0 ? `${lastMsgAgoMin} min ago` : 'never'} | Success: ${messageStats.successCount ?? 'unknown'} ✅ | Failed: ${messageStats.totalFailed ?? 'unknown'} ❌ | Channels: ${messageStats.channelsTotal ?? 'unknown'} | Queue: ${messageStats.queueSize ?? 'unknown'} | FailStreak: ${messageStats.failStreak ?? 'unknown'}`;
@@ -34916,7 +34965,7 @@ class HealthMonitor {
                 logger.error(`Promotion stopped for ${mobile}, Days: ${daysLeft}`);
                 await sendHealthMonitorNotification({
                     title: "Stale: replacing",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.CRITICAL,
                     fields: [
                         { label: "Mobile", value: mobile },
                         { label: "Days left", value: daysLeft },
@@ -34924,9 +34973,9 @@ class HealthMonitor {
                     ],
                     tags: ["promotion", "replacement"],
                 }, `Failed to send stale promotion replacement notification for ${mobile}`);
-                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__.checktghealth)(telegramManager.client, mobile, true);
+                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_12__.checktghealth)(telegramManager.client, mobile, true);
                 const finalDaysLeft = Number(daysLeft) + Math.floor(parseInt(String(lastMsgAgoMin)) / 5);
-                await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_9__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
+                await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
             }
         }
         // Log reaction stats if available
@@ -34937,7 +34986,7 @@ class HealthMonitor {
                 reactorStats = reactionServiceInstance.getStats();
             }
             catch (error) {
-                logger.warn(`[${mobile}] Reaction stats read failed during health logging`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Reaction stats logging failed for ${mobile}`));
+                logger.warn(`[${mobile}] Reaction stats read failed during health logging`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Reaction stats logging failed for ${mobile}`));
             }
             if (reactorStats) {
                 const lastReactionAgo = reactorStats.lastReactionTime > 0
@@ -34997,7 +35046,7 @@ class HealthMonitor {
                 }
             }
             catch (error) {
-                logger.warn(`[${mobile}] Reaction service recreation threw`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Reaction recreation failed for ${mobile}`));
+                logger.warn(`[${mobile}] Reaction service recreation threw`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Reaction recreation failed for ${mobile}`));
             }
             if (!reactionServiceInstance) {
                 logger.warn(`[${mobile}] Reaction service recreation failed or prerequisites are missing`);
@@ -35014,7 +35063,7 @@ class HealthMonitor {
                 isInFloodWait = Boolean(reactionServiceInstance.getStats().isInFloodWait);
             }
             catch (error) {
-                logger.warn(`[${mobile}] Reaction recovery could not read stats; attempting restart`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Reaction stats read failed for ${mobile}`));
+                logger.warn(`[${mobile}] Reaction recovery could not read stats; attempting restart`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Reaction stats read failed for ${mobile}`));
             }
         }
         if (isInFloodWait) {
@@ -35030,7 +35079,7 @@ class HealthMonitor {
             return { handled: true, recoveredManager: false };
         }
         catch (error) {
-            logger.warn(`[${mobile}] Reaction recovery failed`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Reaction recovery failed for ${mobile}`));
+            logger.warn(`[${mobile}] Reaction recovery failed`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Reaction recovery failed for ${mobile}`));
             return { handled: true, recoveredManager: false };
         }
     }
@@ -35088,7 +35137,7 @@ class HealthMonitor {
         logger.error(`Promotion stopped for ${mobile}, Days: ${daysLeft}`);
         await sendHealthMonitorNotification({
             title: "Unhealthy: swap",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.CRITICAL,
             fields: [
                 { label: "Mobile", value: mobile },
                 { label: "Days left", value: daysLeft },
@@ -35096,9 +35145,9 @@ class HealthMonitor {
             ],
             tags: ["promotion", "replacement"],
         }, `Failed to send unhealthy promotion replacement notification for ${mobile}`);
-        await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__.checktghealth)(telegramManager.client, mobile, true);
+        await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_12__.checktghealth)(telegramManager.client, mobile, true);
         const finalDaysLeft = Number(daysLeft) + Math.floor(parseInt(String(lastMsgAgoMin)) / 5);
-        await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_9__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
+        await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
     }
     async recoverDatabaseFromPlan(action) {
         logger.warn("Promotion Mongo recovery requested by service health", {
@@ -35115,7 +35164,7 @@ class HealthMonitor {
             }
         }
         catch (error) {
-            logger.warn("Promotion Mongo recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Promotion Mongo recovery failed"));
+            logger.warn("Promotion Mongo recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Promotion Mongo recovery failed"));
         }
     }
     async recoverRedisFromPlan(action) {
@@ -35138,7 +35187,7 @@ class HealthMonitor {
             }
         }
         catch (error) {
-            logger.warn("Promotion Redis recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Promotion Redis recovery failed"));
+            logger.warn("Promotion Redis recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Promotion Redis recovery failed"));
         }
     }
     recoverMemoryFromPlan(action) {
@@ -35148,10 +35197,10 @@ class HealthMonitor {
             metadata: action.metadata,
         });
         try {
-            _diagnostics_memory_cleanup__WEBPACK_IMPORTED_MODULE_14__.MemoryCleanupService.getInstance().forceCleanup();
+            _diagnostics_memory_cleanup__WEBPACK_IMPORTED_MODULE_16__.MemoryCleanupService.getInstance().forceCleanup();
         }
         catch (error) {
-            logger.warn("Promotion memory cleanup failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Promotion memory cleanup failed"));
+            logger.warn("Promotion memory cleanup failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Promotion memory cleanup failed"));
         }
     }
     async performMaintenanceTasks(telegramManager, mobile) {
@@ -35170,13 +35219,13 @@ class HealthMonitor {
                     logger.warn(`${mobile}: Manager destroyed or disconnected, skipping immediate maintenance`);
                     return;
                 }
-                await telegramManager.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_5__.Api.updates.GetState());
+                await telegramManager.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_6__.Api.updates.GetState());
                 // Check if DialogManager is ready before accessing dialogs
                 if (!telegramManager.dialogManager.isReady()) {
                     logger.warn(`${mobile}: DialogManager not initialized yet, skipping dialog access`);
                     return;
                 }
-                const dialogs = telegramManager.dialogManager.getDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_8__.DialogType.PERSONAL, 5);
+                const dialogs = telegramManager.dialogManager.getDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogType.PERSONAL, 5);
                 if (!dialogs || dialogs.length === 0) {
                     logger.debug(`${mobile}: No personal dialogs found for maintenance task`);
                     return;
@@ -35192,7 +35241,7 @@ class HealthMonitor {
                 }
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `${mobile} Error in immediate maintenance`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `${mobile} Error in immediate maintenance`);
                 logger.error(`${mobile}: Immediate maintenance failed, client may need restart`);
             }
             const innerTimer = setTimeout(async () => {
@@ -35203,13 +35252,13 @@ class HealthMonitor {
                         logger.warn(`${mobile}: Manager destroyed or disconnected, skipping delayed maintenance`);
                         return;
                     }
-                    await telegramManager.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_5__.Api.updates.GetState());
+                    await telegramManager.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_6__.Api.updates.GetState());
                     // Check if DialogManager is ready before accessing dialogs
                     if (!telegramManager.dialogManager.isReady()) {
                         logger.warn(`${mobile}: DialogManager not initialized yet, skipping delayed dialog access`);
                         return;
                     }
-                    const dialogs = telegramManager.dialogManager.getDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_8__.DialogType.PERSONAL, 2);
+                    const dialogs = telegramManager.dialogManager.getDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogType.PERSONAL, 2);
                     if (!dialogs || dialogs.length === 0) {
                         logger.debug(`${mobile}: No personal dialogs found for delayed maintenance task`);
                         return;
@@ -35225,7 +35274,7 @@ class HealthMonitor {
                     }
                 }
                 catch (error) {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `${mobile} Error in delayed maintenance`);
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `${mobile} Error in delayed maintenance`);
                     logger.error(`${mobile}: Delayed maintenance failed, client may need restart`);
                 }
             }, 150000);
@@ -35278,7 +35327,7 @@ class HealthMonitor {
             // The mobile manager will handle recreation during the next refresh
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Failed to restart client: ${mobile}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Failed to restart client: ${mobile}`);
         }
     }
     /**
@@ -35291,12 +35340,12 @@ class HealthMonitor {
                 logger.info(`Recovery attempt ${attempt}/${maxRetries} for ${mobile}`);
                 // First, clean up any existing manager
                 await this.telegramService.disposeClient(mobile);
-                await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(2000);
+                await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(2000);
                 // Attempt to create a new client
                 const newManager = await this.telegramService.createClient(clientDetails, false, true);
                 if (newManager?.client?.connected && newManager.promoterInstance) {
                     logger.success(`Successfully recovered Telegram manager for ${mobile}`);
-                    await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(3000);
+                    await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000);
                     await newManager.promoterInstance.startPromotion();
                     return true;
                 }
@@ -35305,11 +35354,11 @@ class HealthMonitor {
                 }
             }
             catch (error) {
-                logger.error(`Recovery attempt ${attempt} failed for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Recovery failed`));
+                logger.error(`Recovery attempt ${attempt} failed for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Recovery failed`));
             }
             // Wait before next attempt
             if (attempt < maxRetries) {
-                await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(5000 * attempt); // Exponential backoff
+                await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(5000 * attempt); // Exponential backoff
             }
         }
         logger.error(`All recovery attempts failed for ${mobile}`);
@@ -35324,14 +35373,14 @@ class HealthMonitor {
             try {
                 logger.info(`Client recovery attempt ${attempt}/${maxRetries} for ${mobile}`);
                 // Wait a bit before retry
-                await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(3000 * attempt);
+                await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000 * attempt);
                 // Re-attempt the health check
                 await this.checkClientHealth(mobile, clientData);
                 logger.success(`Client recovery successful for ${mobile} on attempt ${attempt}`);
                 return true;
             }
             catch (error) {
-                logger.error(`Recovery attempt ${attempt} failed for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Client recovery failed`));
+                logger.error(`Recovery attempt ${attempt} failed for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Client recovery failed`));
                 try {
                     const telegramManager = this.telegramService.getClient(mobile);
                     if (!telegramManager) {
@@ -35340,15 +35389,15 @@ class HealthMonitor {
                     logger.warn(`Skipping legacy profile rewrite during recovery for ${mobile}; persona verifier remains the only profile writer`);
                 }
                 catch (e) {
-                    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(e, `Liveness check failed during recovery for ${mobile}`);
-                    if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__["default"])(errorDetails)) {
+                    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(e, `Liveness check failed during recovery for ${mobile}`);
+                    if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_14__["default"])(errorDetails)) {
                         await this.handlePermanentClientError(mobile, errorDetails.message || "Unable to fetch session/Recover session");
                         return false;
                     }
                 }
                 // If it's a critical error, don't keep retrying
                 const criticalMessage = error?.message || error?.errorMessage || "Unable to fetch session/Recover session";
-                if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_12__["default"])({ error, message: criticalMessage })) {
+                if ((0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_14__["default"])({ error, message: criticalMessage })) {
                     logger.error(`Critical permanent error detected for ${mobile}, triggering replacement flow`, {
                         message: criticalMessage,
                     });
@@ -35362,7 +35411,7 @@ class HealthMonitor {
     async handlePermanentClientError(mobile, message) {
         await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { status: "inactive", message });
         logger.error(`Permanent client error for ${mobile}; triggering setup/replacement flow`, { message });
-        await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)({ errorMessage: message, message }, mobile, true);
+        await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)({ errorMessage: message, message }, mobile, true);
         await this.mobileManager.removeClient(mobile);
         await this.mobileManager.refresh();
         if (this.mobileManager.getActiveCount() === 0) {
@@ -35397,7 +35446,7 @@ class HealthMonitor {
             }
             // Last resort - trigger process restart
             logger.error(`No recovery possible for ${mobile}, removing mobile and triggering replacement flow...`);
-            await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.startNewUserProcess)(error, mobile);
+            await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.startNewUserProcess)(error, mobile);
             await this.mobileManager.removeClient(mobile);
             await this.mobileManager.refresh();
             if (this.mobileManager.getActiveCount() === 0) {
@@ -35408,7 +35457,7 @@ class HealthMonitor {
             }
         }
         catch (recoveryError) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(recoveryError, `Error handling failed client ${mobile}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(recoveryError, `Error handling failed client ${mobile}`);
             if (this.mobileManager.getActiveCount() === 0) {
                 await this.ensureActiveMobilesOrExit(`No active mobiles remain after recovery error for ${mobile}`);
             }
@@ -35432,17 +35481,17 @@ class HealthMonitor {
         logger.error(`${reason}; exiting process`, { activeCount });
         await sendHealthMonitorNotification({
             title: "No active mobile",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.CRITICAL,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.NotificationSeverity.CRITICAL,
             summary: reason,
             tags: ["lifecycle", "exit"],
         }, `Failed to send zero-mobile exit notification: ${reason}`);
-        await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(3000);
+        await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000);
         await this.exitAfterCleanup(reason, 1);
     }
     async exitAfterCleanup(reason, exitCode) {
         logger.info(`Starting graceful process exit cleanup: ${reason}`);
         try {
-            await _tg_dialogs__WEBPACK_IMPORTED_MODULE_8__.DialogManager.cleanupAllInstances();
+            await _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogManager.cleanupAllInstances();
         }
         catch (error) {
             logger.error("Error cleaning up DialogManager before process exit:", error);
@@ -35517,7 +35566,7 @@ class HealthMonitor {
             return isHealthy;
         }
         catch (error) {
-            logger.warn("Error checking system health", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "System health check failed"));
+            logger.warn("Error checking system health", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "System health check failed"));
             return false;
         }
     }
@@ -35545,10 +35594,10 @@ class HealthMonitor {
                         }
                     }
                     catch (error) {
-                        logger.warn(`Failed to recover manager for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Recovery failed"));
+                        logger.warn(`Failed to recover manager for ${mobile}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Recovery failed"));
                     }
                     // Small delay between recovery attempts
-                    await (0,_utils__WEBPACK_IMPORTED_MODULE_3__.sleep)(2000);
+                    await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(2000);
                 }
                 logger.success(`System recovery completed: ${recoveredCount}/${mobilesWithoutManagers.length} managers recovered`);
             }
@@ -35560,12 +35609,12 @@ class HealthMonitor {
                     await this.telegramService.connectClients();
                 }
                 catch (error) {
-                    logger.warn("TelegramService reconnection failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Reconnection failed"));
+                    logger.warn("TelegramService reconnection failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Reconnection failed"));
                 }
             }
         }
         catch (error) {
-            logger.error("System recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "System recovery failed"));
+            logger.error("System recovery failed", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "System recovery failed"));
             throw error;
         }
     }
@@ -36263,7 +36312,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _TelegramManager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./TelegramManager */ "./src/core/TelegramManager.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 
@@ -36790,7 +36839,7 @@ class MobileManager {
                 }
             }
             // Also check TelegramManager static instances for orphans
-            const staticInstances = _TelegramManager__WEBPACK_IMPORTED_MODULE_4__["default"].getAllInstances();
+            const staticInstances = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getAllInstances();
             const staticOrphans = [];
             for (const instance of staticInstances) {
                 const mobile = instance.clientDetails?.mobile;
@@ -36802,7 +36851,7 @@ class MobileManager {
                 logger.info(`🧹 Found ${staticOrphans.length} orphaned managers in TelegramManager static map, cleaning up...`);
                 for (const mobile of staticOrphans) {
                     try {
-                        const instance = _TelegramManager__WEBPACK_IMPORTED_MODULE_4__["default"].getInstance(mobile);
+                        const instance = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getInstance(mobile);
                         if (instance && !instance.isDestroyed) {
                             await instance.destroy();
                             logger.info(`🗑️ Cleaned up static orphaned manager for: ${mobile}`);
@@ -36818,7 +36867,7 @@ class MobileManager {
                 logger.info(`⚠️ Found ${clientsWithoutManagers.length} clients without managers:`, clientsWithoutManagers);
                 logger.info("💡 These will be handled by TelegramService during health checks");
             }
-            logger.info(`✅ Synchronization complete. Active: ${activeMobiles.length}, MobileManager: ${this.telegramManagers.size}, TelegramManager.static: ${_TelegramManager__WEBPACK_IMPORTED_MODULE_4__["default"].getInstanceCount()}, DialogManager: ${_tg_dialogs__WEBPACK_IMPORTED_MODULE_6__.DialogManager.getInstanceCount()}`);
+            logger.info(`✅ Synchronization complete. Active: ${activeMobiles.length}, MobileManager: ${this.telegramManagers.size}, TelegramManager.static: ${_telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getInstanceCount()}, DialogManager: ${_tg_dialogs__WEBPACK_IMPORTED_MODULE_6__.DialogManager.getInstanceCount()}`);
         }
         catch (error) {
             logger.warn("⚠️ Warning during manager synchronization:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Synchronization failed"));
@@ -37011,468 +37060,28 @@ function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   createPromoteClient: () => (/* binding */ createPromoteClient),
-/* harmony export */   defaultMessages: () => (/* binding */ defaultMessages),
-/* harmony export */   defaultReactions: () => (/* binding */ defaultReactions),
-/* harmony export */   fetchNumbersFromString: () => (/* binding */ fetchNumbersFromString),
-/* harmony export */   formatDateTime: () => (/* binding */ formatDateTime),
-/* harmony export */   getCurrentHourIST: () => (/* binding */ getCurrentHourIST),
-/* harmony export */   getISTTimestamp: () => (/* binding */ getISTTimestamp),
-/* harmony export */   getPublicIP: () => (/* binding */ getPublicIP),
-/* harmony export */   getRandomBoolean: () => (/* binding */ getRandomBoolean),
-/* harmony export */   getdaysLeft: () => (/* binding */ getdaysLeft),
-/* harmony export */   handlePermanentTelegramFailure: () => (/* binding */ handlePermanentTelegramFailure),
-/* harmony export */   openChannels: () => (/* binding */ openChannels),
-/* harmony export */   prcessID: () => (/* binding */ prcessID),
-/* harmony export */   removeNumbersFromString: () => (/* binding */ removeNumbersFromString),
-/* harmony export */   saveFile: () => (/* binding */ saveFile),
-/* harmony export */   sleep: () => (/* binding */ sleep),
-/* harmony export */   startNewUserProcess: () => (/* binding */ startNewUserProcess),
-/* harmony export */   toBoolean: () => (/* binding */ toBoolean)
+/* harmony export */   fetchNumbersFromString: () => (/* reexport safe */ _shared_numbers__WEBPACK_IMPORTED_MODULE_1__.fetchNumbersFromString),
+/* harmony export */   formatDateTime: () => (/* reexport safe */ _shared_time__WEBPACK_IMPORTED_MODULE_2__.formatDateTime),
+/* harmony export */   getPublicIP: () => (/* reexport safe */ _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_4__.getPublicIP),
+/* harmony export */   getdaysLeft: () => (/* reexport safe */ _shared_time__WEBPACK_IMPORTED_MODULE_2__.getdaysLeft),
+/* harmony export */   handlePermanentTelegramFailure: () => (/* reexport safe */ _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure),
+/* harmony export */   prcessID: () => (/* reexport safe */ _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_4__.prcessID),
+/* harmony export */   sleep: () => (/* reexport safe */ _shared_sleep__WEBPACK_IMPORTED_MODULE_0__.sleep),
+/* harmony export */   startNewUserProcess: () => (/* reexport safe */ _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.startNewUserProcess)
 /* harmony export */ });
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! axios */ "axios");
-/* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_4__);
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! url */ "url");
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_5__);
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _setupNewMobile__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./setupNewMobile */ "./src/core/setupNewMobile.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _shared_sleep__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../shared/sleep */ "./src/shared/sleep.ts");
+/* harmony import */ var _shared_numbers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../shared/numbers */ "./src/shared/numbers.ts");
+/* harmony import */ var _shared_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../shared/time */ "./src/shared/time.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+// Temporary re-export shim (structural cleanup B4). The helpers live in their feature folders now;
+// only TelegramManager.ts, connection.ts and connection-service.ts still import this path, and those
+// session/connection files are not edited before the session batch (B11). Delete this file then.
 
 
 
 
 
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("utils");
-const __filename = (0,url__WEBPACK_IMPORTED_MODULE_5__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/core/utils.ts");
-const __dirname = path__WEBPACK_IMPORTED_MODULE_4__.dirname(__filename);
-async function sendPermanentFailureNotification(notification, context) {
-    try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
-        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.logUnsentNotification)(sent, "Permanent failure notification returned false", context);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, context, false);
-        return false;
-    }
-}
-function maskApiHash(apiHash) {
-    if (!apiHash)
-        return "missing";
-    return apiHash.length <= 8 ? apiHash : `***${apiHash.slice(-8)}`;
-}
-function formatTelegramFingerprintSummary(fingerprint) {
-    if (!fingerprint)
-        return "apiId=unknown | apiHash=unknown | device=unknown | system=unknown | app=unknown | lang=unknown";
-    return [
-        `apiId=${fingerprint.apiId}`,
-        `apiHash=${fingerprint.apiHashSuffix}`,
-        `device=${fingerprint.deviceModel || "unknown"}`,
-        `system=${fingerprint.systemVersion || "unknown"}`,
-        `app=${fingerprint.appVersion || "unknown"}`,
-        `langPack=${fingerprint.langPack || "unknown"}`,
-        `lang=${fingerprint.langCode || "unknown"}`,
-        `systemLang=${fingerprint.systemLangCode || "unknown"}`,
-        `proxy=${fingerprint.proxy || "none"}`,
-    ].join(" | ");
-}
-async function loadTelegramFingerprintSummary(mobile) {
-    if (!mobile)
-        return null;
-    try {
-        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_10__.generateTGConfig)(mobile);
-        const params = config.params;
-        const proxy = params.proxy;
-        return {
-            apiId: config.apiId,
-            apiHashSuffix: maskApiHash(config.apiHash),
-            deviceModel: typeof params.deviceModel === "string" ? params.deviceModel : undefined,
-            systemVersion: typeof params.systemVersion === "string" ? params.systemVersion : undefined,
-            appVersion: typeof params.appVersion === "string" ? params.appVersion : undefined,
-            langPack: typeof params.langPack === "string" ? params.langPack : undefined,
-            langCode: typeof params.langCode === "string" ? params.langCode : undefined,
-            systemLangCode: typeof params.systemLangCode === "string" ? params.systemLangCode : undefined,
-            proxy: proxy?.ip && proxy?.port ? `${proxy.ip}:${proxy.port}` : undefined,
-        };
-    }
-    catch (error) {
-        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${mobile}`, {
-            error: error instanceof Error ? error.message : String(error),
-        });
-        return null;
-    }
-}
-// IChannel (the activeChannels doc shape) is now the single canonical type in @tg/core — see
-// packages/tg-core/src/types/activeChannel.ts. Import it from '@tg/core'; do not redefine it here.
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-// contains moved to @tg/core/utils/contains (shared, tg-aut canonical version).
-// selectRandomElements moved to @tg/core/utils/random (shared).
-function toBoolean(value) {
-    if (typeof value === 'string') {
-        return value.toLowerCase() === 'true';
-    }
-    if (typeof value === 'number') {
-        return value === 1;
-    }
-    return value;
-}
-function fetchNumbersFromString(inputString) {
-    if (!inputString)
-        return "";
-    const regex = /\d+/g;
-    const matches = inputString?.match(regex);
-    if (matches) {
-        return matches.join("");
-    }
-    return inputString;
-}
-function removeNumbersFromString(inputString) {
-    const regex = /\d+/g;
-    return inputString.replace(regex, '');
-}
-const defaultReactions = [
-    '❤', '🔥', '👏', '🥰', '😁', '🤔',
-    '🤯', '😱', '🤬', '😢', '🎉', '🤩',
-    '🤮', '💩', '🙏', '👌', '🕊', '🤡',
-    '🥱', '🥴', '😍', '🐳', '❤‍🔥', '💯',
-    '🤣', '💔', '🏆', '😭', '😴', '👍',
-    '🌚', '⚡', '🍌', '😐', '💋', '👻',
-    '👀', '🙈', '🤝', '🤗', '🆒',
-    '🗿', '🙉', '🙊', '🤷', '👎'
-];
-async function handlePermanentTelegramFailure(error, mobile, force = false, context = 'runtime') {
-    if (error?.__setupHandled) {
-        logger.info(`[PermanentFailure] ${context}: ${(process.env.clientId || 'UNKNOWN').toUpperCase()}-${mobile} setup flow already handled for this error`);
-        return true;
-    }
-    const message = error?.message || error?.errorMessage || "Unknown error";
-    if (!force && !(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_8__["default"])({ error, message })) {
-        logger.debug(`[PermanentFailure] ${context}: skipping non-permanent error`, {
-            mobile,
-            message,
-        });
-        return false;
-    }
-    logger.error(`[PermanentFailure] ${context}: classified as permanent, triggering replacement flow`, {
-        mobile,
-        message,
-        force,
-    });
-    await startNewUserProcess(error, mobile, force, context);
-    return true;
-}
-async function startNewUserProcess(error, mobile, force = false, context = 'runtime') {
-    if (error?.__setupHandled) {
-        logger.info(`[PermanentFailure] ${context}: ${(process.env.clientId || 'UNKNOWN').toUpperCase()}-${mobile} setup flow already handled for this error`);
-        return;
-    }
-    error.__setupHandled = true;
-    const message = error?.message || error?.errorMessage || "Unknown error";
-    if (!force && !(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_8__["default"])({ error, message })) {
-        logger.debug(`[PermanentFailure] ${context}: startNewUserProcess skipped because error is not permanent`, {
-            mobile,
-            message,
-        });
-        return;
-    }
-    const fingerprint = await loadTelegramFingerprintSummary(mobile);
-    const fingerprintSummary = formatTelegramFingerprintSummary(fingerprint);
-    await sendPermanentFailureNotification({
-        title: "Mobile replaced",
-        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.CRITICAL,
-        fields: [
-            { label: "Mobile", value: mobile },
-            { label: "Context", value: context },
-            { label: "Error", value: message.slice(0, 500), code: false },
-        ],
-        details: fingerprintSummary.split(' | '),
-        tags: ["promote", "telegram", "permanent-failure", "replacement"],
-    }, `PermanentFailure.notification.${mobile}`);
-    logger.error(`[PermanentFailure] ${context}: handing off to setupNewMobile`, {
-        mobile,
-        message,
-        clientId: process.env.clientId,
-        fingerprint,
-    });
-    await (0,_setupNewMobile__WEBPACK_IMPORTED_MODULE_7__.setupNewMobile)(mobile, false, 90, true, message);
-}
-/**
- * Whole days until a SpamBot release date, -1 when unparseable. The old split(' ') parser returned
- * NaN for every real format ("12 Oct 2026, 15:58 UTC", "Oct 12, 2026"), so limits never rotated.
- */
-function getdaysLeft(inputDate) {
-    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.parseSpamBotReleaseDate)(inputDate, new Date());
-    if (!parsed)
-        return -1;
-    return Math.ceil((parsed.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-}
-const openChannels = [
-    "1503501267",
-    "1551323319",
-    "1874177023",
-    "1726884257",
-    "2078206164",
-    "1783847947",
-    "1280090273",
-    "1680562555",
-    "2034836144",
-    "1837117287",
-    "2048953473",
-    "1659680108",
-    "1942384583",
-    "1633338877",
-    "2062130327",
-    "1801945887",
-    "1825148754",
-    "1586137943",
-    "1847027610",
-    "1508171809",
-    "1712982876",
-    "1249091516",
-    "1514843822",
-    "1959564784",
-    "1529606821",
-    "1751125886",
-    "1755570724",
-    "1627383361",
-    "1687496208",
-    "1541729758",
-    "2003519665",
-    "1913476459",
-    "1548006801",
-    "2035631610",
-    "1236560723",
-    "1622766959",
-    "2049243534",
-    "1780327268",
-    "1803626686",
-    "1802180690",
-    "1769784193",
-    "2087610212",
-    "1813163445",
-    "1684831952",
-    "1387333195",
-    "2122118869",
-    "1887746719",
-    "1652078022",
-    "1988938452",
-    "1583611497",
-    "1673218199",
-    "2122063964",
-    "1956751085",
-    "1686773455",
-    "1705755336",
-    "1894460536",
-    "1635649108",
-    "2064393771",
-    "1831901563",
-    "1862260678",
-    "1318582599",
-    "2106543232",
-    "1654557420",
-    "1181590789",
-    "1222174863",
-    "2008789348",
-    "1746586826",
-    "2121282957",
-    "1794858656",
-    "1617883662",
-    "1590103744",
-    "1972653135",
-    "2041058457",
-    "1546582368",
-    "1673831190",
-    "1637480510",
-    "1480040054",
-    "2115440057",
-    "2059483606",
-    "1336087349",
-    "1347315367",
-    "1935653698",
-    "1209858289",
-    "1650098849",
-    "1643694723",
-    "1732214668",
-    "1740047200",
-    "1586912179",
-    "1559696504",
-    "1469191373",
-    "1851254214",
-    "1234379666",
-    "1917165275",
-    "1584560094",
-    "1179319575",
-    "1641006506",
-    "2035989217",
-    "1926661300",
-    "1678130613",
-    "1727190974",
-    "2093547249",
-    "1652554715",
-    "1772077397",
-    "1929734618",
-    "1394253915",
-    "1519468408",
-    "2141607443",
-    "1314177183",
-    "1624967628",
-    "2091837588",
-    "1614393352",
-    "1720123123",
-    "1709882922",
-    "2104429073",
-    "1922992673",
-    "1376948626",
-    "1814963734",
-    "2186436757",
-    "1813392684",
-    "1875330360",
-    "1746364549"
-];
-// getRandomEmoji / generateEmojis moved to @tg/core/utils/emoji (shared).
-function getCurrentHourIST() {
-    const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000;
-    const istTime = new Date(now.getTime() + istOffset);
-    const istHour = istTime.getUTCHours();
-    return istHour;
-}
-const createPromoteClient = async (payload) => {
-    try {
-        const response = await axios__WEBPACK_IMPORTED_MODULE_0___default().post(`${process.env.uptimeChecker}/promoteclients`, payload, {
-            headers: {
-                'accept': '*/*',
-                'Content-Type': 'application/json',
-            },
-        });
-        logger.info('Response:', response.data);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "Failedd to insert promoteClient");
-    }
-};
-async function saveFile(url, name) {
-    const urlPathname = new URL(url).pathname;
-    const urlFilename = urlPathname.split('/').pop() || '';
-    const urlExtMatch = urlFilename.match(/\.([^.]+)$/);
-    const urlExtension = urlExtMatch ? urlExtMatch[1].toLowerCase() : '';
-    const getExtFromMimeType = (mimeType) => {
-        const mimeToExt = {
-            'image/jpeg': 'jpg',
-            'image/jpg': 'jpg',
-            'image/png': 'png',
-            'image/gif': 'gif',
-            'image/webp': 'webp',
-            'image/bmp': 'bmp',
-            'video/mp4': 'mp4',
-            'video/webm': 'webm',
-            'video/quicktime': 'mov'
-        };
-        return mimeToExt[mimeType.toLowerCase()] || '';
-    };
-    try {
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_1__.fetchWithTimeout)(url, { responseType: 'arraybuffer' });
-        if (response?.status === 200) {
-            const contentTypeRaw = response.headers?.['content-type'];
-            const contentType = contentTypeRaw != null ? String(contentTypeRaw) : '';
-            const mimeExtension = contentType ? getExtFromMimeType(contentType) : '';
-            const extension = urlExtension || mimeExtension || 'jpg';
-            const filename = name
-                ? `${name}.${extension}`
-                : urlFilename && urlExtMatch
-                    ? urlFilename
-                    : urlFilename
-                        ? `${urlFilename}.${extension}`
-                        : `file_${Date.now()}.${extension}`;
-            const downloadsDir = path__WEBPACK_IMPORTED_MODULE_4__.join(__dirname, 'downloads');
-            try {
-                if (!fs__WEBPACK_IMPORTED_MODULE_3__.existsSync(downloadsDir)) {
-                    fs__WEBPACK_IMPORTED_MODULE_3__.mkdirSync(downloadsDir, { recursive: true });
-                }
-            }
-            catch (err) {
-                logger.error('Failed to create downloads directory:', err);
-                throw new Error(`Failed to create downloads directory: ${err.message}`);
-            }
-            const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-            const mypath = path__WEBPACK_IMPORTED_MODULE_4__.join(downloadsDir, sanitizedFilename);
-            try {
-                await fs__WEBPACK_IMPORTED_MODULE_3__.promises.writeFile(mypath, response.data);
-                logger.info(`${sanitizedFilename} Saved at ${mypath}`);
-                return mypath;
-            }
-            catch (err) {
-                logger.error('File operation error:', err);
-                throw new Error(`Failed to save file: ${err.message}`);
-            }
-        }
-        else {
-            throw new Error(`Unable to download file from ${url}`);
-        }
-    }
-    catch (err) {
-        logger.error('Download error:', err);
-        throw err;
-    }
-}
-const defaultMessages = [
-    "1", "2", "3", "4", "5", "6", "7", "8",
-    "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21"
-];
-function getRandomBoolean() {
-    return Math.random() >= 0.5;
-}
-function formatDateTime(date) {
-    return date.toLocaleString("en-US", {
-        day: "numeric", // e.g., 1
-        month: "numeric", // e.g., 2
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-        timeZone: "Asia/Kolkata" // Set to IST
-    }).replace(/^(\d+)\/(\d+)/, "$2/$1"); // Swap month and day
-}
-// Process ID for this instance
-const prcessID = Math.floor(Math.random() * 123);
-logger.info("ProcessID: ", prcessID);
-// IP utilities
-let ip = null;
-const getPublicIP = async () => {
-    if (ip)
-        return ip;
-    try {
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_1__.fetchWithTimeout)('https://api.ipify.org?format=json');
-        logger.info(`Your public IP address is: ${response.data.ip}`);
-        ip = response.data.ip;
-        return ip;
-    }
-    catch (error) {
-        logger.error('Error fetching the public IP address:', error.message);
-    }
-};
-function getISTTimestamp() {
-    const now = new Date();
-    const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000)); // Add 5:30 hours
-    return istTime.toISOString().replace('Z', '+05:30');
-}
 
 
 /***/ },
@@ -39251,11 +38860,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _core_connection__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../core/connection */ "./src/core/connection.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _shared_sleep__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../shared/sleep */ "./src/shared/sleep.ts");
 /* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../core/app-service */ "./src/core/app-service.ts");
-/* harmony import */ var _core_connection_service__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../core/connection-service */ "./src/core/connection-service.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _core_connection_service__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../core/connection-service */ "./src/core/connection-service.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -39266,7 +38876,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("connection-route");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("connection-route");
 function requestIdOf(req) {
     const requestId = req.requestId;
     return typeof requestId === "string" ? requestId : undefined;
@@ -39283,7 +38893,7 @@ async function sendConnectionRouteNotification(notification, failureContext) {
 }
 function sendBootstrapFailure(req, res, error) {
     const requestId = requestIdOf(req);
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_7__.createPromoteRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_8__.createPromoteRouteComponentFailureEvidence)({
         requestId,
         component: "service.initialization",
         owner: "system",
@@ -39291,11 +38901,11 @@ function sendBootstrapFailure(req, res, error) {
         error,
         action: "recover",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_7__.sendPromoteRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_8__.sendPromoteRouteHealthFailureResponse)(res, {
         operation: "connection-bootstrap",
         readOnly: false,
         error: "Failed to initiate connection bootstrap",
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_7__.promoteRouteHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_8__.promoteRouteHealthErrorMessage)(error),
         evidence,
         requestId,
         extra: { status: "bootstrap_failed" },
@@ -39308,37 +38918,37 @@ function configureConnectionRoute(app) {
     let canTry2 = true;
     const currentBootstrapResponse = (connectionService) => {
         if (connectionService.isInitialized()) {
-            return { statusCode: 200, body: { status: 'already_initialized', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() } };
+            return { statusCode: 200, body: { status: 'already_initialized', processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() } };
         }
         if (connectionService.isInitializationInProgress() || _core_connection__WEBPACK_IMPORTED_MODULE_3__.connectionState.bootstrapInProgress) {
-            return { statusCode: 202, body: { status: 'bootstrap_in_progress', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() } };
+            return { statusCode: 202, body: { status: 'bootstrap_in_progress', processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() } };
         }
         return null;
     };
     app.get('/tryToConnect/:num', async (req, res) => {
         const rawProcessId = String(req.params?.num ?? "");
         const receivePrcssId = /^\d+$/.test(rawProcessId) ? Number(rawProcessId) : Number.NaN;
-        logger.info(`Connect Req received from: ${receivePrcssId}`, { processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID });
+        logger.info(`Connect Req received from: ${receivePrcssId}`, { processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID });
         try {
             if (!Number.isSafeInteger(receivePrcssId)) {
                 res.status(400).json({ status: 'invalid_process_id' });
                 return;
             }
-            if (receivePrcssId !== _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID) {
+            if (receivePrcssId !== _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID) {
                 logger.info('SomeOther Unknown Process Exist');
-                res.status(409).json({ status: 'wrong_process', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() });
+                res.status(409).json({ status: 'wrong_process', processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() });
                 await sendConnectionRouteNotification({
                     title: 'Wrong process',
                     severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.WARNING,
                     fields: [
-                        { label: 'Current', value: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() },
+                        { label: 'Current', value: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() },
                         { label: 'Requested', value: rawProcessId },
                     ],
                     tags: ['promote', 'connection', 'shutdown'],
                 }, 'Error notifying wrong process shutdown');
                 setTimeout(async () => {
                     try {
-                        await _core_app_service__WEBPACK_IMPORTED_MODULE_5__.AppService.getInstance(_core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString()).gracefulShutdown("Wrong promote process detected");
+                        await _core_app_service__WEBPACK_IMPORTED_MODULE_5__.AppService.getInstance(_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString()).gracefulShutdown("Wrong promote process detected");
                     }
                     catch (shutdownError) {
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(shutdownError, 'Error during wrong-process graceful shutdown');
@@ -39347,11 +38957,11 @@ function configureConnectionRoute(app) {
                 }, 100);
                 return;
             }
-            const connectionService = _core_connection_service__WEBPACK_IMPORTED_MODULE_6__.ConnectionService.getInstance();
+            const connectionService = _core_connection_service__WEBPACK_IMPORTED_MODULE_7__.ConnectionService.getInstance();
             const existingBootstrap = currentBootstrapResponse(connectionService);
             if (existingBootstrap) {
                 logger.info('Process bootstrap state already resolved, skipping duplicate trigger', {
-                    processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID,
+                    processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID,
                     connectionState: _core_connection__WEBPACK_IMPORTED_MODULE_3__.connectionState,
                     status: existingBootstrap.body.status,
                 });
@@ -39359,15 +38969,15 @@ function configureConnectionRoute(app) {
                 return;
             }
             if (!canTry2) {
-                res.status(202).json({ status: 'bootstrap_cooldown', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() });
+                res.status(202).json({ status: 'bootstrap_cooldown', processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() });
                 return;
             }
-            await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.sleep)(300);
-            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_5__.AppService.getInstance(_core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString());
+            await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(300);
+            const appService = _core_app_service__WEBPACK_IMPORTED_MODULE_5__.AppService.getInstance(_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString());
             const latestBootstrap = currentBootstrapResponse(connectionService);
             if (latestBootstrap) {
                 logger.info('Process bootstrap state changed before trigger, skipping duplicate trigger', {
-                    processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID,
+                    processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID,
                     connectionState: _core_connection__WEBPACK_IMPORTED_MODULE_3__.connectionState,
                     status: latestBootstrap.body.status,
                 });
@@ -39375,7 +38985,7 @@ function configureConnectionRoute(app) {
                 return;
             }
             logger.info('Trying to initiate promote process bootstrap', {
-                processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID,
+                processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID,
                 clientId: process.env.clientId,
             });
             canTry2 = false;
@@ -39383,8 +38993,8 @@ function configureConnectionRoute(app) {
             (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_2__.scheduleUnrefTimeout)(() => {
                 canTry2 = true;
             }, 70000);
-            res.status(202).json({ status: 'bootstrap_started', processId: _core_utils__WEBPACK_IMPORTED_MODULE_4__.prcessID.toString() });
-            await (0,_core_utils__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000);
+            res.status(202).json({ status: 'bootstrap_started', processId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_6__.prcessID.toString() });
+            await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_4__.sleep)(3000);
             await appService.initialize();
             (0,_core_connection__WEBPACK_IMPORTED_MODULE_3__.markBootstrapCompleted)();
         }
@@ -39761,7 +39371,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_randomized_maintenance_restart__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/randomized-maintenance-restart */ "../../packages/tg-core/src/utils/randomized-maintenance-restart.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _shared_time__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../shared/time */ "./src/shared/time.ts");
 /* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../core/Telegram.service */ "./src/core/Telegram.service.ts");
 /* harmony import */ var _core_connection__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../core/connection */ "./src/core/connection.ts");
 /* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
@@ -39830,7 +39440,7 @@ function setupScheduledJobs() {
             // Reset stats after 30 seconds
             (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__.scheduleUnrefTimeout)(async () => {
                 try {
-                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.resetPromoteClientStats((0,_core_utils__WEBPACK_IMPORTED_MODULE_5__.formatDateTime)(new Date()));
+                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.resetPromoteClientStats((0,_shared_time__WEBPACK_IMPORTED_MODULE_5__.formatDateTime)(new Date()));
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error resetting promote client stats");
@@ -40109,6 +39719,36 @@ async function sendPromoteStatsNotification(notification, failureContext) {
 
 /***/ },
 
+/***/ "./src/promotion/default-messages.ts"
+/*!*******************************************!*\
+  !*** ./src/promotion/default-messages.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   defaultMessages: () => (/* binding */ defaultMessages),
+/* harmony export */   defaultReactions: () => (/* binding */ defaultReactions)
+/* harmony export */ });
+const defaultReactions = [
+    '❤', '🔥', '👏', '🥰', '😁', '🤔',
+    '🤯', '😱', '🤬', '😢', '🎉', '🤩',
+    '🤮', '💩', '🙏', '👌', '🕊', '🤡',
+    '🥱', '🥴', '😍', '🐳', '❤‍🔥', '💯',
+    '🤣', '💔', '🏆', '😭', '😴', '👍',
+    '🌚', '⚡', '🍌', '😐', '💋', '👻',
+    '👀', '🙈', '🤝', '🤗', '🆒',
+    '🗿', '🙉', '🙊', '🤷', '👎'
+];
+const defaultMessages = [
+    "1", "2", "3", "4", "5", "6", "7", "8",
+    "9", "10", "11", "12", "13", "14", "15",
+    "16", "17", "18", "19", "20", "21"
+];
+
+
+/***/ },
+
 /***/ "./src/promotion/promotion-engine.ts"
 /*!*******************************************!*\
   !*** ./src/promotion/promotion-engine.ts ***!
@@ -40123,7 +39763,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _default_messages__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./default-messages */ "./src/promotion/default-messages.ts");
 /* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
 /* harmony import */ var _core_app_service__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/app-service */ "./src/core/app-service.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
@@ -40170,7 +39810,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
         this.converted = 0;
         this.previousSuccessfulMessages = [];
         this.MAX_SUCCESS_MESSAGES = 30;
-        this.defaultAvailableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
+        this.defaultAvailableMsgs = _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
         this.refreshPromotionContext();
         this.onTelegramRuntimeFailure = options.onTelegramRuntimeFailure;
         logger.log(`[${this.mobile}] 🚀 PromotionEngine created; helperChannelLoopDelay=${this.formatDuration(this.HELPER_CHANNEL_LOOP_DELAY_MS)}`);
@@ -40340,7 +39980,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
                 logger.warn(`[${this.mobile}] Channel ${channelId} not found in DB during deleted handling`);
                 return;
             }
-            const availableMsgs = Array.isArray(channelInfo.availableMsgs) ? channelInfo.availableMsgs : [..._core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages];
+            const availableMsgs = Array.isArray(channelInfo.availableMsgs) ? channelInfo.availableMsgs : [..._default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages];
             // channelIntelligence.recordDeletion() (shared runner) is the source of truth for the
             // deletion outcome; no legacy activeChannels deletedCount/successMsgCount/
             // followupMsgSuccessCount write-back is needed here.
@@ -40513,9 +40153,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
         if (channelInfo.availableMsgs)
             return channelInfo;
         // availableMsgs repair: the stored doc has no template list.
-        const repaired = (await _data_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.updateActiveChannel(channelInfo.channelId, { availableMsgs: _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages })) ?? null;
+        const repaired = (await _data_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.updateActiveChannel(channelInfo.channelId, { availableMsgs: _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages })) ?? null;
         if (repaired)
-            repaired.availableMsgs = _core_utils__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
+            repaired.availableMsgs = _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
         return repaired;
     }
     getChannelStore() {
@@ -40990,7 +40630,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _core_Telegram_service__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/Telegram.service */ "./src/core/Telegram.service.ts");
 /* harmony import */ var _core_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../core/inactive-mobile-scraper */ "./src/core/inactive-mobile-scraper.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _core_utils__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../core/utils */ "./src/core/utils.ts");
+/* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
 /* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
@@ -41273,10 +40913,10 @@ function configureRoutes(app) {
         }
     });
     app.get('/ip', async (req, res) => {
-        res.send(await (0,_core_utils__WEBPACK_IMPORTED_MODULE_5__.getPublicIP)());
+        res.send(await (0,_bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.getPublicIP)());
     });
     app.get('/getProcessId', async (req, res) => {
-        res.json({ ProcessId: _core_utils__WEBPACK_IMPORTED_MODULE_5__.prcessID.toString() });
+        res.json({ ProcessId: _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_5__.prcessID.toString() });
     });
     // Application control routes
     app.get('/exit', (req, res, next) => {
@@ -42057,6 +41697,110 @@ function configureRoutes(app) {
 
 /***/ },
 
+/***/ "./src/shared/numbers.ts"
+/*!*******************************!*\
+  !*** ./src/shared/numbers.ts ***!
+  \*******************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   fetchNumbersFromString: () => (/* binding */ fetchNumbersFromString),
+/* harmony export */   getRandomBoolean: () => (/* binding */ getRandomBoolean),
+/* harmony export */   removeNumbersFromString: () => (/* binding */ removeNumbersFromString)
+/* harmony export */ });
+function fetchNumbersFromString(inputString) {
+    if (!inputString)
+        return "";
+    const regex = /\d+/g;
+    const matches = inputString?.match(regex);
+    if (matches) {
+        return matches.join("");
+    }
+    return inputString;
+}
+function removeNumbersFromString(inputString) {
+    const regex = /\d+/g;
+    return inputString.replace(regex, '');
+}
+function getRandomBoolean() {
+    return Math.random() >= 0.5;
+}
+
+
+/***/ },
+
+/***/ "./src/shared/sleep.ts"
+/*!*****************************!*\
+  !*** ./src/shared/sleep.ts ***!
+  \*****************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   sleep: () => (/* binding */ sleep)
+/* harmony export */ });
+// IChannel (the activeChannels doc shape) is now the single canonical type in @tg/core — see
+// packages/tg-core/src/types/activeChannel.ts. Import it from '@tg/core'; do not redefine it here.
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+/***/ },
+
+/***/ "./src/shared/time.ts"
+/*!****************************!*\
+  !*** ./src/shared/time.ts ***!
+  \****************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   formatDateTime: () => (/* binding */ formatDateTime),
+/* harmony export */   getCurrentHourIST: () => (/* binding */ getCurrentHourIST),
+/* harmony export */   getISTTimestamp: () => (/* binding */ getISTTimestamp),
+/* harmony export */   getdaysLeft: () => (/* binding */ getdaysLeft)
+/* harmony export */ });
+/* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+
+/**
+ * Whole days until a SpamBot release date, -1 when unparseable. The old split(' ') parser returned
+ * NaN for every real format ("12 Oct 2026, 15:58 UTC", "Oct 12, 2026"), so limits never rotated.
+ */
+function getdaysLeft(inputDate) {
+    const parsed = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__.parseSpamBotReleaseDate)(inputDate, new Date());
+    if (!parsed)
+        return -1;
+    return Math.ceil((parsed.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+}
+// getRandomEmoji / generateEmojis moved to @tg/core/utils/emoji (shared).
+function getCurrentHourIST() {
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istTime = new Date(now.getTime() + istOffset);
+    const istHour = istTime.getUTCHours();
+    return istHour;
+}
+function formatDateTime(date) {
+    return date.toLocaleString("en-US", {
+        day: "numeric", // e.g., 1
+        month: "numeric", // e.g., 2
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZone: "Asia/Kolkata" // Set to IST
+    }).replace(/^(\d+)\/(\d+)/, "$2/$1"); // Swap month and day
+}
+function getISTTimestamp() {
+    const now = new Date();
+    const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000)); // Add 5:30 hours
+    return istTime.toISOString().replace('Z', '+05:30');
+}
+
+
+/***/ },
+
 /***/ "./src/telegram-utils/updatePrivacy.ts"
 /*!*********************************************!*\
   !*** ./src/telegram-utils/updatePrivacy.ts ***!
@@ -42365,6 +42109,183 @@ async function persistProbeTimestamp(mobile, timestamp) {
     catch (error) {
         logger.debug(`Failed to persist SpamBot probe timestamp for ${mobile}: ${String(error)}`);
     }
+}
+
+
+/***/ },
+
+/***/ "./src/telegram/client-access.ts"
+/*!***************************************!*\
+  !*** ./src/telegram/client-access.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__),
+/* harmony export */   isTelegramManagerRegistered: () => (/* binding */ isTelegramManagerRegistered),
+/* harmony export */   registerTelegramManager: () => (/* binding */ registerTelegramManager)
+/* harmony export */ });
+let registered = null;
+/** Called once by bootstrap with the TelegramManager class. */
+function registerTelegramManager(statics) {
+    registered = statics;
+}
+function isTelegramManagerRegistered() {
+    return registered !== null;
+}
+function statics() {
+    if (!registered) {
+        throw new Error("TelegramManager is not registered: bootstrap must call registerTelegramManager() first");
+    }
+    return registered;
+}
+const TelegramManager = {
+    getInstance: (...args) => statics().getInstance(...args),
+    getAllInstances: () => statics().getAllInstances(),
+    getInstanceCount: () => statics().getInstanceCount(),
+    getOrCreate: (...args) => statics().getOrCreate(...args),
+};
+/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (TelegramManager);
+
+
+/***/ },
+
+/***/ "./src/telegram/permanent-failure.ts"
+/*!*******************************************!*\
+  !*** ./src/telegram/permanent-failure.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   handlePermanentTelegramFailure: () => (/* binding */ handlePermanentTelegramFailure),
+/* harmony export */   startNewUserProcess: () => (/* binding */ startNewUserProcess)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _core_setupNewMobile__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../core/setupNewMobile */ "./src/core/setupNewMobile.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("utils");
+async function sendPermanentFailureNotification(notification, context) {
+    try {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.logUnsentNotification)(sent, "Permanent failure notification returned false", context);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, context, false);
+        return false;
+    }
+}
+function maskApiHash(apiHash) {
+    if (!apiHash)
+        return "missing";
+    return apiHash.length <= 8 ? apiHash : `***${apiHash.slice(-8)}`;
+}
+function formatTelegramFingerprintSummary(fingerprint) {
+    if (!fingerprint)
+        return "apiId=unknown | apiHash=unknown | device=unknown | system=unknown | app=unknown | lang=unknown";
+    return [
+        `apiId=${fingerprint.apiId}`,
+        `apiHash=${fingerprint.apiHashSuffix}`,
+        `device=${fingerprint.deviceModel || "unknown"}`,
+        `system=${fingerprint.systemVersion || "unknown"}`,
+        `app=${fingerprint.appVersion || "unknown"}`,
+        `langPack=${fingerprint.langPack || "unknown"}`,
+        `lang=${fingerprint.langCode || "unknown"}`,
+        `systemLang=${fingerprint.systemLangCode || "unknown"}`,
+        `proxy=${fingerprint.proxy || "none"}`,
+    ].join(" | ");
+}
+async function loadTelegramFingerprintSummary(mobile) {
+    if (!mobile)
+        return null;
+    try {
+        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_4__.generateTGConfig)(mobile);
+        const params = config.params;
+        const proxy = params.proxy;
+        return {
+            apiId: config.apiId,
+            apiHashSuffix: maskApiHash(config.apiHash),
+            deviceModel: typeof params.deviceModel === "string" ? params.deviceModel : undefined,
+            systemVersion: typeof params.systemVersion === "string" ? params.systemVersion : undefined,
+            appVersion: typeof params.appVersion === "string" ? params.appVersion : undefined,
+            langPack: typeof params.langPack === "string" ? params.langPack : undefined,
+            langCode: typeof params.langCode === "string" ? params.langCode : undefined,
+            systemLangCode: typeof params.systemLangCode === "string" ? params.systemLangCode : undefined,
+            proxy: proxy?.ip && proxy?.port ? `${proxy.ip}:${proxy.port}` : undefined,
+        };
+    }
+    catch (error) {
+        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${mobile}`, {
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+    }
+}
+async function handlePermanentTelegramFailure(error, mobile, force = false, context = 'runtime') {
+    if (error?.__setupHandled) {
+        logger.info(`[PermanentFailure] ${context}: ${(process.env.clientId || 'UNKNOWN').toUpperCase()}-${mobile} setup flow already handled for this error`);
+        return true;
+    }
+    const message = error?.message || error?.errorMessage || "Unknown error";
+    if (!force && !(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_3__["default"])({ error, message })) {
+        logger.debug(`[PermanentFailure] ${context}: skipping non-permanent error`, {
+            mobile,
+            message,
+        });
+        return false;
+    }
+    logger.error(`[PermanentFailure] ${context}: classified as permanent, triggering replacement flow`, {
+        mobile,
+        message,
+        force,
+    });
+    await startNewUserProcess(error, mobile, force, context);
+    return true;
+}
+async function startNewUserProcess(error, mobile, force = false, context = 'runtime') {
+    if (error?.__setupHandled) {
+        logger.info(`[PermanentFailure] ${context}: ${(process.env.clientId || 'UNKNOWN').toUpperCase()}-${mobile} setup flow already handled for this error`);
+        return;
+    }
+    error.__setupHandled = true;
+    const message = error?.message || error?.errorMessage || "Unknown error";
+    if (!force && !(0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_3__["default"])({ error, message })) {
+        logger.debug(`[PermanentFailure] ${context}: startNewUserProcess skipped because error is not permanent`, {
+            mobile,
+            message,
+        });
+        return;
+    }
+    const fingerprint = await loadTelegramFingerprintSummary(mobile);
+    const fingerprintSummary = formatTelegramFingerprintSummary(fingerprint);
+    await sendPermanentFailureNotification({
+        title: "Mobile replaced",
+        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.CRITICAL,
+        fields: [
+            { label: "Mobile", value: mobile },
+            { label: "Context", value: context },
+            { label: "Error", value: message.slice(0, 500), code: false },
+        ],
+        details: fingerprintSummary.split(' | '),
+        tags: ["promote", "telegram", "permanent-failure", "replacement"],
+    }, `PermanentFailure.notification.${mobile}`);
+    logger.error(`[PermanentFailure] ${context}: handing off to setupNewMobile`, {
+        mobile,
+        message,
+        clientId: process.env.clientId,
+        fingerprint,
+    });
+    await (0,_core_setupNewMobile__WEBPACK_IMPORTED_MODULE_2__.setupNewMobile)(mobile, false, 90, true, message);
 }
 
 
