@@ -69311,7 +69311,7 @@ async function processImage(event) {
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_34__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.fabricatedTextReasons)(imageDetails.text),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.laxmiPayeeReasons)(imageDetails, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.personaPayeeReasons)(imageDetails, [...db.getOwnClientNames(), ...db.getClientFirstNames()], (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.personaPayeeReasons)(imageDetails, [...db.getOwnClientNames(), ...db.getClientFirstNames()]),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
@@ -81017,18 +81017,17 @@ function laxmiPayeeReasons(details, ownVpas) {
 }
 /**
  * Owner 2026-10-21: a persona name (ours or another client's) as the payee needs one of our banking names on the
- * screenshot; a persona payee alone, with or without a UPI id, is fake. Only the payee name and the payee UPI id's local
- * part are checked, so a payer or note naming a persona never counts. Our own UPI id / account id on the screenshot also
- * clears it: a genuine payment by our QR shows the persona name (QR pn=) with our id and often no banking name.
+ * screenshot; without one it is fake, whatever UPI id or account id it shows (owner: "Sraavyagowda" on our
+ * paytmqr6u68em@ptys with no banking name, sneha2 8358211066, was a fake). Only the payee name and the payee UPI id's
+ * local part are checked, so a payer or note naming a persona never counts.
  */
-function personaPayeeReasons(details, personaNames, ownVpas) {
+function personaPayeeReasons(details, personaNames) {
     // A word of the payee must start with the name: "KavyaaGowda", "kavya123@ybl"; not "Mrs Ravya" (sravya).
     const words = `${details.payeeName ?? ''} ${String(details.payeeUpiId ?? '').split('@')[0]}`.toLowerCase().split(/[^a-z0-9]+/);
     const names = personaNames.map(_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.normalizeVpa).filter((name) => name.length >= 3);
     if (!names.some((name) => words.some((word) => word.startsWith(name))))
         return [];
-    const shown = `${details.payeeName ?? ''} ${details.payeeUpiId ?? ''} ${details.payerName ?? ''} ${details.text ?? ''}`;
-    return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.isPaidToUs)(shown, ownVpas) ? [] : ['PERSONA_PAYEE'];
+    return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.hasOurPayeeName)(`${details.payeeName ?? ''} ${details.payerName ?? ''} ${details.text ?? ''}`) ? [] : ['PERSONA_PAYEE'];
 }
 const IST_OFFSET_MS = 330 * 60000;
 const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
