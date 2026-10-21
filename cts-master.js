@@ -1640,7 +1640,7 @@ let AppService = AppService_1 = class AppService {
             }
             if (document2.length > 0) {
                 for (const doc of document2) {
-                    if (doc.canReply == 0 && doc.lastMsgTimeStamp > threeDaysAgo) {
+                    if (doc.canReply == 0) {
                         resp.canCall = false;
                     }
                     if (doc.callTime > threeDaysAgo) {
@@ -47037,6 +47037,8 @@ __decorate([
 ], UserDataController.prototype, "updateAll", null);
 __decorate([
     (0, common_1.Get)(':profile/:chatId'),
+    (0, common_1.UseInterceptors)(interceptors_1.CloudflareCacheInterceptor),
+    (0, decorators_1.NoCache)(),
     (0, swagger_1.ApiOperation)({
         summary: 'Get user data by profile/clientId and chat ID',
         description: 'Retrieves a user data entry by chat ID. The first path segment accepts EITHER a persona/profile '
