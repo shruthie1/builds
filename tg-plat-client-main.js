@@ -45996,7 +45996,7 @@ async function initiateCall(amount, userDetails, reason = "Default") {
     }
     else {
         logger.debug(`[EDGE CASE] Call limited - chatId: ${chatId}, amount: ${adjustedAmount}, payAmount: ${userDetails.payAmount}, highestPayAmount: ${userDetails.highestPayAmount}`);
-        await handleLimitedCall(userDetails, chatId, adjustedAmount);
+        await handleLimitedCall(userDetails, chatId, adjustedAmount, reason);
         return false; // Call was not initiated, just handled limited case
     }
 }
@@ -46086,15 +46086,65 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
     return callRequested;
 }
 /**
- * Handle limited call scenario
+ * Handle limited call scenario: the ops notice says why the call was held back and what happens next.
  */
-async function handleLimitedCall(userDetails, chatId, amount) {
+async function handleLimitedCall(userDetails, chatId, amount, reason) {
     logger.debug(`[EDGE CASE] Call limited - chatId: ${chatId}, amount: ${amount}, payAmount: ${userDetails.payAmount}, highestPayAmount: ${userDetails.highestPayAmount}, callTime: ${userDetails.callTime}`);
+    const waitMin = userDetails.highestPayAmount >= 250 ? 10 : 3; // as in canProceedWithService
+    const lastCallMin = userDetails.callTime ? Math.max(0, Math.round((Date.now() - Number(userDetails.callTime)) / 60000)) : null;
+    let title = `Call held: ${waitMin} min wait after last call, nothing owed`;
+    let next = 'No call scheduled: no paid service pending';
+    if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(userDetails)) {
+        const dueInMs = await scheduleOwedCall(userDetails, chatId, waitMin);
+        title = dueInMs === null
+            ? `Call held: ${waitMin} min wait after last call, scheduling FAILED`
+            : `Call held: ${waitMin} min wait after last call, calling in ${formatWait(dueInMs)}`;
+        next = dueInMs === null ? 'Could not schedule the call (see logs)' : `Call scheduled in ${formatWait(dueInMs)}`;
+    }
     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_12__.notifyChat)(chatId, {
-        title: 'Limited to call',
-        fields: [{ label: 'Amount', value: amount, code: false }, { label: 'Paid', value: userDetails.payAmount, code: false }, { label: 'Highest paid', value: userDetails.highestPayAmount, code: false }],
+        title,
+        fields: [
+            { label: 'Amount', value: amount, code: false },
+            { label: 'Paid', value: userDetails.payAmount, code: false },
+            { label: 'Highest paid', value: userDetails.highestPayAmount, code: false },
+        ],
+        details: [
+            `Why: ${waitMin} min wait after the last call${lastCallMin === null ? '' : ` (last call ${lastCallMin} min ago)`}`,
+            `Next: ${next}`,
+            `Trigger: ${reason.replace(/\n/g, ' ')}`,
+        ],
     });
     await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.asktoPayByEvent)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient(), userDetails);
+}
+function formatWait(ms) {
+    const totalSec = Math.round(ms / 1000);
+    return totalSec >= 60 ? `${Math.floor(totalSec / 60)}m ${totalSec % 60}s` : `${totalSec}s`;
+}
+/**
+ * Limited inside the post-call cooldown: nothing else rings them once it ends, so the paid service was
+ * never delivered (kavya2 2026-10-21). Ring once the cooldown in canProceedWithService has passed.
+ * Returns the delay, or null when scheduling failed.
+ */
+async function scheduleOwedCall(userDetails, chatId, waitMin) {
+    const dueInMs = Math.max(30000, (Number(userDetails.callTime) || 0) + waitMin * 60 * 1000 - Date.now() + 15000);
+    try {
+        const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./call-me */ "./src/calls/call-me.ts"));
+        if (await inHouseCallsActive(_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager)) {
+            await (0,_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_9__.scheduleInHouseFollowUp)(chatId, dueInMs);
+        }
+        else {
+            const type = userDetails.demoGiven ? (userDetails.secondShow ? "3" : "2") : "1";
+            await (0,_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_9__.scheduleLadder)(chatId, type);
+            await (0,_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_9__.deferEventsForChat)(chatId, dueInMs);
+        }
+        logger.log(`[CALL] ${chatId} limited with a paid service pending: call scheduled in ${Math.round(dueInMs / 1000)}s`);
+        return dueInMs;
+    }
+    catch (error) {
+        logger.error(`[ERROR] Error scheduling the owed call - chatId: ${chatId}:`, error);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Cannot schedule the owed call");
+        return null;
+    }
 }
 
 
@@ -53250,7 +53300,9 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_32__.markInbound)(event, "ignored", "canReply=0");
         }
         if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
-            if (userDetails.highestPayAmount < 250 || (userDetails.highestPayAmount >= 250 && userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000)) {
+            // Paid after their last call (callTime is backdated 5 min on delivery): an unserved upgrade skips the 2-hour wait (kavya2 2026-10-21).
+            const paidSinceLastCall = (userDetails.lastPaidAt ?? 0) > (userDetails.callTime ?? 0) + 5 * 60000;
+            if (userDetails.highestPayAmount < 250 || paidSinceLastCall || (userDetails.highestPayAmount >= 250 && userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000)) {
                 // The chat's 'callRequestBlockedUntil' moment: one re-request per throttle window (persisted, so a restart
                 // does not let a spammer ring again at once).
                 const now = Date.now();
@@ -59521,11 +59573,14 @@ async function respondToMsgs(event, allMsg) {
                         else {
                             // For users with higher payment amounts
                             const timeSinceLastCall = currentTime - userDetails.callTime;
-                            const canInitiateHighPayCall = timeSinceLastCall > 2 * 60 * 60 * 1000 || isCallRequest;
+                            // Paid after their last call (callTime is backdated 5 min on delivery): an unserved upgrade, not "after 1 hour" (kavya2 2026-10-21).
+                            const paidSinceLastCall = (userDetails.lastPaidAt ?? 0) > (userDetails.callTime ?? 0) + 5 * 60 * 1000;
+                            const canInitiateHighPayCall = timeSinceLastCall > 2 * 60 * 60 * 1000 || isCallRequest || paidSinceLastCall;
                             if (canInitiateHighPayCall) {
-                                if (timeSinceLastCall > 1 * 60 * 60 * 1000) {
-                                    // Update payment amount to highest and initiate call
-                                    userDetails.payAmount = userDetails.highestPayAmount;
+                                if (timeSinceLastCall > 1 * 60 * 60 * 1000 || paidSinceLastCall) {
+                                    // Update payment amount to highest and initiate call (an upgrade within the hour keeps what they just paid)
+                                    if (timeSinceLastCall > 1 * 60 * 60 * 1000)
+                                        userDetails.payAmount = userDetails.highestPayAmount;
                                     try {
                                         callInitiated = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall)(userDetails.payAmount, userDetails, "Re-Requested Call 2");
                                         logger.info(`High-pay call initiated for user ${chatId} with amount ${userDetails.payAmount}`);
@@ -71729,6 +71784,7 @@ function chatNoticeInput(chatId, notice) {
         ...(notice.fieldLayout ? { fieldLayout: notice.fieldLayout } : {}),
         tables: notice.tables,
         ...(quote ? { quote, quoteLabel } : {}),
+        ...(notice.details?.length ? { details: notice.details, detailsTitle: notice.detailsTitle } : {}),
     };
 }
 async function notifyChat(chatId, notice) {
