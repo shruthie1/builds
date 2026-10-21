@@ -69167,7 +69167,8 @@ async function processImage(event) {
     let releaseClaim;
     // Once a service (call / link / pics) has gone out, a later error must not free the claim (that would allow a
     // second credit of the same payment).
-    const serviceStarted = () => { releaseClaim = undefined; };
+    let serviceSent = false;
+    const serviceStarted = () => { releaseClaim = undefined; serviceSent = true; };
     const initiateCallKeepingClaim = async (...args) => {
         const started = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_26__.initiateCall)(...args);
         serviceStarted();
@@ -69265,7 +69266,12 @@ async function processImage(event) {
             msg = `UNWANTED IMAGE : @${process.env.clientId}\nChatId : ${chatId}\nUser : ${broadcastName}\nInvalidCount: ${invalidPhotoCount}\n\n\n${(0,_shared_format__WEBPACK_IMPORTED_MODULE_6__.parseObjectToString)({ ...imageDetails, text: imageDetails.text?.replace(/[\r\n]+/g, " ") })}\n\n\n${(0,_shared_format__WEBPACK_IMPORTED_MODULE_6__.parseObjectToString)(sanitizedData)}`;
             await postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg);
         }
-        if (!blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
+        // A call is owed. A payment to us is judged first and the owed call follows below unless that payment's own service
+        // went out (live 2026-10-21: the owed call returned here and a fresh ₹350 was never checked or credited).
+        const callOwed = !blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails);
+        const judgePaymentFirst = callOwed && amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT
+            && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
+        if (callOwed && !judgePaymentFirst) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_26__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
                 return true;
@@ -69450,6 +69456,13 @@ async function processImage(event) {
             }
             else {
                 await replyToNonPaymentPicture(event, chatId, imageDetails);
+            }
+        }
+        if (judgePaymentFirst && !serviceSent) {
+            // Rejected, held, repeat or credited without a service: the call owed before this picture still goes out.
+            const latest = await db.read(chatId);
+            if (latest && latest.canReply !== 0 && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(latest)) {
+                await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_26__.proceedWithCall)(latest, chatId, "Image Processed");
             }
         }
         releaseClaim = undefined;
@@ -80572,8 +80585,8 @@ class PaymentFlow {
                     await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
                     return { handled: true };
                 }
-                // Only where the credit rules needed a recent time: the ones that accept at any time (own name, no videos
-                // yet, ₹200+) credited old times before this hold existed and still do. Repeats were stopped above.
+                // Only where the credit rules needed a recent time: the ones that accept at any time (no videos yet,
+                // ₹200+ or no amount) credited old times before this hold existed and still do. Repeats were stopped above.
                 if (verdict.anyTime && (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
                     this.io.log(`[payment-gate] ${f.chatId}: old payment time (${check.time ?? ''}) but the credit rules accept it at any time: crediting`);
                 }
@@ -81217,9 +81230,10 @@ const accept = () => ({ isvalid: true, msg: "" });
 const reject = (reason, title = REJECT_TITLE[reason]) => ({ isvalid: false, msg: PAYMENT_MSG[reason], title });
 /**
  * Is this payment screenshot a valid payment to us? Called only for payments to our UPI/merchant.
- *  - our persona name on it: accept, no time check
  *  - another client's name on it (and not ours): reject, limit the user 30 min
- *  - no known name: judged by the payment time (see judgeRecentTime / judgeUnreadableTime / judgePaidToOthers)
+ *  - otherwise (our persona name or no known name): judged by the payment time (see judgeRecentTime /
+ *    judgeUnreadableTime / judgePaidToOthers). Persona names sit in the payment note and only say which client a
+ *    payment is for (bank names are shared across clients), so our name never skips the time check (owner 2026-10-21).
  * `atMs`: when the picture arrived (pass the same moment as to isRecentValidPayment). Defaults to now.
  */
 async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutesImage, didPaidToOthers, atMs = Date.now()) {
@@ -81234,17 +81248,13 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     const videoCount = Array.isArray(userDetails.videos) ? userDetails.videos.length : 0;
     const chatId = userDetails.chatId;
     logger.log(`ENTRY | chatId=${chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} isWithin10minValid=${isWithinPastTenMinutesImage.isValid} isWithin10minResult=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
-    if (myNameExists) {
-        logger.log(`SCENARIO: My name in payment | ACCEPT (no time check) | chatId=${chatId}`);
-        return { ...accept(), anyTime: true };
-    }
-    if (othersNameExists) {
+    if (othersNameExists && !myNameExists) {
         logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${chatId}`);
         const updated = await db.update(chatId, { limitTime: Date.now() + OTHER_CLIENT_LIMIT_MS });
         await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(updated.chatId, { title: 'Not my payment', fields: [{ label: 'Time', value: isWithinPastTenMinutesImage.time, code: false }], told: true });
         return reject("otherClient");
     }
-    logger.log(`SCENARIO: No known names in payment | validating time & didPaidToOthers | chatId=${chatId}`);
+    logger.log(`SCENARIO: ${myNameExists ? "My name in payment (this client's)" : "No known names in payment"} | validating time & didPaidToOthers | chatId=${chatId}`);
     const ctx = { image: imageDetails, user: userDetails, check: isWithinPastTenMinutesImage, videoCount, atMs };
     if (didPaidToOthers)
         return judgePaidToOthers(ctx);
@@ -81253,12 +81263,12 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     // payment time must not hold them either (ramya1 1913384761 2026-10-21: ₹50, no videos, asked for a details page).
     return verdict.isvalid && acceptsAnyTime(imageDetails, videoCount) ? { ...verdict, anyTime: true } : verdict;
 }
-/** No known name, not paid to others: accepted whatever the time (judgeUnreadableTime's first rule). */
+/** Not another client's payment, not paid to others: accepted whatever the time (judgeUnreadableTime's first rule). */
 function acceptsAnyTime(image, videoCount) {
     // Written as the negation on purpose: a missing/NaN amount is accepted (same as judgeUnreadableTime).
     return !(videoCount > 0 && image.amount < NO_TIME_CHECK_AMOUNT);
 }
-/** No known name, the time is inside the window: accept unless the time contradicts the user's last call. */
+/** Not another client's payment, the time is inside the window: accept unless the time contradicts the user's last call. */
 function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
     const now = new Date(atMs);
@@ -81274,59 +81284,59 @@ function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const callTimeAgoMins = callTime ? ((nowMs - callTime) / MINUTE_MS).toFixed(2) : "N/A";
     logger.log(`Sub-scenario: isWithin10min=true | timeDiff=${age}ms (${ageMins} mins ago) callTimeAgo=${callTimeAgoMins} mins paymentUTC<=now=${notFuture} callTime<paymentTime=${callTime < paymentMs}`);
     if (age <= ACCEPT_WITHIN_MS && notFuture && callTime < paymentMs) {
-        logger.log(`SCENARIO: No known names + time valid (12h, callTime<payment) | ACCEPT | chatId=${chatId}`);
+        logger.log(`SCENARIO: time valid (12h, callTime<payment) | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     const leniencyVideos = videoCount < LENIENT_VIDEO_COUNT;
     const callOver5MinsAgo = callTime < nowMs - CALL_GAP_MS;
     const callWithin5Mins = callTime >= nowMs - CALL_GAP_MS;
     if (leniencyVideos && callOver5MinsAgo) {
-        logger.log(`SCENARIO: No known names + time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
+        logger.log(`SCENARIO: time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     if (callWithin5Mins && age <= FRESH_PAYMENT_MS && notFuture) {
-        logger.log(`SCENARIO: No known names + call within 5mins + payment within 2.5mins | ACCEPT | chatId=${chatId}`);
+        logger.log(`SCENARIO: call within 5mins + payment within 2.5mins | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     if (age <= NEAR_NOW_MS && notFuture) {
-        logger.log(`SCENARIO: No known names + time close to now but callTime check failed (possible wrong timestamp) | REJECT ask screenshot | chatId=${chatId} timeDiffMins=${ageMins}`);
+        logger.log(`SCENARIO: time close to now but callTime check failed (possible wrong timestamp) | REJECT ask screenshot | chatId=${chatId} timeDiffMins=${ageMins}`);
         return reject("confirmTime");
     }
-    logger.log(`SCENARIO: No known names + time invalid (old payment) | REJECT Old payment | chatId=${chatId} timeDiffMins=${ageMins}`);
+    logger.log(`SCENARIO: time invalid (old payment) | REJECT Old payment | chatId=${chatId} timeDiffMins=${ageMins}`);
     return reject("oldPayment");
 }
-/** No known name, the time is outside the window or unreadable. */
+/** Not another client's payment, the time is outside the window or unreadable. */
 function judgeUnreadableTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
     const callOver5MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_9__.callTimeAsOf)(user.callTime, atMs) < atMs - CALL_GAP_MS;
     logger.log(`Sub-scenario: isWithin10min=false | videos=${videoCount} amount=${image.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${check.isValid}`);
     if (acceptsAnyTime(image, videoCount)) {
-        logger.log(`SCENARIO: No known names + time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
+        logger.log(`SCENARIO: time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     if (!callOver5MinsAgo) {
-        logger.log(`SCENARIO: No known names + call still active (within 5mins) | REJECT call over msg | chatId=${chatId}`);
+        logger.log(`SCENARIO: call still active (within 5mins) | REJECT call over msg | chatId=${chatId}`);
         return reject("callOver");
     }
     if (check.isValid) {
-        logger.log(`SCENARIO: No known names + time not recent (parsed time exists but not in window) | REJECT Old payment | chatId=${chatId}`);
+        logger.log(`SCENARIO: time not recent (parsed time exists but not in window) | REJECT Old payment | chatId=${chatId}`);
         return reject("oldPayment");
     }
     // A time read in the future (check.misread) lands here, never in the old-payment branch above.
-    logger.log(`SCENARIO: No known names + time unparseable/unclear/misread (could be new payment) | REJECT ask screenshot with time | chatId=${chatId} misread=${check.misread ?? "none"}`);
+    logger.log(`SCENARIO: time unparseable/unclear/misread (could be new payment) | REJECT ask screenshot with time | chatId=${chatId} misread=${check.misread ?? "none"}`);
     return reject("timeUnclear", check.misread ? MISREAD_TITLE : REJECT_TITLE.timeUnclear);
 }
-/** No known name and the screenshot shows a payment to someone else too: needs a recent time and no call in the last 3 min. */
+/** Not another client's payment, and the screenshot shows a payment to someone else too: needs a recent time and no call in the last 3 min. */
 async function judgePaidToOthers({ user, check, atMs }) {
     const chatId = user.chatId;
     const callOver3MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_9__.callTimeAsOf)(user.callTime, atMs) < atMs - PAID_OTHERS_CALL_GAP_MS;
     logger.log(`Sub-scenario: didPaidToOthers=true | isWithin10min=${check.result} callOver3MinsAgo=${callOver3MinsAgo}`);
     if (check.result && callOver3MinsAgo) {
-        logger.log(`SCENARIO: No known names + paid to others + time recent + call over 3mins | ACCEPT | chatId=${chatId}`);
+        logger.log(`SCENARIO: paid to others + time recent + call over 3mins | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     const reason = !check.result ? "time not recent" : "call within 3mins";
-    logger.log(`SCENARIO: No known names + paid to others + suspicious (${reason}) | REJECT ask screenshot | chatId=${chatId} isValid=${check.isValid}`);
+    logger.log(`SCENARIO: paid to others + suspicious (${reason}) | REJECT ask screenshot | chatId=${chatId} isValid=${check.isValid}`);
     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(chatId, { title: 'Suspicious pay', fields: [{ label: 'Time', value: check.time, code: false }], told: true });
     return reject(check.isValid ? "suspiciousOld" : "suspiciousNotMine");
 }
