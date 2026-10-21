@@ -80425,20 +80425,6 @@ function isFragmentOfOurs(payee, own) {
         return ownLocal.includes(local) && (ownHandle.startsWith(handle) || withinOneEdit(handle, ownHandle));
     });
 }
-const longDigitRuns = (local) => local.match(/\d{8,}/g) ?? [];
-/**
- * One of our 8+ digit runs (a phone number such as 8000073302, a paytmqr merchant code) in the payee's local part, cut
- * or up to two OCR edits off, on ANY handle: the same number on another app's handle is still ours (divya2 7008192234
- * ₹20 accepted 2026-10-18 on "800071302@ybl"). Of the 64 distinct ids the rule blocked in 10-07..21 (credited +
- * visionShadow), only that one matches.
- */
-function hasOurDigitRun(payee, own) {
-    const runs = longDigitRuns(payee.split('@')[0]);
-    if (runs.length === 0)
-        return false;
-    const ownRuns = own.flatMap((id) => longDigitRuns(id.split('@')[0]));
-    return runs.some((run) => ownRuns.some((ours) => ours.includes(run) || editDistance(run, ours) <= 2));
-}
 /** True only for a complete payee id below FOREIGN_UPI_MAX_SIMILARITY to every one of ours and no fragment of one. */
 function isForeignPayeeUpi(payee, ownIds) {
     if (!isCompleteVpa(payee))
@@ -80447,7 +80433,9 @@ function isForeignPayeeUpi(payee, ownIds) {
     if (own.length === 0)
         return false;
     const p = compactVpa(payee);
-    if (isFragmentOfOurs(p, own) || hasOurDigitRun(p, own))
+    // owner 2026-10-21: our number on another handle is a fake (800071302@ybl vs ours 8000073302@fbpe), so digits
+    // count as ours only through isFragmentOfOurs (same handle) or the whole-id similarity.
+    if (isFragmentOfOurs(p, own))
         return false;
     return own.every((id) => upiSimilarity(p, id) < FOREIGN_UPI_MAX_SIMILARITY);
 }
