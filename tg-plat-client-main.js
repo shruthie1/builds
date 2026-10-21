@@ -56192,6 +56192,69 @@ function pickOneMsg(msgsArray) {
 
 /***/ },
 
+/***/ "./src/conversation/messages/post-show-resell.ts"
+/*!*******************************************************!*\
+  !*** ./src/conversation/messages/post-show-resell.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RESELL_QUIET_MS: () => (/* binding */ RESELL_QUIET_MS),
+/* harmony export */   offersPriceList: () => (/* binding */ offersPriceList),
+/* harmony export */   resellOr: () => (/* binding */ resellOr)
+/* harmony export */ });
+/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
+/* harmony import */ var _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../calls/inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _standard_messages__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/**
+ * Post-show resell (owner 2026-10-21). A user who has had their second show and still sits in the second-show tier
+ * (payAmount 65-199, highest below 200) is asked for ₹350 only (today's upsell) for 15 min after the show and for
+ * 15 min after they come back from 4+ h of silence; otherwise they get the full price list (₹150 / ₹100 / ₹350 /
+ * ₹600), but only while a repeat payment would still be served. Everyone else keeps today's copy.
+ */
+
+
+
+
+/** After the show, and after a return from silence, only ₹350 is asked for this long. */
+const RESELL_QUIET_MS = 15 * 60 * 1000;
+/** addVideo backdates callTime by 5 min, so the show ends about callTime + 5 min. */
+const SHOW_END_AFTER_CALL_TIME_MS = 5 * 60 * 1000;
+/** Other personas cannot be read here (sync); judged as neutral, the per-chat rules decide. */
+const NO_OTHER_PROFILES = { canCall: true, demoGiven: 0, latestCallTime: 0, videos: [] };
+/**
+ * Same gates a repeat payment meets: handleRepeatPayment (imageUtils/processImage.ts) re-calls at payAmount, or
+ * payAmount + 100 when no service is pending, then initiateCall (hasPendingPaidService) and the call itself
+ * (canCallUser, as VCUI / in-house) decide whether it is served.
+ */
+function repeatWouldBeServed(user, now) {
+    const pay = Number(user.payAmount) || 0;
+    const next = { ...user, payAmount: (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_0__.hasPendingPaidService)(user) ? pay : pay + 100 };
+    return (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_0__.hasPendingPaidService)(next) && (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(next, NO_OTHER_PROFILES, now);
+}
+/** True when the price list replaces today's ₹350 ask. `returnedAt`: the chat's 'returned' moment (4+ h silence). */
+function offersPriceList(user, now = Date.now(), returnedAt = (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(String(user.chatId), 'returned')) {
+    const pay = Number(user.payAmount) || 0;
+    const hadSecondShow = user.secondShow || (Number(user.fullShow) || 0) > 0;
+    if (!hadSecondShow || pay < 65 || pay >= 200 || (Number(user.highestPayAmount) || 0) >= 200)
+        return false;
+    if (now - ((Number(user.callTime) || 0) + SHOW_END_AFTER_CALL_TIME_MS) < RESELL_QUIET_MS)
+        return false;
+    if (returnedAt !== undefined && now - returnedAt < RESELL_QUIET_MS)
+        return false;
+    return repeatWouldBeServed(user, now);
+}
+/** The pay ask for this user: the price list when offersPriceList, else `upsell` (today's copy, unchanged). */
+function resellOr(user, upsell, now = Date.now()) {
+    return offersPriceList(user, now) ? _standard_messages__WEBPACK_IMPORTED_MODULE_3__.pricelistArray : upsell;
+}
+
+
+/***/ },
+
 /***/ "./src/conversation/messages/random-messages.ts"
 /*!******************************************************!*\
   !*** ./src/conversation/messages/random-messages.ts ***!
@@ -57211,10 +57274,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
-/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _messages_post_show_resell__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
 /**
  * Paid User Specific Pattern Handlers
  * These patterns only apply to users who have paid (payAmount >= 25)
@@ -57240,7 +57304,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("tg-aut:paid-patterns");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__.Logger("tg-aut:paid-patterns");
 /**
  * A minutes message ("remaing 6 min", "u did only 4 minutes") this soon after a delivered show is about the call that
  * just ended: answer with callOverMessages, not the duration pitch. Same 'demo' moment askToPayByEvent reads (noted
@@ -57248,7 +57313,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("t
  */
 const POST_SHOW_MINUTES_WINDOW_MS = 30 * 60 * 1000;
 function showDeliveredRecently(chatId) {
-    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_19__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
+    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_20__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
 }
 // Waiting for / asking where the call is: never a complaint about the last call (payment words are checked too).
 const WAITING_FOR_CALL = ['waiting', 'why no call', 'why not call', 'not coming', 'not calling', 'kab', 'where', 'nahi aaya', 'nhi aaya', 'nahi aya', 'nhi aya', 'nahi aayi', 'nhi aayi'];
@@ -57268,12 +57333,12 @@ const MINUTES_FOR_THIS_PRICE = /\b(?:this|that|same)\s+(?:price|amount|rate)\b|\
  * the amount (no duration to price), so it wants the duration line, not the price/pay reply.
  */
 function asksMinutesForPrice(text) {
-    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.durationIntent)(text) !== 'question')
+    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.durationIntent)(text) !== 'question')
         return false;
     if (MINUTES_FOR_THIS_PRICE.test(text.toLowerCase()))
         return true;
     const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
-    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
+    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
 }
 /**
  * Duration response messages
@@ -57628,7 +57693,7 @@ const paidPatterns = [
             // Owner 2026-10-20: after a delivered show (the 'demo' moment within 30 min, or demoGiven on the record), a
             // complaint about the call ("just 2 mins", "itna hi?", "only 55 sec") gets callOverMessages.
             const PAYMENT_ARRAY = ['pay', 'payment', 'paisa', 'paise', 'transaction', 'amt', 'ant', 'amount', 'rupee', 'rupees', 'rs', '₹', '$'];
-            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.durationIntent)(text);
+            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.durationIntent)(text);
             const recentShow = showDeliveredRecently(context.chatId);
             const showDelivered = recentShow || Boolean(userDetails.demoGiven);
             // "paid 5 min ago why no call" / "waiting 10 min, call kab?" is a repeat payer waiting for the next call, not
@@ -57638,13 +57703,13 @@ const paidPatterns = [
                 await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_7__.sendMessageWithTimeout)(event.client, context.chatId, { message: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages) });
                 return true;
             }
-            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text);
+            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.extractDurationMinutes)(text);
             const TIME_ARRAY = ['time', 'tim', 'duration', 'durat', 'lamba', 'lamb', 'when', 'wen', 'kab', 'how long'];
             const DURATION_UNITS = ['min', 'mins', 'minute', 'minutes', 'miny', 'mint'];
             const KITNA_ARRAY = ['dher', 'der', 'entha'];
             const HOW_MUCH_QUESTION = ['how much', 'hw much'];
             const bareDurationUnit = DURATION_UNITS.includes(trimPunctuation(text));
-            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.hasMinuteUnit)(text);
+            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.hasMinuteUnit)(text);
             // "one more time" / "again" asks for another call, not how long: leave it to user_repeat_service_request.
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['one more', 'once more', 'again', 'another', 'dobara', 'phir se', 'phirse']) &&
                 !hasDurationUnit &&
@@ -57679,7 +57744,7 @@ const paidPatterns = [
                 !hasNumberedKitnaDuration &&
                 (minutesForPrice || (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_ARRAY) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'cost', 'rate', 'amount', 'money', 'pay'])))) {
                 // "remaing 6 min" is 6 minutes, not ₹6 (kavya1 1008701926 2026-10-19 got the "Demo : 1 minute" menu).
-                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text);
+                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.firstAmountFromText)(text);
                 // After a show a question ("how many mins?", "150 kitna minute") gets the duration line for the amount
                 // in the text, else for payAmount; a bare "5 min" right after the show is still about that call.
                 const message = intent === 'question' && showDelivered
@@ -57719,7 +57784,7 @@ const paidPatterns = [
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.urgencyRequestPaid));
                 }
                 else {
-                    const currentUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_16__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount));
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell));
                 }
                 return true;
@@ -57782,7 +57847,7 @@ const paidPatterns = [
                             "Its me only baby😚😚",
                             "No Dear, Please understand"
                         ], 1)[0];
-                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_16__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
+                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_17__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
                         await sleep(2000);
                     }
                     catch (error) {
@@ -57821,7 +57886,7 @@ const paidPatterns = [
                     }
                     else if (userDetails.payAmount >= 25) {
                         if (userDetails.payAmount >= 30) {
-                            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_16__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
+                            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_17__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
                         }
                         else if ((userDetails.payAmount < 30 && cheatCount > 2) ||
                             cheatCount > 3) {
@@ -57941,7 +58006,7 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const hasBareKitnaDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) &&
                 hasDurationWord &&
-                (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstNumberFromText)(text) === -1 &&
+                (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.firstNumberFromText)(text) === -1 &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount']);
             if (hasBareKitnaDuration)
                 return false;
@@ -57949,7 +58014,7 @@ const paidPatterns = [
             if (asksMinutesForPrice(text))
                 return false;
             if (hasDurationWord && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_FOR_DURATION) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['free', 'timepass', 'time pas'])) {
-                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.extractDurationMinutes)(text);
+                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.extractDurationMinutes)(text);
                 if (durationMinutes === -1) {
                     await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_9__.asktoPayByEvent)(event.client, userDetails, true);
                     return true;
@@ -57972,7 +58037,7 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const AGE_QUERY = ['saal', 'year', 'years', 'yrs', 'age', 'umar', 'umra', 'vayasu', 'vayassu'];
             const PRICE_OBJECTION = ['high', 'jyada', 'expensive', 'kam', 'reduce', 'decrease', 'discount'];
-            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text) <= 0;
+            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.firstAmountFromText)(text) <= 0;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, AGE_QUERY) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitne ki ho', 'kitni ki ho']))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_OBJECTION))
@@ -57982,7 +58047,7 @@ const paidPatterns = [
                 return true;
             }
             if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_SERVICE) && !isBareDemoRequest) {
-                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.firstAmountFromText)(text);
+                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_19__.firstAmountFromText)(text);
                 if (amount > 0) {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(amount)));
                 }
@@ -58028,7 +58093,7 @@ const paidPatterns = [
                     }, { label: 'paid.busy.demo' });
                 }
                 else if (userDetails.payAmount > 14) {
-                    const currentUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_16__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount));
                     (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_11__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: "**Heyy **" + context.senderJson.firstName + "\n\n" + (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell),
                     }, { label: 'paid.busy.upsell' });
@@ -58131,7 +58196,8 @@ const paidPatterns = [
         scope: 'paid',
         description: 'All call requests (voice/video) for paid users - merged and enhanced',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const currentUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
+            const tierUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
+            const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_16__.resellOr)(userDetails, tierUpsell);
             // Voice message request (not video/voice call): "send voice", "audio bhej", etc.
             const VOICE = ['voice', 'voic', 'vois', 'voc', 'audio', 'awaz', 'awj', 'vn ', 'v.n'];
             const SHOW_SEND = ['send', 'bhej', 'bhejo', 'bejo', 'dedo', 'deo', 'show', 'bhe', 'do', 'dal'];
@@ -58149,8 +58215,9 @@ const paidPatterns = [
             if (['video_call', 'explicit_video'].includes(callType ?? '')) {
                 const replyMsg = `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray)}`;
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, replyMsg);
+                // The reply above already carries the price list: the follow-up stays the tier upsell (no second list).
                 (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_11__.schedulePatternFollowup)(event, context, 17000, {
-                    kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell),
+                    kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(tierUpsell),
                 }, { label: 'paid.callRequest.upsell' });
                 return true;
             }
@@ -60130,7 +60197,7 @@ __webpack_require__.r(__webpack_exports__);
 // Not here on purpose: live call machinery (plans, peers, promises), in-flight payment sequencing, caches. Those are
 // runtime objects of this process, not chat history.
 const MOMENTS = new Set([
-    'user', 'replied', 'pitch', 'pitchSent', 'demo', 'greeting', 'autoCall', 'paymentPhoto', 'paymentVerdict', 'paymentCredited', 'fraudWarned',
+    'user', 'returned', 'replied', 'pitch', 'pitchSent', 'demo', 'greeting', 'autoCall', 'paymentPhoto', 'paymentVerdict', 'paymentCredited', 'fraudWarned',
     'fraudReminder', 'demoPricePrompt', 'callRequestBlockedUntil',
 ]);
 const MAX_CHATS = 5000;
@@ -69445,6 +69512,8 @@ async function processImage(event) {
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.fabricatedTextReasons)(imageDetails.text),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.laxmiPayeeReasons)(imageDetails, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.personaPayeeReasons)(imageDetails, [...db.getOwnClientNames(), ...db.getClientFirstNames()]),
+                            // Only against the fetched /upi-ids list: without it our shared ids are unknown and nothing is foreign.
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.foreignPayeeUpiReasons)(imageDetails, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).length > 0 ? (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds) : []),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
@@ -71963,6 +72032,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   NUDGE_QUIET_MS: () => (/* binding */ NUDGE_QUIET_MS),
 /* harmony export */   PITCH_COOLDOWN_MS: () => (/* binding */ PITCH_COOLDOWN_MS),
 /* harmony export */   PITCH_WINDOW_MS: () => (/* binding */ PITCH_WINDOW_MS),
+/* harmony export */   RETURN_AFTER_SILENCE_MS: () => (/* binding */ RETURN_AFTER_SILENCE_MS),
 /* harmony export */   awaitingReply: () => (/* binding */ awaitingReply),
 /* harmony export */   carriesPitch: () => (/* binding */ carriesPitch),
 /* harmony export */   claimPitchSlot: () => (/* binding */ claimPitchSlot),
@@ -72148,11 +72218,17 @@ function recentSentText(chatId, withinMs = 2 * 60 * 1000, now = Date.now()) {
     const last = lastSent.get(String(chatId));
     return last && now - last.at <= withinMs ? last.text : undefined;
 }
+/** Silence after which the next user message counts as a return (post-show resell, owner 2026-10-21). */
+const RETURN_AFTER_SILENCE_MS = 4 * 60 * 60 * 1000;
+/** The user wrote. After 4+ h of known silence it is also a 'returned' moment (no earlier message kept = no known gap). */
 function noteUserMessage(chatId, at = Date.now()) {
+    const previous = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'user');
+    if (previous !== undefined && at - previous >= RETURN_AFTER_SILENCE_MS)
+        (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'returned', at);
     (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'user', at);
 }
 function resetChatVoice() {
-    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.resetChatMoments)('pitch', 'pitchSent', 'user', 'replied');
+    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.resetChatMoments)('pitch', 'pitchSent', 'user', 'returned', 'replied');
     lastSent.clear();
 }
 
@@ -73748,11 +73824,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
-/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
-/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
+/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Refund, greetings, ready-to-pay, yes / off-domain / generic-question fallbacks, trust reassurance. */
+
 
 
 
@@ -73777,7 +73855,7 @@ const openingAndFallbackPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEGATED_REFUND))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['refund', 'not satisfied', 'wapas', 'return', 'money back'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.refundReplyPool)(text)));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.refundReplyPool)(text)));
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🥺');
                 return true;
             }
@@ -73812,14 +73890,14 @@ const openingAndFallbackPatterns = [
             const NEGATION_WORDS = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'never', 'mat', "can't", 'cant', 'cannot'];
             // Guard: "what if you dont call after i pay" is a TRUST/FEAR objection, not readiness — prevents conditional/fear phrases stealing the ready route
             const fearCondtionalPhrases = ['what if', 'what happens if', 'kya hoga', 'agar', 'suppose', 'if i', 'after i', 'before i', 'dont call', 'wont call', 'not call', 'nahi call', 'nhi call'];
-            const hasStandalonePay = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsPadded)(text, ['pay']);
+            const hasStandalonePay = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['pay']);
             const hasPayAction = hasStandalonePay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION);
             const isReady = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMMIT) && hasPayAction) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok pay', 'okay pay']))
-                && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsPadded)(text, NEGATION_WORDS)
+                && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, NEGATION_WORDS)
                 && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, fearCondtionalPhrases);
             if (isReady) {
-                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_8__.finishPaymentMsgs)}`;
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, userDetails.chatId, reply);
+                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__.finishPaymentMsgs)}`;
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, reply);
                 return true;
             }
             return false;
@@ -73832,7 +73910,7 @@ const openingAndFallbackPatterns = [
         description: 'User says "yes" to a prompt',
         handler: async (event, text, allMsg, userDetails, context) => {
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['yes', 'yep', 'yeah', 'yup', 'haan', 'haa', 'sure', 'okk', 'theek', 'sari'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getCoreInitMsg)()}`);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getCoreInitMsg)()}`);
                 return true;
             }
             return false;
@@ -73850,10 +73928,10 @@ const openingAndFallbackPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             const trimmed = (text ?? '').trim();
             // Only fire on a real stray message — not 1-char noise, not a bare number.
-            if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.isOnlyDigits)(trimmed)) {
+            if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.isOnlyDigits)(trimmed)) {
                 return false;
             }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_9__.getCoreInitMsg)(), true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getCoreInitMsg)(), true);
             return true;
         }
     },
@@ -73868,7 +73946,7 @@ const openingAndFallbackPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             // Word starts only: "show mee" is not a question ("s-how"), "for us" is not "r u" (meghana1 2026-10-21).
             const isQuestion = text.includes('?') ||
-                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsAtWordStart)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsAtWordStart)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
             if (!isQuestion) {
                 return false;
             }
@@ -73880,7 +73958,7 @@ const openingAndFallbackPatterns = [
             }
             else {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
-                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage)(userDetails.payAmount))}`,
+                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_7__.resellOr)(userDetails, (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage)(userDetails.payAmount)))}`,
                     `Haan baby, of course! 🙈\n\n**Pay** na and let's enjoy! 💋`,
                     `Yess reyy!! 🔥\n\nJust **pay** baby, I'll do it all for you! 😈`,
                     `Ofcourse baby 😚\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}`,
@@ -74990,8 +75068,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Language, virgin, married, compliments, proposal, love. */
+
 
 
 
@@ -75041,7 +75121,7 @@ const personalQuestionPatterns = [
             if (!asksLanguage && !languageInability && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NATIVE_LANGUAGE_CUES)) {
                 return false;
             }
-            const askedCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.incrementLanguageAskedCount(context.chatId);
+            const askedCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.incrementLanguageAskedCount(context.chatId);
             if (askedCount <= 1) {
                 // First time: tell them which languages I speak.
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__.language);
@@ -75161,7 +75241,7 @@ const personalQuestionPatterns = [
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, randomElement, true);
                 return true;
             }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)), true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_8__.resellOr)(userDetails, (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount))), true);
             return true;
         }
     },
@@ -75233,12 +75313,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_9___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_9__);
-/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_10__);
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): What the service shows / how it works, age, name, bargaining, location, goodbye, privacy, availability. */
 
 
@@ -75253,7 +75334,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-aut:common-patterns");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:common-patterns");
 const serviceAndPersonaPatterns = [
     {
         id: 'user_service_what_will_you_show_question',
@@ -75269,13 +75351,13 @@ const serviceAndPersonaPatterns = [
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SHOW_DO) &&
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, SERVICE_CONTEXT) &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PRICE_CONTEXT);
-            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isServiceDescriptionQuestion)(text) || serviceShowQuestion) {
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.isServiceDescriptionQuestion)(text) || serviceShowQuestion) {
                 logger.debug(`[ServiceDescription] Detected: "${text}"`);
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.serviceDescriptionReplyPool)(text)));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.serviceDescriptionReplyPool)(text)));
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '😘');
                 // Upsell opportunity for low payment users
                 if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_11__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
                     }, { label: 'common.serviceDescription.upsell' });
                 }
@@ -75306,7 +75388,7 @@ const serviceAndPersonaPatterns = [
             const afterPaymentProcess = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, afterPaymentKeywords) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, nextActionKeywords)) ||
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid ke baad', 'payment ke baad', 'pay karne ke baad', 'i paid what', 'paid now what']);
             if (afterPaymentProcess) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.processReplyPool)(text)), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.processReplyPool)(text)), true);
                 return true;
             }
             // Payment method questions (should not trigger here)
@@ -75314,13 +75396,13 @@ const serviceAndPersonaPatterns = [
                 'how to pay', 'where to pay', 'kaise pay', 'kaha pay', 'payment kaise',
                 'upi kaise', 'qr kaise', 'gpay kaise', 'phonepe kaise'
             ];
-            const technicalPayment = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.hasPaymentFailureIntent)(text) || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isPaymentAccessIssue)(text);
+            const technicalPayment = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.hasPaymentFailureIntent)(text) || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.isPaymentAccessIssue)(text);
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, paymentMethodKeywords) || technicalPayment)
                 return false;
             // Other exclusions
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['what you do', 'what u do', 'what do you do']))
                 return false;
-            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.hasRepeatRecoveryIntent)(text))
+            if ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.hasRepeatRecoveryIntent)(text))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call again', 'vc again', 'video again', 'restart call', 'repeat call']))
                 return false;
@@ -75337,7 +75419,7 @@ const serviceAndPersonaPatterns = [
                 text.trim().toLowerCase() === 'procedure' ||
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['start how', 'start kaise', 'go ahead how']);
             if (matched) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.processReplyPool)(text)), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.processReplyPool)(text)), true);
                 return true;
             }
             return false;
@@ -75395,7 +75477,7 @@ const serviceAndPersonaPatterns = [
         description: 'Name query — "what is your name"',
         handler: async (event, text, allMsg, userDetails, context) => {
             const normalized = text.toLowerCase();
-            const trimmed = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.trimPunctuation)(text);
+            const trimmed = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.trimPunctuation)(text);
             const padded = ` ${trimmed} `;
             const nameKeywords = ['name', 'naam', 'peru', 'hesr'];
             const possessiveWords = [
@@ -75449,8 +75531,8 @@ const serviceAndPersonaPatterns = [
             }
             if (isObjection) {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__.bargainMsgs));
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
-                    kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_11__.schedulePatternFollowup)(event, context, 15000, {
+                    kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_8__.resellOr)(userDetails, (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount))),
                 }, { label: 'common.bargain.upsell' });
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🙄');
                 return true;
@@ -75484,7 +75566,7 @@ const serviceAndPersonaPatterns = [
             ];
             const fromText = ['from', 'frm', 'liv', 'rehti', 'rehte', 'reh', 'you from'];
             const fromWords = [' ho ', ' r u ', ' ru '];
-            const blockedContext = ['chat', 'work', 'call', 'video', 'voice', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.BODY_PART_TERMS];
+            const blockedContext = ['chat', 'work', 'call', 'video', 'voice', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.BODY_PART_TERMS];
             const hasLocationCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, locationQuestionKeywords);
             const hasFromCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(normalized, fromText) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, fromWords);
             const hasPersonCue = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(padded, [' u ', ' you ', ' your ']);
@@ -75508,8 +75590,8 @@ const serviceAndPersonaPatterns = [
         scope: 'all',
         description: 'Goodbye / exit / abuse intent',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const hasGoodbyeIntent = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isGoodbyeIntent)(text);
-            const padded = ` ${(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.trimPunctuation)(text)} `;
+            const hasGoodbyeIntent = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.isGoodbyeIntent)(text);
+            const padded = ` ${(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.trimPunctuation)(text)} `;
             const ABUSE = ['bitch', 'lanj', 'randi', 'gandu', 'bsdk', 'madarchod', 'bhosdi', 'fuck off', 'shut up'];
             const HARD_EXIT = [
                 'get lost', 'go away', 'leave me alone', 'leave me', 'leave it',
@@ -75546,9 +75628,9 @@ const serviceAndPersonaPatterns = [
             }
             if (hasGoodbyeIntent || hardExitOrAbuse || moneyExit) {
                 try {
-                    await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_9__.Api.messages.SetTyping({
+                    await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_10__.Api.messages.SetTyping({
                         peer: await event.message.getSender(),
-                        action: new telegram__WEBPACK_IMPORTED_MODULE_9__.Api.SendMessageRecordAudioAction(),
+                        action: new telegram__WEBPACK_IMPORTED_MODULE_10__.Api.SendMessageRecordAudioAction(),
                     }));
                 }
                 catch (error) {
@@ -75618,7 +75700,7 @@ const serviceAndPersonaPatterns = [
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '👀');
                 // Follow-up upsell for low-paying users
                 if (userDetails.payAmount < 50) {
-                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__.schedulePatternFollowup)(event, context, 15000, {
+                    (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_11__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_7__.getUpsellMessage)(userDetails.payAmount)),
                     }, { label: 'common.availability.upsell' });
                 }
@@ -75639,7 +75721,7 @@ const serviceAndPersonaPatterns = [
                     'waiting for', 'how long', 'long wait', 'kitna time']);
             const isSimpleAck = (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok', 'okay', 'kk', 'k', 'okay baby', 'ok baby', 'accha', 'theek']);
             if (isWaitAck || isSimpleAck) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_9__.pushToReplies)(event, userDetails.chatId, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
                     "Okay!",
                     "Ok baby 😊",
                     "Hmm okay",
@@ -75787,15 +75869,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../calls/voice-proof */ "./src/calls/voice-proof.ts");
-/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
-/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
-/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
-/* harmony import */ var _payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../payments/proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../calls/voice-proof */ "./src/calls/voice-proof.ts");
+/* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../payments/proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../payments/upi */ "./src/payments/upi.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Interests, what-are-you-doing, how-are-you, hmm, DP / QR / demo / voice-call / full-service questions. */
 
 
@@ -75813,7 +75896,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:common-patterns");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut:common-patterns");
 const smallTalkPatterns = [
     {
         id: 'user_personal_interests_lifestyle_question',
@@ -75904,7 +75988,7 @@ const smallTalkPatterns = [
         scope: 'all',
         description: 'How are you queries',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const EXCLUDED_CONTEXT = ['how are your', 'old', 'age', 'years', 'yrs', 'good', 'pay', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.BODY_PART_TERMS];
+            const EXCLUDED_CONTEXT = ['how are your', 'old', 'age', 'years', 'yrs', 'good', 'pay', ..._pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.BODY_PART_TERMS];
             const trimmed = text.trim().toLowerCase();
             const HOW_EXACT = [
                 'how are you', 'how are you?', 'how are you!', 'how r u', 'how r u?', 'hru?',
@@ -75984,8 +76068,8 @@ const smallTalkPatterns = [
         scope: 'all',
         description: 'QR code/scanner requests',
         handler: async (event, text, allMsg, userDetails, context) => {
-            if (!(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.isPaymentAccessIssue)(text) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['scan', 'qr', 'barcode', 'bar code'])) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.qr}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.link}`, './QR.jpg');
+            if (!(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.isPaymentAccessIssue)(text) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['scan', 'qr', 'barcode', 'bar code'])) {
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, context.chatId, `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.qr}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.link}`, './QR.jpg');
                 return true;
             }
             return false;
@@ -76040,7 +76124,7 @@ const smallTalkPatterns = [
             const EXCLUDED_CONTEXT = ['fake', 'frau', 'scam', 'reco', 'laxmi'];
             // "banking name ...?" is a question cue; an account counts only in full (our banking name or UPI id).
             const CONFIRMATION_CUES = ['banking', 'is this right', 'this one', 'is this correct', 'right account', 'right number', 'sahi hai', 'correct hai'];
-            const namesOurAccount = (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__.hasOurPayeeName)(text) || (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__.showsOurUpiId)(text, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_13__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_14__.UpiIds));
+            const namesOurAccount = (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_13__.hasOurPayeeName)(text) || (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_13__.showsOurUpiId)(text, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_14__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_15__.UpiIds));
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
             if (!namesOurAccount && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, CONFIRMATION_CUES) && !text.trim().startsWith('.'))
@@ -76069,8 +76153,8 @@ const smallTalkPatterns = [
                 '**Take a Demo na baby!!**\nThen you will understand reyy! 🙃',
                 'Just **try the Demo** once baby!\nYou\'ll see na... trust me! 🙈',
             ]));
-            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 15000, {
-                kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage)(userDetails.payAmount)),
+            (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_9__.schedulePatternFollowup)(event, context, 15000, {
+                kind: 'respond', text: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_6__.resellOr)(userDetails, (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage)(userDetails.payAmount))),
             }, { label: 'common.really.upsell' });
             return true;
         }
@@ -76117,7 +76201,7 @@ const smallTalkPatterns = [
             const isGiveDemo = hasDemoAction && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO);
             if (isGiveDemo) {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([`**Trust Me** Once and **Take Demo!!**\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50two])}`]));
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 17000, { kind: 'reply', text: '', file: './fifty.mp3' }, { label: 'common.giveDemo.fifty' });
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_9__.schedulePatternFollowup)(event, context, 17000, { kind: 'reply', text: '', file: './fifty.mp3' }, { label: 'common.giveDemo.fifty' });
                 return true;
             }
             return false;
@@ -76213,9 +76297,9 @@ const smallTalkPatterns = [
                 logger.debug(`[VoiceCall] Detected voice call mention in: "${text}" (type: ${voiceType})`);
                 // Asked again for the voice (or proof): ring them and play it instead of another voice note.
                 // Falls back to the voice message below (first request, busy, limits, privacy, off).
-                const calling = await (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__.tryVoiceProofCall)(context.chatId, {
+                const calling = await (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_8__.tryVoiceProofCall)(context.chatId, {
                     followUp: (Number(userDetails.payAmount) || 0) < 15,
-                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, '', './voice.mp3'),
+                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, context.chatId, '', './voice.mp3'),
                 });
                 if (calling)
                     return true;
@@ -76247,7 +76331,7 @@ const smallTalkPatterns = [
                 }
                 // Send voice sample after delay
                 // Relative path - FileSender resolves it. A failure is logged by the follow-up job.
-                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_8__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './voice.mp3' }, { label: 'common.voiceCall.sample' });
+                (0,_conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_9__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './voice.mp3' }, { label: 'common.voiceCall.sample' });
                 return true;
             }
             return false;
@@ -76266,7 +76350,7 @@ const smallTalkPatterns = [
             const PRICE_WORDS = ['pric', 'prce', 'prc', 'cost', 'cst', 'rate', 'charge', 'amount', 'how much', 'kitn'];
             const SERVICE_CONTEXT = ['vc', 'video', 'call', 'service', 'min', 'minute'];
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
-            const hasDurationUnit = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['min', 'mins', 'minute', 'minutes']);
+            const hasDurationUnit = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.containsPadded)(text, ['min', 'mins', 'minute', 'minutes']);
             const asksFullPrice = ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_SERVICE) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_WORDS))
                 || (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_WORDS) || hasHowMuchPrice) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, SERVICE_CONTEXT));
             const HOW_MUCH_FULL_EXCLUSION = ['how much full', 'how much for full', 'how much is full', 'how much in full'];
@@ -76292,7 +76376,7 @@ const smallTalkPatterns = [
                 return true;
             }
             const specificDurationPriceAsk = (hasHowMuchPrice && hasDurationUnit) ||
-                ((0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_10__.firstNumberFromText)(text) > 0 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) && hasDurationUnit);
+                ((0,_conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_11__.firstNumberFromText)(text) > 0 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) && hasDurationUnit);
             if (specificDurationPriceAsk) {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelist, ..._conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray]));
                 return true;
@@ -76300,7 +76384,7 @@ const smallTalkPatterns = [
             // Duration question
             const DURATION = ['how long', 'how much time', 'kitna time', 'kitni der', 'duration', 'time milega', 'how many min'];
             const DURATION_Q = ['how', 'kitna', 'kitne', 'kitni', 'kithna', 'kithne', 'kithni', 'entha', 'ethra', 'how much'];
-            const hasTimeWord = hasDurationUnit || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['time', 'duration', 'der', 'long']);
+            const hasTimeWord = hasDurationUnit || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_12__.containsPadded)(text, ['time', 'duration', 'der', 'long']);
             const isDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DURATION)
                 || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DURATION_Q) && hasTimeWord);
             if (isDuration) {
@@ -78982,10 +79066,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! src/greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_16___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__);
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! src/greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_18___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__);
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+
+
 
 
 
@@ -79021,7 +79109,7 @@ async function runAskToPayQr(client, chatId, args) {
         const peer = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_7__.resolveUserPeer)(client, dialogManager, chatId, { accessHash: args.accessHash, username: args.username });
         if (!peer)
             throw new Error(`Could not resolve ${args.username || chatId} (no cached entity, accessHash or username match)`);
-        const upsellMessage = (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(args.payAmount);
+        const upsellMessage = args.priceList ? _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_16__.pricelistArray : (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(args.payAmount);
         const paymentMessage = args.prefix ? `${args.prefix}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(upsellMessage)}` : (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(upsellMessage);
         try {
             await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_4__.setTyping)(peer);
@@ -79123,27 +79211,29 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
         _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_10__.stateManager.clearRepingTimeout(chatId);
         logger.log(`[askToPay] Sending payment request to ${userDetails.username || chatId}${force ? ' (asked for)' : ''}`);
         await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_4__.setTyping)(peer);
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_16__.sleep)(3000);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_18__.sleep)(3000);
         // If service is already pending from our side (they've paid and are owed a call/show),
         // do NOT ask for payment again — send a soft nudge instead. `force` still overrides.
         if (userDetails.paidReply && !force && (0,_service_eligibility__WEBPACK_IMPORTED_MODULE_5__.canProceedWithService)(userDetails)) {
             logger.log(`[askToPay] Service already pending for ${userDetails.username || chatId} — soft nudge instead of payment ask`);
-            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeout)(client, peer, { message: (0,src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_15__.initMsg)() }, { voice: force ? 'system' : 'answer' });
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeout)(client, peer, { message: (0,src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_17__.initMsg)() }, { voice: force ? 'system' : 'answer' });
             return true;
         }
         if (userDetails.paidReply) {
             const payAmount = userDetails.payAmount || 0;
-            const upsellMessage = (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(payAmount);
+            const priceList = (0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_15__.offersPriceList)(userDetails);
+            const upsellMessage = priceList ? _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_16__.pricelistArray : (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(payAmount);
             if (sendQR) {
                 const qrArgs = {
                     payAmount,
+                    priceList,
                     prefix,
                     force,
                     decidedAt: Date.now(),
                     username: userDetails.username || undefined,
                     accessHash: userDetails.accessHash ? String(userDetails.accessHash) : undefined,
                 };
-                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_17__.scheduleDelayed)(chatId, 'askToPayQr', qrArgs, ASK_TO_PAY_QR_DELAY_MS);
+                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_19__.scheduleDelayed)(chatId, 'askToPayQr', qrArgs, ASK_TO_PAY_QR_DELAY_MS);
             }
             else {
                 await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeout)(client, peer, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(upsellMessage) }, { voice: force ? 'system' : 'pitch' });
@@ -79151,7 +79241,7 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
         }
         else {
             logger.log(`[askToPay] Sending init message (no paid reply) to ${userDetails.username || chatId}`);
-            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeout)(client, peer, { message: (0,src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_15__.initMsg)() }, { voice: force ? 'system' : 'answer' });
+            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeout)(client, peer, { message: (0,src_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_17__.initMsg)() }, { voice: force ? 'system' : 'answer' });
         }
         return true;
     }
@@ -80214,12 +80304,16 @@ function authenticityEnabled(env = process.env) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FOREIGN_UPI_MAX_SIMILARITY: () => (/* binding */ FOREIGN_UPI_MAX_SIMILARITY),
 /* harmony export */   checkPayeeUpi: () => (/* binding */ checkPayeeUpi),
 /* harmony export */   clientUpiIds: () => (/* binding */ clientUpiIds),
+/* harmony export */   isCompleteVpa: () => (/* binding */ isCompleteVpa),
+/* harmony export */   isForeignPayeeUpi: () => (/* binding */ isForeignPayeeUpi),
 /* harmony export */   isMaskedVpa: () => (/* binding */ isMaskedVpa),
 /* harmony export */   normalizeVpa: () => (/* binding */ normalizeVpa),
 /* harmony export */   ourUpiIds: () => (/* binding */ ourUpiIds),
 /* harmony export */   ownIdsFrom: () => (/* binding */ ownIdsFrom),
+/* harmony export */   upiSimilarity: () => (/* binding */ upiSimilarity),
 /* harmony export */   withinOneEdit: () => (/* binding */ withinOneEdit)
 /* harmony export */ });
 /** Payee VPA ownership (design 6, P6). */
@@ -80282,6 +80376,80 @@ function ownIdsFrom(source, extra = []) {
     // allIds can carry QR suffixes ("vpa@bank&bpsign=..."): the payee VPA a receipt shows is the part before '&'.
     const out = ids.filter((x) => typeof x === 'string' && x.length > 0).map(x => (x.includes('@') ? x.split('&')[0] : x));
     return [...new Set(out)];
+}
+/**
+ * Owner 2026-10-21: a complete payee UPI id that is not one of ours, nor an OCR-garbled copy or cut-off fragment of
+ * one, is a fake (nidhi1 8167003987 ₹50: banking name "Girls community" on girlscommunity@ybl; ours is
+ * community01@airtel). Measured on the 1092 credited screenshots of 2026-10-14..21 (docs/PAYMENT-SCREENSHOT-FLOW.md):
+ * every garbled / cut copy of ours scored >= 0.676 or was a fragment, every foreign id it blocks scored <= 0.45.
+ */
+const FOREIGN_UPI_MAX_SIMILARITY = 0.55;
+/** Lowercase, no spaces, no QR suffix, letters/digits/'@' only: "BHARATPE.8000073302@fbpe&bpsign=.." -> "bharatpe8000073302@fbpe". */
+const compactVpa = (v) => normalizeVpa(v).split('&')[0].replace(/[^a-z0-9@]/g, '');
+function editDistance(a, b) {
+    let prev = Array.from({ length: b.length + 1 }, (_, k) => k);
+    for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let k = 1; k <= b.length; k++)
+            cur[k] = Math.min(prev[k] + 1, cur[k - 1] + 1, prev[k - 1] + (a[i - 1] === b[k - 1] ? 0 : 1));
+        prev = cur;
+    }
+    return prev[b.length];
+}
+/** 1 - edit distance / longer length over the WHOLE id (local part and handle): @ybl vs @airtel counts. */
+function upiSimilarity(a, b) {
+    const x = compactVpa(a);
+    const y = compactVpa(b);
+    const len = Math.max(x.length, y.length);
+    return len === 0 ? 1 : 1 - editDistance(x, y) / len;
+}
+/** A whole id: "local@handle", not cut ("..." / "…") and not masked. Only a whole id can be judged foreign. */
+function isCompleteVpa(v) {
+    const n = normalizeVpa(v);
+    if (/\.\.|…/.test(n) || isMaskedVpa(n))
+        return false;
+    const [local = '', handle = ''] = compactVpa(n).split('@');
+    return n.includes('@') && local.length > 0 && handle.length > 0;
+}
+/**
+ * OCR cut / split of one of ours ("m9@paytm", "vr3l@ptys", "8000073302@fbpe", "BHARATPE.8000073302@f"): the visible
+ * local part is a run of one of our local parts with a digit in it, on that id's handle (or its start / one edit
+ * off). A digit-free word (girls, community, lakshmi, store) never counts as a fragment.
+ */
+function isFragmentOfOurs(payee, own) {
+    const [local, handle = ''] = payee.split('@');
+    if (!/\d/.test(local))
+        return false;
+    return own.some((id) => {
+        const [ownLocal, ownHandle = ''] = id.split('@');
+        return ownLocal.includes(local) && (ownHandle.startsWith(handle) || withinOneEdit(handle, ownHandle));
+    });
+}
+const longDigitRuns = (local) => local.match(/\d{8,}/g) ?? [];
+/**
+ * One of our 8+ digit runs (a phone number such as 8000073302, a paytmqr merchant code) in the payee's local part, cut
+ * or up to two OCR edits off, on ANY handle: the same number on another app's handle is still ours (divya2 7008192234
+ * ₹20 accepted 2026-10-18 on "800071302@ybl"). Of the 64 distinct ids the rule blocked in 10-07..21 (credited +
+ * visionShadow), only that one matches.
+ */
+function hasOurDigitRun(payee, own) {
+    const runs = longDigitRuns(payee.split('@')[0]);
+    if (runs.length === 0)
+        return false;
+    const ownRuns = own.flatMap((id) => longDigitRuns(id.split('@')[0]));
+    return runs.some((run) => ownRuns.some((ours) => ours.includes(run) || editDistance(run, ours) <= 2));
+}
+/** True only for a complete payee id below FOREIGN_UPI_MAX_SIMILARITY to every one of ours and no fragment of one. */
+function isForeignPayeeUpi(payee, ownIds) {
+    if (!isCompleteVpa(payee))
+        return false;
+    const own = (ownIds ?? []).map(compactVpa).filter((id) => id.includes('@'));
+    if (own.length === 0)
+        return false;
+    const p = compactVpa(payee);
+    if (isFragmentOfOurs(p, own) || hasOurDigitRun(p, own))
+        return false;
+    return own.every((id) => upiSimilarity(p, id) < FOREIGN_UPI_MAX_SIMILARITY);
 }
 
 
@@ -81136,6 +81304,7 @@ const PAYMENT_ASK_REPEAT_MESSAGES = [
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
+/* harmony export */   foreignPayeeUpiReasons: () => (/* binding */ foreignPayeeUpiReasons),
 /* harmony export */   laxmiPayeeReasons: () => (/* binding */ laxmiPayeeReasons),
 /* harmony export */   personaPayeeReasons: () => (/* binding */ personaPayeeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
@@ -81193,6 +81362,14 @@ function personaPayeeReasons(details, personaNames) {
     if (!names.some((name) => words.some((word) => word.startsWith(name))))
         return [];
     return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.hasOurPayeeName)(`${details.payeeName ?? ''} ${details.payerName ?? ''} ${details.text ?? ''}`) ? [] : ['PERSONA_PAYEE'];
+}
+/**
+ * Owner 2026-10-21: the payee UPI id, when shown whole, must be one of ours or an OCR-garbled / cut copy of one
+ * (`isForeignPayeeUpi`); our banking name next to someone else's id is a fake (nidhi1 8167003987 ₹50, "Girls community"
+ * on girlscommunity@ybl). A cut, masked or missing id is not judged. `ownVpas` empty (list not loaded) = never.
+ */
+function foreignPayeeUpiReasons(details, ownVpas) {
+    return (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.isForeignPayeeUpi)(details.payeeUpiId, ownVpas) ? ['UPI_NOT_OURS'] : [];
 }
 const IST_OFFSET_MS = 330 * 60000;
 const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
