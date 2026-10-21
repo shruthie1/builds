@@ -69311,6 +69311,7 @@ async function processImage(event) {
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_34__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.fabricatedTextReasons)(imageDetails.text),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.laxmiPayeeReasons)(imageDetails, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.personaPayeeReasons)(imageDetails, [...db.getOwnClientNames(), ...db.getClientFirstNames()], (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
@@ -69337,7 +69338,7 @@ async function processImage(event) {
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails);
                                     // A PhonePe transaction id carries the real payment moment; it beats a missing or edited printed time.
                                     const paymentMsOf = (check) => (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.phonePeTxnTimeMs)(imageDetails.text) ?? (check.isValid ? (check.paymentMs ?? null) : null);
-                                    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMsOf(isWithinPastTenMinutesImage)));
+                                    const session = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMsOf(isWithinPastTenMinutesImage)), creditAmount: amount });
                                     if (!session && isWithinPastTenMinutesImage.timezoneShiftMin !== undefined) {
                                         // No store: whether the UTR / file was already credited is unknown, so the time is judged as read.
                                         logger.warn(`[ProcessImage] ${chatId}: payment gate unavailable, time-zone move not applied`);
@@ -75627,7 +75628,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
 /* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../payments/proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../payments/upi */ "./src/payments/upi.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Interests, what-are-you-doing, how-are-you, hmm, DP / QR / demo / voice-call / full-service questions. */
+
+
+
 
 
 
@@ -75864,12 +75871,14 @@ const smallTalkPatterns = [
             // Hardened: removed bare '?'/'name'/'right'/'kya' — they affirmed EVERY question
             // ("video call?", "show pussy?", "whats your name?") with a "yes". Keep the
             // specific payment-account / "is this right" confirmation phrases only.
-            const EXCLUDED_CONTEXT = ['fake', 'frau', 'scam', 'reco'];
-            const ACCOUNT_CUES = ['banking', 'ravva', 'lk pvt', 'community', 'girls comm', 'lakshmi', 'laxmi'];
-            const CONFIRMATION_CUES = ['is this right', 'this one', 'is this correct', 'right account', 'right number', 'sahi hai', 'correct hai'];
+            // "laxmi" is never our account (owner 2026-10-21: it marks a fake), so it is never confirmed.
+            const EXCLUDED_CONTEXT = ['fake', 'frau', 'scam', 'reco', 'laxmi'];
+            // "banking name ...?" is a question cue; an account counts only in full (our banking name or UPI id).
+            const CONFIRMATION_CUES = ['banking', 'is this right', 'this one', 'is this correct', 'right account', 'right number', 'sahi hai', 'correct hai'];
+            const namesOurAccount = (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__.hasOurPayeeName)(text) || (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_12__.showsOurUpiId)(text, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_13__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_14__.UpiIds));
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, EXCLUDED_CONTEXT))
                 return false;
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ACCOUNT_CUES) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, CONFIRMATION_CUES) && !text.trim().startsWith('.'))
+            if (!namesOurAccount && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, CONFIRMATION_CUES) && !text.trim().startsWith('.'))
                 return false;
             await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.yesMsgs));
             return true;
@@ -80446,7 +80455,11 @@ class PaymentFlow {
         try {
             if (!Buffer.isBuffer(ref.photo) || ref.photo.length === 0)
                 return null;
-            return await this.gate.begin(gateFacts(ref), { clientId: ref.clientId, ...(ref.details.payeeUpiId ? { payeeUpiId: ref.details.payeeUpiId } : {}) });
+            return await this.gate.begin(gateFacts(ref), {
+                clientId: ref.clientId,
+                ...(ref.details.payeeUpiId ? { payeeUpiId: ref.details.payeeUpiId } : {}),
+                ...(ref.creditAmount !== undefined ? { creditAmount: ref.creditAmount } : {}),
+            });
         }
         catch (error) {
             this.io.warn(`[payment-gate] unavailable for ${ref.chatId}/${ref.msgId}: ${String(error?.message ?? error)}`);
@@ -80829,6 +80842,7 @@ class ProofGate {
             ...(facts.utr ? { utr: facts.utr } : {}),
             ...(extra.payeeUpiId ? { payeeUpiId: extra.payeeUpiId } : {}),
             amount: facts.amount,
+            ...(extra.creditAmount !== undefined ? { creditAmount: extra.creditAmount } : {}),
             time: facts.timeMs !== null ? { state: 'known', epochMs: facts.timeMs } : { state: 'unknown' },
             // Outcome lives in `ask` / `servedAt`; `decision` is the schema's required field (ACCEPT = not rejected here).
             decision: 'ACCEPT', reasons: [], mode: 'enforce', provider: 'tg-aut', source: 'local',
@@ -80958,9 +80972,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   laxmiPayeeReasons: () => (/* binding */ laxmiPayeeReasons),
+/* harmony export */   personaPayeeReasons: () => (/* binding */ personaPayeeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
 /* harmony export */ });
 /* harmony import */ var _screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+
 
 /**
  * Text that only a fabricated receipt carries. A real app never prints the UTR / transaction id as X's (account
@@ -80997,6 +81014,21 @@ function laxmiPayeeReasons(details, ownVpas) {
     if (!t.includes('laxmi'))
         return [];
     return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.showsOurUpiId)(t, ownVpas) ? [] : ['LAXMI_PAYEE'];
+}
+/**
+ * Owner 2026-10-21: a persona name (ours or another client's) as the payee needs one of our banking names on the
+ * screenshot; a persona payee alone, with or without a UPI id, is fake. Only the payee name and the payee UPI id's local
+ * part are checked, so a payer or note naming a persona never counts. Our own UPI id / account id on the screenshot also
+ * clears it: a genuine payment by our QR shows the persona name (QR pn=) with our id and often no banking name.
+ */
+function personaPayeeReasons(details, personaNames, ownVpas) {
+    // A word of the payee must start with the name: "KavyaaGowda", "kavya123@ybl"; not "Mrs Ravya" (sravya).
+    const words = `${details.payeeName ?? ''} ${String(details.payeeUpiId ?? '').split('@')[0]}`.toLowerCase().split(/[^a-z0-9]+/);
+    const names = personaNames.map(_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.normalizeVpa).filter((name) => name.length >= 3);
+    if (!names.some((name) => words.some((word) => word.startsWith(name))))
+        return [];
+    const shown = `${details.payeeName ?? ''} ${details.payeeUpiId ?? ''} ${details.payerName ?? ''} ${details.text ?? ''}`;
+    return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.isPaidToUs)(shown, ownVpas) ? [] : ['PERSONA_PAYEE'];
 }
 const IST_OFFSET_MS = 330 * 60000;
 const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
@@ -81621,7 +81653,9 @@ function normalizeAmount(amount, payAmount) {
             if (amount > payAmount) {
                 const stripped = stripGlyphPrefix(strAmount);
                 if (payAmount < 30 && strAmount.length <= 3) {
-                    logger.log(`[NORMALIZE] Rule applied: ${amount} → 50 (payAmount < 30, length <= 3)`);
+                    // A ₹50 read as ₹50 is no rewrite: log "Rule applied" only for a changed amount.
+                    if (amount !== 50)
+                        logger.log(`[NORMALIZE] Rule applied: ${amount} → 50 (payAmount < 30, length <= 3)`);
                     return 50;
                 }
                 else if (stripped === 150) {
@@ -81972,8 +82006,10 @@ class UpiIds {
             throw new Error(`Cannot assign string to property ${key} (not a string property)`);
         }
     }
+    /** Adds an id once: every /upi-ids refresh re-sends the whole list, so a plain push doubled it per refresh. */
     static pushValue(value) {
-        UpiIds.allIds.push(value);
+        if (!UpiIds.allIds.includes(value))
+            UpiIds.allIds.push(value);
     }
 }
 UpiIds.paytm1 = 'BHARATPE.8000073302@fbpe';
