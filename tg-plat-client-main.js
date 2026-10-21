@@ -31118,6 +31118,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { projection: { [key]: 1 } });
         return row ? row[key] : undefined;
     }
+    /**
+     * True when ANY persona row for chatId has canReply 0 (owner rule 2026-10-21: such a chat is never
+     * called by any client). Deliberately unscoped: every profile counts. Throws.
+     */
+    async hasBlockedRow(chatId) {
+        return !!(await this.collection.findOne({ chatId, canReply: 0 }, { projection: { _id: 1 } }));
+    }
     /** chatId's rows under OTHER personas (full docs). Throws. */
     async findInOtherPersonas(chatId, identity) {
         return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
@@ -46182,6 +46189,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /* harmony import */ var _after_call_records__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./after-call-records */ "./src/calls/after-call-records.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+
+
 
 
 
@@ -46560,6 +46571,10 @@ class CallManager {
      * call is over). Anything the in-house path cannot serve falls back to the legacy ring + VCUI.
      */
     async dispatchCall(chatId) {
+        if (await this.isBlocked(chatId)) {
+            this.clearNoLegacyRing(chatId);
+            return;
+        }
         const inHouse = await this.getInHouse();
         if (inHouse) {
             try {
@@ -46597,6 +46612,25 @@ class CallManager {
             return;
         }
         await this.requestCall(chatId, true);
+    }
+    /**
+     * A chat blocked (canReply 0) on this client or ANY other is never rung, whichever path queued
+     * the call (re-ring, restart restore, operator, forced). A failed read rings: a db hiccup must
+     * not drop a paying user's call.
+     */
+    async isBlocked(chatId) {
+        try {
+            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
+            const [own, others] = await Promise.all([db.read(chatId), db.readOtherPersonaRows(chatId)]);
+            if (own?.canReply !== 0 && !(0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.blockedOnAnyProfile)(others ?? []))
+                return false;
+            logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${own?.canReply === 0 ? 'this' : 'another'} client`);
+            return true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] block check failed for ${chatId}; ringing`, false);
+            return false;
+        }
     }
     /** Drops chatId's operator-call mark; true when it had one. */
     clearNoLegacyRing(chatId) {
@@ -46696,6 +46730,9 @@ class CallManager {
             logger.log(`[CallManager] No client available for call request`);
             return false;
         }
+        // Re-checked here: a fallback ring can wait minutes on the legacy line after dispatchCall's check.
+        if (await this.isBlocked(chatId))
+            return false;
         // Telegram call-limited this account (FLOOD_WAIT) or refused calls to this user (PEER_FLOOD): a
         // ring would flood again and deepen the limit.
         if (this.callCooldown.isActive() || this.callCooldown.isRefused(chatId)) {
@@ -48173,6 +48210,11 @@ class InHouseCallService {
                 const user = await this.deps.readUser(chatId);
                 if (!user)
                     return { action: 'ignore' };
+                // Blocked here or on any other client: never picked up (no show, no pitch clip, no pay prompt); it rings out.
+                if (user.canReply === 0 || (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(await this.deps.readOtherProfiles(chatId))) {
+                    this.logger.log(`[in-house-calls] incoming call from ${chatId} ignored: chat is blocked (canReply 0)`);
+                    return { action: 'ignore' };
+                }
                 const { plan } = await this.planFor(chatId, user);
                 // Re-check after the awaits: another call may have taken the last slot meanwhile.
                 if (this.isInCall(chatId))
@@ -48408,6 +48450,11 @@ class InHouseCallService {
         this.voiceProofLog.push(now);
         this.saveVoiceProofState();
         try {
+            const [user, others] = await Promise.all([this.deps.readUser(chatId), this.deps.readOtherProfiles(chatId)]);
+            if (user?.canReply === 0 || (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others)) {
+                this.releaseVoiceProofSlot(chatId, now);
+                return { status: 'skipped', reason: 'blocked' };
+            }
             if (!(await this.isAvailable()))
                 return { status: 'unsupported' };
             const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
@@ -48449,6 +48496,15 @@ class InHouseCallService {
             this.voiceProofCalls.delete(chatId);
             this.notifyCallEnded(chatId);
         }
+    }
+    /** Undo playVoiceProof's reservation for a call that was never placed (no cooldown, cap or spacing used). */
+    releaseVoiceProofSlot(chatId, reservedAt) {
+        if (this.voiceProofByChat.get(chatId) === reservedAt)
+            this.voiceProofByChat.delete(chatId);
+        const at = this.voiceProofLog.lastIndexOf(reservedAt);
+        if (at >= 0)
+            this.voiceProofLog.splice(at, 1);
+        this.saveVoiceProofState();
     }
     /** Load the persisted caps once (before the first decision), dropping anything older than 24 h. */
     loadVoiceProofState() {
@@ -48704,14 +48760,9 @@ class InHouseCallService {
             // An incoming call took the last engine slot while we were planning: retry from the queue.
             if (/busy/i.test(error?.message ?? ''))
                 return { status: 'busy_engine' };
-            // This account cannot address the user at all (entity not resolvable, PEER_ID_INVALID, blocked,
-            // deactivated): a legacy ring fails the same way, and re-arming the legacy ladder looped every
-            // ~31 min forever (sowmya2/sneha2/shruthi1, 2026-10-10). Stop calling this chat.
-            const unreachable = (0,_telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_3__.classifyUnreachable)(error);
-            if (unreachable) {
-                this.logger.warn(`[in-house-calls] ${chatId} unreachable from this account (${unreachable}): clearing its call ladder`);
-                return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
-            }
+            const unreachable = this.unreachableResult(plan, error);
+            if (unreachable)
+                return unreachable;
             const flood = requesting ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error) : null;
             if (flood) {
                 this.noteCallFlood(flood, chatId);
@@ -48959,6 +49010,20 @@ class InHouseCallService {
         this.sizes.set(url, size);
         return size;
     }
+    /**
+     * This account cannot address the user at all (entity not resolvable, PEER_ID_INVALID, blocked,
+     * deactivated): a legacy ring fails the same way, and re-arming the legacy ladder looped every
+     * ~31 min forever (sowmya2/sneha2/shruthi1, 2026-10-10). Stop calling this chat. Applies both to a
+     * thrown setup error and to a RequestCall failure the engine records instead of throwing
+     * (record.error, e.g. USER_IS_BLOCKED), which otherwise fell back to a second legacy ring.
+     */
+    unreachableResult(plan, error) {
+        const unreachable = (0,_telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_3__.classifyUnreachable)(error);
+        if (!unreachable)
+            return null;
+        this.logger.warn(`[in-house-calls] ${plan.chatId} unreachable from this account (${unreachable}): clearing its call ladder`);
+        return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
+    }
     async settle(plan, record) {
         const { chatId } = plan;
         const connected = record.connectedAt !== null;
@@ -49011,6 +49076,10 @@ class InHouseCallService {
                 this.safeWarn({ title: 'Media failed', summary: 'Answered but no media.', fields: [{ label: 'Chat', value: chatId, code: false }, { label: 'Reason', value: `${record.endReason}: ${record.error ?? ''}`, code: false }, { label: 'Video', value: `video_${plan.videoId}`, code: false }, { label: 'Source', value: videoSource(plan.url), code: false }] }, `media_failed:${chatId}`);
                 return { status: 'media_failed', reason: record.endReason ?? undefined, videoId: plan.videoId, videoType: plan.videoType };
             }
+            // USER_IS_BLOCKED & co recorded by the engine (RequestCall failed without throwing).
+            const unreachable = record.error ? this.unreachableResult(plan, { message: record.error }) : null;
+            if (unreachable)
+                return unreachable;
             // PEER_FLOOD & co on the call itself: the account is limited, a legacy ring would flood too.
             const flood = record.error ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)({ message: record.error }) : null;
             if (flood) {
@@ -49690,6 +49759,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESUME_MAX_AGE_MS: () => (/* binding */ RESUME_MAX_AGE_MS),
 /* harmony export */   RESUME_REWIND_SEC: () => (/* binding */ RESUME_REWIND_SEC),
 /* harmony export */   VIDEO_IDS: () => (/* binding */ VIDEO_IDS),
+/* harmony export */   blockedOnAnyProfile: () => (/* binding */ blockedOnAnyProfile),
 /* harmony export */   callEchoParams: () => (/* binding */ callEchoParams),
 /* harmony export */   callVideoParams: () => (/* binding */ callVideoParams),
 /* harmony export */   canCallUser: () => (/* binding */ canCallUser),
@@ -49750,15 +49820,20 @@ function videoIds(values) {
     return (values || []).map(Number).filter(Number.isFinite);
 }
 /**
+ * Owner rule (2026-10-21): a chat blocked (canReply 0) on ANY client is never called by any client,
+ * however long ago the block was. Rows are this chat's rows on the other personas.
+ */
+function blockedOnAnyProfile(rows) {
+    return rows.some((row) => row?.canReply === 0);
+}
+/**
  * CMS getPaymentStats, read-only: the stale-row reset it also performs is deliberately NOT ported
- * (a read must not rewrite other personas' rows).
+ * (a read must not rewrite other personas' rows). Unlike it, a block elsewhere counts at any age.
  */
 function summariseOtherProfiles(rows, now) {
     const threeDaysAgo = now - 3 * DAY_MS;
-    const stats = { canCall: true, demoGiven: 0, latestCallTime: 0, videos: [] };
+    const stats = { canCall: !blockedOnAnyProfile(rows), demoGiven: 0, latestCallTime: 0, videos: [] };
     for (const row of rows) {
-        if (row.canReply === 0 && Number(row.lastMsgTimeStamp) > threeDaysAgo)
-            stats.canCall = false;
         const callTime = Number(row.callTime) || 0;
         if (callTime > threeDaysAgo) {
             if (row.demoGiven)
@@ -49791,9 +49866,9 @@ function canCallUser(user, others, now) {
             || (high > 350 && (full < 3 && videos < 9) || (full < 8 && calledBefore)))));
     if (!eligible)
         return false;
-    // VCUI: paymentstats.canCall applies while fewer than 5 demos were given elsewhere; the start
-    // button then also requires (demoGiven < 5 || latest call elsewhere > 24h ago).
-    if (others.demoGiven < 5 && !others.canCall)
+    // Blocked on another client: never, whatever the demo count. Otherwise VCUI's start button
+    // requires (demoGiven < 5 || latest call elsewhere > 24h ago).
+    if (!others.canCall)
         return false;
     return others.demoGiven < 5 || others.latestCallTime < now - DAY_MS;
 }
