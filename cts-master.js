@@ -1362,18 +1362,7 @@ let AppService = AppService_1 = class AppService {
                     this.scheduledJobs.push(channelJoinJob);
             }
             if (this.runtimeConfig.enabled('UMS_SCHEDULER')) {
-                const retentionJob = schedule.scheduleJob('ums-user-data-retention', '0 3 * * * ', 'Asia/Kolkata', async () => {
-                    this.logger.log('Starting UMS user-data/timestamp retention');
-                    try {
-                        const res = await this.userDataService.removeRedundantData();
-                        await this.timestampService.clear();
-                        console.log('Deleted userdata older than month | count: ', res.deletedCount);
-                        this.logger.log(`Completed UMS user-data/timestamp retention: deleted=${res.deletedCount}`);
-                    }
-                    catch (e) {
-                        console.error('Error Deleteing old userData', e);
-                    }
-                });
+                const retentionJob = schedule.scheduleJob('ums-user-data-retention', '0 3 * * * ', 'Asia/Kolkata', () => this.runUserDataRetention());
                 if (retentionJob)
                     this.scheduledJobs.push(retentionJob);
             }
@@ -1412,6 +1401,23 @@ let AppService = AppService_1 = class AppService {
             const axiosError = error;
             this.logger.error(`Forward request failed: ${axiosError.message}`, axiosError.stack);
             throw new Error(`Forward GET request failed: ${axiosError.message}`);
+        }
+    }
+    async runUserDataRetention() {
+        this.logger.log('Starting UMS user-data/timestamp retention');
+        try {
+            const res = await this.userDataService.removeRedundantData();
+            this.logger.log(`Completed UMS userData retention: deleted=${res.deletedCount}`);
+        }
+        catch (e) {
+            this.logger.error(`UMS userData retention failed: ${(0, utils_1.parseError)(e, 'userData retention', false).message}`);
+        }
+        try {
+            await this.timestampService.clear();
+            this.logger.log('Completed UMS timestamps clear');
+        }
+        catch (e) {
+            this.logger.error(`UMS timestamps clear failed: ${(0, utils_1.parseError)(e, 'timestamps clear', false).message}`);
         }
     }
     async processEligibleUsers(limit, skip) {
@@ -15768,6 +15774,13 @@ const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const tg_signup_service_1 = __webpack_require__(/*! ./tg-signup.service */ "./src/components/TgSignup/tg-signup.service.ts");
 const tg_signup_dto_1 = __webpack_require__(/*! ./dto/tg-signup.dto */ "./src/components/TgSignup/dto/tg-signup.dto.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const Exception_filter_1 = __webpack_require__(/*! ../../interceptors/Exception-filter */ "./src/interceptors/Exception-filter.ts");
+function loggableError(error) {
+    return {
+        error: (0, Exception_filter_1.redactPasswordHint)(error instanceof Error ? error.message : String(error)),
+        stack: error instanceof Error ? (0, Exception_filter_1.redactPasswordHint)(error.stack) : undefined,
+    };
+}
 let TgSignupController = TgSignupController_1 = class TgSignupController {
     constructor(tgSignupService) {
         this.tgSignupService = tgSignupService;
@@ -15775,7 +15788,7 @@ let TgSignupController = TgSignupController_1 = class TgSignupController {
     }
     async sendCode(sendCodeDto) {
         try {
-            this.logger.debug(`[SEND_CODE] Request received for phone: ${sendCodeDto.phone}`);
+            this.logger.debug(`[SEND_CODE] Request received for phone: ${(0, tg_signup_service_1.maskPhone)(sendCodeDto.phone)}`);
             const result = await this.tgSignupService.sendCode(sendCodeDto.phone);
             return {
                 status: common_1.HttpStatus.CREATED,
@@ -15789,16 +15802,13 @@ let TgSignupController = TgSignupController_1 = class TgSignupController {
             };
         }
         catch (error) {
-            this.logger.error(`[SEND_CODE] Error for phone: ${sendCodeDto.phone}`, {
-                error,
-                stack: error instanceof Error ? error.stack : undefined
-            });
+            this.logger.error(`[SEND_CODE] Error for phone: ${(0, tg_signup_service_1.maskPhone)(sendCodeDto.phone)}`, loggableError(error));
             throw error;
         }
     }
     async verifyCode(verifyCodeDto) {
         try {
-            this.logger.debug(`[VERIFY_CODE] Request received for phone: ${verifyCodeDto.phone}`);
+            this.logger.debug(`[VERIFY_CODE] Request received for phone: ${(0, tg_signup_service_1.maskPhone)(verifyCodeDto.phone)}`);
             const result = await this.tgSignupService.verifyCode(verifyCodeDto.phone, verifyCodeDto.code, verifyCodeDto.password);
             return {
                 status: result.requires2FA ? common_1.HttpStatus.BAD_REQUEST : common_1.HttpStatus.OK,
@@ -15809,10 +15819,7 @@ let TgSignupController = TgSignupController_1 = class TgSignupController {
             };
         }
         catch (error) {
-            this.logger.error(`[VERIFY_CODE] Error for phone: ${verifyCodeDto.phone}`, {
-                error,
-                stack: error instanceof Error ? error.stack : undefined
-            });
+            this.logger.error(`[VERIFY_CODE] Error for phone: ${(0, tg_signup_service_1.maskPhone)(verifyCodeDto.phone)}`, loggableError(error));
             throw error;
         }
     }
@@ -15949,6 +15956,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var TgSignupService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.TgSignupService = void 0;
+exports.maskPhone = maskPhone;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const tl_1 = __webpack_require__(/*! telegram/tl */ "telegram/tl");
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
@@ -15959,6 +15967,7 @@ const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const Exception_filter_1 = __webpack_require__(/*! ../../interceptors/Exception-filter */ "./src/interceptors/Exception-filter.ts");
 const CODE_TYPE_BY_CLASS = {
     SentCodeTypeApp: 'app',
     SentCodeTypeSms: 'sms',
@@ -16582,7 +16591,7 @@ let TgSignupService = TgSignupService_1 = class TgSignupService {
             }
         }
         catch (error) {
-            this.logger.error(`Verification error for ${maskPhone(phone)}: ${errorText(error)}`);
+            this.logger.error(`Verification error for ${maskPhone(phone)}: ${(0, Exception_filter_1.redactPasswordHint)(errorText(error))}`);
             const message = errorText(error);
             if (message.includes('No active signup session') ||
                 message.includes('Connection failed')) {
@@ -20924,7 +20933,10 @@ let BotsService = BotsService_1 = class BotsService {
     }
     async resolveChannelAdminMobile(channelId) {
         const viaBots = await this.readChannelViaBots(channelId);
-        const viewers = viaBots ? [] : [...this.getChannelManagerMobiles(), ...(await this.getHealthyAccountMobiles(15))];
+        const managers = viaBots ? [] : [...new Set(this.getChannelManagerMobiles())];
+        const live = managers.length ? new Set((await this.findHealthyAccountsByIdentity(managers, [])).map(u => u.mobile)) : new Set();
+        const viewers = managers.filter(m => live.has(m));
+        const blind = new Set();
         let admins = viaBots && viaBots.admins.length > 0 ? viaBots.admins : null;
         for (const viewer of viewers) {
             try {
@@ -20935,13 +20947,14 @@ let BotsService = BotsService_1 = class BotsService {
                 }
             }
             catch {
+                blind.add(viewer);
                 continue;
             }
         }
         const aboutMobiles = new Set();
         for (const m of (viaBots?.about || '').match(/\d{10,13}/g) || [])
             aboutMobiles.add(m);
-        for (const viewer of aboutMobiles.size > 0 ? [] : viewers) {
+        for (const viewer of aboutMobiles.size > 0 ? [] : viewers.filter(v => !blind.has(v))) {
             let about = '';
             try {
                 about = await this.telegramService.getChannelAbout(viewer, channelId);
@@ -23365,7 +23378,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     }
                 }
                 else if (!this.leaveChannelMap.has(doc.mobile)) {
-                    if (this.safeSetLeaveChannelMap(doc.mobile, channels.canSendFalseChats)) {
+                    if (this.queueLeaveChannelsIfAllowed(doc, channels.canSendFalseChats)) {
                         leaveAdded++;
                     }
                 }
@@ -23955,6 +23968,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             for (let i = 0; i < clients.length; i++) {
                 const document = clients[i];
                 const mobile = document.mobile;
+                if (this.isMobileDailyCapped(mobile))
+                    continue;
                 let client = null;
                 try {
                     client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
@@ -23966,7 +23981,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     }
                     if (channels.canSendFalseCount < 10) {
                         const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
-                        const result = await this.fetchJoinCandidates(mobile, channels.ids.length, 25, excludedIds);
+                        const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(mobile);
+                        const result = await this.fetchJoinCandidates(mobile, channels.ids.length, remaining, excludedIds);
                         if (!this.joinChannelMap.has(mobile)) {
                             if (this.safeSetJoinChannelMap(mobile, result)) {
                                 joinSet.add(mobile);
@@ -23975,7 +23991,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     }
                     else {
                         if (!this.leaveChannelMap.has(mobile)) {
-                            if (this.safeSetLeaveChannelMap(mobile, channels.canSendFalseChats)) {
+                            if (this.queueLeaveChannelsIfAllowed(document, channels.canSendFalseChats)) {
                                 leaveSet.add(mobile);
                             }
                         }
@@ -36686,7 +36702,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     }
                 }
                 else if (!this.leaveChannelMap.has(doc.mobile)) {
-                    if (this.safeSetLeaveChannelMap(doc.mobile, channels.canSendFalseChats)) {
+                    if (this.queueLeaveChannelsIfAllowed(doc, channels.canSendFalseChats)) {
                         leaveAdded++;
                     }
                 }
@@ -36904,6 +36920,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 let failCount = 0;
                 for (const document of clients) {
                     const mobile = document.mobile;
+                    if (this.isMobileDailyCapped(mobile))
+                        continue;
                     let client = null;
                     try {
                         client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
@@ -36918,7 +36936,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         if (channels.canSendFalseCount < 10) {
                             const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
                             await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
-                            const result = await this.fetchJoinCandidates(mobile, channels.ids.length, 25, excludedIds);
+                            const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(mobile);
+                            const result = await this.fetchJoinCandidates(mobile, channels.ids.length, remaining, excludedIds);
                             if (!this.joinChannelMap.has(mobile)) {
                                 if (this.safeSetJoinChannelMap(mobile, result)) {
                                     joinSet.add(mobile);
@@ -36927,7 +36946,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         }
                         else {
                             if (!this.leaveChannelMap.has(mobile)) {
-                                if (this.safeSetLeaveChannelMap(mobile, channels.canSendFalseChats)) {
+                                if (this.queueLeaveChannelsIfAllowed(document, channels.canSendFalseChats)) {
                                     leaveSet.add(mobile);
                                 }
                             }
@@ -40607,6 +40626,34 @@ class BaseClientService {
     isMobileDailyCapped(mobile) {
         return this.getDailyJoinCount(mobile) >= this.config.maxChannelJoinsPerDay;
     }
+    resetDailyLeaveCountersIfNeeded() {
+        const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
+        if (today !== this.dailyLeaveDate) {
+            this.dailyLeaveCounts.clear();
+            this.dailyLeaveDate = today;
+        }
+    }
+    getRemainingDailyLeaves(mobile) {
+        this.resetDailyLeaveCountersIfNeeded();
+        return Math.max(0, this.MAX_LEAVES_PER_DAY - (this.dailyLeaveCounts.get(mobile) || 0));
+    }
+    addDailyLeaveCount(mobile, count) {
+        this.resetDailyLeaveCountersIfNeeded();
+        this.dailyLeaveCounts.set(mobile, (this.dailyLeaveCounts.get(mobile) || 0) + count);
+    }
+    queueLeaveChannelsIfAllowed(doc, channels) {
+        const mobile = doc.mobile;
+        const phase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
+        if (BaseClientService.NO_LEAVE_WARMUP_PHASES.has(phase)) {
+            this.logger.debug(`${mobile} in ${phase}: not queueing ${channels?.length ?? 0} channels to leave`);
+            return false;
+        }
+        if (this.getRemainingDailyLeaves(mobile) <= 0) {
+            this.logger.debug(`${mobile} hit daily leave cap (${this.MAX_LEAVES_PER_DAY}), not queueing leaves`);
+            return false;
+        }
+        return this.safeSetLeaveChannelMap(mobile, channels);
+    }
     getEffectiveCooldownMs(mobile, lastUpdateAttempt) {
         const baseCooldownMs = this.config.cooldownHours * 60 * 60 * 1000;
         if (lastUpdateAttempt <= 0)
@@ -40732,6 +40779,9 @@ class BaseClientService {
         this.joinFailureCounts = new Map();
         this.MAX_JOIN_FAILURES_PER_MOBILE = 3;
         this.joinScopeClientId = null;
+        this.MAX_LEAVES_PER_DAY = 20;
+        this.dailyLeaveCounts = new Map();
+        this.dailyLeaveDate = '';
         this.PERIODIC_HEALTH_CHECK_LIMIT = 25;
         this.PERIODIC_HEALTH_CHECK_SPARE = 10;
         this.KNOWN_2FA_PASSWORD = 'Ajtdmwajt1@';
@@ -42037,9 +42087,15 @@ class BaseClientService {
                     this.removeFromLeaveMap(mobile);
                     continue;
                 }
-                channelsToProcess = channels.splice(0, this.config.leaveChannelBatchSize);
+                const allowance = this.getRemainingDailyLeaves(mobile);
+                if (allowance <= 0) {
+                    this.logger.debug(`${mobile} hit daily leave cap (${this.MAX_LEAVES_PER_DAY}), dropping ${channels.length} queued leaves`);
+                    this.removeFromLeaveMap(mobile);
+                    continue;
+                }
+                channelsToProcess = channels.splice(0, Math.min(this.config.leaveChannelBatchSize, allowance));
                 this.logger.debug(`${mobile} leaving ${channelsToProcess.length} channels (${channels.length} remaining)`);
-                if (channels.length > 0) {
+                if (channels.length > 0 && allowance > channelsToProcess.length) {
                     this.leaveChannelMap.set(mobile, channels);
                 }
                 else {
@@ -42047,6 +42103,7 @@ class BaseClientService {
                 }
                 const client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
                 const leaveResult = await client.leaveChannels(channelsToProcess);
+                this.addDailyLeaveCount(mobile, channelsToProcess.length);
                 const leftCount = leaveResult?.successCount ?? channelsToProcess.length;
                 const skippedCount = leaveResult?.skipCount ?? 0;
                 this.logger.debug(`${mobile} leave result: success=${leftCount}, skipped=${skippedCount}, attempted=${channelsToProcess.length}`);
@@ -42833,6 +42890,11 @@ class BaseClientService {
 exports.BaseClientService = BaseClientService;
 BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
     'set_2fa', 'remove_other_auths', 'update_username',
+]);
+BaseClientService.NO_LEAVE_WARMUP_PHASES = new Set([
+    warmup_phases_1.WarmupPhase.ENROLLED,
+    warmup_phases_1.WarmupPhase.SETTLING,
+    warmup_phases_1.WarmupPhase.IDENTITY,
 ]);
 
 
@@ -44763,7 +44825,8 @@ let TimestampService = class TimestampService {
             }
             return createdObj;
         }
-        const keys = Object.keys(timestamp).filter(k => k !== '_id');
+        const keep = new Set(['_id', 'createdAt', 'updatedAt']);
+        const keys = Object.keys(timestamp).filter(k => !keep.has(k));
         if (keys.length === 0) {
             const copy = { ...timestamp };
             if (copy._id)
@@ -48028,6 +48091,16 @@ __decorate([
     __metadata("design:type", String)
 ], User.prototype, "lastActive", void 0);
 __decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Consecutive failed maintenance logins', required: false }),
+    (0, mongoose_1.Prop)({ required: false, type: Number }),
+    __metadata("design:type", Number)
+], User.prototype, "maintenanceFailures", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Earliest time maintenance may retry this account', required: false }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], User.prototype, "maintenanceRetryAt", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Call statistics', required: false }),
     (0, mongoose_1.Prop)({
         type: mongoose_2.default.Schema.Types.Mixed,
@@ -50914,7 +50987,6 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         if (this.isDailyResetRecoveryWindow()) {
             this.afterStartup('ums-test-daily-user-stats-reset-recovery', 15_000, () => this.runDailyUserStatsReset());
         }
-        this.afterStartup('ums-test-initial-user-processing', 120_000, () => this.maintenance.processEligibleUsers(400, 0));
     }
     afterStartup(name, delayMs, task) {
         const timer = setTimeout(() => {
@@ -51161,6 +51233,10 @@ const components_1 = __webpack_require__(/*! ../../components */ "./src/componen
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const channel_live_facts_1 = __webpack_require__(/*! ../../utils/telegram-utils/channel-live-facts */ "./src/utils/telegram-utils/channel-live-facts.ts");
 const channel_eligibility_1 = __webpack_require__(/*! ./channel-eligibility */ "./src/control-plane/maintenance/channel-eligibility.ts");
+const DUPLICATE_DOC_OVERFETCH = 5;
+const MAINTENANCE_RETRY_BASE_MS = 3 * 60 * 60 * 1000;
+const MAINTENANCE_RETRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_MAINTENANCE_FAILURES = 5;
 let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaintenanceService {
     constructor(usersService, channelsService, activeChannelsService, bufferClientService, promoteClientService) {
         this.usersService = usersService;
@@ -51223,7 +51299,7 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 .filter((mobile) => Boolean(mobile))),
         ];
         this.logger.log(`Raw-user query excludes lifecycle pool mobiles: buffer=${bufferClients.length}, promote=${promoteClients.length}, unique=${lifecycleMobiles.length}`);
-        return this.usersService.executeQuery({
+        const rows = await this.usersService.executeQuery({
             expired: false,
             ...(lifecycleMobiles.length
                 ? { mobile: { $nin: lifecycleMobiles } }
@@ -51240,7 +51316,34 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                     updatedAt: { $lte: threeMonthsAgo },
                 },
             ],
-        }, {}, limit, skip);
+            maintenanceRetryAt: { $not: { $gt: now } },
+            maintenanceFailures: { $not: { $gte: MAX_MAINTENANCE_FAILURES } },
+        }, { mobile: 1, updatedAt: -1, _id: 1 }, (skip + limit) * DUPLICATE_DOC_OVERFETCH, 0);
+        const seenMobiles = new Set();
+        const representatives = [];
+        for (const row of rows) {
+            if (seenMobiles.has(row.mobile))
+                continue;
+            seenMobiles.add(row.mobile);
+            representatives.push(row);
+        }
+        return representatives.slice(skip, skip + limit);
+    }
+    maintenanceRetryDelayMs(failures) {
+        return Math.min(MAINTENANCE_RETRY_BASE_MS * 2 ** Math.max(0, failures - 1), MAINTENANCE_RETRY_MAX_MS);
+    }
+    async recordMaintenanceFailure(user) {
+        const failures = (Number(user.maintenanceFailures) || 0) + 1;
+        const retryAt = new Date(Date.now() + this.maintenanceRetryDelayMs(failures));
+        try {
+            await this.usersService.updateByFilter({ tgId: user.tgId }, { maintenanceFailures: failures, maintenanceRetryAt: retryAt });
+            this.logger.warn(failures >= MAX_MAINTENANCE_FAILURES
+                ? `Account maintenance for ${user.mobile} failed ${failures} times; no further retries`
+                : `Account maintenance for ${user.mobile} failed (${failures}/${MAX_MAINTENANCE_FAILURES}); next retry after ${retryAt.toISOString()}`);
+        }
+        catch (recordError) {
+            this.logger.error(`Could not record maintenance backoff for ${user.mobile}: ${(0, utils_1.parseError)(recordError, 'RecordMaintenanceFailure', false).message}`);
+        }
     }
     async updateUser(user) {
         let manager;
@@ -51260,7 +51363,7 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
             ]);
             const lastActive = foreignLastActive ??
                 (user.lastActive ? undefined : new Date().toISOString().split('T')[0]);
-            await this.usersService.updateByFilter({ $or: [{ tgId: user.tgId }, { mobile: me.phone }] }, {
+            await this.usersService.updateByFilter({ tgId: user.tgId }, {
                 contacts: 'savedCount' in contacts ? contacts.savedCount : 0,
                 calls: calls || {
                     incoming: 0,
@@ -51271,7 +51374,6 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 },
                 firstName: me.firstName,
                 lastName: me.lastName,
-                mobile: me.phone,
                 username: me.username,
                 msgs: selfMessages.total,
                 totalChats: dialogs.total,
@@ -51283,6 +51385,8 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 twoFA: Boolean(hasPassword),
                 ...(lastActive ? { lastActive } : {}),
                 tgId: me.id.toString(),
+                maintenanceFailures: 0,
+                maintenanceRetryAt: null,
             });
             try {
                 await manager.setOnlineStatus();
@@ -51301,6 +51405,9 @@ let AccountMaintenanceService = AccountMaintenanceService_1 = class AccountMaint
                 'auth_key_unregistered',
             ])) {
                 await this.usersService.delete(user.tgId);
+            }
+            else {
+                await this.recordMaintenanceFailure(user);
             }
         }
         finally {
@@ -52031,14 +52138,32 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ExceptionsFilter = void 0;
+exports.redactPasswordHint = redactPasswordHint;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const utils_1 = __webpack_require__(/*! ../utils */ "./src/utils/index.ts");
+function redactPasswordHint(text) {
+    return typeof text === 'string' ? text.replace(/\(hint: [^\n]*\)/g, '(hint: [redacted])') : text;
+}
+function redactForLog(exception) {
+    if (!(exception instanceof Error) || !/\(hint: /.test(exception.message))
+        return exception;
+    const copy = Object.assign(Object.create(Object.getPrototypeOf(exception)), exception);
+    copy.message = redactPasswordHint(exception.message);
+    copy.stack = redactPasswordHint(exception.stack);
+    if (exception instanceof common_1.HttpException) {
+        const res = exception.getResponse();
+        copy.response = typeof res === 'string' ? redactPasswordHint(res)
+            : res && typeof res.message === 'string' ? { ...res, message: redactPasswordHint(res.message) } : res;
+    }
+    return copy;
+}
 let ExceptionsFilter = class ExceptionsFilter {
     catch(exception, host) {
         const ctx = host.switchToHttp();
         const response = ctx.getResponse();
-        const errorDetails = (0, utils_1.parseError)(exception, 'Exception', false);
-        console.error("stack:", exception["stack"]);
+        const loggable = redactForLog(exception);
+        const errorDetails = (0, utils_1.parseError)(loggable, 'Exception', false);
+        console.error("stack:", loggable?.["stack"]);
         let status = errorDetails.status || common_1.HttpStatus.INTERNAL_SERVER_ERROR;
         let message = errorDetails.message || 'Internal server error';
         if (exception instanceof common_1.HttpException) {
@@ -52231,15 +52356,11 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const processListeners_1 = __webpack_require__(/*! ./processListeners */ "./src/processListeners.ts");
 (0, processListeners_1.setProcessListeners)();
 __webpack_require__(/*! reflect-metadata */ "reflect-metadata");
 const core_1 = __webpack_require__(/*! @nestjs/core */ "@nestjs/core");
-const mongoose_1 = __importDefault(__webpack_require__(/*! mongoose */ "mongoose"));
 const app_module_1 = __webpack_require__(/*! ./app.module */ "./src/app.module.ts");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
@@ -52247,6 +52368,7 @@ const fs = __importStar(__webpack_require__(/*! fs */ "fs"));
 const Exception_filter_1 = __webpack_require__(/*! ./interceptors/Exception-filter */ "./src/interceptors/Exception-filter.ts");
 const timeout_interceptor_1 = __webpack_require__(/*! ./interceptors/timeout.interceptor */ "./src/interceptors/timeout.interceptor.ts");
 const apiKey_1 = __webpack_require__(/*! ./utils/apiKey */ "./src/utils/apiKey.ts");
+const mongoose_debug_1 = __webpack_require__(/*! ./mongoose-debug */ "./src/mongoose-debug.ts");
 async function bootstrap() {
     try {
         const app = await core_1.NestFactory.create(app_module_1.AppModule);
@@ -52279,7 +52401,7 @@ async function bootstrap() {
                 },
             },
         });
-        mongoose_1.default.set('debug', true);
+        (0, mongoose_debug_1.configureMongooseDebug)();
         app.useGlobalFilters(new Exception_filter_1.ExceptionsFilter());
         app.useGlobalInterceptors(new timeout_interceptor_1.TimeoutInterceptor(60000));
         app.useGlobalPipes(new common_1.ValidationPipe({
@@ -52417,6 +52539,27 @@ exports.LoggerMiddleware = LoggerMiddleware;
 exports.LoggerMiddleware = LoggerMiddleware = __decorate([
     (0, common_1.Injectable)()
 ], LoggerMiddleware);
+
+
+/***/ },
+
+/***/ "./src/mongoose-debug.ts"
+/*!*******************************!*\
+  !*** ./src/mongoose-debug.ts ***!
+  \*******************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.configureMongooseDebug = configureMongooseDebug;
+const mongoose_1 = __importDefault(__webpack_require__(/*! mongoose */ "mongoose"));
+function configureMongooseDebug(env = process.env) {
+    if (env.MONGOOSE_DEBUG === 'true')
+        mongoose_1.default.set('debug', true);
+}
 
 
 /***/ },
