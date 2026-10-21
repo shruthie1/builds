@@ -75887,7 +75887,7 @@ const serviceAndPersonaPatterns = [
                     "Ok baby 😊",
                     "Hmm okay",
                     "Theek hai",
-                    "Okay na 💕"
+                    "Okay 💕"
                 ]));
                 return true;
             }
