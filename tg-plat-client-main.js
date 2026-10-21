@@ -48983,6 +48983,8 @@ class InHouseCallService {
                         endCall: outcome.endCall,
                         percentage: outcome.percentage,
                         source: 'in-house-call',
+                        // executehsl skips the completion if fullShow moved past this (owner 2026-10-21).
+                        ...(handler === 'executehsl' ? { fullShowSeen: plan.fullShowAtPlan } : {}),
                     });
                 }
                 catch (error) {
@@ -50363,15 +50365,44 @@ async function blockRepeatDemo(chatId, userDetails, data) {
     });
     return { recorded: false, reason: 'repeat-demo' };
 }
+/**
+ * Second / full show completion whose start snapshot is behind (owner 2026-10-21). The caller sends
+ * fullShowSeen = user.fullShow when the show started (VC page: the /userdata it loaded; in-house: the plan).
+ * Every recorded second/full show raises fullShow, so a higher fullShow now means this show was already
+ * recorded: an old VC page reopened, or the same show reported twice. Callers that omit the field keep
+ * today's behaviour.
+ */
+function isStaleFullShow(userDetails, data) {
+    const seen = data.fullShowSeen;
+    if (typeof seen !== 'number' || !Number.isFinite(seen) || !userDetails)
+        return false;
+    return (Number(userDetails.fullShow) || 0) > seen;
+}
+async function blockRepeatFullShow(chatId, userDetails, data) {
+    logger.warn(`Repeat full show blocked for ${chatId}: fullShow=${String(userDetails.fullShow ?? '')} fullShowSeen=${String(data.fullShowSeen)} video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} payAmount=${String(userDetails.payAmount ?? '')}`);
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_1__.notifyChat)(String(userDetails.chatId ?? chatId), {
+        title: 'Full show completion not recorded: already recorded',
+        fieldLayout: 'lines',
+        fields: serviceNoticeFields(userDetails, data, { fullShow: userDetails.fullShow }),
+        details: [
+            `Full shows when this show started: ${String(data.fullShowSeen)}; now: ${String(userDetails.fullShow ?? 0)}.`,
+            'Likely a cached/reopened VC page or a duplicate report. Not recorded: no state update, stats, video or post-show messages.',
+        ],
+    });
+    return { recorded: false, reason: 'repeat-full-show' };
+}
 async function executehsl(client, chatId, data) {
     const playback = evaluatePlaybackCompletion(data);
     if (!playback.recorded) {
         logger.warn(`Skipping incomplete full-show playback for ${chatId}: video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} endCall=${String(data.endCall ?? '')}`);
         return playback;
     }
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_6__.setAudioRecord)(chatId);
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     let userDetails = await db.read(chatId);
+    if (isStaleFullShow(userDetails, data)) {
+        return blockRepeatFullShow(chatId, userDetails, data);
+    }
+    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_6__.setAudioRecord)(chatId);
     schedulePostShow(chatId, { kind: 'hsl', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
     const isSecondShow = userDetails.highestPayAmount > 50;
     const before = { ...userDetails };
@@ -58148,7 +58179,9 @@ const paidPatterns = [
             const TOO_HIGH_STEMS = ['high', 'jyada', 'expensive', 'reduce', 'decrease', 'thak', 'ekkuv', 'discoun'];
             const words = text.replace(/(?:https?:\/\/|www\.|t\.me\/)\S*/g, ' ').split(/[^a-z0-9\u0080-\uffff]+/).filter(Boolean);
             const tooHigh = words.some((word) => TOO_HIGH_WORDS.includes(word) || TOO_HIGH_STEMS.some((stem) => word.startsWith(stem)));
-            if (tooHigh) {
+            // A payer still owed the service they paid for keeps it: dropping a ₹150 payer before their second show
+            // left them at 50 with the demo already used, i.e. nothing for what they paid.
+            if (tooHigh && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(userDetails)) {
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_10__.UserDataDtoCrud.getInstance();
                 // Drop to the lower tier, never above what they paid: a ₹30 payer was raised to 50 (credit never paid).
                 // highestPayAmount 0/missing falls back to payAmount (never zero a payer's balance).
@@ -68392,24 +68425,22 @@ function capMap(map) {
         map.delete(oldest);
     }
 }
+const UNSERVED_SUM_WINDOW_MS = 30 * 60 * 1000;
 const unservedCredits = new Map(); // chatId -> armed total
 const endedUnserved = new Set(); // chatIds whose current payment ended "pay again", consumed at the credit
-function istDay(ms = Date.now()) {
-    return new Date(ms + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
 function serviceSig(u) {
     return JSON.stringify([!!u.demoGiven, !!u.secondShow, u.fullShow ?? 0, u.picsSent ?? 0, (u.videos ?? []).length, u.callTime ?? 0]);
 }
-/** Payment ended with "pay again" and nothing delivered: arm the same-day sum at the credit point. */
+/** Payment ended with "pay again" and nothing delivered: arm the unserved sum at the credit point. */
 function markEndedUnserved(chatId) {
     endedUnserved.add(chatId);
 }
-/** The amount to route this payment at: its own, or the armed same-day unserved total plus it. */
+/** The amount to route this payment at: its own, or the armed unserved total (within the window) plus it. */
 function tierAmountFor(chatId, userDetails, amount, key) {
     const armed = unservedCredits.get(chatId);
     if (!armed)
         return amount;
-    if (armed.day !== istDay() || armed.key === key || armed.sig !== serviceSig(userDetails)) {
+    if (Date.now() - armed.at > UNSERVED_SUM_WINDOW_MS || armed.key === key || armed.sig !== serviceSig(userDetails)) {
         if (armed.key !== key)
             unservedCredits.delete(chatId);
         return amount;
@@ -69137,7 +69168,7 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
             fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
             told: true,
         });
-        // An old screenshot is a stale payment, not a fresh unserved one: only a recent one arms the same-day sum.
+        // An old screenshot is a stale payment, not a fresh unserved one: only a recent one arms the unserved sum.
         if (isWithinPastTenMinutesImage.result)
             markEndedUnserved(chatId);
     }
@@ -69202,7 +69233,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         if (endedWithoutService) {
             const fresh = (await db.read(chatId)) ?? userDetails;
             unservedCredits.delete(chatId);
-            unservedCredits.set(chatId, { day: istDay(), total: tierAmount, key: `msg:${event.message.id}`, sig: serviceSig(fresh) });
+            unservedCredits.set(chatId, { at: Date.now(), total: tierAmount, key: `msg:${event.message.id}`, sig: serviceSig(fresh) });
             capMap(unservedCredits);
         }
         else {
@@ -69465,11 +69496,11 @@ async function processImage(event) {
                                         logger.log("Valid payment confirmed and processed.");
                                         // Smart state reset based on payment
                                         const oldPayAmount = userDetails.payAmount;
-                                        // Same chat, same IST day, nothing delivered since the earlier credited payment(s): route at the sum.
+                                        // Same chat, within 30 min, nothing delivered since the earlier credited payment(s): route at the sum.
                                         const tierAmount = tierAmountFor(chatId, userDetails, amount, `msg:${event.message.id}`);
                                         endedUnserved.delete(chatId); // only this payment's own outcome may arm the next sum
                                         if (tierAmount !== amount) {
-                                            logger.log(`[ProcessImage] ${chatId}: same-day unserved payments add up: routing ${amount} as ${tierAmount}`);
+                                            logger.log(`[ProcessImage] ${chatId}: unserved payments add up: routing ${amount} as ${tierAmount}`);
                                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, { title: 'Payments added up', fields: [fact('This payment', amount), fact('Routed as', tierAmount)] });
                                         }
                                         (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_33__.resetStatesOnPayment)(chatId, userDetails, tierAmount);
@@ -94310,6 +94341,13 @@ function buildTelegramRouteData(req) {
             data[key] = body[key];
         else if (req.query[key] !== undefined)
             data[key] = req.query[key];
+    }
+    // fullShowSeen (owner 2026-10-21): user.fullShow when the show started; executehsl drops a completion
+    // whose snapshot is behind (stale page / duplicate report). Passed on only as a finite number.
+    const fullShowSeen = body.fullShowSeen !== undefined ? body.fullShowSeen : req.query.fullShowSeen;
+    if ((typeof fullShowSeen === 'number' || (typeof fullShowSeen === 'string' && fullShowSeen.trim() !== ''))
+        && Number.isFinite(Number(fullShowSeen))) {
+        data.fullShowSeen = Number(fullShowSeen);
     }
     return data;
 }
