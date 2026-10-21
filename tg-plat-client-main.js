@@ -57534,6 +57534,12 @@ const paidPatterns = [
             const HOW_MUCH_QUESTION = ['how much', 'hw much'];
             const bareDurationUnit = DURATION_UNITS.includes(trimPunctuation(text));
             const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_18__.hasMinuteUnit)(text);
+            // "one more time" / "again" asks for another call, not how long: leave it to user_repeat_service_request.
+            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['one more', 'once more', 'again', 'another', 'dobara', 'phir se', 'phirse']) &&
+                !hasDurationUnit &&
+                !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'kitna', 'kitne', 'kitni', 'how long'])) {
+                return false;
+            }
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const hasNumberedKitnaDuration = durationMinutes !== -1 &&
                 (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) &&
@@ -58056,8 +58062,13 @@ const paidPatterns = [
         description: 'Price too high complaints',
         handler: async (event, text, allMsg, userDetails, context) => {
             // ===== Price too high: bags-based =====
-            const TOO_HIGH = ['high', 'jyada', 'expensive', 'kam', 'reduce', 'decrease', 'thak', 'ekkuv', 'discoun'];
-            if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, TOO_HIGH)) {
+            // This handler rewrites the user's tier and callTime, so it matches at word starts only and ignores links:
+            // "yes t.me/call/j0ta_uutprkamq" matched 'kam' as a substring (meghana1 2026-10-21).
+            const TOO_HIGH_WORDS = ['kam', 'kamm', 'kami', 'kammi'];
+            const TOO_HIGH_STEMS = ['high', 'jyada', 'expensive', 'reduce', 'decrease', 'thak', 'ekkuv', 'discoun'];
+            const words = text.replace(/(?:https?:\/\/|www\.|t\.me\/)\S*/g, ' ').split(/[^a-z0-9\u0080-\uffff]+/).filter(Boolean);
+            const tooHigh = words.some((word) => TOO_HIGH_WORDS.includes(word) || TOO_HIGH_STEMS.some((stem) => word.startsWith(stem)));
+            if (tooHigh) {
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_10__.UserDataDtoCrud.getInstance();
                 if (userDetails.highestPayAmount >= 250) {
                     userDetails = await db.update(userDetails.chatId, {
@@ -67873,6 +67884,7 @@ function regenerateSwaggerSpec() {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ANALYSIS_HOLD_DELAYS_MS: () => (/* binding */ ANALYSIS_HOLD_DELAYS_MS),
+/* harmony export */   UNCLEAR_SCREENSHOT_MESSAGES: () => (/* binding */ UNCLEAR_SCREENSHOT_MESSAGES),
 /* harmony export */   processImage: () => (/* binding */ processImage),
 /* harmony export */   restoreHolds: () => (/* binding */ restoreHolds),
 /* harmony export */   runFraudBlock: () => (/* binding */ runFraudBlock),
@@ -69344,6 +69356,18 @@ async function processImage(event) {
                                     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, { title: 'Told: not just', fields: [fact('Amount', amount)], told: true });
                                 }
                             }
+                        }
+                        else if (sanitizedData.isPaymentMine && !imageDetails.isSuccess && !imageDetails.isFailed && !imageDetails.isFinished) {
+                            // A payment to us whose status the model left unknown (pending / unreadable, none of success / failed /
+                            // finished set) is not "someone else's payment": never delete or count it, ask for the screenshot again
+                            // like the no-amount branch (RCA 2026-10-21: 62 such deletes since 10-10, 3 confirmed false rejects).
+                            await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_31__.sendMessageWithTimeout)(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
+                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, {
+                                title: 'Status unclear (asked again)',
+                                summary: 'Payment to us, but the payment status could not be read; asked for the full screenshot.',
+                                fields: [fact('Amount', amount)],
+                                told: true,
+                            });
                         }
                         else {
                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
