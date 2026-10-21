@@ -50307,10 +50307,13 @@ async function executehs(client, chatId, data) {
         logger.warn(`Skipping incomplete demo playback for ${chatId}: video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} endCall=${String(data.endCall ?? '')}`);
         return playback;
     }
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_6__.setAudioRecord)(chatId);
-    schedulePostShow(chatId, { kind: 'hs', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     let userDetails = await db.read(chatId);
+    if (userDetails?.demoGiven === true) {
+        return blockRepeatDemo(chatId, userDetails, data);
+    }
+    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_6__.setAudioRecord)(chatId);
+    schedulePostShow(chatId, { kind: 'hs', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
     const noticeFields = serviceNoticeFields(userDetails, data);
     const updatedData = {
         paidReply: true,
@@ -50334,6 +50337,31 @@ async function executehs(client, chatId, data) {
     await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_6__.setTyping)(chatId);
     (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.noteDemoGiven)(chatId);
     return playback;
+}
+/**
+ * A demo completion for a user whose demo is already recorded (kavya1 5723974555, 2026-10-21: one ₹50
+ * credit, two full demo plays after a cached VC page reopen). Every path that sells a new demo sets
+ * demoGiven=false before calling initiateCall (the callers do it: processImage.ts, existing-user-handler.ts,
+ * tp-messages.ts), and the VC page only plays demo media while demoGiven is false, so demoGiven=true here means
+ * the page ran on stale data, or an operator command (outhandler hs/hsl/dmvr) already marked the demo given.
+ * Nothing is recorded: no state reset, stats, video, post-show messages or ask-to-pay marker. Ops get one
+ * notice; the user gets nothing.
+ */
+async function blockRepeatDemo(chatId, userDetails, data) {
+    const lastPaidAt = Number(userDetails.lastPaidAt) || 0;
+    logger.warn(`Repeat demo blocked for ${chatId}: demoGiven already true; video=${String(data.video ?? '')} percentage=${String(data.percentage ?? '')} payAmount=${String(userDetails.payAmount ?? '')} lastPaidAt=${lastPaidAt}`);
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_1__.notifyChat)(String(userDetails.chatId ?? chatId), {
+        title: 'Demo completion not recorded: demo already marked given',
+        fieldLayout: 'lines',
+        fields: serviceNoticeFields(userDetails, data),
+        details: [
+            'demoGiven was already true when this demo completion arrived (stale VC page, or marked by an operator command).',
+            'A new demo payment resets demoGiven to false before the call.',
+            'Likely a cached/reopened VC page. Not recorded: no state reset, stats, video or post-show messages.',
+            `Last paid at: ${lastPaidAt ? new Date(lastPaidAt).toISOString() : 'unknown'}`,
+        ],
+    });
+    return { recorded: false, reason: 'repeat-demo' };
 }
 async function executehsl(client, chatId, data) {
     const playback = evaluatePlaybackCompletion(data);
@@ -58122,22 +58150,17 @@ const paidPatterns = [
             const tooHigh = words.some((word) => TOO_HIGH_WORDS.includes(word) || TOO_HIGH_STEMS.some((stem) => word.startsWith(stem)));
             if (tooHigh) {
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_10__.UserDataDtoCrud.getInstance();
-                if (userDetails.highestPayAmount >= 250) {
-                    userDetails = await db.update(userDetails.chatId, {
-                        payAmount: 100,
-                        secondShow: false,
-                        highestPayAmount: 100,
-                        callTime: Date.now() - 15 * 60 * 1000
-                    });
-                }
-                else {
-                    userDetails = await db.update(userDetails.chatId, {
-                        payAmount: 50,
-                        secondShow: false,
-                        highestPayAmount: 50,
-                        callTime: Date.now() - 15 * 60 * 1000
-                    });
-                }
+                // Drop to the lower tier, never above what they paid: a ₹30 payer was raised to 50 (credit never paid).
+                // highestPayAmount 0/missing falls back to payAmount (never zero a payer's balance).
+                const highest = Number(userDetails.highestPayAmount) || 0;
+                const cap = highest >= 250 ? 100 : 50;
+                const tier = Math.min(cap, highest || Number(userDetails.payAmount) || cap);
+                userDetails = await db.update(userDetails.chatId, {
+                    payAmount: tier,
+                    secondShow: false,
+                    highestPayAmount: tier,
+                    callTime: Date.now() - 15 * 60 * 1000
+                });
                 // Don't go silent after dropping the tier — tell the user their new, lower
                 // price with the dynamic upsell menu (reflects the just-updated payAmount).
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount)), true);
@@ -62441,12 +62464,19 @@ class UserDataDtoCrud {
      * Callers treat false as "already handled", never as an error.
      */
     async creditPayment(chatId, amount, paymentKey) {
+        return (await this.creditPaymentOutcome(chatId, amount, paymentKey)) === 'applied';
+    }
+    /**
+     * creditPayment with its reason: 'applied', 'duplicate' (this key was already credited), or why nothing
+     * was written ('unavailable' / 'no-row' / 'invalid-amount'). Only 'duplicate' means "already booked".
+     */
+    async creditPaymentOutcome(chatId, amount, paymentKey) {
         const repositories = this.getRepositories();
         if (!repositories) {
             // Pre-connection window. Refusing is correct: crediting through the raw path would skip
             // the idempotency guard, which is the entire point of routing money through here.
             logger.warn?.(`creditPayment(${chatId}) skipped: repositories unavailable`);
-            return false;
+            return 'unavailable';
         }
         const result = await repositories.userData.creditPayment(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), {
             amount,
@@ -62455,7 +62485,7 @@ class UserDataDtoCrud {
         if (!result.applied && result.reason === 'duplicate') {
             logger.log(`[creditPayment] ${chatId}: replay of ${paymentKey} ignored (balance ${result.balance})`);
         }
-        return result.applied;
+        return result.applied ? 'applied' : (result.reason ?? 'invalid-amount');
     }
     /**
      * Record person-level identity in `userIdentity` (D4), keyed on chatId alone.
@@ -62480,7 +62510,19 @@ class UserDataDtoCrud {
             logger.warn?.(`observeIdentity(${chatId}) failed: ${String(error)}`);
         }
     }
-    async recordPaymentAttribution(chatId, confirmedAmount) {
+    /**
+     * `ledger` is the outcome of `creditPayment` for THIS screenshot (keyed on its message id):
+     *   - 'applied'   a NEW payment with its own identity (the proof gate claimed its UTR / picture):
+     *                 its full amount is booked (paid:1 only on the first today).
+     *   - 'duplicate' the key was already credited (restart replay / re-fired task): nothing booked.
+     *   - omitted     no payment identity (no gate claim, or no UTR / picture hash: a re-screenshot of
+     *                 the same payment gets a new message id) or the ledger did not credit: the legacy
+     *                 "rise over today's highest" rule, which can undercount but never double-books.
+     * Before the ledger existed this method had no payment identity, so a second same-day payment
+     * was indistinguishable from a re-entry and was booked only as its rise over the day's highest
+     * (₹50 then ₹350 booked 50 + 300; ₹30 then ₹20 booked 30 + 0).
+     */
+    async recordPaymentAttribution(chatId, confirmedAmount, ledger) {
         const normalizedChatId = String(chatId || '').trim();
         const amount = Number(confirmedAmount);
         const profile = process.env.dbcoll?.trim();
@@ -62499,7 +62541,9 @@ class UserDataDtoCrud {
         // and stamps today's per-day counting marker, returning the PRE-image. Atomicity is what
         // makes it correct under concurrency: two overlapping calls for the same payer are
         // serialized by Mongo, so only the first sees a pre-image without today's marker.
-        // Branching happens off the pre-image, never off a separate read:
+        // With a ledger outcome the payment identity comes from the ledger key ('applied' books the
+        // full amount, 'duplicate' nothing) and the pre-image only decides paid:1. Without one
+        // (legacy fallback) branching happens off the pre-image, never off a separate read:
         //   - no matching doc (pre === null) -> first payment today  -> paid:1 + revenue:floor
         //   - marker != today               -> first payment today  -> paid:1 + revenue:floor
         //   - marker == today, prev < floor  -> same-day upgrade      -> revenue: delta only
@@ -62520,7 +62564,14 @@ class UserDataDtoCrud {
             // Amount this call newly credited in Mongo; 0 means a re-entry for an already-counted
             // payment (repeat screenshot / full-show), which must not write another payment_event.
             let creditedNow = 0;
-            if (!countedToday) {
+            if (ledger === 'duplicate') {
+                creditedNow = 0;
+            }
+            else if (ledger === 'applied') {
+                creditedNow = floorAmount;
+                void this.recordDailyUser(process.env.mobile, countedToday ? { revenue: floorAmount } : { paid: 1, revenue: floorAmount });
+            }
+            else if (!countedToday) {
                 creditedNow = floorAmount;
                 void this.recordDailyUser(process.env.mobile, { paid: 1, revenue: floorAmount });
             }
@@ -67941,6 +67992,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ANALYSIS_HOLD_DELAYS_MS: () => (/* binding */ ANALYSIS_HOLD_DELAYS_MS),
 /* harmony export */   UNCLEAR_SCREENSHOT_MESSAGES: () => (/* binding */ UNCLEAR_SCREENSHOT_MESSAGES),
 /* harmony export */   processImage: () => (/* binding */ processImage),
+/* harmony export */   resetUnservedCredits: () => (/* binding */ resetUnservedCredits),
 /* harmony export */   restoreHolds: () => (/* binding */ restoreHolds),
 /* harmony export */   runFraudBlock: () => (/* binding */ runFraudBlock),
 /* harmony export */   runHoldRecheck: () => (/* binding */ runHoldRecheck),
@@ -68340,6 +68392,32 @@ function capMap(map) {
         map.delete(oldest);
     }
 }
+const unservedCredits = new Map(); // chatId -> armed total
+const endedUnserved = new Set(); // chatIds whose current payment ended "pay again", consumed at the credit
+function istDay(ms = Date.now()) {
+    return new Date(ms + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+function serviceSig(u) {
+    return JSON.stringify([!!u.demoGiven, !!u.secondShow, u.fullShow ?? 0, u.picsSent ?? 0, (u.videos ?? []).length, u.callTime ?? 0]);
+}
+/** Payment ended with "pay again" and nothing delivered: arm the same-day sum at the credit point. */
+function markEndedUnserved(chatId) {
+    endedUnserved.add(chatId);
+}
+/** The amount to route this payment at: its own, or the armed same-day unserved total plus it. */
+function tierAmountFor(chatId, userDetails, amount, key) {
+    const armed = unservedCredits.get(chatId);
+    if (!armed)
+        return amount;
+    if (armed.day !== istDay() || armed.key === key || armed.sig !== serviceSig(userDetails)) {
+        if (armed.key !== key)
+            unservedCredits.delete(chatId);
+        return amount;
+    }
+    return armed.total + amount;
+}
+/** Test hook. */
+function resetUnservedCredits() { unservedCredits.clear(); endedUnserved.clear(); }
 /** Test hook: when set, re-checks run from this timer instead of a delayed record. */
 let holdTimer = null;
 /** Test hook. */
@@ -68878,6 +68956,7 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
                 fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
                 told: true,
             });
+            markEndedUnserved(chatId);
             // Pic request count handled in database (userDetails.picCount)
         }
     }
@@ -69004,6 +69083,7 @@ async function handleSmallPicsPayment(event, chatId, imageDetails, userDetails, 
                 fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
                 told: true,
             });
+            markEndedUnserved(chatId);
             // Increment counters
             _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.incrementPleaseRequestCount(chatId);
             // picCount handled in database (userDetails.picCount)
@@ -69057,6 +69137,9 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
             fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
             told: true,
         });
+        // An old screenshot is a stale payment, not a fresh unserved one: only a recent one arms the same-day sum.
+        if (isWithinPastTenMinutesImage.result)
+            markEndedUnserved(chatId);
     }
     // Decrement invalid photo count (user sent valid payment)
     const currentInvalidCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getInvalidPhotoCount(chatId);
@@ -69066,7 +69149,8 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
     }
 }
 /** Every valid payment: ledger credit, centralized payAmount update, attribution. */
-async function recordValidPaymentCredit(event, chatId, db, userDetails, amount) {
+async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount = amount, gateIdentified = false) {
+    const endedWithoutService = endedUnserved.delete(chatId);
     // Centralized payAmount update - ensures payAmount is updated for all valid payments
     // This handles cases where payAmount might not be updated in specific code paths above
     // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
@@ -69084,31 +69168,49 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount) 
     //   - idempotency, keyed on the SCREENSHOT MESSAGE. The surrounding credit
     //     paths run inside scheduleProcessImageTask callbacks, and that helper is a
     //     bare setTimeout wrapper with no dedupe, so one screenshot can credit twice.
+    // The ledger outcome decides what revenue books: a NEW key whose payment identity the proof gate claimed (UTR or
+    // picture hash) books its full amount, a replayed key books nothing. Everything else (no gate identity: a
+    // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
+    // the legacy rise-over-highest rule, which never double-books.
+    let credit;
     if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT) {
         creditedSeq.delete(chatId);
         creditedSeq.set(chatId, ++holdSeq);
         capMap(creditedSeq);
         try {
-            await db.creditPayment(chatId, amount, `msg:${event.message.id}`);
+            credit = await db.creditPaymentOutcome(chatId, amount, `msg:${event.message.id}`);
         }
         catch (creditError) {
             // A ledger failure must never break the payment flow the user is watching.
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
         }
     }
-    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT && amount > currentUserDetails.payAmount) {
+    // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
+    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
         // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
         userDetails = await db.update(chatId, {
-            payAmount: amount,
+            payAmount: tierAmount,
         });
-        logger.log(`[ProcessImage] Centralized update: payAmount set to ${amount} (was ${currentUserDetails.payAmount})`);
+        logger.log(`[ProcessImage] Centralized update: payAmount set to ${tierAmount} (was ${currentUserDetails.payAmount})`);
     }
     else if (currentUserDetails.payAmount >= amount && amount > 0) {
         logger.log(`[ProcessImage] Skipping centralized update: payAmount already at ${currentUserDetails.payAmount} (amount: ${amount})`);
     }
+    const ledger = credit === 'duplicate' ? 'duplicate' : credit === 'applied' && gateIdentified ? 'applied' : undefined;
+    if (credit === 'applied') {
+        if (endedWithoutService) {
+            const fresh = (await db.read(chatId)) ?? userDetails;
+            unservedCredits.delete(chatId);
+            unservedCredits.set(chatId, { day: istDay(), total: tierAmount, key: `msg:${event.message.id}`, sig: serviceSig(fresh) });
+            capMap(unservedCredits);
+        }
+        else {
+            unservedCredits.delete(chatId);
+        }
+    }
     try {
-        await db.recordPaymentAttribution(chatId, amount);
+        await db.recordPaymentAttribution(chatId, amount, ledger);
     }
     catch (error) {
         // Payment service must not be withheld because analytics is unavailable.
@@ -69353,6 +69455,8 @@ async function processImage(event) {
                                     });
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
+                                    // The gate claimed this payment's own identity (UTR / picture hash): its full amount is new revenue.
+                                    const gateIdentified = Boolean(session && releaseClaim && (session.facts.utr || session.facts.dHash));
                                     if (blockedAnswering && !isPaymentProperlyMine?.isvalid) {
                                         logger.warn(`[ProcessImage] blocked user ${chatId}: payment not accepted, ignored silently`);
                                         return;
@@ -69361,19 +69465,26 @@ async function processImage(event) {
                                         logger.log("Valid payment confirmed and processed.");
                                         // Smart state reset based on payment
                                         const oldPayAmount = userDetails.payAmount;
-                                        (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_33__.resetStatesOnPayment)(chatId, userDetails, amount);
+                                        // Same chat, same IST day, nothing delivered since the earlier credited payment(s): route at the sum.
+                                        const tierAmount = tierAmountFor(chatId, userDetails, amount, `msg:${event.message.id}`);
+                                        endedUnserved.delete(chatId); // only this payment's own outcome may arm the next sum
+                                        if (tierAmount !== amount) {
+                                            logger.log(`[ProcessImage] ${chatId}: same-day unserved payments add up: routing ${amount} as ${tierAmount}`);
+                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, { title: 'Payments added up', fields: [fact('This payment', amount), fact('Routed as', tierAmount)] });
+                                        }
+                                        (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_33__.resetStatesOnPayment)(chatId, userDetails, tierAmount);
                                         // Check if this is an upgrade
-                                        if (amount > oldPayAmount && oldPayAmount > 0) {
-                                            (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_33__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, amount);
+                                        if (tierAmount > oldPayAmount && oldPayAmount > 0) {
+                                            (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_33__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, tierAmount);
                                         }
-                                        if (amount > userDetails.highestPayAmount) {
-                                            userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, amount);
+                                        if (tierAmount > userDetails.highestPayAmount) {
+                                            userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount);
                                         }
-                                        if (amount !== payAmount && amount < 30) {
-                                            await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
+                                        if (tierAmount !== payAmount && tierAmount < 30) {
+                                            await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
-                                        else if (amount >= 15 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT) {
-                                            await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, amount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
+                                        else if (tierAmount >= 15 && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT) {
+                                            await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
                                         else {
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_4__.deleteMessage)(event);
@@ -69383,7 +69494,7 @@ async function processImage(event) {
                                                 fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
                                             });
                                         }
-                                        await recordValidPaymentCredit(event, chatId, db, userDetails, amount);
+                                        await recordValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount, gateIdentified);
                                     }
                                     else if (isPaymentProperlyMine) {
                                         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_31__.sendMessageWithTimeout)(event.client, chatId, {
@@ -73724,8 +73835,9 @@ const openingAndFallbackPatterns = [
         scope: 'all',
         description: 'Generic question fallback — No to negative-framed, encouraging Yes to the rest',
         handler: async (event, text, allMsg, userDetails, context) => {
+            // Word starts only: "show mee" is not a question ("s-how"), "for us" is not "r u" (meghana1 2026-10-21).
             const isQuestion = text.includes('?') ||
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_10__.containsAtWordStart)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
             if (!isQuestion) {
                 return false;
             }
@@ -73789,6 +73901,7 @@ const openingAndFallbackPatterns = [
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BODY_PART_TERMS: () => (/* binding */ BODY_PART_TERMS),
+/* harmony export */   containsAtWordStart: () => (/* binding */ containsAtWordStart),
 /* harmony export */   containsBodyTerm: () => (/* binding */ containsBodyTerm),
 /* harmony export */   containsPadded: () => (/* binding */ containsPadded),
 /* harmony export */   hasPaymentFailureIntent: () => (/* binding */ hasPaymentFailureIntent),
@@ -73838,11 +73951,32 @@ function containsPadded(text, terms) {
     const padded = ` ${trimPunctuation(text)} `;
     return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(padded, terms.map((term) => ` ${trimPunctuation(term)} `));
 }
+/**
+ * True when one of `terms` starts a word in `text` ("how are you", "show me how" match 'how'; "show mee" does not:
+ * "s-how"). For short question words that plain substring matching finds inside other words (meghana1 2026-10-21).
+ */
+function containsAtWordStart(text, terms) {
+    const lower = (text ?? '').toLowerCase();
+    return terms.some((term) => {
+        const needle = term.toLowerCase();
+        for (let index = lower.indexOf(needle); index !== -1; index = lower.indexOf(needle, index + 1)) {
+            if (index === 0 || !/[a-z0-9]/.test(lower[index - 1]))
+                return true;
+        }
+        return false;
+    });
+}
 function containsBodyTerm(text, terms) {
-    const wordOnly = ['ass', 'bum', 'butt', 'hole', 'face', 'body', 'lips', 'legs', 'hips', 'waist', 'back', 'neck', 'arms'];
-    const wordTerms = terms.filter((term) => wordOnly.includes(term));
+    // Whole words only: these also occur inside ordinary words ("chati" in "chating", "chut" in "chutti"/"parachute",
+    // "butt" in "button", "ass" in "class"). meghana1 2026-10-21: "chating with you" was read as a body request.
+    const wordOnly = ['ass', 'bum', 'butt', 'hole', 'face', 'body', 'lips', 'legs', 'hips', 'waist', 'back', 'neck', 'arms', 'chati', 'chut'];
+    // Spelling variants that are still the whole word ("chutt", "chuut").
+    const variants = { chut: ['chutt', 'chuut'] };
+    const wordTerms = terms.filter((term) => wordOnly.includes(term)).flatMap((term) => [term, ...(variants[term] ?? [])]);
     const looseTerms = terms.filter((term) => !wordOnly.includes(term));
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, looseTerms) || containsPadded(text, wordTerms);
+    // Punctuation around a word does not join it to the next one ("chut, dikhao", "chut?").
+    const spaced = ` ${(text ?? '').toLowerCase().replace(/[^a-z0-9\u0080-\uffff]+/g, ' ')} `;
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_0__.contains)(text, looseTerms) || wordTerms.some((term) => spaced.includes(` ${term} `));
 }
 function isOnlyDigits(value) {
     const trimmed = value.trim();
