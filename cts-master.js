@@ -49326,7 +49326,7 @@ let UsersService = UsersService_1 = class UsersService {
             updateData.mobile = this.canonicalMobile(updateData.mobile);
         }
         const updated = await this.userModel
-            .findOneAndUpdate({ tgId }, { $set: updateData }, { new: true })
+            .findOneAndUpdate({ tgId }, { $set: updateData }, { new: true, sort: { _id: 1 } })
             .exec();
         if (!updated) {
             throw new common_1.NotFoundException(`User with tgId ${tgId} not found`);
@@ -49371,7 +49371,7 @@ let UsersService = UsersService_1 = class UsersService {
             }
         }
         const listQuery = await this.getDefaultUserListQuery(query);
-        return this.userModel.find(listQuery).sort({ updatedAt: -1 }).limit(200).exec();
+        return this.userModel.find(listQuery).sort({ updatedAt: -1, _id: 1 }).limit(200).exec();
     }
     async computeRelationshipScore(mobile) {
         const canonicalMobile = this.canonicalMobile(mobile);
