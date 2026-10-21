@@ -24098,6 +24098,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { projection: { [key]: 1 } });
         return row ? row[key] : undefined;
     }
+    /**
+     * True when ANY persona row for chatId has canReply 0 (owner rule 2026-10-21: such a chat is never
+     * called by any client). Deliberately unscoped: every profile counts. Throws.
+     */
+    async hasBlockedRow(chatId) {
+        return !!(await this.collection.findOne({ chatId, canReply: 0 }, { projection: { _id: 1 } }));
+    }
     /** chatId's rows under OTHER personas (full docs). Throws. */
     async findInOtherPersonas(chatId, identity) {
         return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
@@ -34459,6 +34466,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+
 
 
 
@@ -34564,6 +34573,8 @@ class CallManager {
             logger.info(`[${this.instanceName}] No client available for call request`);
             return false;
         }
+        if (await this.isBlocked(chatId))
+            return false;
         try {
             logger.info(`[${this.instanceName}] Requesting call to:`, chatId);
             if (!this.isCallActive() || force) {
@@ -34625,6 +34636,22 @@ class CallManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[${this.instanceName}] Call request error`, false);
             this.endCall();
+            return false;
+        }
+    }
+    /**
+     * Owner rule (2026-10-21): a chat blocked (canReply 0) on ANY persona row is never rung, by any
+     * caller of requestCall. Text is unaffected. A failed read rings (fail open), as in tg-aut.
+     */
+    async isBlocked(chatId) {
+        try {
+            if (!(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_7__.UserDataDtoCrud.getInstance().hasBlockedRow(chatId)))
+                return false;
+            logger.info(`[${this.instanceName}] Call to ${chatId} skipped: chat is blocked (canReply 0) on a persona row`);
+            return true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[${this.instanceName}] block check failed for ${chatId}; ringing`, false);
             return false;
         }
     }
@@ -35109,6 +35136,16 @@ class UserDataDtoCrud {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting user data");
             return null;
         }
+    }
+    /**
+     * True when chatId is blocked (canReply 0) on ANY persona row; such a chat is never called.
+     * Throws (including when Mongo is not connected) so the caller decides how to fail.
+     */
+    async hasBlockedRow(chatId) {
+        const userData = this.repositories.get(this.client)?.userData;
+        if (!userData)
+            throw new Error('Mongo client not connected; userData unavailable');
+        return userData.hasBlockedRow(String(chatId));
     }
     /** Merge post-route common-chat evidence into the userData row created by tg-aut. */
     async recordAttributionChannelIds(chatId, channelIds) {
