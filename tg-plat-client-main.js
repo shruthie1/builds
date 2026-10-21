@@ -68534,11 +68534,6 @@ async function sendAnalysisUnavailableNotice(chatId, note, extra = []) {
     }
 }
 // Payment gate (owner rules 2026-10-13): payments/proof-gate/flow.ts decides; this wires it to Telegram + userData.
-/** Our payee VPAs: the live list from ums /upi-ids, this client's own qrId/gpayId, plus the built-in defaults. */
-function ownVpas() {
-    const builtIn = [_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.paytm1, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.paytm2, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.paytm3, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.ppay, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.bpay2, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.axisUPI, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.gpay, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.gpayid, _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.defaultId];
-    return [...(Array.isArray(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.allIds) ? _payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds.allIds : []), ...(0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.clientUpiIds)(), ...builtIn].filter((v) => typeof v === "string" && v.length > 0);
-}
 /**
  * Would this screenshot reach the payment gate (successful payment to us, not the failed / "connecting" /
  * questionable-caption branches)? A blocked user's photo is only processed when it does; everything else from a
@@ -69315,7 +69310,7 @@ async function processImage(event) {
                         const fraudReasons = [
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_34__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.fabricatedTextReasons)(imageDetails.text),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.laxmiPayeeReasons)(imageDetails, ownVpas()),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.laxmiPayeeReasons)(imageDetails, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds)),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
@@ -69335,7 +69330,7 @@ async function processImage(event) {
                                     const arrivalMs = pictureArrivalMs(event);
                                     // The time-zone move only for a payment to our UPI id (owner 2026-10-21); a served UTR / file is never
                                     // credited whatever its time (the gate's repeat check runs before the credit rules).
-                                    const payeeOurs = (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.checkPayeeUpi)(imageDetails.payeeUpiId, ownVpas().map((v) => v.split("&")[0])) === "own";
+                                    const payeeOurs = (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.checkPayeeUpi)(imageDetails.payeeUpiId, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).map((v) => v.split("&")[0])) === "own";
                                     let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs });
                                     // The gate (repeat / fake-edited / old-time / credit claim) runs around handleMyPayment; when it
                                     // handled the screenshot it has already replied and nothing below runs.
@@ -80049,6 +80044,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   clientUpiIds: () => (/* binding */ clientUpiIds),
 /* harmony export */   isMaskedVpa: () => (/* binding */ isMaskedVpa),
 /* harmony export */   normalizeVpa: () => (/* binding */ normalizeVpa),
+/* harmony export */   ourUpiIds: () => (/* binding */ ourUpiIds),
 /* harmony export */   ownIdsFrom: () => (/* binding */ ownIdsFrom),
 /* harmony export */   withinOneEdit: () => (/* binding */ withinOneEdit)
 /* harmony export */ });
@@ -80093,6 +80089,14 @@ function checkPayeeUpi(payee, ownIds) {
 /** This client's own payee ids from its `clients` doc (loaded into process.env at boot: qrId, gpayId). */
 function clientUpiIds(env = process.env) {
     return [env.qrId, env.gpayId].filter((v) => typeof v === 'string' && v.trim().includes('@')).map(v => v.trim());
+}
+/** The built-in default VPAs on `UpiIds` (payments/upi.ts). */
+const BUILT_IN_UPI_KEYS = ['paytm1', 'paytm2', 'paytm3', 'ppay', 'bpay2', 'axisUPI', 'gpay', 'gpayid', 'defaultId'];
+/** Our payee VPAs: `UpiIds.allIds` (ums /upi-ids), this client's own qrId/gpayId, plus the built-in defaults. */
+function ourUpiIds(upi, env = process.env) {
+    const listed = Array.isArray(upi.allIds) ? upi.allIds : [];
+    const builtIn = BUILT_IN_UPI_KEYS.map((key) => upi[key]);
+    return [...listed, ...clientUpiIds(env), ...builtIn].filter((v) => typeof v === 'string' && v.length > 0);
 }
 /** Adapter over `UpiIds` from services/payment/UpiClass (only `.allIds` is read), plus `extra` ids (clientUpiIds). */
 function ownIdsFrom(source, extra = []) {
@@ -80956,6 +80960,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   laxmiPayeeReasons: () => (/* binding */ laxmiPayeeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
 /* harmony export */ });
+/* harmony import */ var _screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+
 /**
  * Text that only a fabricated receipt carries. A real app never prints the UTR / transaction id as X's (account
  * numbers are masked, ids are not), and "Sample Payment" comes from receipt-generator templates.
@@ -80983,20 +80989,14 @@ function fabricatedTextReasons(text) {
 }
 /**
  * Owner 2026-10-13: "laxmi" on a receipt means a fake (laxmitorreaybp / "laxmi stores" on sowmya1 1118222077,
- * revvilaxmi@ybl); a payer is never called Laxmi. Exceptions: our OWN Paytm QR shows the merchant as "Ravva Laxmi",
- * and any screenshot showing one of our VPAs.
+ * revvilaxmi@ybl); a payer is never called Laxmi. Owner 2026-10-21: only "Ravva Lakshmi" is ours, so "Ravva Laxmi" is
+ * fake too. Exceptions: any screenshot showing one of our VPAs (`showsOurUpiId`), and the payer's bank "Dhanlaxmi".
  */
 function laxmiPayeeReasons(details, ownVpas) {
-    const t = String(details.text ?? '').toLowerCase().replace(/ravva\s*laxmi/g, '');
+    const t = String(details.text ?? '').toLowerCase().replace(/dhan\s*laxmi/g, '');
     if (!t.includes('laxmi'))
         return [];
-    const compact = t.replace(/\s+/g, '');
-    const ours = ownVpas
-        .map((v) => String(v ?? '').toLowerCase().split('&')[0].split('@')[0].replace(/\s+/g, ''))
-        .filter((local) => local.length >= 6);
-    if (ours.some((local) => compact.includes(local)))
-        return [];
-    return ['LAXMI_PAYEE'];
+    return (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_0__.showsOurUpiId)(t, ownVpas) ? [] : ['LAXMI_PAYEE'];
 }
 const IST_OFFSET_MS = 330 * 60000;
 const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
@@ -81656,6 +81656,78 @@ function normalizeAmount(amount, payAmount) {
 
 /***/ },
 
+/***/ "./src/payments/screenshot/paid-to-us.ts"
+/*!***********************************************!*\
+  !*** ./src/payments/screenshot/paid-to-us.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   OUR_PAYEE_NAMES: () => (/* binding */ OUR_PAYEE_NAMES),
+/* harmony export */   hasOurPayeeName: () => (/* binding */ hasOurPayeeName),
+/* harmony export */   isPaidToUs: () => (/* binding */ isPaidToUs),
+/* harmony export */   showsOurUpiId: () => (/* binding */ showsOurUpiId)
+/* harmony export */ });
+/* harmony import */ var _proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+
+/** Our payee (banking) names; each counts only in full. "Lakshmi" is spelled with "ksh": "Laxmi" is not ours. */
+const OUR_PAYEE_NAMES = [
+    'Ravva Lakshmi',
+    'Lakshmi Stores',
+    'Girls Community',
+    'Reddy Girl',
+    'Shetty Saikumar',
+    'Shetty Srinivas',
+];
+/** Our account identifiers that are not UPI ids: account numbers, the BharatPe merchant id and label. */
+const OUR_ACCOUNT_IDS = ['137045557', '8000073302', '210249262', 'bharatpemerchant', '0851610820'];
+/** Cut-off forms seen on credited screenshots ("Mrs Ravva Laksh...", "BHARATPE.8000073..."); count only before "..." / "…". */
+const SEEN_CUT_OFF_NAMES = ['ravvalaksh'];
+const SEEN_CUT_OFF_UPI_IDS = ['bharatpe.8000073'];
+/** A UPI id cut short counts from this length: 5+ characters past the shared Paytm QR prefix "paytmqr281005050101". */
+const MIN_UPI_ID_PREFIX = 24;
+/** Shorter UPI local parts are too generic to look for in free text. */
+const MIN_UPI_LOCAL_PART = 6;
+// Each name in both word orders without spaces: receipts print "LAKSHMI\nSTORES", "REDDYGIRL", "Saikumar Shetty".
+const PAYEE_NAME_FORMS = OUR_PAYEE_NAMES.flatMap((name) => {
+    const words = name.toLowerCase().split(' ');
+    return [words.join(''), [...words].reverse().join('')];
+});
+const hasCutOff = (compacted, forms) => forms.some((form) => compacted.includes(`${form}...`) || compacted.includes(`${form}…`));
+const upiLocalParts = (ids) => ids
+    .filter((id) => typeof id === 'string')
+    .map((id) => (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(id).split('&')[0].split('@')[0])
+    .filter((local) => local.length >= MIN_UPI_LOCAL_PART);
+/** One of our payee names in full (any case, any or no spacing, either word order), or a seen cut-off of one. */
+function hasOurPayeeName(text) {
+    const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
+    return PAYEE_NAME_FORMS.some((form) => compacted.includes(form)) || hasCutOff(compacted, SEEN_CUT_OFF_NAMES);
+}
+/** One of our UPI ids (local part), a long prefix of one (cut off or split by OCR), or a seen cut-off form. */
+function showsOurUpiId(text, ownIds) {
+    const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
+    const locals = upiLocalParts(ownIds);
+    if (locals.some((local) => compacted.includes(local)))
+        return true;
+    if (hasCutOff(compacted, SEEN_CUT_OFF_UPI_IDS))
+        return true;
+    const tokens = String(text ?? '').toLowerCase().split(/[^a-z0-9.\-]+/).map((token) => token.replace(/\.+$/, ''));
+    return tokens.some((token) => token.length >= MIN_UPI_ID_PREFIX && locals.some((local) => local.startsWith(token)));
+}
+function showsOurAccountId(text) {
+    const lower = String(text ?? '').toLowerCase();
+    return OUR_ACCOUNT_IDS.some((id) => lower.includes(id));
+}
+/** Paid to us: our UPI id, account identifier or payee name is on the screenshot. Fragments of names never count. */
+function isPaidToUs(text, ownUpiIds) {
+    return showsOurUpiId(text, ownUpiIds) || showsOurAccountId(text) || hasOurPayeeName(text);
+}
+
+
+/***/ },
+
 /***/ "./src/payments/screenshot/parse-image.ts"
 /*!************************************************!*\
   !*** ./src/payments/screenshot/parse-image.ts ***!
@@ -81672,13 +81744,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _upi__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../upi */ "./src/payments/upi.ts");
 /* harmony import */ var _proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _paid_to_us__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:parse-image");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:parse-image");
 function parseImage(imageData) {
     const paymentRelated = isPaymentRelated(imageData) || isPayment((imageData.text || '').toLowerCase());
     const sanitizedData = {
@@ -81707,11 +81781,9 @@ const getupiKeys = () => {
         return [];
     }
 };
-/** This client's own payee ids (clients doc qrId / gpayId), local part: not always in the shared /upi-ids list. */
-const clientUpiKeys = () => (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.clientUpiIds)().map(upiId => upiId.split('@')[0]).filter(Boolean);
+/** Paid to us: see paid-to-us.ts. */
 function isPaymentMine(imageData) {
-    const keywordsToCheck = [...getupiKeys(), ...clientUpiKeys(), 'lakshmi', 'lk pvt', 'shetty', 'setti', 'ravva', 'reddy g', 'ddy girl', "paidgirl", "redgir", "137045557", "8000073302", '210249262', "bharatpemerchant", "shetty", "community", "0851610820", 'girls', 'community'];
-    return imageData.wordCount >= 2 && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(`${imageData.payeeName} ${imageData.payerName} ${imageData.text}`, keywordsToCheck);
+    return imageData.wordCount >= 2 && (0,_paid_to_us__WEBPACK_IMPORTED_MODULE_2__.isPaidToUs)(`${imageData.payeeName} ${imageData.payerName} ${imageData.text}`, (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_1__.ourUpiIds)(_upi__WEBPACK_IMPORTED_MODULE_0__.UpiIds));
 }
 function isFailedPayment(imageData) {
     return imageData.isFailed;
@@ -81720,13 +81792,13 @@ function isValidPayment(imageData) {
     const text = imageData.text || '';
     // A screen that still has its pay button is never finished, whatever the model says (fallback models call
     // "Proceed To Pay" a success). On such a screen only success words in the text count.
-    const isUnsubmittedPayScreen = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+    const isUnsubmittedPayScreen = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, [
         'proceed to pay', 'add a message', 'enter upi pin', 'enter your upi pin', 'swipe to pay', 'slide to pay',
     ]);
     const modelSuccess = imageData.isSuccess && !isUnsubmittedPayScreen;
     const hasSuccessSignal = modelSuccess ||
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paid successfully', 'payment successful', 'transaction successful', 'successful', 'completed', 'payment took', 'debited', 'credited', 'pay again']);
-    const hasReferenceSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['transaction id', 'transaction no', 'transaction number', 'utr', 'ref no', 'reference no', 'reference number', 'rrn']);
+        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['paid successfully', 'payment successful', 'transaction successful', 'successful', 'completed', 'payment took', 'debited', 'credited', 'pay again']);
+    const hasReferenceSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['transaction id', 'transaction no', 'transaction number', 'utr', 'ref no', 'reference no', 'reference number', 'rrn']);
     const hasAmountSignal = imageData.amount > 0 || /(?:₹|rs\.?|inr)\s*\d{1,5}|\b\d{2,5}\s*(?:rs|rupees?|₹)\b/i.test(text);
     const hasKnownPayeeSignal = isPaymentMine(imageData);
     const strongEvidenceCount = [
@@ -81737,7 +81809,7 @@ function isValidPayment(imageData) {
     ].filter(Boolean).length;
     const hasStrongCompletionEvidence = (hasSuccessSignal && (hasReferenceSignal || hasAmountSignal || hasKnownPayeeSignal)) ||
         (modelSuccess && imageData.isFinished && strongEvidenceCount >= 2);
-    const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+    const hasAlwaysInvalidContext = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, [
         'failed to connect', 'fazlu rehman',
         'genuine paid girl', 'call just',
         'google ads', 'googleads',
@@ -81751,15 +81823,15 @@ function isValidPayment(imageData) {
     // "interactions" marks stats/ads pages, but GPay's chat-thread view of a paid payment says "Your interactions
     // with <payee> will appear here" (meghana1 chat 8784226986, 2026-10-14): void it only without a completed
     // payment to our payee.
-    const hasInteractionsText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['interactions']);
-    const hasPrePaymentPrompt = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [
+    const hasInteractionsText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['interactions']);
+    const hasPrePaymentPrompt = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, [
         'pay secure', 'pay securely', 'select payment method',
         'unable to process', 'sending money', 'add upi', 'try after',
         'payable', "on tapping", "debit from", 'scan the qr',
         "on pressing", "on clicking",
     ]);
-    const hasPendingOrProcessText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['paying', 'proceed', 'process', 'pending']);
-    const hasEnterAmountText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['enter amount']);
+    const hasPendingOrProcessText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['paying', 'proceed', 'process', 'pending']);
+    const hasEnterAmountText = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['enter amount']);
     if (hasPrePaymentPrompt) {
         logger.debug(`[ImagePayment] Pre-payment prompt present; strongEvidence=${strongEvidenceCount}, success=${hasSuccessSignal}, ref=${hasReferenceSignal}, amount=${hasAmountSignal}, payee=${hasKnownPayeeSignal}`);
     }
@@ -81770,7 +81842,7 @@ function isValidPayment(imageData) {
         (!hasPrePaymentPrompt || hasStrongCompletionEvidence) &&
         (!hasPendingOrProcessText || (hasPendingOrProcessText && hasStrongCompletionEvidence)) &&
         (!hasEnterAmountText ||
-            (hasEnterAmountText && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.containsAll)(text, ['banking', 'joined', 'pay', 'request']) && hasStrongCompletionEvidence));
+            (hasEnterAmountText && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.containsAll)(text, ['banking', 'joined', 'pay', 'request']) && hasStrongCompletionEvidence));
 }
 function isPaymentRelated(imageData) {
     return imageData.isPayment;
@@ -81778,7 +81850,7 @@ function isPaymentRelated(imageData) {
 function isPayment(textLower) {
     const keywordsToCheck = ["reddy", "paidgirl", 'amount', "ravva", 'balance', "failed", "shetty", "community", "lakshmi", "0851610820",
         'payment', 'successful', 'payment', 'girls', 'shetty', 'lk pvt', '8000073302', 'community', "137045557", '210249262', 'paytmqr6m66o9@ptys', 'success', 'paid', 'phonepe', 'transaction', 'sent secure', 'transfer', 'paytm', 'bhim', ...getupiKeys()];
-    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(textLower, keywordsToCheck) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(textLower, ['failed to connect', 'fazlu rehman', 'genuine paid girl']);
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(textLower, keywordsToCheck) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(textLower, ['failed to connect', 'fazlu rehman', 'genuine paid girl']);
 }
 function isLocalFailed(imageData) {
     const invalidKeywords = ["failed", "pending", 'not enough', 'will be refund',
@@ -81787,8 +81859,8 @@ function isLocalFailed(imageData) {
         "demo video", , "technical", "server", "blocked", "not debited", "glitch", "unavailable",
         "try a", "after sometime", "not been debited", "exceeded", "refund"];
     const text = imageData.text.toLowerCase();
-    return ((((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, invalidKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['to connect', 'make paytm your default']))
-        || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['process']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['successful', 'completed', 'finished']))));
+    return ((((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, invalidKeywords) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['to connect', 'make paytm your default']))
+        || ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['process']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, ['successful', 'completed', 'finished']))));
 }
 
 
