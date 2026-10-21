@@ -1729,8 +1729,11 @@ let AppService = AppService_1 = class AppService {
         if (!normalized)
             return { ok: false };
         const bounded = normalized.slice(0, 3500);
-        const sent = await this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToRich)(bounded));
-        return { ok: Boolean(sent) };
+        void Promise.resolve()
+            .then(() => this.botsService.sendMessageByCategory(components_1.ChannelCategory.WEB_TELEMETRY, (0, rich_message_1.telemetryToRich)(bounded)))
+            .then((sent) => { if (!sent)
+            this.logger.warn('webTelemetry: send returned falsy (message dropped)'); }, (error) => this.logger.warn(`webTelemetry: send failed (message dropped): ${error?.message ?? error}`));
+        return { ok: true };
     }
     async findAllMasked(query) {
         return await this.clientService.findAllMasked();
@@ -1749,8 +1752,14 @@ let AppService = AppService_1 = class AppService {
             await Promise.all(clients.map(async (document, index) => {
                 const row = rows[index];
                 try {
-                    const resp = await (0, utils_1.fetchWithTimeout)(`${document.repl}/channelinfo`, { timeout: 200000 }, 1);
-                    row[1] = resp.data.canSendTrueCount ?? '-';
+                    const url = `${document.repl}/channelinfo`;
+                    const resp = await (0, utils_1.fetchWithTimeout)(url, { timeout: 200000 }, 1);
+                    if (!resp) {
+                        this.logger.warn(`tg-aut unreachable for ${document.clientId} (${url})`);
+                        row[3] = 'error: tg-aut unreachable';
+                        return;
+                    }
+                    row[1] = resp.data?.canSendTrueCount ?? '-';
                     row[3] = 'ok';
                     if (resp?.data?.canSendTrueCount &&
                         resp?.data?.canSendTrueCount < 350) {
@@ -1930,7 +1939,10 @@ let AppService = AppService_1 = class AppService {
                 const url = `${profile.repl}/blockuser/${chatId}`;
                 console.log('Executing: ', url);
                 const result = await (0, utils_1.fetchWithTimeout)(url);
-                console.log(result.data);
+                if (!result)
+                    this.logger.warn(`tg-aut unreachable for ${profile.clientId} (${url})`);
+                else
+                    console.log(result.data);
             }
             profileData = profileData + ' | ' + userData.profile;
         }
@@ -1948,7 +1960,10 @@ let AppService = AppService_1 = class AppService {
                 const url = `${profile.repl}/unblockuser/${chatId}`;
                 console.log('Executing: ', url);
                 const result = await (0, utils_1.fetchWithTimeout)(url);
-                console.log(result.data);
+                if (!result)
+                    this.logger.warn(`tg-aut unreachable for ${profile.clientId} (${url})`);
+                else
+                    console.log(result.data);
             }
             profileData = profileData + ' | ' + userData.profile;
         }
@@ -2233,6 +2248,7 @@ let AppService = AppService_1 = class AppService {
             clearTimeout(timer);
         for (const job of this.scheduledJobs)
             job.cancel();
+        redisClient_1.RedisClient.stopPing();
     }
 };
 exports.AppService = AppService;
@@ -2825,7 +2841,7 @@ let ConfigurationService = ConfigurationService_1 = class ConfigurationService {
     async update(updateDto) {
         const { _id, ...updateData } = updateDto;
         try {
-            const updatedConfig = await this.configurationModel.findOneAndUpdate({}, { $set: updateData }, { new: true, upsert: true, lean: true }).exec();
+            const updatedConfig = await this.configurationModel.findOneAndUpdate({}, { $set: updateData }, { returnDocument: 'after', upsert: true, lean: true }).exec();
             if (!updatedConfig) {
                 throw new common_1.NotFoundException('Failed to update configuration');
             }
@@ -6283,7 +6299,7 @@ let TelegramService = TelegramService_1 = class TelegramService {
     async getBotInfo(token) {
         try {
             const response = await (0, fetchWithTimeout_1.fetchWithTimeout)(`https://api.telegram.org/bot${token}/getMe`);
-            if (response.data?.ok) {
+            if (response?.data?.ok) {
                 return response.data.result;
             }
             throw new Error('Failed to get bot info');
@@ -17238,7 +17254,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             const updatedChannel = await this.activeChannelModel
                 .findOneAndUpdate({ channelId: this.channelKey(channelId) }, {
                 $set: { ...cleanDto, updatedAt: new Date() },
-            }, { new: true, upsert: true, lean: true })
+            }, { returnDocument: 'after', upsert: true, lean: true })
                 .exec();
             return updatedChannel;
         }
@@ -17259,7 +17275,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 throw new common_1.BadRequestException('Channel ID and message are required');
             }
             return await this.activeChannelModel
-                .findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $pull: { availableMsgs: msg }, $set: { updatedAt: new Date() } }, { new: true, lean: true })
+                .findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $pull: { availableMsgs: msg }, $set: { updatedAt: new Date() } }, { returnDocument: 'after', lean: true })
                 .exec();
         }
         catch (error) {
@@ -17272,7 +17288,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 throw new common_1.BadRequestException('Channel ID and message are required');
             }
             return await this.activeChannelModel
-                .findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $addToSet: { availableMsgs: msg }, $set: { updatedAt: new Date() } }, { new: true, lean: true })
+                .findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $addToSet: { availableMsgs: msg }, $set: { updatedAt: new Date() } }, { returnDocument: 'after', lean: true })
                 .exec();
         }
         catch (error) {
@@ -19476,7 +19492,7 @@ let BotsService = BotsService_1 = class BotsService {
             throw new common_1.BadRequestException('Bot lifecycle fields are managed only by the health workflow');
         }
         const bot = await this.botModel
-            .findByIdAndUpdate(id, { ...updateBotDto, lastUsed: new Date() }, { new: true })
+            .findByIdAndUpdate(id, { ...updateBotDto, lastUsed: new Date() }, { returnDocument: 'after' })
             .lean()
             .exec();
         if (!bot) {
@@ -20663,7 +20679,7 @@ let BotsService = BotsService_1 = class BotsService {
                     return false;
             }
         }
-        for (const viewerMobile of [...this.getChannelManagerMobiles(), ...(await this.getHealthyAccountMobiles(10))]) {
+        for (const viewerMobile of await this.liveChannelManagerMobiles()) {
             try {
                 const admins = await this.telegramService.getGroupAdmins(viewerMobile, channelId);
                 const ids = new Set((Array.isArray(admins) ? admins : []).map((a) => String(a?.id ?? a?.userId ?? a?.user?.id ?? '')));
@@ -20931,11 +20947,16 @@ let BotsService = BotsService_1 = class BotsService {
             .map(m => (m || '').trim())
             .filter(Boolean);
     }
+    async liveChannelManagerMobiles() {
+        const managers = [...new Set(this.getChannelManagerMobiles())];
+        if (!managers.length)
+            return [];
+        const live = new Set((await this.findHealthyAccountsByIdentity(managers, [])).map(u => u.mobile));
+        return managers.filter(m => live.has(m));
+    }
     async resolveChannelAdminMobile(channelId) {
         const viaBots = await this.readChannelViaBots(channelId);
-        const managers = viaBots ? [] : [...new Set(this.getChannelManagerMobiles())];
-        const live = managers.length ? new Set((await this.findHealthyAccountsByIdentity(managers, [])).map(u => u.mobile)) : new Set();
-        const viewers = managers.filter(m => live.has(m));
+        const viewers = viaBots ? [] : await this.liveChannelManagerMobiles();
         const blind = new Set();
         let admins = viaBots && viaBots.admins.length > 0 ? viaBots.admins : null;
         for (const viewer of viewers) {
@@ -21022,14 +21043,6 @@ let BotsService = BotsService_1 = class BotsService {
             return desired;
         }
     }
-    shuffle(arr) {
-        const a = [...arr];
-        for (let i = a.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [a[i], a[j]] = [a[j], a[i]];
-        }
-        return a;
-    }
     async findHealthyAccountsByIdentity(mobiles, tgIds) {
         const found = [];
         try {
@@ -21044,27 +21057,11 @@ let BotsService = BotsService_1 = class BotsService {
         const seen = new Set();
         return found.filter(u => u?.session && String(u.session).trim() && u.mobile && !seen.has(u.mobile) && seen.add(u.mobile));
     }
-    async getHealthyAccounts() {
-        const users = await this.usersService.search({ expired: false });
-        return this.shuffle(users.filter(u => u.session && String(u.session).trim() && u.mobile));
-    }
     async pickHealthyCreatorCandidates(n) {
         const managerMobiles = new Set(this.getChannelManagerMobiles());
         const accounts = await this.usersService.getBotCreatorAccounts(Math.max(n * 3, 30));
         const usable = accounts.filter(u => u.mobile && !managerMobiles.has(u.mobile));
         return usable.slice(0, Math.max(1, n)).map(u => ({ mobile: u.mobile, username: u.username, firstName: u.firstName }));
-    }
-    async getHealthyAccountMobiles(limit) {
-        const managers = this.getChannelManagerMobiles();
-        const others = (await this.getHealthyAccounts()).map(u => u.mobile);
-        const ordered = [];
-        for (const m of [...managers, ...others]) {
-            if (m && !ordered.includes(m))
-                ordered.push(m);
-            if (ordered.length >= limit)
-                break;
-        }
-        return ordered;
     }
     async notify(message) {
         try {
@@ -22915,7 +22912,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                                 assignedLastName: pick.lastName || null,
                                 assignedBio: pick.bio || null,
                                 assignedProfilePics: pick.profilePics,
-                            } }, { new: true });
+                            } }, { returnDocument: 'after' });
                         if (result) {
                             assignment = {
                                 assignedFirstName: result.assignedFirstName,
@@ -23156,7 +23153,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             throw new common_1.BadRequestException('Cannot activate BufferClient without a session');
         }
         const updatedBufferClient = await this.bufferClientModel
-            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { new: true, returnDocument: 'after' })
+            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
             .exec();
         if (!updatedBufferClient) {
             throw new common_1.NotFoundException(`BufferClient with mobile ${mobile} not found`);
@@ -23318,7 +23315,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 status: 'active',
                 lastUsed: now,
             },
-        }, { new: true, returnDocument: 'after', ...(session ? { session } : {}) })
+        }, { returnDocument: 'after', ...(session ? { session } : {}) })
             .exec();
         if (!updatedBufferClient) {
             throw new common_1.NotFoundException(`Primary buffer client ${mobile} for ${clientId} not found`);
@@ -23462,7 +23459,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                     enrolledAt: new Date(),
                 }
-            }, { new: true, upsert: true })
+            }, { returnDocument: 'after', upsert: true })
                 .exec();
         }
         catch (error) {
@@ -24087,7 +24084,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                         warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                         enrolledAt: new Date(),
                     }
-                }, { new: true, upsert: true }).exec();
+                }, { returnDocument: 'after', upsert: true }).exec();
                 return true;
             });
             if (!enrolled)
@@ -25170,7 +25167,7 @@ let BuildService = class BuildService {
     }
     async update(updateClientDto) {
         delete updateClientDto['_id'];
-        const updatedUser = await this.buildModel.findOneAndUpdate({}, { $set: { ...updateClientDto } }, { new: true, upsert: true }).exec();
+        const updatedUser = await this.buildModel.findOneAndUpdate({}, { $set: { ...updateClientDto } }, { returnDocument: 'after', upsert: true }).exec();
         if (!updatedUser) {
             throw new common_1.NotFoundException(`buildModel not found`);
         }
@@ -25558,7 +25555,7 @@ let ChannelsService = class ChannelsService {
         if (update.private === true || update.forbidden === true || update.banned === true) {
             update.canSendMsgs = false;
         }
-        const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $set: update }, { new: true, upsert: true }).exec();
+        const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $set: update }, { returnDocument: 'after', upsert: true }).exec();
         return updatedChannel;
     }
     async markJoinRequestRequired(channelId) {
@@ -26737,7 +26734,7 @@ let ClientService = ClientService_1 = class ClientService {
             }
             await this.notifyClientUpdate(clientId);
             const updatedClient = await this.executeWithRetry(() => this.clientModel
-                .findOneAndUpdate({ clientId }, { $set: cleanUpdateDto }, { new: true, runValidators: true })
+                .findOneAndUpdate({ clientId }, { $set: cleanUpdateDto }, { returnDocument: 'after', runValidators: true })
                 .lean()
                 .exec());
             if (!updatedClient) {
@@ -27205,7 +27202,7 @@ let ClientService = ClientService_1 = class ClientService {
         try {
             await session.withTransaction(async () => {
                 updatedClient = await this.clientModel
-                    .findOneAndUpdate({ clientId, mobile: this.canonicalMobile(expectedExistingMobile) }, { $set: cleanUpdateDto }, { new: true, runValidators: true, session })
+                    .findOneAndUpdate({ clientId, mobile: this.canonicalMobile(expectedExistingMobile) }, { $set: cleanUpdateDto }, { returnDocument: 'after', runValidators: true, session })
                     .lean()
                     .exec();
                 if (!updatedClient) {
@@ -34778,7 +34775,7 @@ let IpManagementService = IpManagementService_1 = class IpManagementService {
     }
     async updateProxyIp(ipAddress, port, updateDto) {
         this.logger.debug(`Updating proxy IP: ${ipAddress}:${port}`);
-        const updatedIp = await this.proxyIpModel.findOneAndUpdate({ ipAddress, port }, { $set: updateDto }, { new: true }).lean();
+        const updatedIp = await this.proxyIpModel.findOneAndUpdate({ ipAddress, port }, { $set: updateDto }, { returnDocument: 'after' }).lean();
         if (!updatedIp) {
             throw new common_1.NotFoundException(`Proxy IP ${ipAddress}:${port} not found`);
         }
@@ -36361,7 +36358,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                                 assignedLastName: pick.lastName || null,
                                 assignedBio: pick.bio || null,
                                 assignedProfilePics: pick.profilePics,
-                            } }, { new: true });
+                            } }, { returnDocument: 'after' });
                         if (result) {
                             assignment = {
                                 assignedFirstName: result.assignedFirstName,
@@ -36590,7 +36587,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             throw new common_1.BadRequestException('Cannot activate PromoteClient without a session');
         }
         const updatedUser = await this.promoteClientModel
-            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { new: true, returnDocument: 'after' })
+            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
             .exec();
         if (!updatedUser) {
             throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
@@ -36871,7 +36868,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                     warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                     enrolledAt: new Date(),
                 }
-            }, { new: true, upsert: true })
+            }, { returnDocument: 'after', upsert: true })
                 .exec();
         }
         catch (error) {
@@ -37258,7 +37255,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                         warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                         enrolledAt: new Date(),
                     }
-                }, { new: true, upsert: true }).exec();
+                }, { returnDocument: 'after', upsert: true }).exec();
                 return true;
             });
             if (!enrolled)
@@ -37953,7 +37950,7 @@ let PromoteMsgsService = class PromoteMsgsService {
     }
     async update(updateClientDto) {
         delete updateClientDto['_id'];
-        const updatedUser = await this.promotemsgModel.findOneAndUpdate({}, { $set: { ...updateClientDto } }, { new: true, upsert: true }).exec();
+        const updatedUser = await this.promotemsgModel.findOneAndUpdate({}, { $set: { ...updateClientDto } }, { returnDocument: 'after', upsert: true }).exec();
         if (!updatedUser) {
             throw new common_1.NotFoundException(`promotemsgModel not found`);
         }
@@ -38284,7 +38281,7 @@ let PromoteStatService = class PromoteStatService {
         return promoteStat;
     }
     async update(client, updatePromoteStatDto) {
-        const promoteStat = await this.promoteStatModel.findOneAndUpdate({ client }, updatePromoteStatDto, { new: true }).exec();
+        const promoteStat = await this.promoteStatModel.findOneAndUpdate({ client }, updatePromoteStatDto, { returnDocument: 'after' }).exec();
         if (!promoteStat) {
             throw new common_1.NotFoundException(`PromoteStat not found for client ${client}`);
         }
@@ -38947,7 +38944,7 @@ let SessionAuditService = class SessionAuditService {
             if (sessionString) {
                 query.sessionString = sessionString;
             }
-            const updatedRecord = await this.sessionAuditModel.findOneAndUpdate(query, { $set: updateData }, { new: true, sort: { createdAt: -1 } });
+            const updatedRecord = await this.sessionAuditModel.findOneAndUpdate(query, { $set: updateData }, { returnDocument: 'after', sort: { createdAt: -1 } });
             if (updatedRecord) {
                 this.logger.info(mobile, `Session audit record updated: ${updatedRecord.id}`);
             }
@@ -38974,7 +38971,7 @@ let SessionAuditService = class SessionAuditService {
             const updatedRecord = await this.sessionAuditModel.findOneAndUpdate(query, {
                 $inc: { usageCount: 1 },
                 $set: { lastUsedAt: new Date() }
-            }, { new: true, sort: { createdAt: -1 } });
+            }, { returnDocument: 'after', sort: { createdAt: -1 } });
             if (updatedRecord) {
                 this.logger.info(mobile, `Session usage recorded: count ${updatedRecord.usageCount}`);
             }
@@ -41936,7 +41933,7 @@ class BaseClientService {
                 if (joinCount > 0) {
                     let optimisticCount = null;
                     try {
-                        const inc = await this.model.findOneAndUpdate({ mobile }, { $inc: { channels: joinCount } }, { new: true, projection: { channels: 1 } });
+                        const inc = await this.model.findOneAndUpdate({ mobile }, { $inc: { channels: joinCount } }, { returnDocument: 'after', projection: { channels: 1 } });
                         optimisticCount = typeof inc?.channels === 'number' ? inc.channels : null;
                     }
                     catch (incError) {
@@ -41960,10 +41957,11 @@ class BaseClientService {
                 }
             }
             catch (error) {
-                const errorDetails = this.handleError(error, `${mobile} ${currentChannel ? `@${currentChannel.username}` : ''} Join Channel Error`, mobile);
+                const inviteRequestSent = (0, telegram_error_code_1.hasTelegramErrorCode)(error, 'INVITE_REQUEST_SENT');
+                const errorDetails = inviteRequestSent ? null : this.handleError(error, `${mobile} ${currentChannel ? `@${currentChannel.username}` : ''} Join Channel Error`, mobile);
                 const rawErrorMessage = this.getErrorText(error);
-                if ((0, telegram_error_code_1.hasTelegramErrorCode)(error, 'INVITE_REQUEST_SENT')) {
-                    this.logger.log(`${mobile} join request sent (pending approval) for @${currentChannel?.username ?? 'unknown'}`);
+                if (inviteRequestSent) {
+                    this.logger.debug(`${mobile} join request sent (pending approval) for @${currentChannel?.username ?? 'unknown'}`);
                     this.incrementDailyJoinCount(mobile);
                     await this.recordJoinRequest(mobile, currentChannel);
                     if (joinCount > 0) {
@@ -44109,7 +44107,7 @@ let StatService = class StatService {
         return stat;
     }
     async update(chatId, profile, updateStatDto) {
-        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { new: true }).exec();
+        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { returnDocument: 'after' }).exec();
         if (!stat) {
             throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
         }
@@ -44518,7 +44516,7 @@ let Stat2Service = class Stat2Service {
         return stat;
     }
     async update(chatId, profile, updateStatDto) {
-        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { new: true }).exec();
+        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { returnDocument: 'after' }).exec();
         if (!stat) {
             throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
         }
@@ -44806,7 +44804,7 @@ let TimestampService = class TimestampService {
     }
     async update(updateTimestampDto) {
         delete updateTimestampDto['_id'];
-        const updatedTimestamp = await this.timestampModel.findOneAndUpdate({}, { $set: { ...updateTimestampDto } }, { new: true, upsert: true, lean: true }).exec();
+        const updatedTimestamp = await this.timestampModel.findOneAndUpdate({}, { $set: { ...updateTimestampDto } }, { returnDocument: 'after', upsert: true, lean: true }).exec();
         if (!updatedTimestamp) {
             throw new common_1.NotFoundException(`Timestamp not found`);
         }
@@ -45662,7 +45660,7 @@ let TransactionService = TransactionService_1 = class TransactionService {
         try {
             const updatedTransaction = await this.transactionModel
                 .findByIdAndUpdate(id, updateTransactionDto, {
-                new: true,
+                returnDocument: 'after',
                 runValidators: true
             })
                 .exec();
@@ -46369,7 +46367,7 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
                         updatedAt: new Date()
                     }
                 }, {
-                    new: true,
+                    returnDocument: 'after',
                     upsert: true,
                     lean: true,
                     runValidators: true
@@ -47278,7 +47276,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         delete sanitizedDto.profile;
         delete sanitizedDto.chatId;
         const updatedUser = await this.userDataModel
-            .findOneAndUpdate(await this.userRowFilter(profile, chatId), { $set: sanitizedDto }, { new: true, upsert: false })
+            .findOneAndUpdate(await this.userRowFilter(profile, chatId), { $set: sanitizedDto }, { returnDocument: 'after', upsert: false })
             .lean()
             .exec();
         if (!updatedUser) {
@@ -47352,7 +47350,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
     }
     async incrementTotalCount(profile, chatId, amount = 1) {
         const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $inc: { totalCount: amount } }, { new: true })
+            .findOneAndUpdate({ profile, chatId }, { $inc: { totalCount: amount } }, { returnDocument: 'after' })
             .lean()
             .exec();
         if (!updatedUser) {
@@ -47362,7 +47360,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
     }
     async incrementPayAmount(profile, chatId, amount) {
         const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $inc: { payAmount: amount } }, { new: true })
+            .findOneAndUpdate({ profile, chatId }, { $inc: { payAmount: amount } }, { returnDocument: 'after' })
             .lean()
             .exec();
         if (!updatedUser) {
@@ -47372,7 +47370,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
     }
     async updateLastActive(profile, chatId) {
         return this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $set: { lastActiveTime: new Date() } }, { new: true })
+            .findOneAndUpdate({ profile, chatId }, { $set: { lastActiveTime: new Date() } }, { returnDocument: 'after' })
             .lean()
             .exec();
     }
@@ -47425,7 +47423,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
                 limitTime: new Date(),
                 paidReply: false,
             },
-        }, { new: true })
+        }, { returnDocument: 'after' })
             .lean()
             .exec();
     }
@@ -49383,7 +49381,7 @@ let UsersService = UsersService_1 = class UsersService {
                     expired: false,
                     password: 'Ajtdmwajt1@',
                 },
-            }, { new: true, upsert: true }).exec();
+            }, { returnDocument: 'after', upsert: true }).exec();
             this.logger.log(`backfillFromPool: recreated missing user for ${canonicalMobile} (tgId ${tgId})`);
             return created ? created.toJSON() : null;
         }
@@ -49399,7 +49397,7 @@ let UsersService = UsersService_1 = class UsersService {
             updateData.mobile = this.canonicalMobile(updateData.mobile);
         }
         const updated = await this.userModel
-            .findOneAndUpdate({ tgId }, { $set: updateData }, { new: true, sort: { _id: 1 } })
+            .findOneAndUpdate({ tgId }, { $set: updateData }, { returnDocument: 'after', sort: { _id: 1 } })
             .exec();
         if (!updated) {
             throw new common_1.NotFoundException(`User with tgId ${tgId} not found`);
@@ -55017,6 +55015,8 @@ const ioredis_1 = __importDefault(__webpack_require__(/*! ioredis */ "ioredis"))
 const logger_1 = __webpack_require__(/*! ./logger */ "./src/utils/logger.ts");
 const logger = new logger_1.Logger(__filename);
 const DEFAULT_REDIS_URI = "redis://127.0.0.1:6379";
+const KEEPALIVE_MS = 30_000;
+const PING_INTERVAL_MS = 60_000;
 function describeRedisUri(uri) {
     try {
         const u = new URL(uri);
@@ -55035,11 +55035,17 @@ class RedisClient {
             const target = describeRedisUri(uri);
             const retryStrategy = (times) => {
                 const delay = Math.min(times * 100, 3000);
-                logger.warn(`Retrying Redis connection (${times}) after ${delay}ms`);
+                logger.debug(`Retrying Redis connection (${times}) after ${delay}ms`);
                 return delay;
             };
             try {
-                RedisClient.instance = new ioredis_1.default(uri, { retryStrategy });
+                RedisClient.instance = new ioredis_1.default(uri, { retryStrategy, keepAlive: KEEPALIVE_MS });
+                const client = RedisClient.instance;
+                RedisClient.pingTimer = setInterval(() => {
+                    if (client.status === "ready")
+                        client.ping().catch(() => undefined);
+                }, PING_INTERVAL_MS);
+                RedisClient.pingTimer.unref();
                 RedisClient.instance.on("connect", () => {
                     logger.log(`Connected to Redis at ${target}`);
                 });
@@ -55047,7 +55053,7 @@ class RedisClient {
                     logger.error("Redis connection error:", err.message);
                 });
                 RedisClient.instance.on("close", () => {
-                    logger.log("Redis connection closed");
+                    logger.debug("Redis connection closed");
                 });
             }
             catch (error) {
@@ -55057,7 +55063,14 @@ class RedisClient {
         }
         return RedisClient.instance;
     }
+    static stopPing() {
+        if (RedisClient.pingTimer) {
+            clearInterval(RedisClient.pingTimer);
+            RedisClient.pingTimer = null;
+        }
+    }
     static async disconnect() {
+        RedisClient.stopPing();
         if (RedisClient.instance) {
             try {
                 await RedisClient.instance.quit();
@@ -55198,6 +55211,7 @@ class RedisClient {
 }
 exports.RedisClient = RedisClient;
 RedisClient.instance = null;
+RedisClient.pingTimer = null;
 
 
 /***/ },
