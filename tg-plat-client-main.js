@@ -49258,7 +49258,9 @@ class InHouseCallService {
                 }
                 return { status: 'privacy_restricted', videoId: plan.videoId };
             }
-            if (record.endReason === 'no_answer' || record.endReason === 'busy' || record.endReason === 'missed' || record.endReason === 'hangup') {
+            // Only a ring nobody picked up. A call that was answered (incoming: we answered them) and then hung up
+            // before the video started is a media failure below, not a decline (shruthi2 2026-10-22).
+            if (!record.answeredAt && (record.endReason === 'no_answer' || record.endReason === 'busy' || record.endReason === 'missed' || record.endReason === 'hangup')) {
                 // A decline (hangup) is not re-rung by us, and pending ladder events already retry; a decline pauses
                 // them like "don't call" (one ring at the end of the pause, no "pick up na" texts meanwhile).
                 if (record.endReason === 'hangup')
@@ -50716,7 +50718,8 @@ async function executehs(client, chatId, data) {
     const noticeFields = serviceNoticeFields(userDetails, data);
     const updatedData = {
         paidReply: true,
-        cheatCount: Math.max(userDetails.cheatCount - 1, 0),
+        // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
+        cheatCount: 0,
         limitTime: Date.now(),
         totalCount: 10,
         // D3: totalCount: 10 is a FLAG, not a count — and 10 lands inside live thresholds in
@@ -50807,7 +50810,8 @@ async function executehsl(client, chatId, data) {
     // is reset/backdated elsewhere): 30 min with no upsell (conversation/state/upsell-quiet).
     (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.noteShowCompleted)(chatId, before.highestPayAmount);
     const updatedData = {
-        cheatCount: Math.max(userDetails.cheatCount - 1, 0),
+        // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
+        cheatCount: 0,
         fullShow: Math.max((userDetails.fullShow || 0) + 1, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__.cycleVideos)(userDetails) - 3),
         paidReply: true,
         limitTime: userDetails.payAmount > 200 ? Date.now() + (3 * 60 * 1000) : Date.now(),
