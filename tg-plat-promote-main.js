@@ -12781,6 +12781,70 @@ class RedisWrites extends KeyedBackup {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts"
+/*!************************************************************************!*\
+  !*** ../../packages/tg-core/src/telegram-utils/account-dead-notice.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_DEAD_NOTICE_WINDOW_MS: () => (/* binding */ ACCOUNT_DEAD_NOTICE_WINDOW_MS),
+/* harmony export */   accountDeadReason: () => (/* binding */ accountDeadReason),
+/* harmony export */   claimAccountDeadNotice: () => (/* binding */ claimAccountDeadNotice),
+/* harmony export */   isAccountDeadCode: () => (/* binding */ isAccountDeadCode),
+/* harmony export */   setAccountDeadNoticeStoreForTest: () => (/* binding */ setAccountDeadNoticeStoreForTest)
+/* harmony export */ });
+/* harmony import */ var _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+
+
+const ACCOUNT_DEAD_NOTICE_WINDOW_MS = 10 * 60 * 1000;
+const ACCOUNT_DEAD_CODES = new Set([
+    'FROZEN_METHOD_INVALID',
+    'FROZEN_PARTICIPANT_MISSING',
+    'USER_DEACTIVATED',
+    'USER_DEACTIVATED_BAN',
+    'PHONE_NUMBER_BANNED',
+]);
+function isAccountDeadCode(code) {
+    return ACCOUNT_DEAD_CODES.has(code);
+}
+/** The reason when `error` says our own account is frozen, deactivated or banned; otherwise null. */
+function accountDeadReason(error) {
+    const parsed = (0,_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__.parseTelegramError)(error);
+    return parsed.type === 'AUTH_ERROR' && ACCOUNT_DEAD_CODES.has(parsed.code) ? parsed.code : null;
+}
+const defaultStore = () => _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_1__.RedisClient.getClient();
+let store = defaultStore;
+let clock = () => Date.now();
+/** In-process copy of the claims, so the cap holds when Redis is down. One entry per mobile and reason. */
+const claimedAt = new Map();
+/** TEST SEAM ONLY. No arguments restores Redis and the real clock. */
+function setAccountDeadNoticeStoreForTest(accessor, now) {
+    store = accessor ?? defaultStore;
+    clock = now ?? (() => Date.now());
+    claimedAt.clear();
+}
+/** True when the caller should send the notice for this mobile and reason (first claim in the window). */
+async function claimAccountDeadNotice(mobile, reason) {
+    const key = `notice::accountdead::${mobile}::${reason}`;
+    const now = clock();
+    const last = claimedAt.get(key);
+    if (last !== undefined && now - last < ACCOUNT_DEAD_NOTICE_WINDOW_MS)
+        return false;
+    claimedAt.set(key, now);
+    try {
+        return (await store().set(key, String(now), 'EX', ACCOUNT_DEAD_NOTICE_WINDOW_MS / 1000, 'NX')) === 'OK';
+    }
+    catch {
+        return true; // Redis down: the in-process claim above still caps it for this process.
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts"
 /*!***********************************************************************!*\
   !*** ../../packages/tg-core/src/telegram-utils/channel-live-facts.ts ***!
@@ -12861,14 +12925,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _account_dead_notice__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
-const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("checkTgHealth");
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("checkTgHealth");
 /**
  * Minimum gap between programmatic SpamBot probes.
  *
@@ -12947,7 +13013,7 @@ async function checktghealth(client, mobile, force, deps) {
         result = false;
         try {
             if (client) {
-                await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.contacts.Unblock({
+                await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.contacts.Unblock({
                     id: '178220800'
                 }));
             }
@@ -12955,7 +13021,9 @@ async function checktghealth(client, mobile, force, deps) {
         catch (unblockError) {
             (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(unblockError);
         }
-        await sendHealthFailureNotification(mobile, errorDetails.message);
+        // A frozen / deactivated / banned own account: the permanent-failure handoff sends its one notice.
+        if (!(onPermanentFailure && (0,_account_dead_notice__WEBPACK_IMPORTED_MODULE_2__.accountDeadReason)(error)))
+            await sendHealthFailureNotification(mobile, errorDetails.message);
         if (onPermanentFailure) {
             await onPermanentFailure(error, mobile);
         }
@@ -19141,6 +19209,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 /* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+/* harmony import */ var _telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+
 
 
 
@@ -19450,7 +19520,8 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         // Send notification if requested and applicable
         if (sendErr) {
             try {
-                const ignoreError = expected || shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
+                // A frozen / deactivated / banned own account has its one notice (CLIENT_UPDATES, permanent-failure handoff).
+                const ignoreError = expected || shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns) || (0,_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__.accountDeadReason)(err) !== null;
                 if (!ignoreError) {
                     const notificationMessage = telegramErrorMsg || extractedMessage;
                     const notification = {
@@ -40580,18 +40651,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _setup_new_mobile__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./setup-new-mobile */ "./src/telegram/setup-new-mobile.ts");
 /* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("utils");
-async function sendPermanentFailureNotification(notification, context) {
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("utils");
+async function sendPermanentFailureNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.BotConfig.getInstance().sendMessage(category, notification);
         return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.logUnsentNotification)(sent, "Permanent failure notification returned false", context);
     }
     catch (error) {
@@ -40623,7 +40696,7 @@ async function loadTelegramFingerprintSummary(mobile) {
     if (!mobile)
         return null;
     try {
-        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_4__.generateTGConfig)(mobile);
+        const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_5__.generateTGConfig)(mobile);
         const params = config.params;
         const proxy = params.proxy;
         return {
@@ -40682,17 +40755,22 @@ async function startNewUserProcess(error, mobile, force = false, context = 'runt
     }
     const fingerprint = await loadTelegramFingerprintSummary(mobile);
     const fingerprintSummary = formatTelegramFingerprintSummary(fingerprint);
-    await sendPermanentFailureNotification({
-        title: "Mobile replaced",
-        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.CRITICAL,
-        fields: [
-            { label: "Mobile", value: mobile },
-            { label: "Context", value: context },
-            { label: "Error", value: message.slice(0, 500), code: false },
-        ],
-        details: fingerprintSummary.split(' | '),
-        tags: ["promote", "telegram", "permanent-failure", "replacement"],
-    }, `PermanentFailure.notification.${mobile}`);
+    // Owner (2026-10-22): a frozen / deactivated / banned account goes to CLIENT_UPDATES, once per mobile and reason
+    // per window; other permanent failures stay in ACCOUNT_NOTIFICATIONS.
+    const deadReason = (0,_tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__.accountDeadReason)(error);
+    const notify = !deadReason || await (0,_tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__.claimAccountDeadNotice)(mobile, deadReason);
+    if (notify)
+        await sendPermanentFailureNotification(deadReason ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.CLIENT_UPDATES : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            title: "Mobile replaced",
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.CRITICAL,
+            fields: [
+                { label: "Mobile", value: mobile },
+                { label: "Context", value: context },
+                { label: "Error", value: message.slice(0, 500), code: false },
+            ],
+            details: fingerprintSummary.split(' | '),
+            tags: ["promote", "telegram", "permanent-failure", "replacement"],
+        }, `PermanentFailure.notification.${mobile}`);
     logger.error(`[PermanentFailure] ${context}: handing off to setupNewMobile`, {
         mobile,
         message,
