@@ -70312,17 +70312,19 @@ async function processImage(event) {
                         await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer);
                     }
                     else {
+                        // Who it was paid to is decided in one place (paid-to-us.ts payeeVerdict); this is its context.
+                        const payeeCtx = {
+                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds),
+                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).length > 0,
+                            personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
+                        };
                         const fraudReasons = [
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_33__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.fabricatedTextReasons)(imageDetails.text),
                             // Who it was paid to (paid-to-us.ts payeeVerdict): only a TAMPERED payee is a fraud reason. Someone else's
                             // payment (NOT_OURS) falls through to the "not my payment" branch below. Foreign ids are judged only
                             // against the fetched /upi-ids list: without it our shared ids are unknown.
-                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__.payeeVerdict)(imageDetails, {
-                                ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds),
-                                upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).length > 0,
-                                personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
-                            })),
+                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__.payeeVerdict)(imageDetails, payeeCtx)),
                             // Owner 2026-10-22 "future dates are fake!": a payment time after the picture arrived (beyond the clock tolerance).
                             ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
                         ];
@@ -70344,9 +70346,12 @@ async function processImage(event) {
                                     const arrivalMs = pictureArrivalMs(event);
                                     // The time-zone move only for a payment to our UPI id (owner 2026-10-21), except a neighbouring-zone
                                     // lead (fitsNeighbourTimezoneLead), moved for any payee (owner 2026-10-22); a served UTR / file is never
-                                    // credited whatever its time (the gate's repeat check runs before the credit rules).
-                                    const payeeOurs = (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.checkPayeeUpi)(imageDetails.payeeUpiId, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).map((v) => v.split("&")[0])) === "own";
-                                    let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs });
+                                    // credited whatever its time (the gate's repeat check runs before the credit rules). "Our UPI id" is
+                                    // payeeVerdict's (paidToOurUpiId): a cut / masked display of ours counts (sneha1 2026-10-22).
+                                    const payeeOurs = (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__.paidToOurUpiId)(imageDetails, payeeCtx);
+                                    // The screenshot text carries the PhonePe transaction id: its time makes a payment recent whatever the
+                                    // printed time says (isRecentValidPayment, the one place recency is judged).
+                                    let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs, text: imageDetails.text });
                                     // The gate (repeat / fake-edited / old-time / credit claim) runs around handleMyPayment; when it
                                     // handled the screenshot it has already replied and nothing below runs.
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails);
@@ -70356,7 +70361,7 @@ async function processImage(event) {
                                     if (!session && isWithinPastTenMinutesImage.timezoneShiftMin !== undefined) {
                                         // No store: whether the UTR / file was already credited is unknown, so the time is judged as read.
                                         logger.warn(`[ProcessImage] ${chatId}: payment gate unavailable, time-zone move not applied`);
-                                        isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs);
+                                        isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { text: imageDetails.text });
                                     }
                                     const judged = await flow.judge({
                                         session,
@@ -80415,7 +80420,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "default": () => (/* binding */ isRecentValidPayment),
 /* harmony export */   fitsNeighbourTimezoneLead: () => (/* binding */ fitsNeighbourTimezoneLead),
 /* harmony export */   parsePaymentTime: () => (/* binding */ parsePaymentTime),
-/* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime)
+/* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime),
+/* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -80490,6 +80496,28 @@ function fitsNeighbourTimezoneLead(leadMs) {
         return false;
     const leadMin = leadMs / MINUTE_MS;
     return NEIGHBOUR_TZ_OFFSETS_MIN.some((o) => leadMin >= o - 10 && leadMin <= o + 2);
+}
+const IST_OFFSET_MS = 330 * MINUTE_MS;
+const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
+/**
+ * The payment moment encoded in a PhonePe transaction id ("T" + YYMMDDhhmmss IST + 8-10 digits). Live 2026-10-13:
+ * shruthi2 8872981660 sent ₹50/₹100/₹150 receipts with no readable time whose ids all said 7 Sep
+ * (t260907105901..., t260907115008..., t260907110612...); divya2's genuine 12 Oct 02:57 receipt carried
+ * t261012025657... Null when absent or not a valid date. PhonePe's server stamps it in IST whatever the phone's clock
+ * or time zone says, so it is the machine time the time check (isRecentValidPayment) and the proof gate trust.
+ */
+function phonePeTxnTimeMs(text) {
+    const m = PHONEPE_TXN_ID.exec(String(text ?? ""));
+    if (!m)
+        return null;
+    const [yy, mo, dd, hh, mi, ss] = m.slice(1, 7).map(Number);
+    if (mo < 1 || mo > 12 || dd < 1 || dd > 31 || hh > 23 || mi > 59 || ss > 59)
+        return null;
+    const utc = Date.UTC(2000 + yy, mo - 1, dd, hh, mi, ss) - IST_OFFSET_MS;
+    const check = new Date(utc + IST_OFFSET_MS);
+    if (check.getUTCDate() !== dd || check.getUTCMonth() !== mo - 1)
+        return null;
+    return utc;
 }
 const INVALID = Object.freeze({ isValid: false, result: false });
 /** A provider payment time string as a Date, or null when unparseable. No year handling. */
@@ -80596,6 +80624,24 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `PaymentTime.notification.${context}`, false);
     });
 }
+/** The window rules of isRecentValidPayment: 10 min, or 5 when the user's last call was within the last 10 min. */
+function windowFor(userDetails, nowMs) {
+    const lastCallTime = callTimeAsOf(userDetails.callTime, nowMs) || 0;
+    const afterCall = lastCallTime > 0 && nowMs - lastCallTime <= WINDOW_MS;
+    return { lastCallTime, windowMs: afterCall ? WINDOW_AFTER_CALL_MS : WINDOW_MS, windowLabel: afterCall ? "5 minutes" : "10 minutes" };
+}
+/** A PhonePe transaction-id time inside the window (up to FUTURE_SKEW_MS ahead = now): the recent check, else null. */
+function recentByTxnId(txnMs, input, userDetails, atMs) {
+    const now = new Date(atMs);
+    const nowMs = now.getTime();
+    const { windowMs, windowLabel } = windowFor(userDetails, nowMs);
+    const paymentMs = skewToNow(txnMs, nowMs);
+    if (!(paymentMs >= nowMs - windowMs && paymentMs <= nowMs))
+        return null;
+    const time = `${istLabel(now)} vs ${istLabel(new Date(paymentMs))} (checking within ${windowLabel})`;
+    logger.log(`[payment-time] input="${String(input ?? "").trim()}" PhonePe transaction id time ${((nowMs - txnMs) / MINUTE_MS).toFixed(2)} min before arrival: recent whatever the printed time | ${time}`);
+    return { isValid: true, result: true, time, paymentMs, source: "txn-id" };
+}
 /**
  * Is the screenshot's payment time recent? Within 10 minutes, or 5 when the user's last call was in the
  * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and, with `timezoneShift`, one off by a time-zone
@@ -80605,9 +80651,21 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
  *
  * `atMs`: when the picture arrived (Telegram message date), not when its analysis finished: queue waits and the
  * vision chain can take minutes, and a restart analyses a picture again later. Defaults to now.
+ *
+ * `text` (the screenshot text): a PhonePe transaction id in it (phonePeTxnTimeMs) is the machine time of the payment.
+ * Inside the window it makes the payment recent whatever the printed time says (sneha1 2026-10-22: a UTC+3 phone printed
+ * 16:56 for a 19:26 IST payment and three genuine ₹150 receipts were answered "Old payment"). Only in that direction: a
+ * misread id digit must never reject a payer whose printed time passes. An id that says the payment is older than the
+ * window does stop the time-zone move (a guess the machine time refutes).
  */
 function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) {
     try {
+        const txnMs = phonePeTxnTimeMs(opts.text);
+        if (txnMs !== null) {
+            const recent = recentByTxnId(txnMs, input, userDetails, atMs);
+            if (recent)
+                return recent;
+        }
         if (!input || typeof input !== "string" || input.trim() === "") {
             notifyPaymentTime("invalidInput", "Time empty", undefined, [{ label: "Input", value: String(input) }]);
             return { ...INVALID };
@@ -80620,10 +80678,7 @@ function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) 
             return { ...INVALID };
         }
         const nowMs = now.getTime();
-        const lastCallTime = callTimeAsOf(userDetails.callTime, nowMs) || 0;
-        const afterCall = lastCallTime > 0 && nowMs - lastCallTime <= WINDOW_MS;
-        const windowMs = afterCall ? WINDOW_AFTER_CALL_MS : WINDOW_MS;
-        const windowLabel = afterCall ? "5 minutes" : "10 minutes";
+        const { lastCallTime, windowMs, windowLabel } = windowFor(userDetails, nowMs);
         const inWindow = (ms) => ms >= nowMs - windowMs && ms <= nowMs;
         const report = (ms) => `${istLabel(now)} vs ${istLabel(new Date(ms))} (checking within ${windowLabel})`;
         let paymentMs = parsed.getTime();
@@ -80637,7 +80692,9 @@ function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) 
             const amPm = correctAmPmMisread(paymentMs, nowMs);
             // A lead that fits a neighbouring-timezone phone (fitsNeighbourTimezoneLead) is moved whatever the payee
             // shows, as the fake check and the proof gate excuse it; any other gap only with `timezoneShift`.
-            const zoneAllowed = opts.timezoneShift || fitsNeighbourTimezoneLead(paymentMs - nowMs);
+            // A transaction id older than the window refutes a time-zone gap: the payment is that old.
+            const txnSaysOld = txnMs !== null && txnMs < nowMs - windowMs;
+            const zoneAllowed = !txnSaysOld && (opts.timezoneShift || fitsNeighbourTimezoneLead(paymentMs - nowMs));
             const zone = amPm || !zoneAllowed ? null : correctTimezoneOffset(paymentMs, nowMs, inWindow);
             const corrected = amPm ?? zone ?? correctFutureDateMisread(paymentMs, nowMs, inWindow);
             if (corrected) {
@@ -82324,7 +82381,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FUTURE_TIME_TOLERANCE_MS: () => (/* binding */ FUTURE_TIME_TOLERANCE_MS),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
-/* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
+/* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 
@@ -82354,26 +82411,8 @@ function fabricatedTextReasons(text) {
     return reasons;
 }
 const IST_OFFSET_MS = 330 * 60000;
-const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
-/**
- * The payment moment encoded in a PhonePe transaction id ("T" + YYMMDDhhmmss IST + 8-10 digits). Live 2026-10-13:
- * shruthi2 8872981660 sent ₹50/₹100/₹150 receipts with no readable time whose ids all said 7 Sep
- * (t260907105901..., t260907115008..., t260907110612...); divya2's genuine 12 Oct 02:57 receipt carried
- * t261012025657... Null when absent or not a valid date.
- */
-function phonePeTxnTimeMs(text) {
-    const m = PHONEPE_TXN_ID.exec(String(text ?? ''));
-    if (!m)
-        return null;
-    const [yy, mo, dd, hh, mi, ss] = m.slice(1, 7).map(Number);
-    if (mo < 1 || mo > 12 || dd < 1 || dd > 31 || hh > 23 || mi > 59 || ss > 59)
-        return null;
-    const utc = Date.UTC(2000 + yy, mo - 1, dd, hh, mi, ss) - IST_OFFSET_MS;
-    const check = new Date(utc + IST_OFFSET_MS);
-    if (check.getUTCDate() !== dd || check.getUTCMonth() !== mo - 1)
-        return null;
-    return utc;
-}
+// The PhonePe transaction-id time is parsed in payment-time.ts (the time check trusts it too); re-exported here for the gate.
+
 /**
  * Owner 2026-10-22: "future dates are fake!" A payment cannot happen after the picture of it reached us. This much
  * ahead of the picture's arrival is still a genuine payment: phone clocks run a few minutes fast and the receipt
@@ -82908,6 +82947,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasOurPayeeName: () => (/* binding */ hasOurPayeeName),
 /* harmony export */   isOurUpiIdToken: () => (/* binding */ isOurUpiIdToken),
 /* harmony export */   isPaidToUs: () => (/* binding */ isPaidToUs),
+/* harmony export */   paidToOurUpiId: () => (/* binding */ paidToOurUpiId),
 /* harmony export */   payeeVerdict: () => (/* binding */ payeeVerdict),
 /* harmony export */   payeeVerdictOf: () => (/* binding */ payeeVerdictOf),
 /* harmony export */   showsOurBankingName: () => (/* binding */ showsOurBankingName),
@@ -82951,7 +82991,60 @@ function hasOurPayeeName(text) {
     const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
     return PAYEE_NAME_FORMS.some((form) => compacted.includes(form)) || hasCutOff(compacted, SEEN_CUT_OFF_NAMES);
 }
-/** One of our UPI ids (local part), a long prefix of one (cut off or split by OCR), or a seen cut-off form. */
+/** The Paytm QR merchant prefix every "paytmqr2810..." id shares (ours and strangers'): visible there proves nothing. */
+const SHARED_PAYTM_QR_PREFIX = 'paytmqr281005050101';
+/** Characters of one of our ids a masked display must show past that shared prefix: the same 5 as MIN_UPI_ID_PREFIX. */
+const MIN_MASKED_DISTINCT = MIN_UPI_ID_PREFIX - SHARED_PAYTM_QR_PREFIX.length;
+/**
+ * A payee id the app printed masked or cut in the middle ("paytmqr********0101rgcfsaeesx...", "paytmqr…0101rgcfsaeesx…";
+ * sneha1 2026-10-22, PhonePe): '*' / '•' hide one character each, an ellipsis hides any run. Ours when the visible
+ * characters sit in one of our local parts at those places (from its start), with MIN_MASKED_DISTINCT of them past the
+ * shared Paytm QR prefix and one visible run of MIN_UPI_LOCAL_PART+: the part that tells our id from anyone else's must
+ * show. A complete id never comes here (isOurUpiIdToken judges it whole), so a look-alike stays not ours.
+ */
+function maskedDisplayOfOurs(token, locals) {
+    const local = token.split('@')[0];
+    if (!/[*•]|…|\.\./.test(local))
+        return false;
+    const parts = [];
+    for (const m of local.matchAll(/([*•]+)|(…+|\.{2,})|([^*•….]+|\.)/g)) {
+        if (m[1])
+            parts.push({ kind: 'mask', n: m[1].length });
+        else if (m[2])
+            parts.push({ kind: 'gap' });
+        else
+            parts.push({ kind: 'lit', s: m[3] });
+    }
+    // A trailing ellipsis is the usual cut: the id goes on.
+    while (parts.length && parts[parts.length - 1].kind === 'gap')
+        parts.pop();
+    const lits = parts.filter((p) => p.kind === 'lit');
+    if (!lits.some((p) => p.s.length >= MIN_UPI_LOCAL_PART))
+        return false;
+    return locals.some((ours) => {
+        const shared = ours.startsWith(SHARED_PAYTM_QR_PREFIX) ? SHARED_PAYTM_QR_PREFIX.length : 0;
+        // Most visible characters past the shared prefix over every placement of the parts in `ours` (from its start).
+        const best = (pi, at) => {
+            if (pi === parts.length)
+                return 0;
+            const p = parts[pi];
+            if (p.kind === 'mask')
+                return at + p.n <= ours.length ? best(pi + 1, at + p.n) : -1;
+            if (p.kind === 'lit') {
+                if (!ours.startsWith(p.s, at))
+                    return -1;
+                const rest = best(pi + 1, at + p.s.length);
+                return rest < 0 ? -1 : rest + Math.max(0, at + p.s.length - Math.max(at, shared));
+            }
+            let top = -1;
+            for (let k = at; k <= ours.length; k++)
+                top = Math.max(top, best(pi + 1, k));
+            return top;
+        };
+        return best(0, 0) >= MIN_MASKED_DISTINCT;
+    });
+}
+/** One of our UPI ids (local part), a long prefix of one (cut off or split by OCR), a masked display of one, or a seen cut-off form. */
 function showsOurUpiId(text, ownIds) {
     const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
     const locals = upiLocalParts(ownIds);
@@ -82960,7 +83053,9 @@ function showsOurUpiId(text, ownIds) {
     if (hasCutOff(compacted, SEEN_CUT_OFF_UPI_IDS))
         return true;
     const tokens = String(text ?? '').toLowerCase().split(/[^a-z0-9.\-]+/).map((token) => token.replace(/\.+$/, ''));
-    return tokens.some((token) => token.length >= MIN_UPI_ID_PREFIX && locals.some((local) => local.startsWith(token)));
+    if (tokens.some((token) => token.length >= MIN_UPI_ID_PREFIX && locals.some((local) => local.startsWith(token))))
+        return true;
+    return String(text ?? '').toLowerCase().split(/[^a-z0-9.\-*•…@]+/).some((token) => maskedDisplayOfOurs(token, locals));
 }
 /**
  * A UPI id read as an id (the payee UPI id field or a "x@handle" token in the text) that is one of ours: the whole id
@@ -83050,6 +83145,19 @@ function payeeVerdictOf(e, ctx) {
 }
 function payeeVerdict(details, ctx) {
     return payeeVerdictOf((0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details), ctx);
+}
+/**
+ * Paid to OUR UPI ID (owner 2026-10-21: the condition for moving a payment time by a time-zone gap, isRecentValidPayment
+ * `timezoneShift`): payeeVerdict says OURS and one of our UPI ids shows as an id (payee UPI id field, a UPI token, or a
+ * cut / masked display of one in the text). A banking name or account id alone is ours but is not our UPI id.
+ */
+function paidToOurUpiId(details, ctx) {
+    const e = (0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details);
+    if (payeeVerdictOf(e, ctx).verdict !== 'OURS')
+        return false;
+    return isOurUpiIdToken(e.payeeUpiId, ctx.ownUpiIds)
+        || e.upiTokens.some((token) => isOurUpiIdToken(token, ctx.ownUpiIds))
+        || showsOurUpiId(e.textNoUpi, ctx.ownUpiIds);
 }
 
 
