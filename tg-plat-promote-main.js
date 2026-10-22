@@ -23905,8 +23905,10 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      *
      * All three become unrepresentable here:
      *
-     *   - `lifetimePaid` is raised with `$max` and NEVER lowered. It is a new field rather than a
+     *   - `lifetimePaid` is only ever raised, NEVER lowered or $set. It is a new field rather than a
      *     repair of `highestPayAmount`, whose history is already corrupted by those downward sets.
+     *     Since 2026-10-22 it is the SUM of credited payments (`lifetimeAmount`, the money on the
+     *     screenshot), or a $max raise for a credit with no payment identity (`lifetimeMode: 'max'`).
      *   - balance and peak move in ONE atomic write, so they cannot disagree.
      *   - `key` is required, and a replayed key is a no-op.
      *
@@ -23927,6 +23929,9 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         if (!key)
             return { applied: false, reason: 'invalid-amount' };
         const now = input.now ?? Date.now();
+        const paid = Number(input.lifetimeAmount);
+        const lifetimeAmount = Number.isFinite(paid) && paid > 0 ? paid : amount;
+        const sumLifetime = input.lifetimeMode !== 'max';
         // upsert:false — a credit merges into an EXISTING conversation row. Creating one here would
         // produce a money row for a user who has never spoken, and the row is always created on
         // first inbound message anyway (a payment screenshot IS an inbound message).
@@ -23948,9 +23953,12 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                             { $max: [{ $ifNull: ['$payAmount', 0] }, amount] }],
                     },
                     lifetimePaid: {
-                        // $max and nothing else. This is the invariant the whole method exists for.
+                        // Raised ($add of a positive amount, or $max), never $set and never lowered. A sum since
+                        // 2026-10-22 (it was a peak): the money a payer has paid, independent of the balance's tier.
                         $cond: ['$__seen', { $ifNull: ['$lifetimePaid', 0] },
-                            { $max: [{ $ifNull: ['$lifetimePaid', 0] }, amount] }],
+                            sumLifetime
+                                ? { $add: [{ $ifNull: ['$lifetimePaid', 0] }, lifetimeAmount] }
+                                : { $max: [{ $ifNull: ['$lifetimePaid', 0] }, lifetimeAmount] }],
                     },
                     lifetimeCredits: {
                         $cond: ['$__seen', { $ifNull: ['$lifetimeCredits', 0] },
@@ -23992,7 +24000,9 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             return {
                 applied: true,
                 balance: Math.max(before.payAmount ?? 0, amount),
-                lifetimePaid: Math.max(before.lifetimePaid ?? 0, amount),
+                lifetimePaid: sumLifetime
+                    ? (before.lifetimePaid ?? 0) + lifetimeAmount
+                    : Math.max(before.lifetimePaid ?? 0, lifetimeAmount),
             };
         });
     }
