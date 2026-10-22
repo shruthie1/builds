@@ -18952,6 +18952,71 @@ class RedisWrites extends KeyedBackup {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts"
+/*!************************************************************************!*\
+  !*** ../../packages/tg-core/src/telegram-utils/account-dead-notice.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_DEAD_NOTICE_WINDOW_MS: () => (/* binding */ ACCOUNT_DEAD_NOTICE_WINDOW_MS),
+/* harmony export */   accountDeadReason: () => (/* binding */ accountDeadReason),
+/* harmony export */   claimAccountDeadNotice: () => (/* binding */ claimAccountDeadNotice),
+/* harmony export */   isAccountDeadCode: () => (/* binding */ isAccountDeadCode),
+/* harmony export */   setAccountDeadNoticeStoreForTest: () => (/* binding */ setAccountDeadNoticeStoreForTest)
+/* harmony export */ });
+/* harmony import */ var _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+
+
+const ACCOUNT_DEAD_NOTICE_WINDOW_MS = 10 * 60 * 1000;
+const ACCOUNT_DEAD_CODES = new Set([
+    'FROZEN_METHOD_INVALID',
+    'FROZEN_PARTICIPANT_MISSING',
+    'USER_DEACTIVATED',
+    'USER_DEACTIVATED_BAN',
+    'PHONE_NUMBER_BANNED',
+]);
+function isAccountDeadCode(code) {
+    return ACCOUNT_DEAD_CODES.has(code);
+}
+/** The reason when `error` says our own account is frozen, deactivated or banned; otherwise null. */
+function accountDeadReason(error) {
+    const parsed = (0,_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_0__.parseTelegramError)(error);
+    return parsed.type === 'AUTH_ERROR' && ACCOUNT_DEAD_CODES.has(parsed.code) ? parsed.code : null;
+}
+const defaultStore = () => _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_1__.RedisClient.getClient();
+let store = defaultStore;
+let clock = () => Date.now();
+/** In-process copy of the claims, so the cap holds when Redis is down. One entry per mobile and reason. */
+const claimedAt = new Map();
+/** TEST SEAM ONLY. No arguments restores Redis and the real clock. */
+function setAccountDeadNoticeStoreForTest(accessor, now) {
+    store = accessor ?? defaultStore;
+    clock = now ?? (() => Date.now());
+    claimedAt.clear();
+}
+/** True when the caller should send the notice for this mobile and reason (first claim in the window). */
+async function claimAccountDeadNotice(mobile, reason) {
+    const key = `notice::accountdead::${mobile}::${reason}`;
+    const now = clock();
+    const last = claimedAt.get(key);
+    if (last !== undefined && now - last < ACCOUNT_DEAD_NOTICE_WINDOW_MS)
+        return false;
+    claimedAt.set(key, now);
+    try {
+        return (await store().set(key, String(now), 'EX', ACCOUNT_DEAD_NOTICE_WINDOW_MS / 1000, 'NX')) === 'OK';
+    }
+    catch {
+        return true; // Redis down: the in-process claim above still caps it for this process.
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/telegram-utils/channel-live-facts.ts"
 /*!***********************************************************************!*\
   !*** ../../packages/tg-core/src/telegram-utils/channel-live-facts.ts ***!
@@ -19034,14 +19099,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _account_dead_notice__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
 
-const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("checkTgHealth");
+
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("checkTgHealth");
 /**
  * Minimum gap between programmatic SpamBot probes.
  *
@@ -19120,7 +19187,7 @@ async function checktghealth(client, mobile, force, deps) {
         result = false;
         try {
             if (client) {
-                await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.contacts.Unblock({
+                await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.contacts.Unblock({
                     id: '178220800'
                 }));
             }
@@ -19128,7 +19195,9 @@ async function checktghealth(client, mobile, force, deps) {
         catch (unblockError) {
             (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(unblockError);
         }
-        await sendHealthFailureNotification(mobile, errorDetails.message);
+        // A frozen / deactivated / banned own account: the permanent-failure handoff sends its one notice.
+        if (!(onPermanentFailure && (0,_account_dead_notice__WEBPACK_IMPORTED_MODULE_2__.accountDeadReason)(error)))
+            await sendHealthFailureNotification(mobile, errorDetails.message);
         if (onPermanentFailure) {
             await onPermanentFailure(error, mobile);
         }
@@ -26073,6 +26142,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 /* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
+/* harmony import */ var _telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+
 
 
 
@@ -26382,7 +26453,8 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         // Send notification if requested and applicable
         if (sendErr) {
             try {
-                const ignoreError = expected || shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
+                // A frozen / deactivated / banned own account has its one notice (CLIENT_UPDATES, permanent-failure handoff).
+                const ignoreError = expected || shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns) || (0,_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__.accountDeadReason)(err) !== null;
                 if (!ignoreError) {
                     const notificationMessage = telegramErrorMsg || extractedMessage;
                     const notification = {
@@ -69613,7 +69685,6 @@ function paymentFlowWith(client, chatId, db, amountRead) {
         notifyOps: (notice) => (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
             ...notice,
             fields: [...(notice.fields ?? []), fact("Amount read", amountRead)],
-            told: true,
         }),
         fraudWarned: () => (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.noteFraudWarning)(chatId),
         fraudCleared: () => (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.clearFraudWarning)(chatId),
@@ -69692,7 +69763,6 @@ async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuf
             title: proofBlockTitle(imageDetails.proofReasons ?? []),
             summary: 'Not credited: blocked on the models\' judgement (no fake text on the screenshot).',
             fields: [fact('Flags', (imageDetails.proofReasons ?? []).join(', ') || 'proof blocked'), fact('Amount read', Number(imageDetails.amount) || 0)],
-            told: true,
         });
         return;
     }
@@ -69781,7 +69851,7 @@ async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoB
             "**Darling!! This payment failed, try again!**"
         ]),
     });
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Sent pay number', told: true });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Sent pay number' });
     await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_26__.respToFailedMSg)(event, imageDetails.text, chatId);
     await scheduleImageFollowup(event, chatId, 'failedPaymentReminder', 10000);
     await (0,_media_channel_upload__WEBPACK_IMPORTED_MODULE_8__.sendImageToChannel)(photoBuffer);
@@ -69798,7 +69868,7 @@ async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photo
                 "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
             ]),
         });
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Fake pic: told', told: true });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Fake pic: told' });
         await scheduleImageFollowup(event, chatId, 'fakeScreenshotLimit', 20000);
     });
 }
@@ -69862,7 +69932,6 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
                 title: 'Pics already sent',
                 fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
-                told: true,
             });
             markEndedUnserved(chatId);
             // Pic request count handled in database (userDetails.picCount)
@@ -69870,7 +69939,7 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
     }
     else {
         // Send demo pics (first time or weighted score >= 3)
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [], told: true });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [] });
         try {
             await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, {
                 message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
@@ -69957,7 +70026,7 @@ async function sendCallLinkForPayment(event, chatId, db, userDetails, amount, se
         await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_35__.offerCallOrLink)(chatId, () => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: linkMessage }), (text) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: text }));
         serviceStarted();
     }
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told to call', told: true });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told to call' });
     return userDetails;
 }
 /** Under-30 payment that cannot start a service: demo pics, or a demo call on a strong score. */
@@ -69989,7 +70058,6 @@ async function handleSmallPicsPayment(event, chatId, imageDetails, userDetails, 
             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
                 title: 'Pics already sent',
                 fields: [fact('Score', weightedScore), ...(isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
-                told: true,
             });
             markEndedUnserved(chatId);
             // Increment counters
@@ -70052,7 +70120,6 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
         await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, {
             title: 'Call is over',
             fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
-            told: true,
         });
         // An old screenshot is a stale payment, not a fresh unserved one: only a recent one arms the unserved sum.
         if (isWithinPastTenMinutesImage.result)
@@ -70303,7 +70370,7 @@ async function processImage(event) {
                         "That's a failed screenshot baby, pay properly!!"
                     ]),
                 });
-                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Scam attempt', told: true });
+                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Scam attempt' });
             }
             else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text.toLowerCase(), [
                 `${process.env.name} connecting`,
@@ -70438,7 +70505,6 @@ async function processImage(event) {
                                                 fact('Judged time', isWithinPastTenMinutesImage.time ?? 'unreadable'),
                                                 fact('Model time', imageDetails.time || '(none)'),
                                             ],
-                                            told: isPaymentProperlyMine.msg,
                                         });
                                     }
                                 }
@@ -70450,7 +70516,7 @@ async function processImage(event) {
                                             `Sweetie... **${amount}₹** won't be enough!!  💸\n\n` + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_12__.demo
                                         ]),
                                     });
-                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told: not just', fields: [fact('Amount', amount)], told: true });
+                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Told: not just', fields: [fact('Amount', amount)] });
                                 }
                             }
                         }
@@ -70463,7 +70529,6 @@ async function processImage(event) {
                                 title: 'Status unclear (asked again)',
                                 summary: 'Payment to us, but the payment status could not be read; asked for the full screenshot.',
                                 fields: [fact('Amount', amount)],
-                                told: true,
                             });
                         }
                         else {
@@ -70484,7 +70549,7 @@ async function processImage(event) {
             // Never a reject: one ask for the full payment screenshot plus one ops notice (the photo card above). No delete,
             // no invalid-photo count, no re-check timer: the next screenshot the user sends is judged on its own.
             await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_30__.sendMessageWithTimeout)(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
-            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.', told: true });
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.' });
         }
         else {
             if (sanitizedData.isPaymentMine) {
@@ -72808,7 +72873,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _chat_voice__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./chat-voice */ "./src/outbound/chat-voice.ts");
 /**
  * Ops notices about one chat (CLIENT_UPDATES): built as structured data at the call site, never as markup.
  * Every notice carries a "Chat" field (the chat id, linked to the tgchats viewer). Notices are standalone: no
@@ -72816,18 +72880,14 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 
-
 const chatUrl = (chatId) => `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`;
 /** Whitespace- and markdown-insensitive form, to spot a summary that repeats the quote. */
 const sameText = (text) => text.replace(/\*\*|__/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 function chatNoticeInput(chatId, notice) {
-    const toldRaw = typeof notice.told === "string" ? notice.told : notice.told ? (0,_chat_voice__WEBPACK_IMPORTED_MODULE_2__.recentSentText)(chatId) : undefined;
-    // The user saw **bold** rendered; the literal markers are noise in the quote.
-    const toldText = toldRaw?.replace(/\*\*/g, "");
-    const quote = toldText ?? notice.quote;
-    // The quote is enough: drop a summary that only repeats it, and the "Told user" label when the title says it.
+    // Owner (2026-10-22): no "Told user" section (the user's last reply) in client updates.
+    const { quote, quoteLabel } = notice;
+    // The quote is enough: drop a summary that only repeats it.
     const summary = quote && notice.summary && sameText(notice.summary) === sameText(quote) ? undefined : notice.summary;
-    const quoteLabel = toldText ? (/\btold\b/i.test(notice.title) ? "" : "Told user") : notice.quoteLabel;
     return {
         title: notice.title,
         summary,
@@ -82671,7 +82731,7 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     if (othersNameExists && !myNameExists) {
         logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${chatId}`);
         const updated = await db.update(chatId, { limitTime: Date.now() + OTHER_CLIENT_LIMIT_MS });
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(updated.chatId, { title: 'Not my payment', fields: [{ label: 'Time', value: isWithinPastTenMinutesImage.time, code: false }], told: true });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(updated.chatId, { title: 'Not my payment', fields: [{ label: 'Time', value: isWithinPastTenMinutesImage.time, code: false }] });
         return reject("otherClient");
     }
     logger.log(`SCENARIO: ${myNameExists ? "My name in payment (this client's)" : "No known names in payment"} | validating time & didPaidToOthers | chatId=${chatId}`);
@@ -82760,7 +82820,7 @@ async function judgePaidToOthers({ user, check, atMs }) {
     }
     const reason = !check.result ? "time not recent" : "call within 3mins";
     logger.log(`SCENARIO: paid to others + suspicious (${reason}) | REJECT ask screenshot | chatId=${chatId} isValid=${check.isValid}`);
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(chatId, { title: 'Suspicious pay', fields: [{ label: 'Time', value: check.time, code: false }], told: true });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(chatId, { title: 'Suspicious pay', fields: [{ label: 'Time', value: check.time, code: false }] });
     return reject(check.isValid ? "suspiciousOld" : "suspiciousNotMine");
 }
 async function askToFinishPayment(event) {
@@ -82773,7 +82833,7 @@ async function askToFinishPayment(event) {
         logger.error("Failed to ask user to finish payment", error);
     }
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(event.chatId.toString(), { title: 'Asked to pay', told: true });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_0__.notifyChat)(event.chatId.toString(), { title: 'Asked to pay' });
 }
 
 
@@ -86117,31 +86177,32 @@ function isPermanentRecipientError(error) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   Replier: () => (/* binding */ Replier),
-/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_19__.isPermanentRecipientError),
-/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_19__.isRecipientDeactivatedError)
+/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isPermanentRecipientError),
+/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isRecipientDeactivatedError)
 /* harmony export */ });
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/errors */ "telegram/errors");
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_errors__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _conversation_message_stats__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../conversation/message-stats */ "./src/conversation/message-stats.ts");
-/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
-/* harmony import */ var _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../conversation/reply-switch */ "./src/conversation/reply-switch.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
-/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
-/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
-/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
-/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
-/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
-/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
+/* harmony import */ var _tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _conversation_message_stats__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../conversation/message-stats */ "./src/conversation/message-stats.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
+/* harmony import */ var _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../conversation/reply-switch */ "./src/conversation/reply-switch.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
+/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
+/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
+/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
+/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
+/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
+/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
 /**
  * Main Replier Orchestrator
  * Coordinates all replier components
@@ -86165,16 +86226,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-aut:replier");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:replier");
 
 
 async function sendReplierNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.BotConfig.getInstance().sendMessage(category, notification);
-        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.logUnsentNotification)(sent, "Replier notification returned false", context);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.BotConfig.getInstance().sendMessage(category, notification);
+        return (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.logUnsentNotification)(sent, "Replier notification returned false", context);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, context, false);
         return false;
     }
 }
@@ -86195,11 +86257,11 @@ class Replier {
         this.updateCount = 0; // Track updates for periodic cleanup
         this.config = config;
         this.rateLimitConfig = rateLimitConfig;
-        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_14__.ReplierQueueManager(config.maxRepliesArrSize, {
-            isStale: (item) => (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_13__.supersededReason)(item.chatId, item.pushedAt) !== null,
+        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_15__.ReplierQueueManager(config.maxRepliesArrSize, {
+            isStale: (item) => (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_14__.supersededReason)(item.chatId, item.pushedAt) !== null,
         });
-        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_15__.ReplierRateLimiter(rateLimitConfig);
-        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_16__.ReplierHealthChecker();
+        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_16__.ReplierRateLimiter(rateLimitConfig);
+        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_17__.ReplierHealthChecker();
         // Initialize state persistence, THEN start processing to avoid race condition
         this.initializeStatePersistence().finally(() => {
             this.startPeriodicProcessing();
@@ -86210,7 +86272,7 @@ class Replier {
      */
     async initializeStatePersistence() {
         try {
-            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_17__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_18__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
             if (state) {
                 this.queueManager.restoreQueue(state.repliesArr);
                 this.rateLimiter.restoreQueues(state.minuteQueue, state.tenMinutesQueue, state.hourQueue);
@@ -86272,7 +86334,7 @@ class Replier {
             sleepTime: this.sleepTime,
             globalSleepTime: this.globalSleepTime
         };
-        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_17__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_18__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
     }
     /**
      * Push reply to queue
@@ -86336,14 +86398,14 @@ class Replier {
         }
         this.isRunning = true;
         try {
-            const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__.TelegramManager.getClient();
+            const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.TelegramManager.getClient();
             await this.processReplies(client);
         }
         catch (error) {
             logger.error("Error in replier:", error);
-            await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 title: "Loop failed",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.ERROR,
                 summary: "The tg-aut replier loop failed before processing queued replies.",
                 fields: [
                     { label: "Error", value: error instanceof Error ? error.message : String(error), code: false },
@@ -86365,51 +86427,53 @@ class Replier {
             // ahead) would not pause the loop: it would shift each queued reply,
             // hit the `sleepTime < now` guard in handleReply, log "SKIPPED REPLY!!"
             // and drop the item (no requeue) — losing the whole queue and hot-spinning.
-            if (_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__.globalCanReply && Date.now() > this.globalSleepTime && Date.now() > this.sleepTime && Date.now() > _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__.floodGate.pausedUntil()) {
+            if (_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_8__.globalCanReply && Date.now() > this.globalSleepTime && Date.now() > this.sleepTime && Date.now() > _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__.floodGate.pausedUntil()) {
                 const replyObj = this.queueManager.shift();
                 if (!replyObj) {
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(2000);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(2000);
                     continue;
                 }
                 try {
-                    const msgStats = (0,_conversation_message_stats__WEBPACK_IMPORTED_MODULE_5__.getPeriodicMsgStats)();
+                    const msgStats = (0,_conversation_message_stats__WEBPACK_IMPORTED_MODULE_6__.getPeriodicMsgStats)();
                     const isMsgLimitReached = (msgStats.totalCount > 3200 || msgStats.userCount > 300);
                     const canSend = this.rateLimiter.canSendMessage();
                     if (canSend) {
-                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_18__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
+                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_19__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
                     }
                     else {
                         this.queueManager.unshift(replyObj);
                         this.scheduleStateSave("rate-limit requeue", 500);
-                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(20000);
+                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(20000);
                     }
                 }
                 catch (error) {
-                    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_10__.parseError)(error, undefined, false);
+                    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, undefined, false);
                     // DROP (don't requeue) any recipient we can NEVER deliver to: deactivated, blocked,
                     // invalid-peer, write-forbidden. Requeuing these unshifts to the FRONT with a 5s
                     // sleep and no retryCount bump, so one such recipient would hot-loop the whole reply
                     // queue forever and Slack-spam every 5s. (The account-permanent case is handled
                     // separately by startNewUserProcess below.)
-                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_19__.isPermanentRecipientError)(error)) {
+                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isPermanentRecipientError)(error)) {
                         logger.warn(`Dropping reply for permanently-unreachable recipient ${replyObj.chatId}: ${errorDetails.message}`);
                         this.scheduleStateSave("recipient permanent", 0);
                         continue;
                     }
-                    await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                        title: "Reply failed",
-                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.ERROR,
-                        summary: "A queued tg-aut reply failed and was requeued.",
-                        fields: [
-                            { label: "Chat", value: replyObj.chatId },
-                            { label: "Error", value: errorDetails.message, code: false },
-                        ],
-                        tags: ["tg-aut", "replier", "reply-error"],
-                    }, `Replier.notification.replyError.${replyObj.chatId}`);
+                    // A frozen / deactivated / banned own account: the handoff below sends its one notice.
+                    if (!(0,_tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_3__.accountDeadReason)(error))
+                        await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                            title: "Reply failed",
+                            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.ERROR,
+                            summary: "A queued tg-aut reply failed and was requeued.",
+                            fields: [
+                                { label: "Chat", value: replyObj.chatId },
+                                { label: "Error", value: errorDetails.message, code: false },
+                            ],
+                            tags: ["tg-aut", "replier", "reply-error"],
+                        }, `Replier.notification.replyError.${replyObj.chatId}`);
                     // A permanent failure (frozen/revoked account) would otherwise requeue and hot-loop
                     // forever with no handoff. startNewUserProcess self-filters (no-op unless permanent)
                     // and dedupes, so it is safe to call on every reply error.
-                    await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, `Replier:${replyObj.chatId}`);
+                    await (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_7__.startNewUserProcess)(error, `Replier:${replyObj.chatId}`);
                     // Only reconnect on network-related errors, not logic errors
                     const errMsg = error instanceof Error ? error.message : String(error);
                     const isNetworkError = errMsg.includes('TIMEOUT') ||
@@ -86418,7 +86482,7 @@ class Replier {
                         errMsg.includes('disconnected');
                     if (isNetworkError) {
                         try {
-                            await _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__.TelegramManager.getClient().connect();
+                            await _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.TelegramManager.getClient().connect();
                         }
                         catch (connectError) {
                             logger.error(`Failed to reconnect client:`, connectError);
@@ -86445,13 +86509,13 @@ class Replier {
                             this.scheduleStateSave("error requeue exhausted", 0);
                         }
                     }
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(5000);
+                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(5000);
                 }
             }
             else {
                 // Paused (FLOOD_WAIT / global stop): wait quietly. No typing to queued chats: a "typing…" that
                 // lasts minutes with no reply looks broken and keeps hitting Telegram while it is throttling us.
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(20000);
+                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(20000);
             }
         }
     }
@@ -86497,9 +86561,9 @@ class Replier {
                 const seconds = parsed.seconds || 60;
                 // Buffer: 2.5-4x — 1.5x is too tight and gets re-flooded immediately
                 const buffer = 2.5 + Math.random() * 1.5;
-                void sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                void sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                     title: "Flood wait",
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.WARNING,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING,
                     summary: "Telegram returned FLOOD_WAIT while replier was sending messages.",
                     fields: [
                         { label: "Wait Seconds", value: seconds },
@@ -86508,7 +86572,7 @@ class Replier {
                     tags: ["tg-aut", "replier", "flood-wait"],
                 }, `Replier.notification.floodWait.${clientId}`);
                 this.sleepTime = Date.now() + Math.ceil(seconds * 1000 * buffer);
-                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__.floodGate.noteFloodWait(seconds * 1000 * buffer); // shared with the OutboundQueue
+                _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__.floodGate.noteFloodWait(seconds * 1000 * buffer); // shared with the OutboundQueue
                 break;
             }
             case 'PEER_FLOOD':
@@ -86521,13 +86585,13 @@ class Replier {
                     const seconds = error.seconds || 60;
                     const buffer = 2.5 + Math.random() * 1.5;
                     this.sleepTime = Date.now() + Math.ceil(seconds * 1000 * buffer);
-                    _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__.floodGate.noteFloodWait(seconds * 1000 * buffer); // shared with the OutboundQueue
+                    _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__.floodGate.noteFloodWait(seconds * 1000 * buffer); // shared with the OutboundQueue
                 }
                 else {
                     // A non-flood error reaching here may be permanent (frozen/revoked account).
                     // startNewUserProcess self-filters to permanent-only and dedupes; fire-and-forget
                     // since this handler is synchronous.
-                    void (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_6__.startNewUserProcess)(error, 'Replier:floodHandler');
+                    void (0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_7__.startNewUserProcess)(error, 'Replier:floodHandler');
                 }
                 break;
         }
@@ -86551,12 +86615,12 @@ class Replier {
             const queueSizes = this.rateLimiter.getQueueSizes();
             const canSend = this.rateLimiter.canSendMessage();
             const title = canSend ? 'Replier State' : 'Message Limit Reached';
-            await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            await sendReplierNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 title,
-                severity: canSend ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.INFO : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_4__.NotificationSeverity.WARNING,
+                severity: canSend ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.INFO : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_5__.NotificationSeverity.WARNING,
                 summary: "tg-aut replier state snapshot.",
                 fields: [
-                    { label: "Global Reply", value: _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__.globalCanReply },
+                    { label: "Global Reply", value: _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_8__.globalCanReply },
                     { label: "Limit Exceeded", value: !canSend },
                     { label: "1 Min", value: `${queueSizes.minute}/${this.rateLimitConfig.messagesPerMinute}` },
                     { label: "10 Mins", value: `${queueSizes.tenMinutes}/${this.rateLimitConfig.messagesPer10Minutes}` },
@@ -86596,7 +86660,7 @@ class Replier {
         });
         return {
             running: this.isRunning,
-            globalCanReply: _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__.globalCanReply,
+            globalCanReply: _conversation_reply_switch__WEBPACK_IMPORTED_MODULE_8__.globalCanReply,
             queueLength: this.queueManager.getLength(),
             rateLimits: this.rateLimiter.getQueueSizes(),
             canSend: this.rateLimiter.canSendMessage(),
@@ -98952,11 +99016,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./fingerprint */ "./src/telegram/permanent-failure/fingerprint.ts");
-/* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../setup-client */ "./src/telegram/setup-client.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./fingerprint */ "./src/telegram/permanent-failure/fingerprint.ts");
+/* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 // Permanent-failure handoff. When Telegram returns a permanent error (FROZEN_METHOD_INVALID,
 // SESSION_REVOKED, AUTH_KEY_*, USER_DEACTIVATED), the affected mobile is dead. We hand off to the
 // CMS setupClient endpoint (which swaps in a fresh buffer account) and then shut this process down
@@ -98977,7 +99042,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:permanent-failure:handoff');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-aut:permanent-failure:handoff');
 const POST_SETUPCLIENT_SHUTDOWN_DELAY_MS = 60000;
 let isNewUserProcessRunning = 0;
 /**
@@ -99083,8 +99149,8 @@ async function startNewUserProcess(error, context = 'runtime') {
     permanentFailureHandoffInProgress = true;
     permanentFailureHandoffContext = context;
     try {
-        const fingerprint = await (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.loadTelegramFingerprintSummary)(process.env.mobile);
-        const fingerprintSummary = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_7__.formatTelegramFingerprintSummary)(fingerprint);
+        const fingerprint = await (0,_fingerprint__WEBPACK_IMPORTED_MODULE_8__.loadTelegramFingerprintSummary)(process.env.mobile);
+        const fingerprintSummary = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_8__.formatTelegramFingerprintSummary)(fingerprint);
         logger.error(`[PermanentFailure] ${context}: starting setupClient handoff`, {
             errorMessage,
             mobile: process.env.mobile,
@@ -99092,18 +99158,23 @@ async function startNewUserProcess(error, context = 'runtime') {
             permanentReplacement: true,
             fingerprint,
         });
-        await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
-            title: 'Auth failed',
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
-            summary: 'A tg-aut mobile hit a permanent Telegram failure and is being handed off to setupClient.',
-            fields: [
-                { label: 'Mobile', value: process.env.mobile || 'unknown' },
-                { label: 'Context', value: context },
-                { label: 'Error', value: errorMessage, code: false },
-            ],
-            details: fingerprintSummary,
-            tags: ['tg-aut', 'telegram', 'permanent-failure', 'setup-client'],
-        }, `TgAutPermanentFailure.notification.permanentFailure.${process.env.mobile || 'unknown'}`);
+        // Owner (2026-10-22): a frozen / deactivated / banned account is announced in CLIENT_UPDATES, once per mobile
+        // and reason per window; other permanent failures stay in ACCOUNT_LOGIN_FAILURES, once per handoff attempt.
+        const accountDead = (0,_tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_5__.isAccountDeadCode)(errorMessage);
+        const notify = !accountDead || await (0,_tg_core_telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_5__.claimAccountDeadNotice)(process.env.mobile || 'unknown', errorMessage);
+        if (notify)
+            await sendPermanentFailureNotification(accountDead ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.CLIENT_UPDATES : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGIN_FAILURES, {
+                title: 'Auth failed',
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.CRITICAL,
+                summary: 'A tg-aut mobile hit a permanent Telegram failure and is being handed off to setupClient.',
+                fields: [
+                    { label: 'Mobile', value: process.env.mobile || 'unknown' },
+                    { label: 'Context', value: context },
+                    { label: 'Error', value: errorMessage, code: false },
+                ],
+                details: fingerprintSummary,
+                tags: ['tg-aut', 'telegram', 'permanent-failure', 'setup-client'],
+            }, `TgAutPermanentFailure.notification.permanentFailure.${process.env.mobile || 'unknown'}`);
         if (errorMessage === 'AUTH_KEY_DUPLICATED') {
             await sendPermanentFailureNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
                 title: 'Key duplicated',
@@ -99116,7 +99187,7 @@ async function startNewUserProcess(error, context = 'runtime') {
                 tags: ['tg-aut', 'telegram', 'auth-key-duplicated'],
             }, `TgAutPermanentFailure.notification.authKeyDuplicated.${process.env.mobile || 'unknown'}`);
         }
-        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_6__.getRuntimeConfigBaseOrNull)();
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_7__.getRuntimeConfigBaseOrNull)();
         if (!runtimeBase) {
             logger.error(`[PermanentFailure] ${context}: cannot trigger setupClient because runtime config base is missing`);
             noteHandoffFailure(context);
@@ -99131,7 +99202,7 @@ async function startNewUserProcess(error, context = 'runtime') {
             reason: errorMessage,
             permanentReplacement: true,
         });
-        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_8__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_9__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
+        const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_9__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_10__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
         if (!setupResult.swapped) {
             throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
         }
