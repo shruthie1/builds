@@ -83048,18 +83048,31 @@ function maskedDisplayOfOurs(token, locals) {
         return best(0, 0) >= MIN_MASKED_DISTINCT;
     });
 }
-/** One of our UPI ids (local part), a long prefix of one (cut off or split by OCR), a masked display of one, or a seen cut-off form. */
-function showsOurUpiId(text, ownIds) {
-    const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
+/**
+ * One of our UPI ids printed as an id in free text: a long prefix of one (cut off or split by OCR, MIN_UPI_ID_PREFIX+
+ * characters in one token), a masked / cut display of one (maskedDisplayOfOurs), or a seen cut-off form. Read per token,
+ * never with spaces collapsed, so a banking name that equals one of our local parts ("LAKSHMI STORES" for
+ * lakshmistores@airtel, "Reddy Girl" for reddygirl@airtel), spaced or not, is not an id here.
+ */
+function showsOurUpiIdAsId(text, ownIds) {
     const locals = upiLocalParts(ownIds);
-    if (locals.some((local) => compacted.includes(local)))
-        return true;
-    if (hasCutOff(compacted, SEEN_CUT_OFF_UPI_IDS))
+    if (hasCutOff((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text), SEEN_CUT_OFF_UPI_IDS))
         return true;
     const tokens = String(text ?? '').toLowerCase().split(/[^a-z0-9.\-]+/).map((token) => token.replace(/\.+$/, ''));
     if (tokens.some((token) => token.length >= MIN_UPI_ID_PREFIX && locals.some((local) => local.startsWith(token))))
         return true;
     return String(text ?? '').toLowerCase().split(/[^a-z0-9.\-*•…@]+/).some((token) => maskedDisplayOfOurs(token, locals));
+}
+/**
+ * Something of our UPI ids in free text, for "is it ours at all" (entitiesShowOurs, small talk): an id as an id
+ * (showsOurUpiIdAsId) or one of our local parts anywhere, spaces collapsed. The latter also matches a banking name
+ * equal to a local part ("LAKSHMI STORES"), which is ours too; it is never "our UPI id" (paidToOurUpiId).
+ */
+function showsOurUpiId(text, ownIds) {
+    const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
+    if (upiLocalParts(ownIds).some((local) => compacted.includes(local)))
+        return true;
+    return showsOurUpiIdAsId(text, ownIds);
 }
 /**
  * A UPI id read as an id (the payee UPI id field or a "x@handle" token in the text) that is one of ours: the whole id
@@ -83151,17 +83164,37 @@ function payeeVerdict(details, ctx) {
     return payeeVerdictOf((0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details), ctx);
 }
 /**
+ * A payee UPI id field or UPI token that is one of ours read as an id: a complete id judged whole (isOurUpiIdToken), else
+ * within one edit of one of ours (checkPayeeUpi, the pre-2026-10-22 rule), one of our local parts before a cut handle
+ * ("lakshmi.3365-10@wa..."), or a cut / masked display (showsOurUpiIdAsId). A bare name is none of these.
+ */
+function isOurUpiIdShown(id, ownIds) {
+    const v = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(id);
+    if (!v)
+        return false;
+    if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.isCompleteVpa)(v))
+        return isOurUpiIdToken(v, ownIds);
+    const own = ownIds.filter((x) => typeof x === 'string').map((x) => x.split('&')[0]);
+    if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.checkPayeeUpi)(v, own) === 'own')
+        return true;
+    if (v.includes('@') && upiLocalParts(ownIds).includes(v.split('@')[0]))
+        return true;
+    return showsOurUpiIdAsId(id, ownIds);
+}
+/**
  * Paid to OUR UPI ID (owner 2026-10-21: the condition for moving a payment time by a time-zone gap, isRecentValidPayment
  * `timezoneShift`): payeeVerdict says OURS and one of our UPI ids shows as an id (payee UPI id field, a UPI token, or a
- * cut / masked display of one in the text). A banking name or account id alone is ours but is not our UPI id.
+ * cut / masked display of one in the text). A banking name or account id alone is ours but is not our UPI id, also when
+ * the name equals one of our ids' local parts ("LAKSHMI STORES" / lakshmistores@airtel: 128 of 1,099 prod receipts
+ * 2026-10-22 got a false time-zone move that way).
  */
 function paidToOurUpiId(details, ctx) {
     const e = (0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details);
     if (payeeVerdictOf(e, ctx).verdict !== 'OURS')
         return false;
-    return isOurUpiIdToken(e.payeeUpiId, ctx.ownUpiIds)
-        || e.upiTokens.some((token) => isOurUpiIdToken(token, ctx.ownUpiIds))
-        || showsOurUpiId(e.textNoUpi, ctx.ownUpiIds);
+    return isOurUpiIdShown(e.payeeUpiId, ctx.ownUpiIds)
+        || e.upiTokens.some((token) => isOurUpiIdShown(token, ctx.ownUpiIds))
+        || showsOurUpiIdAsId(e.textNoUpi, ctx.ownUpiIds);
 }
 
 
