@@ -75753,20 +75753,9 @@ const paymentStatusPatterns = [
                     return true;
                 }
                 logger.debug(`[AmountFaceConfirm] Detected: "${text}" (amount: ${amountValue}, hasFace: ${hasFace}, hasPic: ${hasPic}, hasOkay: ${hasOkay})`);
-                let reply;
-                if (hasFace && amountValue < 150) {
-                    reply = `The **with-face plan is 150₹** baby.\n\n**100₹** is the **without-face** option. Choose one and pay.`;
-                }
-                else if (!hasFace && amountValue === 100) {
-                    reply = `Yes baby, **100₹ is the without-face plan**.\n\nPay and send the screenshot here.`;
-                }
-                else if (hasFace && amountValue === 150) {
-                    reply = `Yes baby, **150₹ is the with-face plan**.\n\nPay and send the screenshot here.`;
-                }
-                else {
-                    reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__.finishPaymentMsgs)}`;
-                }
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, userDetails.chatId, reply);
+                // Owner 2026-10-22: accept whatever amount/plan the user offers ("100 with face" included);
+                // the paid service ladder decides what is shown, never a price correction here.
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, userDetails.chatId, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__.finishPaymentMsgs)}`);
                 return true;
             }
             return false;
