@@ -53205,9 +53205,10 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         }
         // Under a fake-screenshot warning the chat is about one thing: the real payment page. One short reminder
         // (at most every 2 min) instead of normal chat (prod 2026-10-15: flirty replies right after the warning).
+        // From 10 min after the warning the reminder warns of the coming block (owner 2026-10-23); the block is unchanged.
         if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.fraudWarningOpen)(chatId)) {
             if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.claimFraudReminder)(chatId))
-                await (0,_respond__WEBPACK_IMPORTED_MODULE_7__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_24__.pickOneMsg)([..._payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_11__.FRAUD_REMINDER_MESSAGES]), undefined, 'system');
+                await (0,_respond__WEBPACK_IMPORTED_MODULE_7__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_24__.pickOneMsg)([...((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.fraudBlockSoon)(chatId) ? _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_11__.FRAUD_BLOCK_SOON_MESSAGES : _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_11__.FRAUD_REMINDER_MESSAGES)]), undefined, 'system');
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "fake-warning-open");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
@@ -80381,11 +80382,13 @@ function hasOpenPaymentAsk(db, chatId, kind) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FRAUD_BLOCK_SOON_AFTER_MS: () => (/* binding */ FRAUD_BLOCK_SOON_AFTER_MS),
 /* harmony export */   FRAUD_REMINDER_EVERY_MS: () => (/* binding */ FRAUD_REMINDER_EVERY_MS),
 /* harmony export */   PAYMENT_ACTIVITY_WINDOW_MS: () => (/* binding */ PAYMENT_ACTIVITY_WINDOW_MS),
 /* harmony export */   claimFraudReminder: () => (/* binding */ claimFraudReminder),
 /* harmony export */   clearFraudWarning: () => (/* binding */ clearFraudWarning),
 /* harmony export */   creditedSince: () => (/* binding */ creditedSince),
+/* harmony export */   fraudBlockSoon: () => (/* binding */ fraudBlockSoon),
 /* harmony export */   fraudWarningOpen: () => (/* binding */ fraudWarningOpen),
 /* harmony export */   isSupersededByPaymentVerdict: () => (/* binding */ isSupersededByPaymentVerdict),
 /* harmony export */   noteFraudWarning: () => (/* binding */ noteFraudWarning),
@@ -80405,6 +80408,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const FRAUD_REMINDER_EVERY_MS = 2 * 60 * 1000;
+/** Owner (2026-10-23): from this long after the fake warning, a reminder warns of the coming block instead. */
+const FRAUD_BLOCK_SOON_AFTER_MS = 10 * 60 * 1000;
 /** A photo from this chat went to payment analysis. */
 function notePaymentPhoto(chatId, at = Date.now()) {
     (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.noteMoment)(chatId, 'paymentPhoto', at);
@@ -80451,6 +80456,10 @@ function claimFraudReminder(chatId, now = Date.now()) {
         return false;
     (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.noteMoment)(chatId, 'fraudReminder', now);
     return true;
+}
+/** The fake warning is open and in its last part (block due soon): the reminder becomes a block warning. */
+function fraudBlockSoon(chatId, now = Date.now()) {
+    return fraudWarningOpen(chatId, now) && (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.msSince)(chatId, 'fraudWarned', now) >= FRAUD_BLOCK_SOON_AFTER_MS;
 }
 /** How recent payment activity must be to hold canned opener sends (markAsRead sweep). */
 const PAYMENT_ACTIVITY_WINDOW_MS = 30 * 60 * 1000;
@@ -82324,6 +82333,7 @@ function proofGateFrom(getRepositories) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   FRAUD_BLOCKED_MESSAGES: () => (/* binding */ FRAUD_BLOCKED_MESSAGES),
+/* harmony export */   FRAUD_BLOCK_SOON_MESSAGES: () => (/* binding */ FRAUD_BLOCK_SOON_MESSAGES),
 /* harmony export */   FRAUD_REMINDER_MESSAGES: () => (/* binding */ FRAUD_REMINDER_MESSAGES),
 /* harmony export */   FRAUD_WARNING_MESSAGES: () => (/* binding */ FRAUD_WARNING_MESSAGES),
 /* harmony export */   NOT_MY_PAYMENT_MESSAGE: () => (/* binding */ NOT_MY_PAYMENT_MESSAGE),
@@ -82358,6 +82368,14 @@ const FRAUD_REMINDER_MESSAGES = [
     "Hmm.. no real payment page yet?\nSend it first",
     "Real payment page from History bhejo\nFir call karti hu",
     "Talk later baby\nFirst the real payment screenshot",
+];
+/** Owner (2026-10-23): reminders in the last part of the fake-warning hold warn of the block (no 🚫: not blocked yet). */
+const FRAUD_BLOCK_SOON_MESSAGES = [
+    "Send real payment screenshot baby\n\nWarna block kar dungi 😒",
+    "Last chance 😤\n\nReal payment page from History bhejo, else I'm blocking you",
+    "Time khatam ho raha hai ⏳\n\nReal payment bhejo ya block ho jaoge",
+    "No more fake please 🙄\n\nReal payment bhejo now, warna blocked",
+    "Few mins left baby\n\nSend the real payment or I'm blocking you",
 ];
 /** The details page is needed (a reference of impossible length): polite, it may be a misread. */
 const OLD_TIME_ASK_MESSAGES = [
