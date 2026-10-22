@@ -22824,6 +22824,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
                 return { by: 'imageHash', docs };
             }));
         }
+        if (query.payment && Number.isFinite(query.payment.amount) && Number.isFinite(query.payment.sinceMs)
+            && Number.isFinite(query.payment.fromMs) && Number.isFinite(query.payment.toMs)) {
+            const p = query.payment;
+            lookups.push(this.guard(`servedCandidates.payment(${chatId})`, null, async () => ({
+                by: 'payment',
+                docs: (await this.collection.find({
+                    createdAt: { $gte: new Date(p.sinceMs) }, amount: p.amount, 'time.epochMs': { $gte: p.fromMs, $lt: p.toMs }, ...served,
+                }).limit(20).toArray()).map((doc) => ({ distance: 0, doc })),
+            })));
+        }
         if (lookups.length === 0)
             return [];
         const results = await Promise.all(lookups);
