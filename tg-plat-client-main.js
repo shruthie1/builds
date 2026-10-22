@@ -29840,6 +29840,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
                 return { by: 'imageHash', docs };
             }));
         }
+        if (query.payment && Number.isFinite(query.payment.amount) && Number.isFinite(query.payment.sinceMs)
+            && Number.isFinite(query.payment.fromMs) && Number.isFinite(query.payment.toMs)) {
+            const p = query.payment;
+            lookups.push(this.guard(`servedCandidates.payment(${chatId})`, null, async () => ({
+                by: 'payment',
+                docs: (await this.collection.find({
+                    createdAt: { $gte: new Date(p.sinceMs) }, amount: p.amount, 'time.epochMs': { $gte: p.fromMs, $lt: p.toMs }, ...served,
+                }).limit(20).toArray()).map((doc) => ({ distance: 0, doc })),
+            })));
+        }
         if (lookups.length === 0)
             return [];
         const results = await Promise.all(lookups);
@@ -68925,12 +68935,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../calls/call-me */ "./src/calls/call-me.ts");
 /* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
-/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
-/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
-/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
+/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+
 
 
 
@@ -68997,7 +69009,7 @@ function scheduleProcessImageTask(callback, delayMs, context) {
 }
 function scheduleImageFollowup(event, chatId, kind, delayMs, extra = {}) {
     const msgId = Number(event.message?.id) || 0;
-    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_42__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_43__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
 }
 /** Delayed record 'imageFollowup'. Never throws (same reporting as the old timer wrapper). */
 async function runImageFollowup(client, chatId, params) {
@@ -69347,7 +69359,7 @@ async function holdForLaterAnalysis(event, chatId, held) {
         if (holdTimer)
             holdTimer(() => { void runHoldRecheck(client, chatId, args); }, delay);
         else
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_42__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_43__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
     }
     // Ops hear about it only when the last re-check also failed (2026-10-19: one slow call fired "Analysis down" for a
     // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
@@ -69549,7 +69561,7 @@ const MODEL_BLOCK_TITLE = {
     LLM_FAKE_FUTURE_DATE: "Suspect: future date",
 };
 function proofBlockTitle(reasons) {
-    if (reasons.some((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__.TEXT_PROVEN_BLOCKS.has(r)))
+    if (reasons.some((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_38__.TEXT_PROVEN_BLOCKS.has(r)))
         return "Fake screenshot";
     for (const r of reasons)
         if (MODEL_BLOCK_TITLE[r])
@@ -69592,7 +69604,7 @@ function paymentFlowFor(event, chatId, db, imageDetails) {
 }
 function paymentFlowWith(client, chatId, db, amountRead) {
     const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_36__.proofGateFrom)(() => db.getRepositories?.() ?? null);
-    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__.PaymentFlow(gate, {
+    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_38__.PaymentFlow(gate, {
         reply: (message) => {
             // Queued replies written before this answer (e.g. "Checking...") are now out of date: the replier drops them.
             (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.notePaymentVerdict)(chatId);
@@ -69612,7 +69624,7 @@ function paymentFlowWith(client, chatId, db, amountRead) {
         // The 15-min block after a fake-payment warning: a delayed record (restart-safe; markAskBlocked is atomic).
         scheduleFraudBlock: (due, delayMs) => {
             const args = { profile: due.profile, msgId: due.msgId, label: due.label, amountRead };
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_42__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_43__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
         },
         log: (m) => logger.log(m),
         warn: (m) => logger.warn(m),
@@ -69642,7 +69654,7 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
-    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
+    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
 }
 /** A proof-blocked screenshot: never credited. */
 async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer) {
@@ -69655,7 +69667,7 @@ async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuf
             message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_15__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_15__.OLD_PAYMENT_MESSAGES.length)],
         });
     };
-    const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_37__.TEXT_PROVEN_BLOCKS.has(r));
+    const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_38__.TEXT_PROVEN_BLOCKS.has(r));
     const blockedUser = await db.read(chatId);
     if (blockedUser?.canReply === 0) {
         // Blocked (only the fake-payment flow's blocks reach here): no reply, no ops notice (owner 2026-10-13).
@@ -70078,7 +70090,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
     // the legacy rise-over-highest rule, which never double-books.
     let credit;
-    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT) {
+    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT) {
         creditedSeq.delete(chatId);
         creditedSeq.set(chatId, ++holdSeq);
         capMap(creditedSeq);
@@ -70093,7 +70105,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         }
     }
     // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
-    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT && tierAmount > currentUserDetails.payAmount) {
+    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
         // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
         userDetails = await db.update(chatId, {
@@ -70231,7 +70243,7 @@ async function processImage(event) {
         }
         const processedAmount = (0,_payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_24__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
-        if (blockedAnswering && !(amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT)) {
+        if (blockedAnswering && !(amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT)) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
             return;
         }
@@ -70273,7 +70285,7 @@ async function processImage(event) {
         const callOwed = !blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails);
         // A resend of a payment credited in this chat was answered from the chat's state (call requested / "call soon").
         let resendAnswered = false;
-        const judgePaymentFirst = callOwed && amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT
+        const judgePaymentFirst = callOwed && amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT
             && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
         if (callOwed && !judgePaymentFirst) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_25__.proceedWithCall)(userDetails, chatId, "Image Processed");
@@ -70318,25 +70330,25 @@ async function processImage(event) {
                     else {
                         // Who it was paid to is decided in one place (paid-to-us.ts payeeVerdict); this is its context.
                         const payeeCtx = {
-                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds),
-                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).length > 0,
+                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_41__.UpiIds),
+                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_41__.UpiIds).length > 0,
                             personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
                         };
                         const fraudReasons = [
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_33__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.fabricatedTextReasons)(imageDetails.text),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.fabricatedTextReasons)(imageDetails.text),
                             // Who it was paid to (paid-to-us.ts payeeVerdict): only a TAMPERED payee is a fraud reason. Someone else's
                             // payment (NOT_OURS) falls through to the "not my payment" branch below. Foreign ids are judged only
                             // against the fetched /upi-ids list: without it our shared ids are unknown.
-                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__.payeeVerdict)(imageDetails, payeeCtx)),
+                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_40__.payeeVerdict)(imageDetails, payeeCtx)),
                             // Owner 2026-10-22 "future dates are fake!": a payment time after the picture arrived (beyond the clock tolerance).
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_39__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
                         }
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
-                            if (!(amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT)) {
+                            if (!(amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT)) {
                                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
                                 await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
                                 await scheduleImageFollowup(event, chatId, 'amountOutOfRangeReminder', 10000);
@@ -70348,31 +70360,19 @@ async function processImage(event) {
                                     // Every recency rule is judged at the picture's arrival, not at the end of a queue wait + analysis
                                     // (minutes): a restart re-analysis then reaches the same verdict (-> claim 'again', "Dupe ignored").
                                     const arrivalMs = pictureArrivalMs(event);
-                                    // The time-zone move only for a payment to our UPI id (owner 2026-10-21), except a neighbouring-zone
-                                    // lead (fitsNeighbourTimezoneLead), moved for any payee (owner 2026-10-22); a served UTR / file is never
-                                    // credited whatever its time (the gate's repeat check runs before the credit rules). "Our UPI id" is
-                                    // payeeVerdict's (paidToOurUpiId): a cut / masked display of ours counts (sneha1 2026-10-22).
-                                    const payeeOurs = (0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_39__.paidToOurUpiId)(imageDetails, payeeCtx);
-                                    // The screenshot text carries the PhonePe transaction id: its time makes a payment recent whatever the
-                                    // printed time says (isRecentValidPayment, the one place recency is judged).
-                                    let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs, text: imageDetails.text });
-                                    // The gate (repeat / fake-edited / old-time / credit claim) runs around handleMyPayment; when it
-                                    // handled the screenshot it has already replied and nothing below runs.
+                                    // The same-day rule (payment-time.ts paymentDay, the one place recency is judged); a PhonePe transaction id
+                                    // in the text is the payment's machine time and decides whatever the printed time says.
+                                    const isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { text: imageDetails.text, reference: (0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_37__.isRealReference)((0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_37__.normalizeUtr)(imageDetails.utr)) });
+                                    // The gate (repeat / fake-edited / credit claim) runs around handleMyPayment; when it handled the
+                                    // screenshot it has already replied and nothing below runs.
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails);
-                                    // A PhonePe transaction id carries the real payment moment; it beats a missing or edited printed time.
-                                    const paymentMsOf = (check) => (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_38__.phonePeTxnTimeMs)(imageDetails.text) ?? (check.isValid ? (check.paymentMs ?? null) : null);
-                                    const session = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMsOf(isWithinPastTenMinutesImage)), creditAmount: amount });
-                                    if (!session && isWithinPastTenMinutesImage.timezoneShiftMin !== undefined) {
-                                        // No store: whether the UTR / file was already credited is unknown, so the time is judged as read.
-                                        logger.warn(`[ProcessImage] ${chatId}: payment gate unavailable, time-zone move not applied`);
-                                        isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { text: imageDetails.text });
-                                    }
+                                    const paymentMs = isWithinPastTenMinutesImage.isValid ? (isWithinPastTenMinutesImage.paymentMs ?? null) : null;
+                                    const session = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs), creditAmount: amount, arrivalMs });
                                     const judged = await flow.judge({
                                         session,
                                         canReply: userDetails.canReply,
-                                        check: isWithinPastTenMinutesImage,
-                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_28__.handleMyPayment)(imageDetails, userDetails, isWithinPastTenMinutesImage, didPayOthers, arrivalMs),
-                                        nowMs: arrivalMs,
+                                        // No store (outage): no re-send check, so the credit rules judge on the old 10-minute view.
+                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_28__.handleMyPayment)(imageDetails, userDetails, session ? isWithinPastTenMinutesImage : (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.withoutProofStore)(isWithinPastTenMinutesImage, arrivalMs), didPayOthers, arrivalMs),
                                         answerResend: async () => (resendAnswered = await answerResendFor(event, chatId, db)()),
                                     });
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
@@ -70408,7 +70408,7 @@ async function processImage(event) {
                                         if (tierAmount !== payAmount && tierAmount < 30) {
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
-                                        else if (tierAmount >= 15 && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_41__.MAX_PAYMENT_AMOUNT) {
+                                        else if (tierAmount >= 15 && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_42__.MAX_PAYMENT_AMOUNT) {
                                             if (usedUpBeforeCredit) {
                                                 logger.log(`[used-up-credit] ${chatId}: new service cycle at ₹${tierAmount}`);
                                                 userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_4__.startServiceCycle)(chatId, tierAmount);
@@ -80419,13 +80419,18 @@ function resetPaymentChatGuard() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   TIMEZONE_OFFSETS_MIN: () => (/* binding */ TIMEZONE_OFFSETS_MIN),
+/* harmony export */   FUTURE_LEAD_MS: () => (/* binding */ FUTURE_LEAD_MS),
+/* harmony export */   REFERENCE_MAX_AGE_MS: () => (/* binding */ REFERENCE_MAX_AGE_MS),
+/* harmony export */   RESEND_WINDOW_MS: () => (/* binding */ RESEND_WINDOW_MS),
+/* harmony export */   YESTERDAY_GRACE_MS: () => (/* binding */ YESTERDAY_GRACE_MS),
 /* harmony export */   callTimeAsOf: () => (/* binding */ callTimeAsOf),
 /* harmony export */   "default": () => (/* binding */ isRecentValidPayment),
-/* harmony export */   fitsNeighbourTimezoneLead: () => (/* binding */ fitsNeighbourTimezoneLead),
+/* harmony export */   istDayStartMs: () => (/* binding */ istDayStartMs),
 /* harmony export */   parsePaymentTime: () => (/* binding */ parsePaymentTime),
 /* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime),
-/* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs)
+/* harmony export */   paymentDay: () => (/* binding */ paymentDay),
+/* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs),
+/* harmony export */   withoutProofStore: () => (/* binding */ withoutProofStore)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -80435,73 +80440,67 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("utils.isWithinPastTenMinutes");
 const MINUTE_MS = 60 * 1000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
-const TWELVE_HOURS_MS = 12 * 60 * MINUTE_MS;
-/** How far from exactly 12 h a time may be and still count as an AM/PM misread. */
-const AM_PM_TOLERANCE_MS = 15 * MINUTE_MS;
-/** The payment must be this recent... */
-const WINDOW_MS = 10 * MINUTE_MS;
-/** ...or this recent when the user's last call was within WINDOW_MS (they are paying again right after a call). */
-const WINDOW_AFTER_CALL_MS = 5 * MINUTE_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+const TWELVE_HOURS_MS = 12 * HOUR_MS;
+/** How many days a future date may be moved back when its clock is right (a misread day, e.g. "21st Oct 26" read as 26 Oct). */
+const MAX_DATE_SHIFT_DAYS = 31;
+/**
+ * A screenshot without a UTR whose payment is older than this, of the same amount as a payment credited to the user
+ * since, is a re-send (the proof gate's same-day rule 4, decide.ts). The 10 min the time check used as its window.
+ */
+const RESEND_WINDOW_MS = 10 * MINUTE_MS;
 const IST_TIME = { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" };
 // The year is shown: a year roll-back once hid behind "00:20 26/10" (nidhi1 2026-10-20).
 const IST_DATE = { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "Asia/Kolkata" };
 /**
- * A time up to this far ahead of now is the phone's clock running fast, judged as "just now". Further ahead is a
- * misread. Same tolerance as the proof gate's FUTURE_PAYMENT_MS (proof-gate/decide.ts) so both agree on "future";
- * phones with a hand-set clock run minutes off and the screenshot shows minutes only.
+ * Owner 2026-10-22, the SAME-DAY rule (replaces the 10-minute window and every time-zone adjustment). A payment counts
+ * when its receipt is dated today in IST; a re-send of a credited payment is stopped by the proof gate's identity
+ * checks (UTR / file / picture, fleet-wide; no-UTR rule 4), not by the clock.
+ *  - YESTERDAY_GRACE_MS: a receipt dated yesterday still counts when it is at most this old at arrival, i.e. a payment
+ *    just before IST midnight sent in the first hours after it, or a phone up to 2:30 h behind IST (UTC+3 prints
+ *    yesterday's date until 02:30 IST: nidhi1 2026-10-21 "20 October 11:59 PM" arrived 02:29 IST and was credited).
+ *    Owner said ~2 h after midnight; 3 h covers that measured case. Bounded by the receipt's age, not only by the hour,
+ *    so a receipt from yesterday morning sent at 00:30 is still old.
+ *  - FUTURE_LEAD_MS: a time up to this far ahead of the picture's arrival is a phone clock ahead of IST (Nepal +0:15 ..
+ *    Singapore +2:30) or running fast, judged as now; further ahead is a future time (fake, proof-gate/signals.ts).
  */
-const FUTURE_SKEW_MS = 15 * MINUTE_MS;
-/** How many days a future date may be moved back when its clock is right (a misread day, e.g. "21st Oct 26" read as 26 Oct). */
-const MAX_DATE_SHIFT_DAYS = 31;
+const YESTERDAY_GRACE_MS = 3 * HOUR_MS;
+const FUTURE_LEAD_MS = 3 * HOUR_MS;
 /**
- * A phone set to another time zone prints its own wall clock: the minutes that clock differs from IST (negative =
- * behind IST) for the zones payers use. A payment time that is not fresh but is fresh under the normal rules once moved
- * by one of these is moved by it (ramya1 1913384761 2026-10-21: 22:34 on a UTC+4 phone, sent 00:05 IST). Owner
- * (2026-10-21): only for a payment to our UPI id whose UTR / file was never credited (the caller decides).
+ * Owner 2026-10-22 (A): a receipt that shows a UTR or a PhonePe transaction id is recent up to this old (receipt time
+ * vs arrival), yesterday included. Safe only because the proof gate's global served check (UTR / file, every chat and
+ * client) runs before the credit rules: a reference credited anywhere never reaches this verdict. Without the store the
+ * 10-minute window applies (withoutProofStore). No reference read: today only (plus YESTERDAY_GRACE_MS).
  */
-const TIMEZONE_OFFSETS_MIN = [
-    -30, // UTC+5: Pakistan
-    -60, // UTC+4:30: Afghanistan
-    -90, // UTC+4: UAE, Oman (Gulf)
-    -120, // UTC+3:30: Iran
-    -150, // UTC+3: Saudi Arabia, Qatar, Kuwait, Bahrain, Iraq, East Africa
-    -210, // UTC+2: Eastern Europe winter, Egypt, South Africa; Central Europe summer
-    -270, // UTC+1: Central Europe winter, West Africa; UK summer
-    -330, // UTC+0: UK winter, Ghana, Iceland
-    -510, // UTC-3: Brazil, Argentina; Atlantic Canada summer
-    -570, // UTC-4: US / Canada Eastern summer; Atlantic winter
-    -630, // UTC-5: US / Canada Eastern winter; Central summer
-    -690, // UTC-6: US / Canada Central winter; Mountain summer
-    -750, // UTC-7: US / Canada Mountain winter; Pacific summer
-    -810, // UTC-8: US / Canada Pacific winter
-    15, // UTC+5:45: Nepal
-    30, // UTC+6: Bangladesh
-    60, // UTC+6:30: Myanmar
-    90, // UTC+7: Thailand, Vietnam, Indonesia (west)
-    150, // UTC+8: Singapore, Malaysia, Philippines, China
-];
-/**
- * Owner 2026-10-22: a payer whose phone is set to a neighbouring timezone prints a receipt time ahead of IST by a
- * fixed offset (minutes): Nepal +15, Bangladesh +30, Myanmar +60, Thailand +90, Singapore/Malaysia/China/Philippines
- * +150. The picture arrives after the payment, so the lead over arrival is the offset minus the send delay. Excused
- * when lead ∈ [offset − 10 min, offset + 2 min]: −10 covers sending the picture up to 10 min after paying (the same
- * 10 min as FUTURE_TIME_TOLERANCE_MS); +2 covers a phone clock a minute or two fast. The windows do not touch, so
- * +18..+19, +33..+49, +63..+79, +93..+139 and beyond +152 min stay flagged (the live fake was +40).
- */
-const NEIGHBOUR_TZ_OFFSETS_MIN = [15, 30, 60, 90, 150];
-/**
- * A payment time `leadMs` ahead of the picture's arrival fits a phone set to a neighbouring timezone
- * (NEIGHBOUR_TZ_OFFSETS_MIN): not a future time. Shared by the fake-signal check (proof-gate/signals.ts), the proof
- * gate's old/future-time hold (proof-gate/decide.ts) and the credit rules' time window (isRecentValidPayment) so all agree.
- */
-function fitsNeighbourTimezoneLead(leadMs) {
-    if (!Number.isFinite(leadMs))
-        return false;
-    const leadMin = leadMs / MINUTE_MS;
-    return NEIGHBOUR_TZ_OFFSETS_MIN.some((o) => leadMin >= o - 10 && leadMin <= o + 2);
-}
+const REFERENCE_MAX_AGE_MS = 24 * HOUR_MS;
 const IST_OFFSET_MS = 330 * MINUTE_MS;
+/** Days since the epoch on the IST calendar. */
+function istDay(ms) {
+    return Math.floor((ms + IST_OFFSET_MS) / DAY_MS);
+}
+/** Start (ms) of the IST calendar day that contains `ms`. */
+function istDayStartMs(ms) {
+    return istDay(ms) * DAY_MS - IST_OFFSET_MS;
+}
+/** A receipt with a reference read: recent up to REFERENCE_MAX_AGE_MS old (never ahead of the arrival). */
+function withinReferenceAge(paymentMs, nowMs) {
+    return paymentMs <= nowMs && nowMs - paymentMs <= REFERENCE_MAX_AGE_MS;
+}
+/**
+ * The one recency rule (every caller: isRecentValidPayment, the fake-time signal futurePaymentTimeReasons): is a payment
+ * made at `paymentMs` from today's IST day as seen at `arrivalMs` (when the picture arrived)? See YESTERDAY_GRACE_MS and
+ * FUTURE_LEAD_MS. No minutes window, no time-zone offsets.
+ */
+function paymentDay(paymentMs, arrivalMs) {
+    if (paymentMs - arrivalMs > FUTURE_LEAD_MS)
+        return "future";
+    const today = istDay(arrivalMs);
+    const day = istDay(paymentMs);
+    if (day >= today)
+        return "today";
+    return day === today - 1 && arrivalMs - paymentMs <= YESTERDAY_GRACE_MS ? "today" : "old";
+}
 const PHONEPE_TXN_ID = /\bt\s?(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{8,10}\b/i;
 /**
  * The payment moment encoded in a PhonePe transaction id ("T" + YYMMDDhhmmss IST + 8-10 digits). Live 2026-10-13:
@@ -80524,6 +80523,17 @@ function phonePeTxnTimeMs(text) {
     return utc;
 }
 const INVALID = Object.freeze({ isValid: false, result: false });
+/**
+ * The same-day rule relies on the proof gate to stop a re-send of a payment credited earlier today. When the gate has no
+ * store (paymentProofs unreachable: flow.begin returned null) there is no such check, so the credit rules get the old
+ * 10-minute view: a payment from today older than RESEND_WINDOW_MS before the arrival is treated as not recent. A
+ * genuine payer during an outage is then answered as before the same-day rule; a re-send is not credited twice.
+ */
+function withoutProofStore(check, arrivalMs) {
+    if (!check.result || check.paymentMs === undefined || arrivalMs - check.paymentMs <= RESEND_WINDOW_MS)
+        return check;
+    return { ...check, result: false };
+}
 /** A provider payment time string as a Date, or null when unparseable. No year handling. */
 function parseRawPaymentTime(input) {
     const date = new Date(input.trim());
@@ -80537,7 +80547,7 @@ function parseRawPaymentTime(input) {
  *  - the time itself carried an earlier year (a last-year screenshot: still an old payment).
  * Otherwise the future date is returned as read: it is a misread (nidhi1 2026-10-20: "21st Oct 26, 12:20 am"
  * read as 2026-10-26 became a 360-day-old "Old payment"), and isRecentValidPayment treats it as such.
- * Null when unparseable. Shared by the time-window check and handleMyPayment so both judge the same moment.
+ * Null when unparseable. Shared by the time check and the fake-time signal so both judge the same moment.
  */
 function parsePaymentTime(input, now = new Date()) {
     const date = parseRawPaymentTime(input);
@@ -80553,10 +80563,6 @@ function parsePaymentTime(input, now = new Date()) {
     }
     return date;
 }
-/** A time up to FUTURE_SKEW_MS ahead of `nowMs` is the phone's clock running fast: judged as `nowMs`. */
-function skewToNow(paymentMs, nowMs) {
-    return paymentMs > nowMs && paymentMs - nowMs <= FUTURE_SKEW_MS ? nowMs : paymentMs;
-}
 /**
  * The user's last call as it stood when the picture arrived: a call started after `atMs` (e.g. the call this very
  * payment bought, seen when a restart analyses the picture again) is not "the last call" for this picture, so it
@@ -80566,50 +80572,23 @@ function callTimeAsOf(callTime, atMs) {
     return typeof callTime === "number" && callTime > atMs ? 0 : callTime;
 }
 /**
- * A time off by a time-zone gap (TIMEZONE_OFFSETS_MIN): the gap whose move makes it fresh under the normal rules (the
- * window, or up to FUTURE_SKEW_MS ahead), the closest to now when two do.
+ * A future time that is a misread, moved back: ~12 h ahead (AM read as PM), or a misread day with the right clock
+ * ("21st Oct 26" read as day 26), moved back by whole days. Accepted only when the moved time is fresh: no more than
+ * RESEND_WINDOW_MS before the arrival and not in the future (paymentDay), as the 10-minute window required before.
+ * Landing anywhere on today is not enough: an edited time hours ahead would then always pass. Null otherwise.
  */
-function correctTimezoneOffset(paymentMs, nowMs, inWindow) {
-    let best = null;
-    for (const offsetMin of TIMEZONE_OFFSETS_MIN) {
-        const moved = paymentMs - offsetMin * MINUTE_MS;
-        const distance = Math.abs(moved - nowMs);
-        if (inWindow(skewToNow(moved, nowMs)) && (!best || distance < best.distance))
-            best = { offsetMin, distance };
+function correctFutureMisread(paymentMs, nowMs) {
+    const fresh = (ms) => nowMs - ms <= RESEND_WINDOW_MS && paymentDay(ms, nowMs) !== "future";
+    if (fresh(paymentMs - TWELVE_HOURS_MS)) {
+        return { paymentMs: paymentMs - TWELVE_HOURS_MS, title: "Time adjusted", description: "input time ahead by ~12hrs, subtracting 12hrs" };
     }
-    if (!best)
-        return null;
-    const gap = `${best.offsetMin < 0 ? "-" : "+"}${Math.floor(Math.abs(best.offsetMin) / 60)}:${String(Math.abs(best.offsetMin) % 60).padStart(2, "0")}`;
-    return {
-        paymentMs: skewToNow(paymentMs - best.offsetMin * MINUTE_MS, nowMs),
-        offsetMin: best.offsetMin,
-        description: `input time ${gap} h off IST (phone in another time zone), moved by ${-best.offsetMin} min`,
-    };
-}
-/** A time ~12 h ahead (PM read as AM) or ~12 h behind (AM read as PM), moved back by 12 h. */
-function correctAmPmMisread(paymentMs, nowMs) {
-    if (paymentMs > nowMs) {
-        return Math.abs(paymentMs - nowMs - TWELVE_HOURS_MS) <= AM_PM_TOLERANCE_MS
-            ? { paymentMs: paymentMs - TWELVE_HOURS_MS, description: "input time ahead by ~12hrs, subtracting 12hrs" }
-            : null;
-    }
-    const age = nowMs - paymentMs;
-    return age > TWELVE_HOURS_MS - AM_PM_TOLERANCE_MS && age < TWELVE_HOURS_MS + AM_PM_TOLERANCE_MS
-        ? { paymentMs: paymentMs + TWELVE_HOURS_MS, description: "input time behind by ~12hrs, adding 12hrs" }
-        : null;
-}
-/**
- * A future time whose clock is right but whose day was misread ("21st Oct 26" read as day 26): moved back by
- * whole days into the window. Only future times: a past date at the same clock may be a resent old screenshot.
- */
-function correctFutureDateMisread(paymentMs, nowMs, inWindow) {
-    if (paymentMs <= nowMs)
-        return null;
     const days = Math.round((paymentMs - nowMs) / DAY_MS);
     if (days < 1 || days > MAX_DATE_SHIFT_DAYS)
         return null;
-    const shifted = skewToNow(paymentMs - days * DAY_MS, nowMs);
-    return inWindow(shifted) ? { paymentMs: shifted, description: `input date ${days} day(s) in the future with a matching clock, moved back ${days} day(s)` } : null;
+    const shifted = paymentMs - days * DAY_MS;
+    return fresh(shifted)
+        ? { paymentMs: shifted, title: "Date adjusted", description: `input date ${days} day(s) in the future with a matching clock, moved back ${days} day(s)` }
+        : null;
 }
 function istLabel(date) {
     return `${date.toLocaleTimeString("en-GB", IST_TIME)} ${date.toLocaleDateString("en-GB", IST_DATE)}`;
@@ -80628,99 +80607,68 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, `PaymentTime.notification.${context}`, false);
     });
 }
-/** The window rules of isRecentValidPayment: 10 min, or 5 when the user's last call was within the last 10 min. */
-function windowFor(userDetails, nowMs) {
-    const lastCallTime = callTimeAsOf(userDetails.callTime, nowMs) || 0;
-    const afterCall = lastCallTime > 0 && nowMs - lastCallTime <= WINDOW_MS;
-    return { lastCallTime, windowMs: afterCall ? WINDOW_AFTER_CALL_MS : WINDOW_MS, windowLabel: afterCall ? "5 minutes" : "10 minutes" };
-}
-/** A PhonePe transaction-id time inside the window (up to FUTURE_SKEW_MS ahead = now): the recent check, else null. */
-function recentByTxnId(txnMs, input, userDetails, atMs) {
-    const now = new Date(atMs);
-    const nowMs = now.getTime();
-    const { windowMs, windowLabel } = windowFor(userDetails, nowMs);
-    const paymentMs = skewToNow(txnMs, nowMs);
-    if (!(paymentMs >= nowMs - windowMs && paymentMs <= nowMs))
-        return null;
-    const time = `${istLabel(now)} vs ${istLabel(new Date(paymentMs))} (checking within ${windowLabel})`;
-    logger.log(`[payment-time] input="${String(input ?? "").trim()}" PhonePe transaction id time ${((nowMs - txnMs) / MINUTE_MS).toFixed(2)} min before arrival: recent whatever the printed time | ${time}`);
-    return { isValid: true, result: true, time, paymentMs, source: "txn-id" };
-}
 /**
- * Is the screenshot's payment time recent? Within 10 minutes, or 5 when the user's last call was in the
- * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and, with `timezoneShift`, one off by a time-zone
- * gap as a phone in another zone (TIMEZONE_OFFSETS_MIN), and corrected first (ops are told). `timezoneShift` only for a
- * payment to our UPI id whose UTR / file was never credited (owner 2026-10-21; processImage decides). A time ahead by
- * a lead that fits fitsNeighbourTimezoneLead (Nepal +15 .. Singapore +150) is moved without it (owner 2026-10-22).
+ * Is the screenshot's payment from today (paymentDay, the same-day rule)? A future time that is a misread (AM/PM, day)
+ * is corrected first (ops are told); one still in the future is unreadable, never "old payment".
  *
  * `atMs`: when the picture arrived (Telegram message date), not when its analysis finished: queue waits and the
  * vision chain can take minutes, and a restart analyses a picture again later. Defaults to now.
  *
- * `text` (the screenshot text): a PhonePe transaction id in it (phonePeTxnTimeMs) is the machine time of the payment.
- * Inside the window it makes the payment recent whatever the printed time says (sneha1 2026-10-22: a UTC+3 phone printed
- * 16:56 for a 19:26 IST payment and three genuine ₹150 receipts were answered "Old payment"). Only in that direction: a
- * misread id digit must never reject a payer whose printed time passes. An id that says the payment is older than the
- * window does stop the time-zone move (a guess the machine time refutes).
+ * `text` (the screenshot text): a PhonePe transaction id in it (phonePeTxnTimeMs) is the machine time of the payment
+ * and decides whatever the printed time says, both ways: today = recent (sneha1 2026-10-22: a UTC+3 phone printed 16:56
+ * for a 19:26 IST payment), another day = old (shruthi2 2026-10-13: ids of 7 Sep on receipts with no readable time).
+ * An id dated in the future is a misread digit: ignored. `userDetails` is unused since the same-day rule (kept for callers).
  */
-function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) {
+function isRecentValidPayment(input, _userDetails, atMs = Date.now(), opts = {}) {
     try {
+        const now = new Date(atMs);
+        const nowMs = now.getTime();
+        const report = (ms) => `${istLabel(now)} vs ${istLabel(new Date(ms))} (same day)`;
         const txnMs = phonePeTxnTimeMs(opts.text);
-        if (txnMs !== null) {
-            const recent = recentByTxnId(txnMs, input, userDetails, atMs);
-            if (recent)
-                return recent;
+        const txnDay = txnMs === null ? null : paymentDay(txnMs, nowMs);
+        if (txnMs !== null && txnDay !== "future") {
+            const paymentMs = Math.min(txnMs, nowMs);
+            // The transaction id is itself a reference (owner 2026-10-22 (A)): up to 24 h old counts.
+            const result = txnDay === "today" || withinReferenceAge(txnMs, nowMs);
+            logger.log(`[payment-time] input="${String(input ?? "").trim()}" PhonePe transaction id time ${((nowMs - txnMs) / MINUTE_MS).toFixed(2)} min before arrival: ${txnDay} whatever the printed time | ${report(paymentMs)}`);
+            return { isValid: true, result, time: report(paymentMs), paymentMs, source: "txn-id" };
         }
         if (!input || typeof input !== "string" || input.trim() === "") {
             notifyPaymentTime("invalidInput", "Time empty", undefined, [{ label: "Input", value: String(input) }]);
             return { ...INVALID };
         }
         const trimmedInput = input.trim();
-        const now = new Date(atMs);
         const parsed = parsePaymentTime(trimmedInput, now);
         if (!parsed) {
             notifyPaymentTime("invalidIso", "Time unparseable", undefined, [{ label: "Input", value: trimmedInput }]);
             return { ...INVALID };
         }
-        const nowMs = now.getTime();
-        const { lastCallTime, windowMs, windowLabel } = windowFor(userDetails, nowMs);
-        const inWindow = (ms) => ms >= nowMs - windowMs && ms <= nowMs;
-        const report = (ms) => `${istLabel(now)} vs ${istLabel(new Date(ms))} (checking within ${windowLabel})`;
         let paymentMs = parsed.getTime();
-        let time = report(paymentMs);
-        let timezoneShiftMin;
-        if (paymentMs > nowMs && paymentMs - nowMs <= FUTURE_SKEW_MS) {
-            logger.log(`[payment-time] input="${trimmedInput}" ${((paymentMs - nowMs) / MINUTE_MS).toFixed(2)} min ahead: phone clock skew, judged as now`);
-            paymentMs = nowMs;
-        }
-        else if (!inWindow(paymentMs)) {
-            const amPm = correctAmPmMisread(paymentMs, nowMs);
-            // A lead that fits a neighbouring-timezone phone (fitsNeighbourTimezoneLead) is moved whatever the payee
-            // shows, as the fake check and the proof gate excuse it; any other gap only with `timezoneShift`.
-            // A transaction id older than the window refutes a time-zone gap: the payment is that old.
-            const txnSaysOld = txnMs !== null && txnMs < nowMs - windowMs;
-            const zoneAllowed = !txnSaysOld && (opts.timezoneShift || fitsNeighbourTimezoneLead(paymentMs - nowMs));
-            const zone = amPm || !zoneAllowed ? null : correctTimezoneOffset(paymentMs, nowMs, inWindow);
-            const corrected = amPm ?? zone ?? correctFutureDateMisread(paymentMs, nowMs, inWindow);
-            if (corrected) {
-                // A corrected time a few minutes ahead is the same fast phone clock as above: judged as now.
-                paymentMs = skewToNow(corrected.paymentMs, nowMs);
-                time = report(paymentMs);
-                if (zone) {
-                    timezoneShiftMin = -zone.offsetMin;
-                    logger.log(`[payment-time] input="${trimmedInput}" ${zone.description} | ${time}`);
-                }
-                notifyPaymentTime(amPm ? "timeAdjustment" : zone ? "timezoneAdjustment" : "dateAdjustment", amPm ? "Time adjusted" : zone ? "Timezone adjusted" : "Date adjusted", corrected.description, [{ label: "Input", value: trimmedInput }, { label: "Window", value: windowLabel }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, time);
+        if (paymentDay(paymentMs, nowMs) === "future") {
+            const corrected = correctFutureMisread(paymentMs, nowMs);
+            if (!corrected) {
+                // A payment cannot be in the future: the time was misread. Unreadable, never "old payment".
+                const time = report(paymentMs);
+                logger.log(`[payment-time] input="${trimmedInput}" in the future by ${((paymentMs - nowMs) / MINUTE_MS).toFixed(2)} min: misread, treated as unreadable | ${time}`);
+                notifyPaymentTime("futureTime", "Time in future", "Payment time read in the future: treated as unreadable, not as an old payment.", [{ label: "Input", value: trimmedInput }, { label: "Read as", value: istLabel(new Date(paymentMs)) }]);
+                return { isValid: false, result: false, time, misread: "future" };
             }
+            paymentMs = corrected.paymentMs;
+            notifyPaymentTime("timeAdjustment", corrected.title, corrected.description, [{ label: "Input", value: trimmedInput }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, report(paymentMs));
         }
-        if (paymentMs > nowMs) {
-            // A payment cannot be in the future: the time was misread. Unreadable, never "old payment".
-            logger.log(`[payment-time] input="${trimmedInput}" in the future by ${((paymentMs - nowMs) / MINUTE_MS).toFixed(2)} min: misread, treated as unreadable | ${time}`);
-            notifyPaymentTime("futureTime", "Time in future", "Payment time read in the future: treated as unreadable, not as an old payment.", [{ label: "Input", value: trimmedInput }, { label: "Read as", value: istLabel(new Date(paymentMs)) }]);
-            return { isValid: false, result: false, time, misread: "future" };
+        // PM read as AM (or AM as PM across midnight): a time ~12 h before the arrival whose + 12 h is within
+        // RESEND_WINDOW_MS of it is that misread (kept from the 10-minute window's 12-hours-behind correction). Without
+        // it a morning payer lands on yesterday ("old"), and a same-day payer looks older than their last call.
+        if (Math.abs(nowMs - (paymentMs + TWELVE_HOURS_MS)) <= RESEND_WINDOW_MS) {
+            paymentMs += TWELVE_HOURS_MS;
+            notifyPaymentTime("timeAdjustment", "Time adjusted", "input time behind by ~12hrs, adding 12hrs", [{ label: "Input", value: trimmedInput }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.INFO, report(paymentMs));
         }
-        const result = inWindow(paymentMs);
-        logger.log(`[payment-time] input="${trimmedInput}" paymentAgeMin=${((nowMs - paymentMs) / MINUTE_MS).toFixed(2)} window=${windowLabel} lastCallAgoMin=${lastCallTime > 0 ? ((nowMs - lastCallTime) / MINUTE_MS).toFixed(2) : "N/A"} result=${result} | ${time}`);
-        return { isValid: true, result, time, paymentMs, ...(timezoneShiftMin !== undefined ? { timezoneShiftMin } : {}) };
+        // Ahead by up to FUTURE_LEAD_MS: a phone clock ahead of IST or running fast, judged as the arrival.
+        paymentMs = Math.min(paymentMs, nowMs);
+        const result = paymentDay(paymentMs, nowMs) === "today" || (!!opts.reference && withinReferenceAge(paymentMs, nowMs));
+        const time = report(paymentMs);
+        logger.log(`[payment-time] input="${trimmedInput}" paymentAgeMin=${((nowMs - paymentMs) / MINUTE_MS).toFixed(2)} sameDay=${result} result=${result} | ${time}`);
+        return { isValid: true, result, time, paymentMs };
     }
     catch (error) {
         notifyPaymentTime("validationError", "Time check failed", undefined, [{ label: "Input", value: String(input) }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error).message);
@@ -81527,10 +81475,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ASK_ANSWER_WINDOW_MS: () => (/* binding */ ASK_ANSWER_WINDOW_MS),
 /* harmony export */   CONFIRM_TIME_MS: () => (/* binding */ CONFIRM_TIME_MS),
 /* harmony export */   FRAUD_GRACE_MS: () => (/* binding */ FRAUD_GRACE_MS),
-/* harmony export */   FUTURE_PAYMENT_MS: () => (/* binding */ FUTURE_PAYMENT_MS),
 /* harmony export */   NEAR_PICTURE_BITS: () => (/* binding */ NEAR_PICTURE_BITS),
 /* harmony export */   SAME_TIME_MS: () => (/* binding */ SAME_TIME_MS),
-/* harmony export */   STALE_PAYMENT_MS: () => (/* binding */ STALE_PAYMENT_MS),
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
@@ -81539,14 +81485,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fraudGraceOpen: () => (/* binding */ fraudGraceOpen),
 /* harmony export */   gateBlockAnswerable: () => (/* binding */ gateBlockAnswerable),
 /* harmony export */   isDifferentPicture: () => (/* binding */ isDifferentPicture),
-/* harmony export */   isFuturePaymentTime: () => (/* binding */ isFuturePaymentTime),
 /* harmony export */   isImpossibleReference: () => (/* binding */ isImpossibleReference),
 /* harmony export */   isRealReference: () => (/* binding */ isRealReference),
-/* harmony export */   isStalePaymentTime: () => (/* binding */ isStalePaymentTime),
+/* harmony export */   normalizePayeeName: () => (/* binding */ normalizePayeeName),
+/* harmony export */   normalizePayeeUpi: () => (/* binding */ normalizePayeeUpi),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
 /* harmony export */   sameAmount: () => (/* binding */ sameAmount),
-/* harmony export */   samePayment: () => (/* binding */ samePayment)
+/* harmony export */   samePayee: () => (/* binding */ samePayee)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /**
@@ -81555,6 +81501,8 @@ __webpack_require__.r(__webpack_exports__);
  *  - a repeat of a credited payment (same file, or same UTR + amount, or same picture + amount + time) is never
  *    credited again;
  *  - fake or edited screenshots get a rude reply and a block after FRAUD_GRACE_MS unless a genuine page arrives.
+ * Owner 2026-10-22 (same-day rule): the payment time only has to be today's (payment-time.ts paymentDay); a re-send of
+ * a credited payment is stopped here by identity (file / UTR / picture, every chat and persona; rule 4 without a UTR).
  */
 
 const MINUTE_MS = 60000;
@@ -81564,10 +81512,6 @@ const NEAR_PICTURE_BITS = 4;
 const SAME_TIME_MS = 2 * MINUTE_MS;
 /** A confirming page whose UTR differs is still the same payment when the times agree within this (UTR misreads). */
 const CONFIRM_TIME_MS = 15 * MINUTE_MS;
-/** A readable payment time older than this asks for the details page instead of crediting. */
-const STALE_PAYMENT_MS = 60 * MINUTE_MS;
-/** ...or further than this in the future. */
-const FUTURE_PAYMENT_MS = 15 * MINUTE_MS;
 /** Fake/edited: block unless a genuine page arrives within this. */
 const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
@@ -81608,16 +81552,6 @@ function isDifferentPicture(facts, row) {
         return false;
     return pictureDistance(facts.dHash, row.imageHash) > NEAR_PICTURE_BITS;
 }
-/**
- * Plausibly the same payment as the request row: same UTR, or same amount. Payment times alone are not enough
- * (live: shruthi2 8872981660's old ₹50 and ₹150 receipts were 7 minutes apart).
- */
-function samePayment(facts, row) {
-    const rowUtr = normalizeUtr(row.utr);
-    if (rowUtr && facts.utr && rowUtr === facts.utr)
-        return true;
-    return typeof row.amount === 'number' && row.amount > 0 && sameAmount(row.amount, facts.amount);
-}
 function pictureDistance(a, b) {
     if (!a || !b || a.length !== b.length)
         return Number.POSITIVE_INFINITY;
@@ -81629,6 +81563,30 @@ function pictureDistance(a, b) {
         bits += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
     }
     return bits;
+}
+/** A payee UPI id for comparison: lowercase, no spaces, query part ("&...") dropped. Null when empty. */
+function normalizePayeeUpi(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const u = raw.split('&')[0].replace(/\s+/g, '').toLowerCase();
+    return u.length >= 3 ? u : null;
+}
+/** A payee name for comparison: letters only, lowercase, a leading Mr / Mrs / Ms dropped. Null under 3 letters. */
+function normalizePayeeName(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const n = raw.toLowerCase().replace(/^\s*(?:mrs|mr|ms)\.?\s+/, '').replace(/[^a-z]/g, '');
+    return n.length >= 3 ? n : null;
+}
+/** Same payee: both UPI ids read and equal; else (no UPI id on one side) both names read and equal. Else not known. */
+function samePayee(a, b) {
+    const ua = normalizePayeeUpi(a.payeeUpiId);
+    const ub = normalizePayeeUpi(b.payeeUpiId);
+    if (ua && ub)
+        return ua === ub;
+    const na = normalizePayeeName(a.payeeName);
+    const nb = normalizePayeeName(b.payeeName);
+    return !!na && !!nb && na === nb;
 }
 function rowTimeMs(row) {
     return row.time?.state === 'known' && typeof row.time.epochMs === 'number' ? row.time.epochMs : null;
@@ -81658,12 +81616,12 @@ function sameAmount(a, b) {
     return a === b || withoutGlyph(a) === b || a === withoutGlyph(b) || withoutGlyph(a) === withoutGlyph(b);
 }
 /**
- * Judge a screenshot against every CREDITED screenshot that shares its file, UTR or picture, and against this chat's
- * own recently credited screenshots (`chatServed`).
+ * Judge a screenshot against every CREDITED screenshot that shares its file, UTR or picture, and against this user's
+ * own recently credited screenshots on every persona (`chatServed`; rule 4 below).
  * Repeat beats edited beats clear. A near picture alone is never a repeat (two genuine receipts from one app look
  * alike); it is "edited" only when the numbers changed AND the new screenshot has no fresh real reference (isRealReference).
  */
-function classifyAgainstServed(facts, matches, chatServed = []) {
+function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now()) {
     let edited = null;
     for (const m of matches) {
         const row = m.doc;
@@ -81706,14 +81664,45 @@ function classifyAgainstServed(facts, matches, chatServed = []) {
         if (numbersChanged && !freshReference && !otherPayment)
             edited ?? (edited = { kind: 'edited', reason: 'EDITED_PICTURE', matched: row });
     }
+    // Rule 8 (same-day table in docs/PAYMENT-SCREENSHOT-FLOW.md; owner 2026-10-22 (B)): no UTR read here, and a
+    // payment of the same amount, to the same payee, at the same printed minute was credited today in ANY chat or
+    // client: the same payment re-captured. Same chat = the repeat reply; another user, or this user on another
+    // persona = "not my Payment" (the elsewhere reply, as for a UTR). Both times must be readable: with no time on
+    // either side this rule is off (rule 4 still covers this user).
+    if (!facts.utr && facts.timeMs !== null) {
+        const arrival = facts.arrivalMs ?? nowMs;
+        const minute = Math.floor(facts.timeMs / MINUTE_MS);
+        for (const m of matches) {
+            const row = m.doc;
+            const theirTime = rowTimeMs(row);
+            if (theirTime === null || Math.floor(theirTime / MINUTE_MS) !== minute)
+                continue;
+            if (!sameAmount(row.amount, facts.amount) || !samePayee(facts, row))
+                continue;
+            const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
+            if (!Number.isFinite(servedMs) || servedMs > arrival || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrival) !== 'today')
+                continue;
+            return { kind: 'repeat', by: 'payee', sameChat: sameChat(facts, row), matched: row };
+        }
+    }
     // A different screenshot of a payment this chat was already credited for: neither shows a UTR, same amount, both
     // payment times readable and agreeing (owner 2026-10-21). A UTR on either side decides by the UTR rule above.
+    // Same-day rule 4 (owner 2026-10-22): no UTR read here, the payment is older than RESEND_WINDOW_MS, and this user was
+    // already credited the same amount today (paymentDay; on any persona; the credited row may show a UTR): a re-send.
+    // A recent payment or another amount is a new payment (the ladder: ₹150, then ₹100; never "must be higher").
+    const arrivalMs = facts.arrivalMs ?? nowMs;
     for (const row of chatServed) {
-        if (!sameChat(facts, row) || row.telegramMsgId === facts.msgId || facts.utr || normalizeUtr(row.utr))
+        if (!sameUser(facts, row) || (sameChat(facts, row) && row.telegramMsgId === facts.msgId) || facts.utr)
+            continue;
+        if (!sameAmount(row.amount, facts.amount) || facts.timeMs === null)
             continue;
         const theirTime = rowTimeMs(row);
-        if (sameAmount(row.amount, facts.amount) && theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
+        if (sameChat(facts, row) && !normalizeUtr(row.utr) && theirTime !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
             return { kind: 'repeat', by: 'time', sameChat: true, matched: row };
+        }
+        const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
+        if (arrivalMs - facts.timeMs > _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS && Number.isFinite(servedMs) && servedMs <= arrivalMs && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrivalMs) === 'today') {
+            return { kind: 'repeat', by: 'time', sameChat: sameChat(facts, row), matched: row };
         }
     }
     return edited ?? { kind: 'clear' };
@@ -81754,21 +81743,6 @@ function findConfirmedAsk(facts, open, nowMs) {
             return row;
     }
     return null;
-}
-/** Readable payment time too old (or in the future) to credit without the details page. */
-function isStalePaymentTime(timeMs, nowMs) {
-    if (timeMs === null || !Number.isFinite(timeMs))
-        return false;
-    return nowMs - timeMs > STALE_PAYMENT_MS || isFuturePaymentTime(timeMs, nowMs);
-}
-/**
- * The readable payment time is in the future beyond the tolerance (the "looks old" ask would be wrong). Not when the
- * lead fits a phone set to a neighbouring timezone (fitsNeighbourTimezoneLead): the fake-signal check excuses it too.
- */
-function isFuturePaymentTime(timeMs, nowMs) {
-    if (timeMs === null || !Number.isFinite(timeMs))
-        return false;
-    return timeMs - nowMs > FUTURE_PAYMENT_MS && !(0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.fitsNeighbourTimezoneLead)(timeMs - nowMs);
 }
 /** An open fraud request still inside its grace period. */
 function fraudGraceOpen(row, nowMs) {
@@ -81820,7 +81794,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', time: 'amount + time (no UTR)', race: 'payment' };
+const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', time: 'amount + time (no UTR)', payee: 'amount + payee + minute (no UTR)', race: 'payment' };
 /** proof-check BLOCK reasons that rest on text printed on the screenshot (not on model judgement). */
 const TEXT_PROVEN_BLOCKS = new Set(['DISCLAIMER_LONG', 'DISCLAIMER_SHORT', 'BLOCKLIST_A', 'AI_WATERMARK']);
 /**
@@ -81842,6 +81816,9 @@ function gateFacts(ref) {
         sha256: fp.sha256,
         dHash: fp.dHash,
         timeMs: ref.paymentMs !== null && Number.isFinite(ref.paymentMs) ? ref.paymentMs : null,
+        ...(ref.arrivalMs !== undefined ? { arrivalMs: ref.arrivalMs } : {}),
+        payeeUpiId: ref.details.payeeUpiId ?? null,
+        payeeName: ref.details.payeeName || null,
     };
 }
 class PaymentFlow {
@@ -81860,6 +81837,7 @@ class PaymentFlow {
             return await this.gate.begin(gateFacts(ref), {
                 clientId: ref.clientId,
                 ...(ref.details.payeeUpiId ? { payeeUpiId: ref.details.payeeUpiId } : {}),
+                ...(ref.details.payeeName ? { payeeName: ref.details.payeeName } : {}),
                 ...(ref.creditAmount !== undefined ? { creditAmount: ref.creditAmount } : {}),
             });
         }
@@ -81965,7 +81943,7 @@ class PaymentFlow {
      * `handled` = the gate already replied (repeat, fake/edited, old-time request, lost credit race): no credit.
      */
     async judge(args) {
-        const { session, canReply, check, creditRules, nowMs } = args;
+        const { session, canReply, creditRules } = args;
         // Blocked by this flow and answering it: only a real credit (which unblocks) is replied to / announced;
         // the details-page request still goes to the user (it is their way out), without an ops notice.
         const blocked = canReply === 0;
@@ -82013,26 +81991,6 @@ class PaymentFlow {
                     await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
                     await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
                     return { handled: true };
-                }
-                // Only where the credit rules needed a recent time: the ones that accept at any time (no videos yet,
-                // ₹200+ or no amount) credited old times before this hold existed and still do. Repeats were stopped above.
-                if (verdict.anyTime && (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
-                    this.io.log(`[payment-gate] ${f.chatId}: old payment time (${check.time ?? ''}) but the credit rules accept it at any time: crediting`);
-                }
-                else if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isStalePaymentTime)(f.timeMs, nowMs)) {
-                    const answered = await session.answeredOldTimeAsk();
-                    if (answered && (await session.resolve(answered))) {
-                        // Second, different screenshot after the request: credit by the normal rules, never ask twice.
-                        this.io.log(`[payment-gate] ${f.chatId}: details page after the old-time request (msg ${answered.telegramMsgId}), crediting`);
-                        await this.io.notifyOps({ title: 'Accepted on page', fields: check.time ? [{ label: 'Payment time', value: check.time, code: false }] : [] });
-                    }
-                    else {
-                        await session.openAsk('old_time', ['STALE_PAYMENT_TIME']);
-                        this.io.warn(`[payment-gate] old payment time for ${f.chatId} (${check.time ?? ''}): asked for the details page, not crediting yet`);
-                        await this.io.reply(this.pick((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isFuturePaymentTime)(f.timeMs, nowMs) ? _messages__WEBPACK_IMPORTED_MODULE_1__.FUTURE_TIME_ASK_MESSAGES : _messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
-                        await notify({ title: 'Asked pay page', fields: check.time ? [{ label: 'Old payment time', value: check.time, code: false }] : [] });
-                        return { handled: true };
-                    }
                 }
             }
         }
@@ -82095,11 +82053,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
  * screenshot, 7-day TTL, shared by every persona process). Every call is time-bounded and FAILS OPEN: when the
  * store is missing, slow or erroring the payment path behaves exactly as it did before the gate existed.
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:proof-gate');
@@ -82131,14 +82091,20 @@ class GateSession {
     /** Repeat / edited against credited rows, else whether it answers an open request, else clear. Fails open to clear. */
     async check() {
         const f = this.facts;
+        // Rule 8 (decide.ts): with no UTR read, look for the same payment (amount + printed minute) credited today anywhere.
+        const minuteMs = f.timeMs !== null ? Math.floor(f.timeMs / 60000) * 60000 : null;
+        const payment = !f.utr && minuteMs !== null && f.amount > 0
+            ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
+            : null;
         const [served, chatServed] = await Promise.all([
             this.bound(this.store.servedCandidates({
                 chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
+                ...(payment ? { payment } : {}),
             }), null, 'servedCandidates'),
             this.chatServed(),
         ]);
-        const verdict = served || chatServed.length > 0 ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served ?? [], chatServed) : { kind: 'clear' };
+        const verdict = served || chatServed.length > 0 ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served ?? [], chatServed, this.deps.now()) : { kind: 'clear' };
         if (verdict.kind !== 'clear')
             return verdict;
         const open = await this.openAsks();
@@ -82153,15 +82119,15 @@ class GateSession {
         return verdict;
     }
     /**
-     * This chat's own credited rows, for a different screenshot of a credited payment that neither shows a UTR
-     * (classifyAgainstServed). Read only when that rule can apply: no UTR, payment time readable. [] on failure.
+     * This user's own credited rows (every persona), for a different screenshot of a credited payment with no UTR read
+     * (classifyAgainstServed, same-day rule 4). Read only when that rule can apply: no UTR, payment time readable. [] on failure.
      */
     async chatServed() {
         const f = this.facts;
         if (f.utr || f.timeMs === null || !this.store.recentForChat)
             return [];
         const rows = await this.bound(this.store.recentForChat(f.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
-        return rows.filter((r) => !!r.servedAt && r.profile === f.profile && r.telegramMsgId !== f.msgId);
+        return rows.filter((r) => !!r.servedAt && !(r.profile === f.profile && r.telegramMsgId === f.msgId));
     }
     /** Open requests of this chat (answer window), newest first; [] on failure. */
     async openAsks() {
@@ -82197,24 +82163,6 @@ class GateSession {
             }
         }
         return { closed, gateBlocked };
-    }
-    /**
-     * The open "send the details page" request (old payment time) this DIFFERENT screenshot of the SAME payment answers
-     * (same UTR, or same amount), even when the model read the other fields differently (no
-     * endless re-asking). Another old payment (shruthi2 8872981660: ₹50 then ₹100, other UTR) does not answer it. Requests raised over an impossible reference
-     * are excluded: only a real reference answers those (confirmsAsk).
-     */
-    async answeredOldTimeAsk() {
-        const now = this.deps.now();
-        for (const r of await this.openAsks()) {
-            if (r.telegramMsgId === this.facts.msgId || !(0,_decide__WEBPACK_IMPORTED_MODULE_1__.askAnswerable)(r, now, 'old_time'))
-                continue;
-            if ((r.ask?.reasons ?? []).includes('IMPOSSIBLE_REFERENCE'))
-                continue;
-            if ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.isDifferentPicture)(this.facts, r) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.samePayment)(this.facts, r))
-                return r;
-        }
-        return null;
     }
     /** The fake/edited flow blocked the user over this screenshot's warning. */
     async markBlocked() {
@@ -82253,6 +82201,7 @@ class ProofGate {
             chatId: facts.chatId, profile: facts.profile, clientId: extra.clientId, telegramMsgId: facts.msgId,
             ...(facts.utr ? { utr: facts.utr } : {}),
             ...(extra.payeeUpiId ? { payeeUpiId: extra.payeeUpiId } : {}),
+            ...(extra.payeeName ? { payeeName: extra.payeeName } : {}),
             amount: facts.amount,
             ...(extra.creditAmount !== undefined ? { creditAmount: extra.creditAmount } : {}),
             time: facts.timeMs !== null ? { state: 'known', epochMs: facts.timeMs } : { state: 'unknown' },
@@ -82317,7 +82266,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FRAUD_BLOCKED_MESSAGES: () => (/* binding */ FRAUD_BLOCKED_MESSAGES),
 /* harmony export */   FRAUD_REMINDER_MESSAGES: () => (/* binding */ FRAUD_REMINDER_MESSAGES),
 /* harmony export */   FRAUD_WARNING_MESSAGES: () => (/* binding */ FRAUD_WARNING_MESSAGES),
-/* harmony export */   FUTURE_TIME_ASK_MESSAGES: () => (/* binding */ FUTURE_TIME_ASK_MESSAGES),
 /* harmony export */   NOT_MY_PAYMENT_MESSAGE: () => (/* binding */ NOT_MY_PAYMENT_MESSAGE),
 /* harmony export */   OLD_TIME_ASK_MESSAGES: () => (/* binding */ OLD_TIME_ASK_MESSAGES),
 /* harmony export */   PAYMENT_ASK_REPEAT_MESSAGES: () => (/* binding */ PAYMENT_ASK_REPEAT_MESSAGES)
@@ -82351,16 +82299,10 @@ const FRAUD_REMINDER_MESSAGES = [
     "Real payment page from History bhejo\nFir call karti hu",
     "Talk later baby\nFirst the real payment screenshot",
 ];
-/** The payment time is old: polite, the user may simply be late. */
+/** The details page is needed (a reference of impossible length): polite, it may be a misread. */
 const OLD_TIME_ASK_MESSAGES = [
     "Baby this payment looks old 🤔\n\n Open your payment app History, tap it and send me that page..\nthen we can start 😘",
     "Hmm This is Old one Dear...\n\nsend me the payment details page from History!\nthen I will start right away 💋",
-];
-/** The payment time is in the future. Never mention the time (they would just edit it): say we can't verify it yet. */
-const FUTURE_TIME_ASK_MESSAGES = [
-    "Baby I didn't receive this amount yet 🥺\n\nOpen your payment app History\nTap on the payment and send me that details page na",
-    "Hmm baby I can't verify this payment yaar..\n\nGo to History in your payment app\nSend me the payment details page, then we start 😘",
-    "Arre baby this payment is not showing on my side\n\nOpen History in your payment app\nTap on it and send me that page na",
 ];
 /** The user says they paid / asks if we are real while a details-page ask is open: repeat the ask. */
 const PAYMENT_ASK_REPEAT_MESSAGES = [
@@ -82382,7 +82324,6 @@ const PAYMENT_ASK_REPEAT_MESSAGES = [
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   FUTURE_TIME_TOLERANCE_MS: () => (/* binding */ FUTURE_TIME_TOLERANCE_MS),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)
@@ -82417,13 +82358,6 @@ function fabricatedTextReasons(text) {
 const IST_OFFSET_MS = 330 * 60000;
 // The PhonePe transaction-id time is parsed in payment-time.ts (the time check trusts it too); re-exported here for the gate.
 
-/**
- * Owner 2026-10-22: "future dates are fake!" A payment cannot happen after the picture of it reached us. This much
- * ahead of the picture's arrival is still a genuine payment: phone clocks run a few minutes fast and the receipt
- * prints whole minutes (up to 59 s lost), and a vision model can misread one minute digit. 10 min covers both while
- * catching an edited time (the live case was 40 min ahead). One constant for the date and the same-day time rule.
- */
-const FUTURE_TIME_TOLERANCE_MS = 10 * 60000;
 const TWELVE_HOURS_MS = 12 * 60 * 60000;
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const MONTH = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
@@ -82475,23 +82409,21 @@ function istParts(ms) {
     return { day: t.getUTCFullYear() * 10000 + mo * 100 + d, d, mo, h: t.getUTCHours(), mi: t.getUTCMinutes() };
 }
 /**
- * Owner 2026-10-22: a payment time after the picture's arrival (`arrivalMs`) means an edited screenshot, judged like
- * the other fake signals. More than FUTURE_TIME_TOLERANCE_MS ahead and:
+ * Owner 2026-10-22: a payment time after the picture's arrival (`arrivalMs`) means an edited screenshot, judged like the
+ * other fake signals. "Future" is the same-day rule's (paymentDay, payment-time.ts): more than FUTURE_LEAD_MS (3 h) ahead.
+ * Up to 3 h ahead is a phone clock ahead of IST (Nepal .. Singapore) or running fast, also when its date already reads
+ * tomorrow just after midnight; a date edited to tomorrow is more than 3 h ahead at any other hour.
  *  - FUTURE_DATE: the date is after the arrival's IST day. Not when the text prints dates and none is the one read
  *    (the model misread the day: nidhi1 2026-10-20 "21st Oct 26" read as 26 Oct).
  *  - FUTURE_TIME: same day, later clock. Not when the AM/PM is not printed with that clock and the other half of the
- *    day is not ahead: the earlier reading is taken (a genuine payer is never called fake on an AM/PM misread).
- * Not when the lead fits a neighbouring-timezone phone (fitsNeighbourTimezoneLead; on the full timestamp, so a date
- * just past midnight on such a phone is excused too).
+ *    day is not in the future: the earlier reading is taken (a genuine payer is never called fake on an AM/PM misread).
  * The time is read as the time check reads it (parsePaymentTime: IST wall clock, current year, New Year roll-back).
  */
 function futurePaymentTimeReasons(details, arrivalMs) {
     if (typeof details.time !== 'string' || !details.time.trim() || !Number.isFinite(arrivalMs))
         return [];
     const readMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.parsePaymentTime)(details.time, new Date(arrivalMs))?.getTime();
-    if (readMs === undefined || !Number.isFinite(readMs) || readMs - arrivalMs <= FUTURE_TIME_TOLERANCE_MS)
-        return [];
-    if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.fitsNeighbourTimezoneLead)(readMs - arrivalMs))
+    if (readMs === undefined || !Number.isFinite(readMs) || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(readMs, arrivalMs) !== 'future')
         return [];
     const text = String(details.text ?? '').replace(/\s+/g, ' ');
     const read = istParts(readMs);
@@ -82500,7 +82432,7 @@ function futurePaymentTimeReasons(details, arrivalMs) {
         return dates.length > 0 && !dates.some((p) => p.d === read.d && p.mo === read.mo) ? [] : ['FUTURE_DATE'];
     }
     const otherHalfMs = readMs + (read.h >= 12 ? -TWELVE_HOURS_MS : TWELVE_HOURS_MS);
-    if (otherHalfMs - arrivalMs <= FUTURE_TIME_TOLERANCE_MS && !clockPrintedAs(text, read.h, read.mi))
+    if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(otherHalfMs, arrivalMs) !== 'future' && !clockPrintedAs(text, read.h, read.mi))
         return [];
     return ['FUTURE_TIME'];
 }
@@ -82681,7 +82613,6 @@ function isAutomatedUpiNotification(text) {
     ]);
 }
 const MINUTE_MS = 60 * 1000;
-const ACCEPT_WITHIN_MS = 12 * 60 * MINUTE_MS;
 /** A user who paid to someone else must not have been on a call in the last 3 minutes. */
 const PAID_OTHERS_CALL_GAP_MS = 3 * MINUTE_MS;
 const CALL_GAP_MS = 5 * MINUTE_MS;
@@ -82736,7 +82667,7 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     const othersNameExists = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_3__.contains)(text, otherclients);
     const videoCount = Array.isArray(userDetails.videos) ? userDetails.videos.length : 0;
     const chatId = userDetails.chatId;
-    logger.log(`ENTRY | chatId=${chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} isWithin10minValid=${isWithinPastTenMinutesImage.isValid} isWithin10minResult=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
+    logger.log(`ENTRY | chatId=${chatId} amount=${imageDetails.amount} time="${imageDetails.time?.trim()}" myName=${myNameExists} othersName=${othersNameExists} didPaidToOthers=${didPaidToOthers} timeValid=${isWithinPastTenMinutesImage.isValid} sameDay=${isWithinPastTenMinutesImage.result} videos=${videoCount} callTime=${userDetails.callTime || 0}`);
     if (othersNameExists && !myNameExists) {
         logger.log(`SCENARIO: Other client name in payment (not mine) | REJECT not my payment | chatId=${chatId}`);
         const updated = await db.update(chatId, { limitTime: Date.now() + OTHER_CLIENT_LIMIT_MS });
@@ -82747,33 +82678,29 @@ async function handleMyPayment(imageDetails, userDetails, isWithinPastTenMinutes
     const ctx = { image: imageDetails, user: userDetails, check: isWithinPastTenMinutesImage, videoCount, atMs };
     if (didPaidToOthers)
         return judgePaidToOthers(ctx);
-    const verdict = isWithinPastTenMinutesImage.result ? judgeRecentTime(ctx) : judgeUnreadableTime(ctx);
-    // judgeUnreadableTime accepts these at any time (rules unchanged since before the 2026-10-13 proof gate), so an old
-    // payment time must not hold them either (ramya1 1913384761 2026-10-21: ₹50, no videos, asked for a details page).
-    return verdict.isvalid && acceptsAnyTime(imageDetails, videoCount) ? { ...verdict, anyTime: true } : verdict;
+    return isWithinPastTenMinutesImage.result ? judgeRecentTime(ctx) : judgeUnreadableTime(ctx);
 }
-/** Not another client's payment, not paid to others: accepted whatever the time (judgeUnreadableTime's first rule). */
+/** Not another client's payment, not paid to others: accepted when the time is unreadable (judgeUnreadableTime). */
 function acceptsAnyTime(image, videoCount) {
     // Written as the negation on purpose: a missing/NaN amount is accepted (same as judgeUnreadableTime).
     return !(videoCount > 0 && image.amount < NO_TIME_CHECK_AMOUNT);
 }
-/** Not another client's payment, the time is inside the window: accept unless the time contradicts the user's last call. */
+/** Not another client's payment, the payment is from today (same-day rule): accept unless the time contradicts the user's last call. */
 function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
     const now = new Date(atMs);
     const nowMs = now.getTime();
-    // Judge the moment the time-window check accepted (incl. its AM/PM correction); re-parsing the raw time
-    // dropped that correction and could reject the payment it had just accepted.
+    // Judge the moment the time check accepted (incl. its corrections; a lead ahead of IST is judged as the arrival).
     const paymentMs = check.paymentMs ?? (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.parsePaymentTime)(image.time || "", now)?.getTime() ?? NaN;
     const age = nowMs - paymentMs;
     const ageMins = (age / MINUTE_MS).toFixed(2);
-    const notFuture = paymentMs <= nowMs;
     // callTime may be unset: every comparison with it is then false, on purpose (kept as written).
     const callTime = (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.callTimeAsOf)(user.callTime, nowMs);
     const callTimeAgoMins = callTime ? ((nowMs - callTime) / MINUTE_MS).toFixed(2) : "N/A";
-    logger.log(`Sub-scenario: isWithin10min=true | timeDiff=${age}ms (${ageMins} mins ago) callTimeAgo=${callTimeAgoMins} mins paymentUTC<=now=${notFuture} callTime<paymentTime=${callTime < paymentMs}`);
-    if (age <= ACCEPT_WITHIN_MS && notFuture && callTime < paymentMs) {
-        logger.log(`SCENARIO: time valid (12h, callTime<payment) | ACCEPT | chatId=${chatId}`);
+    logger.log(`Sub-scenario: sameDay=true | timeDiff=${age}ms (${ageMins} mins ago) callTimeAgo=${callTimeAgoMins} mins callTime<paymentTime=${callTime < paymentMs}`);
+    // Same day replaces the old 12 h limit (owner 2026-10-22): a re-send is stopped by the proof gate's identity checks.
+    if (callTime < paymentMs) {
+        logger.log(`SCENARIO: time valid (same day, callTime<payment) | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     const leniencyVideos = videoCount < LENIENT_VIDEO_COUNT;
@@ -82783,33 +82710,40 @@ function judgeRecentTime({ image, user, check, videoCount, atMs }) {
         logger.log(`SCENARIO: time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
         return accept();
     }
-    if (callWithin5Mins && age <= FRESH_PAYMENT_MS && notFuture) {
+    if (callWithin5Mins && age <= FRESH_PAYMENT_MS) {
         logger.log(`SCENARIO: call within 5mins + payment within 2.5mins | ACCEPT | chatId=${chatId}`);
         return accept();
     }
-    if (age <= NEAR_NOW_MS && notFuture) {
+    if (age <= NEAR_NOW_MS) {
         logger.log(`SCENARIO: time close to now but callTime check failed (possible wrong timestamp) | REJECT ask screenshot | chatId=${chatId} timeDiffMins=${ageMins}`);
         return reject("confirmTime");
     }
     logger.log(`SCENARIO: time invalid (old payment) | REJECT Old payment | chatId=${chatId} timeDiffMins=${ageMins}`);
     return reject("oldPayment");
 }
-/** Not another client's payment, the time is outside the window or unreadable. */
+/** Not another client's payment, the payment is not from today (readable) or its time is unreadable. */
 function judgeUnreadableTime({ image, user, check, videoCount, atMs }) {
     const chatId = user.chatId;
     const callOver5MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.callTimeAsOf)(user.callTime, atMs) < atMs - CALL_GAP_MS;
-    logger.log(`Sub-scenario: isWithin10min=false | videos=${videoCount} amount=${image.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${check.isValid}`);
-    if (acceptsAnyTime(image, videoCount)) {
-        logger.log(`SCENARIO: time not recent BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
+    const anyTime = acceptsAnyTime(image, videoCount);
+    logger.log(`Sub-scenario: sameDay=false | videos=${videoCount} amount=${image.amount} callOver5MinsAgo=${callOver5MinsAgo} timeValid=${check.isValid}`);
+    if (check.isValid) {
+        // Same-day rule (owner 2026-10-22): a receipt from another day is an old payment for every payer, also the ones
+        // accepted at any time when the time is unreadable (no videos yet, ₹200+): an old receipt is the re-send risk.
+        if (!anyTime && !callOver5MinsAgo) {
+            logger.log(`SCENARIO: call still active (within 5mins) | REJECT call over msg | chatId=${chatId}`);
+            return reject("callOver");
+        }
+        logger.log(`SCENARIO: not today's payment (readable time, another day) | REJECT Old payment | chatId=${chatId}`);
+        return reject("oldPayment");
+    }
+    if (anyTime) {
+        logger.log(`SCENARIO: time unreadable BUT no videos or amount>=200 | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     if (!callOver5MinsAgo) {
         logger.log(`SCENARIO: call still active (within 5mins) | REJECT call over msg | chatId=${chatId}`);
         return reject("callOver");
-    }
-    if (check.isValid) {
-        logger.log(`SCENARIO: time not recent (parsed time exists but not in window) | REJECT Old payment | chatId=${chatId}`);
-        return reject("oldPayment");
     }
     // A time read in the future (check.misread) lands here, never in the old-payment branch above.
     logger.log(`SCENARIO: time unparseable/unclear/misread (could be new payment) | REJECT ask screenshot with time | chatId=${chatId} misread=${check.misread ?? "none"}`);
@@ -82819,7 +82753,7 @@ function judgeUnreadableTime({ image, user, check, videoCount, atMs }) {
 async function judgePaidToOthers({ user, check, atMs }) {
     const chatId = user.chatId;
     const callOver3MinsAgo = (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.callTimeAsOf)(user.callTime, atMs) < atMs - PAID_OTHERS_CALL_GAP_MS;
-    logger.log(`Sub-scenario: didPaidToOthers=true | isWithin10min=${check.result} callOver3MinsAgo=${callOver3MinsAgo}`);
+    logger.log(`Sub-scenario: didPaidToOthers=true | sameDay=${check.result} callOver3MinsAgo=${callOver3MinsAgo}`);
     if (check.result && callOver3MinsAgo) {
         logger.log(`SCENARIO: paid to others + time recent + call over 3mins | ACCEPT | chatId=${chatId}`);
         return accept();
@@ -82951,7 +82885,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasOurPayeeName: () => (/* binding */ hasOurPayeeName),
 /* harmony export */   isOurUpiIdToken: () => (/* binding */ isOurUpiIdToken),
 /* harmony export */   isPaidToUs: () => (/* binding */ isPaidToUs),
-/* harmony export */   paidToOurUpiId: () => (/* binding */ paidToOurUpiId),
 /* harmony export */   payeeVerdict: () => (/* binding */ payeeVerdict),
 /* harmony export */   payeeVerdictOf: () => (/* binding */ payeeVerdictOf),
 /* harmony export */   showsOurBankingName: () => (/* binding */ showsOurBankingName),
@@ -83066,7 +82999,7 @@ function showsOurUpiIdAsId(text, ownIds) {
 /**
  * Something of our UPI ids in free text, for "is it ours at all" (entitiesShowOurs, small talk): an id as an id
  * (showsOurUpiIdAsId) or one of our local parts anywhere, spaces collapsed. The latter also matches a banking name
- * equal to a local part ("LAKSHMI STORES"), which is ours too; it is never "our UPI id" (paidToOurUpiId).
+ * equal to a local part ("LAKSHMI STORES"), which is ours too.
  */
 function showsOurUpiId(text, ownIds) {
     const compacted = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(text);
@@ -83162,39 +83095,6 @@ function payeeVerdictOf(e, ctx) {
 }
 function payeeVerdict(details, ctx) {
     return payeeVerdictOf((0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details), ctx);
-}
-/**
- * A payee UPI id field or UPI token that is one of ours read as an id: a complete id judged whole (isOurUpiIdToken), else
- * within one edit of one of ours (checkPayeeUpi, the pre-2026-10-22 rule), one of our local parts before a cut handle
- * ("lakshmi.3365-10@wa..."), or a cut / masked display (showsOurUpiIdAsId). A bare name is none of these.
- */
-function isOurUpiIdShown(id, ownIds) {
-    const v = (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(id);
-    if (!v)
-        return false;
-    if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.isCompleteVpa)(v))
-        return isOurUpiIdToken(v, ownIds);
-    const own = ownIds.filter((x) => typeof x === 'string').map((x) => x.split('&')[0]);
-    if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.checkPayeeUpi)(v, own) === 'own')
-        return true;
-    if (v.includes('@') && upiLocalParts(ownIds).includes(v.split('@')[0]))
-        return true;
-    return showsOurUpiIdAsId(id, ownIds);
-}
-/**
- * Paid to OUR UPI ID (owner 2026-10-21: the condition for moving a payment time by a time-zone gap, isRecentValidPayment
- * `timezoneShift`): payeeVerdict says OURS and one of our UPI ids shows as an id (payee UPI id field, a UPI token, or a
- * cut / masked display of one in the text). A banking name or account id alone is ours but is not our UPI id, also when
- * the name equals one of our ids' local parts ("LAKSHMI STORES" / lakshmistores@airtel: 128 of 1,099 prod receipts
- * 2026-10-22 got a false time-zone move that way).
- */
-function paidToOurUpiId(details, ctx) {
-    const e = (0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.buildReceiptEntities)(details);
-    if (payeeVerdictOf(e, ctx).verdict !== 'OURS')
-        return false;
-    return isOurUpiIdShown(e.payeeUpiId, ctx.ownUpiIds)
-        || e.upiTokens.some((token) => isOurUpiIdShown(token, ctx.ownUpiIds))
-        || showsOurUpiIdAsId(e.textNoUpi, ctx.ownUpiIds);
 }
 
 
