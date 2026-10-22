@@ -45907,7 +45907,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ALREADY_PAID_CALL_SOON_MESSAGES: () => (/* binding */ ALREADY_PAID_CALL_SOON_MESSAGES),
 /* harmony export */   answerPendingService: () => (/* binding */ answerPendingService),
 /* harmony export */   initiateCall: () => (/* binding */ initiateCall),
-/* harmony export */   proceedWithCall: () => (/* binding */ proceedWithCall)
+/* harmony export */   proceedWithCall: () => (/* binding */ proceedWithCall),
+/* harmony export */   resetUsedUpNotices: () => (/* binding */ resetUsedUpNotices)
 /* harmony export */ });
 /* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -45947,6 +45948,21 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:call-initiation-service");
+/** Chats already reported to ops as "service used up" in their current limited episode (ends once servable again). */
+const usedUpNoticed = new Set();
+/** True the first time in a limited episode: one ops notice per episode, not one per message. */
+function claimUsedUpNotice(chatId) {
+    if (usedUpNoticed.has(chatId))
+        return false;
+    usedUpNoticed.add(chatId);
+    if (usedUpNoticed.size > 5000)
+        usedUpNoticed.delete(usedUpNoticed.values().next().value);
+    return true;
+}
+/** Test seam: forget the per-episode notice state. */
+function resetUsedUpNotices() {
+    usedUpNoticed.clear();
+}
 /** The deferred "paid during the show" setup: re-read the user when it runs, then initiate the call. */
 async function runDeferredInitiateCall(chatId, payload) {
     const fresh = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId);
@@ -46045,6 +46061,10 @@ const ALREADY_PAID_CALL_SOON_MESSAGES = [
 async function answerPendingService(userDetails, chatId, reason, say) {
     if (!userDetails || userDetails.canReply === 0 || !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(userDetails))
         return false;
+    // Service used up (canCallUser would refuse the ring): "calling you" / "1-2 minutes" would never be followed by a
+    // show; the caller sends its own "call over" reply instead (kavya1 1942485923, 2026-10-22).
+    if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.showStillServable)(userDetails))
+        return false;
     if (_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager?.isOnInHouseCall?.(chatId))
         return true;
     // Re-sending the payment or asking for the owed call means "call me": an earlier "don't call" pause is over, so
@@ -46104,6 +46124,21 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
         }
         return false;
     }
+    // Service used up (10 videos, tier's shows delivered): the ring would be refused at dial (canCallUser), so no
+    // "Wait, I am Calling you" / "Checking", no ladder and no ring. paidReply true ends the "any text = initiate the
+    // call" loop (respond-to-msgs), as requestCall does when it does not call (kavya1 1942485923, 2026-10-22).
+    if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.showStillServable)(userDetails)) {
+        logger.log(`[CALL] ${chatId}: service used up (videos ${userDetails.videos?.length ?? 0}, fullShow ${userDetails.fullShow ?? 0}); no call (${reason})`);
+        try {
+            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `Cannot set paidReply for used-up service ${chatId}`, false);
+        }
+        await noticeServiceUsedUp(userDetails, chatId, Number(userDetails.payAmount) || 0, reason);
+        return false;
+    }
+    usedUpNoticed.delete(chatId);
     // Blocked (canReply 0) on any persona row: the ring is refused at dispatch, so no "calling you" text either
     // (journey F3b). A failed block read is not blocked, as for the ring.
     const blocked = (await callManager?.isBlocked?.(chatId)) === true;
@@ -46172,6 +46207,19 @@ async function handleLimitedCall(userDetails, chatId, amount, reason) {
     let title = `Call held: nothing owed (no paid service pending)`;
     let why = userDetails.canReply === 0 ? 'chat blocked (canReply 0)' : 'service already delivered at this pay amount';
     let next = 'No call scheduled: no paid service pending';
+    if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(userDetails) && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.showStillServable)(userDetails)) {
+        // Owed by tier but used up (videos / shows): nothing to schedule; one notice per episode, and paidReply true so
+        // every later message does not re-run this (kavya1 1942485923, 2026-10-22).
+        try {
+            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.paidReply, true);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `Cannot set paidReply for used-up service ${chatId}`, false);
+        }
+        await noticeServiceUsedUp(userDetails, chatId, amount, reason);
+        await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.asktoPayByEvent)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient(), userDetails);
+        return;
+    }
     if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(userDetails)) {
         why = `${waitMin} min wait after the last call${lastCallMin === null ? '' : ` (last call ${lastCallMin} min ago)`}`;
         const dueInMs = await scheduleOwedCall(userDetails, chatId, waitMin);
@@ -46180,20 +46228,43 @@ async function handleLimitedCall(userDetails, chatId, amount, reason) {
             : `Call held: ${waitMin} min wait after last call, calling in ${formatWait(dueInMs)}`;
         next = dueInMs === null ? 'Could not schedule the call (see logs)' : `Call scheduled in ${formatWait(dueInMs)}`;
     }
+    // Nothing owed and no show possible: the same "Call held" notice once per limited episode, not on every message.
+    const servable = (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.showStillServable)(userDetails);
+    if (servable)
+        usedUpNoticed.delete(chatId);
+    if (servable || claimUsedUpNotice(chatId))
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__.notifyChat)(chatId, {
+            title,
+            fields: [
+                { label: 'Amount', value: amount, code: false },
+                { label: 'Paid', value: userDetails.payAmount, code: false },
+                { label: 'Highest paid', value: userDetails.highestPayAmount, code: false },
+            ],
+            details: [
+                `Why: ${why}`,
+                `Next: ${next}`,
+                `Trigger: ${reason.replace(/\n/g, ' ')}`,
+            ],
+        });
+    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.asktoPayByEvent)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient(), userDetails);
+}
+/** The ops notice for a used-up service: once per limited episode (claimUsedUpNotice). */
+async function noticeServiceUsedUp(userDetails, chatId, amount, reason) {
+    if (!claimUsedUpNotice(chatId))
+        return;
     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__.notifyChat)(chatId, {
-        title,
+        title: 'Call held: service used up',
         fields: [
             { label: 'Amount', value: amount, code: false },
             { label: 'Paid', value: userDetails.payAmount, code: false },
             { label: 'Highest paid', value: userDetails.highestPayAmount, code: false },
         ],
         details: [
-            `Why: ${why}`,
-            `Next: ${next}`,
+            `Why: ${userDetails.videos?.length ?? 0} videos watched, fullShow ${userDetails.fullShow ?? 0}: the call would be refused`,
+            'Next: no call, no "calling you" text; reported once until a show is possible again',
             `Trigger: ${reason.replace(/\n/g, ' ')}`,
         ],
     });
-    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.asktoPayByEvent)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getClient(), userDetails);
 }
 function formatWait(ms) {
     const totalSec = Math.round(ms / 1000);
@@ -47126,7 +47197,8 @@ async function offerCallOrLink(chatId, sendLink, sendText) {
             const callManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance().callManager;
             // Their call privacy just blocked us: "calling you now" would be followed by nothing.
             const blocked = (await callManager.getInHouse())?.isPrivacyBlocked?.(chatId) ?? false;
-            if (!blocked && user && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(user) && (user.callTime ?? 0) < Date.now() - RECALL_GAP_MS) {
+            // Service used up (showStillServable): the ring would be refused, so never "calling you on Telegram now".
+            if (!blocked && user && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(user) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.showStillServable)(user) && (user.callTime ?? 0) < Date.now() - RECALL_GAP_MS) {
                 // Every slot busy: queueing sends the "give me N mins" text instead; never promise "calling now".
                 if (!callManager.isInHouseBusy?.())
                     await sendText((0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_0__.pickOneMsg)(_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_1__.inHouseRecallMessages));
@@ -53675,7 +53747,8 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "canReply=0");
         }
-        if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
+        // Service used up (showStillServable): a ladder / ring would be refused at dial, so none is requested.
+        if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.showStillServable)(userDetails)) {
             // Paid after their last call (callTime is backdated 5 min on delivery): an unserved upgrade skips the 2-hour wait (kavya2 2026-10-21).
             const paidSinceLastCall = (userDetails.lastPaidAt ?? 0) > (userDetails.callTime ?? 0) + 5 * 60000;
             if (userDetails.highestPayAmount < 250 || paidSinceLastCall || (userDetails.highestPayAmount >= 250 && userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000)) {
@@ -70114,7 +70187,8 @@ async function processImage(event) {
                                     // Every recency rule is judged at the picture's arrival, not at the end of a queue wait + analysis
                                     // (minutes): a restart re-analysis then reaches the same verdict (-> claim 'again', "Dupe ignored").
                                     const arrivalMs = pictureArrivalMs(event);
-                                    // The time-zone move only for a payment to our UPI id (owner 2026-10-21); a served UTR / file is never
+                                    // The time-zone move only for a payment to our UPI id (owner 2026-10-21), except a neighbouring-zone
+                                    // lead (fitsNeighbourTimezoneLead), moved for any payee (owner 2026-10-22); a served UTR / file is never
                                     // credited whatever its time (the gate's repeat check runs before the credit rules).
                                     const payeeOurs = (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.checkPayeeUpi)(imageDetails.payeeUpiId, (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_16__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_40__.UpiIds).map((v) => v.split("&")[0])) === "own";
                                     let isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__["default"])(imageDetails.time, userDetails, arrivalMs, { timezoneShift: payeeOurs });
@@ -72411,7 +72485,8 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                     const mm = "I'm Free now Babyy😘💋\n\n";
                                     if (msg) {
                                         if (user?.payAmount >= 30) {
-                                            if (user.demoGiven && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.canProceedWithService)(user)) {
+                                            // Service used up: "I will Call u in some time" / "calling you" would never be followed by a show.
+                                            if (user.demoGiven && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.canProceedWithService)(user) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.showStillServable)(user)) {
                                                 const didPaidToOthers = await db.checkIfPaidToOthers(user.chatId.toString());
                                                 if (didPaidToOthers.paid !== "" || didPaidToOthers.demoGiven !== "") {
                                                     const { offerCallOrLink } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../../calls/call-me */ "./src/calls/call-me.ts"));
@@ -72513,7 +72588,8 @@ async function sendVclinks(client) {
                                         return;
                                     }
                                     if (user?.payAmount >= 30) {
-                                        if (user.demoGiven && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.canProceedWithService)(user)) {
+                                        // A call link for a used-up service only leads to "payment required".
+                                        if (user.demoGiven && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.canProceedWithService)(user) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_9__.showStillServable)(user)) {
                                             await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_4__.trySendingMsg)(user, client, { message: `**Call me Here Man!!**\n\nOpen👇 to Call Now!!\nhttps://ZomCall.netlify.app/${process.env.clientId}/${id.chatId.toString()}`, linkPreview: false }, 'link');
                                         }
                                     }
@@ -80255,8 +80331,8 @@ const TIMEZONE_OFFSETS_MIN = [
 const NEIGHBOUR_TZ_OFFSETS_MIN = [15, 30, 60, 90, 150];
 /**
  * A payment time `leadMs` ahead of the picture's arrival fits a phone set to a neighbouring timezone
- * (NEIGHBOUR_TZ_OFFSETS_MIN): not a future time. Shared by the fake-signal check (proof-gate/signals.ts) and the proof
- * gate's old/future-time hold (proof-gate/decide.ts) so both agree.
+ * (NEIGHBOUR_TZ_OFFSETS_MIN): not a future time. Shared by the fake-signal check (proof-gate/signals.ts), the proof
+ * gate's old/future-time hold (proof-gate/decide.ts) and the credit rules' time window (isRecentValidPayment) so all agree.
  */
 function fitsNeighbourTimezoneLead(leadMs) {
     if (!Number.isFinite(leadMs))
@@ -80373,7 +80449,8 @@ function notifyPaymentTime(context, title, summary, fields, severity = _tg_core_
  * Is the screenshot's payment time recent? Within 10 minutes, or 5 when the user's last call was in the
  * last 10 minutes. A time ~12 h off is treated as an AM/PM misread and, with `timezoneShift`, one off by a time-zone
  * gap as a phone in another zone (TIMEZONE_OFFSETS_MIN), and corrected first (ops are told). `timezoneShift` only for a
- * payment to our UPI id whose UTR / file was never credited (owner 2026-10-21; processImage decides).
+ * payment to our UPI id whose UTR / file was never credited (owner 2026-10-21; processImage decides). A time ahead by
+ * a lead that fits fitsNeighbourTimezoneLead (Nepal +15 .. Singapore +150) is moved without it (owner 2026-10-22).
  *
  * `atMs`: when the picture arrived (Telegram message date), not when its analysis finished: queue waits and the
  * vision chain can take minutes, and a restart analyses a picture again later. Defaults to now.
@@ -80407,7 +80484,10 @@ function isRecentValidPayment(input, userDetails, atMs = Date.now(), opts = {}) 
         }
         else if (!inWindow(paymentMs)) {
             const amPm = correctAmPmMisread(paymentMs, nowMs);
-            const zone = amPm || !opts.timezoneShift ? null : correctTimezoneOffset(paymentMs, nowMs, inWindow);
+            // A lead that fits a neighbouring-timezone phone (fitsNeighbourTimezoneLead) is moved whatever the payee
+            // shows, as the fake check and the proof gate excuse it; any other gap only with `timezoneShift`.
+            const zoneAllowed = opts.timezoneShift || fitsNeighbourTimezoneLead(paymentMs - nowMs);
+            const zone = amPm || !zoneAllowed ? null : correctTimezoneOffset(paymentMs, nowMs, inWindow);
             const corrected = amPm ?? zone ?? correctFutureDateMisread(paymentMs, nowMs, inWindow);
             if (corrected) {
                 // A corrected time a few minutes ahead is the same fast phone clock as above: judged as now.
@@ -83126,8 +83206,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   canProceedWithService: () => (/* binding */ canProceedWithService),
 /* harmony export */   canStartService: () => (/* binding */ canStartService),
-/* harmony export */   hasPendingPaidService: () => (/* binding */ hasPendingPaidService)
+/* harmony export */   hasPendingPaidService: () => (/* binding */ hasPendingPaidService),
+/* harmony export */   showStillServable: () => (/* binding */ showStillServable)
 /* harmony export */ });
+/* harmony import */ var _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../calls/inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+
+/** Other personas are judged at dial time (the call itself); neutral here, the per-chat rules decide. */
+const NO_OTHER_PROFILES = { canCall: true, demoGiven: 0, latestCallTime: 0, videos: [] };
+/**
+ * Could this user still get a show at their current pay (the same rule the call itself applies, canCallUser), ignoring
+ * the wait after their last call (callTime 0)? False = the service is used up (e.g. 10 videos watched, or the tier's
+ * shows delivered): no "calling you" text, ladder or ring would ever be followed by a show (kavya1 1942485923,
+ * 2026-10-22). Not part of hasPendingPaidService / canProceedWithService: the repeat-payment credit reads those.
+ */
+function showStillServable(userDetail, now = Date.now()) {
+    return (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_0__.canCallUser)({ ...userDetail, callTime: 0 }, NO_OTHER_PROFILES, now);
+}
 /**
  * Consolidated service eligibility and call proceeding checker
  * Combines both isServicePending and canProceed logic into one comprehensive function
