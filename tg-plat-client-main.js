@@ -21811,7 +21811,7 @@ const ChannelCategory = Object.freeze({
     UNAUTH_CALLS: 'UNAUTH_CALLS',
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
-    /** @unwantedupdates2: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
+    /** The unwanted-updates group (private): bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
     UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
@@ -51889,6 +51889,105 @@ async function reportLeaveCycle(results, error) {
 
 /***/ },
 
+/***/ "./src/channels/unwanted-updates-group.ts"
+/*!************************************************!*\
+  !*** ./src/channels/unwanted-updates-group.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getUnwantedUpdatesGroup: () => (/* binding */ getUnwantedUpdatesGroup),
+/* harmony export */   joinUnwantedUpdatesGroup: () => (/* binding */ joinUnwantedUpdatesGroup),
+/* harmony export */   parseInviteHash: () => (/* binding */ parseInviteHash),
+/* harmony export */   setUnwantedUpdatesGroup: () => (/* binding */ setUnwantedUpdatesGroup)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:unwanted-updates-group");
+/**
+ * The unwanted-updates group is private (2026-10-23): the client joins it with the invite link in remote config
+ * (UNWANTED_UPDATES_INVITE) and keeps the chat it resolved here. postUnwantedPhoto reads it; with no chat the client
+ * step is skipped and the UNWANTED_UPDATES bot posts instead.
+ */
+let group = null;
+function getUnwantedUpdatesGroup() {
+    return group;
+}
+/** Tests and the join below only. */
+function setUnwantedUpdatesGroup(entity) {
+    group = entity;
+}
+/** "https://t.me/+HASH", "t.me/joinchat/HASH", "+HASH" or a bare "HASH" -> HASH; anything else -> null. */
+function parseInviteHash(raw) {
+    const value = String(raw ?? "").trim();
+    if (!value)
+        return null;
+    const match = value.match(/^(?:(?:https?:\/\/)?(?:t|telegram)\.me\/(?:joinchat\/|\+))?\+?([A-Za-z0-9_-]+)\/?$/);
+    return match ? match[1] : null;
+}
+function rpcMessage(error) {
+    const e = error;
+    return String(e?.errorMessage ?? e?.message ?? error);
+}
+/** The chat behind the invite when this account is already in it (ChatInviteAlready / ChatInvitePeek), else null. */
+async function memberChat(client, hash) {
+    const invite = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.CheckChatInvite({ hash }));
+    if (invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInviteAlready || invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInvitePeek)
+        return invite.chat;
+    return null;
+}
+/**
+ * Joins the unwanted-updates group through UNWANTED_UPDATES_INVITE and keeps its chat. Never throws; no retries (a
+ * failure leaves photos on the bot fallback until the next start). Resolves the chat, or null.
+ */
+async function joinUnwantedUpdatesGroup(client) {
+    const raw = process.env.UNWANTED_UPDATES_INVITE;
+    const hash = parseInviteHash(raw);
+    if (!hash) {
+        if (raw)
+            logger.warn(`[UnwantedUpdatesGroup] UNWANTED_UPDATES_INVITE is not an invite link: photos go via the bot`);
+        else
+            logger.warn(`[UnwantedUpdatesGroup] UNWANTED_UPDATES_INVITE not set: photos go via the bot`);
+        return null;
+    }
+    try {
+        let chat = await memberChat(client, hash);
+        if (!chat) {
+            try {
+                const updates = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.ImportChatInvite({ hash }));
+                chat = updates.chats?.[0] ?? null;
+                logger.log(`[UnwantedUpdatesGroup] joined the unwanted-updates group via invite`);
+            }
+            catch (error) {
+                // Joined between the check and the import: read the chat again.
+                if (!rpcMessage(error).includes("USER_ALREADY_PARTICIPANT"))
+                    throw error;
+                chat = await memberChat(client, hash);
+            }
+        }
+        if (!chat) {
+            logger.warn(`[UnwantedUpdatesGroup] invite accepted but no chat came back: photos go via the bot`);
+            return null;
+        }
+        group = chat;
+        return chat;
+    }
+    catch (error) {
+        const message = rpcMessage(error);
+        const known = message.match(/INVITE_REQUEST_SENT|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID/)?.[0];
+        logger.warn(`[UnwantedUpdatesGroup] could not join the unwanted-updates group (${known ?? message}): photos go via the bot`);
+        return null;
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/config/redis-uri.ts"
 /*!*********************************!*\
   !*** ./src/config/redis-uri.ts ***!
@@ -69893,7 +69992,7 @@ async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastN
     }
 }
 /**
- * Non-payment photo: the client forwards it to @unwantedupdates2 with the text card; only when that forward fails, an
+ * Non-payment photo: the client forwards it to the unwanted-updates group with the text card; only when it cannot, an
  * UNWANTED_UPDATES bot posts the photo card there (postUnwantedPhoto; never UNVDS). Resolves true only when the PHOTO
  * landed; callers that delete the user's photo depend on it.
  */
@@ -73565,9 +73664,9 @@ async function forwardtoUnwanted(event, broadcastName) {
         // junk we don't want to keep. A failed post is only worth a log line (it's not evidence
         // we need to preserve), never a reason to leave the media in place.
         if (detection.mediaType === 'photo') {
-            // Photos (blocked user, over the daily limit, forwarded, image files): client to @unwantedupdates2, bot
-            // there only if the client fails; never UNVDS (owner, 2026-10-23).
-            logger.log(`[Unwanted Media] Posting photo to @unwantedupdates2 from : ${broadcastName} | ${chatId}`);
+            // Photos (blocked user, over the daily limit, forwarded, image files): client to the unwanted-updates
+            // group, bot there only if the client cannot; never UNVDS (owner, 2026-10-23).
+            logger.log(`[Unwanted Media] Posting photo to the unwanted-updates group from : ${broadcastName} | ${chatId}`);
             const saved = await (0,_unwanted_photo__WEBPACK_IMPORTED_MODULE_10__.postUnwantedPhoto)({
                 event,
                 chatId,
@@ -74230,31 +74329,33 @@ const outboundQueue = new OutboundQueue({}, outboundBackup());
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   UNWANTED_UPDATES_CHANNEL: () => (/* binding */ UNWANTED_UPDATES_CHANNEL),
 /* harmony export */   postUnwantedPhoto: () => (/* binding */ postUnwantedPhoto)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/forward-to-channel */ "./src/telegram/forward-to-channel.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channels/unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:unwanted-photo");
-const UNWANTED_UPDATES_CHANNEL = "@unwantedupdates2";
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:unwanted-photo");
 /**
- * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to @unwantedupdates2
- * with a text card; only when that forward fails does a bot of the UNWANTED_UPDATES category post the photo with its
- * card to the same group. Photos never go to UNVDS (videos and other media only). A failed card after a successful
- * forward is no reason for a bot post (that was a double post). Resolves true only when the photo landed.
+ * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to the
+ * unwanted-updates group (private; joined via UNWANTED_UPDATES_INVITE at start) with a text card; when the group is not
+ * resolved or the forward fails, a bot of the UNWANTED_UPDATES category posts the photo with its card to the same group.
+ * Photos never go to UNVDS (videos and other media only). A failed card after a successful forward is no reason for a
+ * bot post (that was a double post). Resolves true only when the photo landed.
  */
 async function postUnwantedPhoto(post) {
     const { event, chatId } = post;
-    if (await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__.forwardToChannel)(event, UNWANTED_UPDATES_CHANNEL)) {
+    const group = (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.getUnwantedUpdatesGroup)();
+    if (group && (await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__.forwardToChannel)(event, group))) {
         try {
-            await event.client.sendMessage(UNWANTED_UPDATES_CHANNEL, { message: post.text.slice(0, 1000) });
+            await event.client.sendMessage(group, { message: post.text.slice(0, 1000) });
         }
         catch (error) {
-            logger.warn(`[UnwantedPhoto] photo forwarded to ${UNWANTED_UPDATES_CHANNEL} for ${chatId} but its text card failed (no bot post):`, error);
+            logger.warn(`[UnwantedPhoto] photo forwarded to the unwanted-updates group for ${chatId} but its text card failed (no bot post):`, error);
         }
         return true;
     }
@@ -97231,18 +97332,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   initSetup: () => (/* binding */ initSetup)
 /* harmony export */ });
-/* harmony import */ var _file_sender__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./file-sender */ "./src/telegram/file-sender.ts");
-/* harmony import */ var _channels_channel_ops__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../channels/channel-ops */ "./src/channels/channel-ops.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _file_sender__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./file-sender */ "./src/telegram/file-sender.ts");
+/* harmony import */ var _channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channels/channel-ops */ "./src/channels/channel-ops.ts");
+/* harmony import */ var _channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../channels/unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+
+
 
 
 // Constants for initialization
-const DEFAULT_CHANNELS = "@clientupdates|@miscmessages|@unwantedupdates2";
+const DEFAULT_CHANNELS = "@clientupdates|@miscmessages";
+const JOIN_GAP_MS = 3 * 60 * 1000;
 /**
  * Initialize setup
  */
 async function initSetup(client) {
-    _file_sender__WEBPACK_IMPORTED_MODULE_0__.fileSender.setClient(client);
-    await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_1__.joinChannels)(client, DEFAULT_CHANNELS, false);
+    _file_sender__WEBPACK_IMPORTED_MODULE_1__.fileSender.setClient(client);
+    if ((await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__.joinChannels)(client, DEFAULT_CHANNELS, false)) === "stop")
+        return;
+    // The unwanted-updates group is private: joined via its invite, spaced like the channel joins (never throws).
+    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(JOIN_GAP_MS);
+    await (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__.joinUnwantedUpdatesGroup)(client);
 }
 
 
