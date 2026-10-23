@@ -40,6 +40,7 @@ const DEFAULTS = {
     stopTimeoutMs: 5000,
     killWindowMs: 8000,
     maxSpoolBytes: 200 * 1024 * 1024,
+    maxQuarantineBytes: 50 * 1024 * 1024,
     counterFlushIntervalMs: 60000,
 };
 /** Statements per flush. Bounds a bisect of an all-bad batch (2N-1 statements) to one tick's worth. */
@@ -47,6 +48,10 @@ const MAX_STATEMENTS_PER_FLUSH = 64;
 /** Rows per spool file before a new one is started, so a replay never reads a huge file. */
 const SPOOL_ROTATE_ROWS = 5000;
 const SPOOL_RESCAN_MS = 60000;
+/** Quarantined spool files are deleted at start() after this long, and beyond maxQuarantineBytes. */
+const QUARANTINE_MAX_AGE_MS = 30 * 24 * 3600000;
+/** Spool lines parsed between event-loop yields during a replay. */
+const PARSE_YIELD_LINES = 1000;
 const SUMMARY_INTERVAL_MS = 10 * 60000;
 /** Failing this long without a success fires onStall; and at most this often. */
 const STALL_AFTER_MS = 30 * 60000;
@@ -139,6 +144,25 @@ function childBatchId(parentId, side) {
     const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
+/** Splits a spill plan at batch boundaries into parts of at most `maxRows` rows (one batch may exceed it). */
+function splitPlan(plan, maxRows) {
+    const parts = [];
+    let cur = { text: "", accepted: [], rows: 0, texts: [] };
+    plan.accepted.forEach((b, i) => {
+        if (cur.rows > 0 && cur.rows + b.rows.length > maxRows) {
+            parts.push(cur);
+            cur = { text: "", accepted: [], rows: 0, texts: [] };
+        }
+        const text = plan.texts[i] ?? "";
+        cur.accepted.push(b);
+        cur.texts.push(text);
+        cur.text += text;
+        cur.rows += b.rows.length;
+    });
+    if (cur.rows > 0)
+        parts.push(cur);
+    return parts;
+}
 /**
  * `~/.tg-analytics-spool/<sanitized basename(cwd)>`, unless ANALYTICS_SPOOL_DIR is set. Outside the
  * app dir on purpose: /root/clients and /root/promotions are git checkouts of the server repo, and
@@ -148,12 +172,6 @@ function defaultSpoolDir() {
     if (process.env.ANALYTICS_SPOOL_DIR)
         return process.env.ANALYTICS_SPOOL_DIR;
     return path__WEBPACK_IMPORTED_MODULE_3__.join(os__WEBPACK_IMPORTED_MODULE_2__.homedir(), ".tg-analytics-spool", sanitizeInstanceKey(path__WEBPACK_IMPORTED_MODULE_3__.basename(process.cwd())));
-}
-const IST_OFFSET_MS = 5.5 * 3600000;
-const istDay = (ms) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
-/** Read at REPLAY time: while Mongo still gets the daily writes, it is authoritative for old days. */
-function mongoDailyWritesOn() {
-    return String(process.env.DAILY_STATS_MONGO_WRITES ?? "").trim().toLowerCase() !== "off";
 }
 function batchKind(table) {
     return table === "daily_client" || table === "daily_mobile" ? COUNTERS_KIND : table;
@@ -180,6 +198,10 @@ function isPidAlive(pid) {
 }
 class AnalyticsSink {
     constructor(options = {}) {
+        /** Spool files with an async unlink in progress: never re-claimed by a rescan. */
+        this.unlinking = new Set();
+        /** Async unlinks started by release(); a flush awaits its own before it resolves. */
+        this.pendingUnlinks = new Set();
         this.pool = null;
         this.buffer = [];
         /** Batches with ids awaiting (re)try. Front = oldest. */
@@ -228,7 +250,7 @@ class AnalyticsSink {
         this.alreadyCommitted = 0;
         this.spoolErrors = 0;
         this.droppedAfterStop = 0;
-        this.skippedReplayMongoAuthoritative = 0;
+        this.internalErrors = 0;
         this.everEnabled = false;
         this.afterStopLogged = false;
         this.lastSummarySig = "0,0,0,0,0,0,0,0,0";
@@ -239,6 +261,7 @@ class AnalyticsSink {
         this.onLoss = options.onLoss;
         this.onStall = options.onStall;
         this.readProcEnviron = options.readProcEnviron ?? defaultReadProcEnviron;
+        this.readProcEnvironInjected = options.readProcEnviron !== undefined;
         const envShutdown = Number(process.env.SHUTDOWN_TIMEOUT);
         this.opts = {
             maxBufferedRows: options.maxBufferedRows ?? DEFAULTS.maxBufferedRows,
@@ -251,6 +274,7 @@ class AnalyticsSink {
             killWindowMs: options.killWindowMs
                 ?? (Number.isFinite(envShutdown) && envShutdown > 0 ? envShutdown : DEFAULTS.killWindowMs),
             maxSpoolBytes: options.maxSpoolBytes ?? DEFAULTS.maxSpoolBytes,
+            maxQuarantineBytes: options.maxQuarantineBytes ?? DEFAULTS.maxQuarantineBytes,
             now: options.now ?? (() => Date.now()),
             counterFlushIntervalMs: options.counterFlushIntervalMs ?? DEFAULTS.counterFlushIntervalMs,
         };
@@ -292,10 +316,13 @@ class AnalyticsSink {
         this.finalSpilled = false;
         this.claimSpoolFiles();
         this.reportOrphanSpools();
+        this.pruneQuarantine();
         this.lastRescanAt = this.opts.now();
         this.lastCounterDrainAt = this.opts.now();
         this.drainCountersNow = false;
-        this.timer = setInterval(() => { void this.flush(); }, this.opts.flushIntervalMs);
+        // flush() never rejects (flushOnce catches everything), but a rejection here would be an
+        // unhandledRejection, which exits the process under server.js: belt and braces.
+        this.timer = setInterval(() => { this.flush().catch(() => { }); }, this.opts.flushIntervalMs);
         this.timer.unref?.();
         // A process.exit() (server.js forces one after SHUTDOWN_TIMEOUT) skips any pending await, but
         // 'exit' listeners still run synchronously: spill there so a slow shutdown loses nothing.
@@ -529,7 +556,12 @@ class AnalyticsSink {
             this.spillScheduled = false;
             if (this.spillInFlight || this.finalSpilled)
                 return;
-            this.spillInFlight = this.drainPendingSpill().finally(() => {
+            // drainPendingSpill catches per append; this catch keeps a bug from becoming an
+            // unhandledRejection (process exit under server.js).
+            this.spillInFlight = this.drainPendingSpill().catch((err) => {
+                this.internalErrors += 1;
+                this.log("warn", `[analytics] async spill aborted by an internal error: ${describe(err)}`);
+            }).finally(() => {
                 this.spillInFlight = null;
                 if (this.pendingSpill.length > 0 && !this.finalSpilled)
                     this.scheduleSpill();
@@ -649,13 +681,16 @@ class AnalyticsSink {
                     if (failedThisFlush || statements >= MAX_STATEMENTS_PER_FLUSH)
                         break;
                     if (this.buffer.length > 0) {
-                        this.retryQueue.push(...this.toBatches(this.buffer.splice(0, this.opts.batchSize)));
+                        // Build first, then remove: an exception in toBatches must not lose the rows.
+                        const next = this.toBatches(this.buffer.slice(0, this.opts.batchSize));
+                        this.buffer.splice(0, this.opts.batchSize);
+                        this.retryQueue.push(...next);
                     }
                     else if (this.counters.size > 0 && (this.drainCountersNow
                         || this.opts.now() - this.lastCounterDrainAt >= this.opts.counterFlushIntervalMs)) {
                         this.drainCounters();
                     }
-                    else if (!this.loadNextSpoolFile()) {
+                    else if (!(await this.loadNextSpoolFile())) {
                         break;
                     }
                     continue;
@@ -734,14 +769,30 @@ class AnalyticsSink {
                     break;
             }
             if (!failedThisFlush)
-                this.maybeRescanSpool();
+                await this.maybeRescanSpool();
+            // "flush resolved" keeps meaning "written rows' spool files are gone".
+            if (this.pendingUnlinks.size > 0)
+                await Promise.all([...this.pendingUnlinks]);
+        }
+        catch (err) {
+            // Rule 3: a bug or a bad input (a corrupt spool line the validation missed, a throwing
+            // logger) must never reject: flush() runs from a timer, and an unhandled rejection kills the
+            // process. Whatever was in the queue stays there for the next flush.
+            this.internalErrors += 1;
+            this.log("warn", `[analytics] flush aborted by an internal error: ${describe(err)}`);
         }
         finally {
             this.flushing = false;
         }
-        this.enforceCap();
-        this.maybeAlertStall();
-        this.maybeLogSummary();
+        try {
+            this.enforceCap();
+            this.maybeAlertStall();
+            this.maybeLogSummary();
+        }
+        catch (err) {
+            this.internalErrors += 1;
+            this.log("warn", `[analytics] post-flush bookkeeping failed: ${describe(err)}`);
+        }
     }
     noteFailure(error) {
         const now = this.opts.now();
@@ -857,14 +908,14 @@ class AnalyticsSink {
             bytes += size;
             rows += b.rows.length;
         }
-        return accepted.length === 0 ? null : { text: chunks.join(""), accepted, rows };
+        return accepted.length === 0 ? null : { text: chunks.join(""), accepted, rows, texts: chunks };
     }
     spillDone(plan, file, reason) {
         if (this.currentSpool && this.currentSpool.file === file)
             this.currentSpool.rows += plan.rows;
         this.spooledRows += plan.rows;
         for (const b of plan.accepted)
-            this.release(b);
+            this.release(b, reason !== "overflow");
         if (reason !== "exit") {
             this.log("warn", `[analytics] spooled ${plan.rows} rows to ${file} (${reason})`);
         }
@@ -889,13 +940,17 @@ class AnalyticsSink {
         const plan = this.planSpill(live, used);
         if (!plan)
             return;
-        const file = this.newSpoolPath();
-        try {
-            fs__WEBPACK_IMPORTED_MODULE_1__.appendFileSync(file, plan.text);
-            this.spillDone(plan, file, reason);
-        }
-        catch (err) {
-            this.spillFailed(plan.accepted, reason, err);
+        // Rotated like overflow files (SPOOL_ROTATE_ROWS), at batch boundaries, so the replay of a
+        // long outage's exit spill never reads one huge file.
+        for (const part of splitPlan(plan, SPOOL_ROTATE_ROWS)) {
+            const file = this.newSpoolPath();
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.appendFileSync(file, part.text);
+                this.spillDone(part, file, reason);
+            }
+            catch (err) {
+                this.spillFailed(part.accepted, reason, err);
+            }
         }
     }
     spillFailed(batches, reason, err) {
@@ -907,8 +962,12 @@ class AnalyticsSink {
         }
         this.log("warn", `[analytics] spool write failed (${reason}, ${lost} rows lost): ${describe(err)}`);
     }
-    /** A batch is resolved (written, dropped, or persisted elsewhere): release its source file. */
-    release(batch) {
+    /**
+     * A batch is resolved (written, dropped, or persisted elsewhere): release its source file.
+     * The unlink is async (flush and the overflow spill run on the event loop); only the sync
+     * stop/exit spill passes `sync`, because no event loop is left to finish an async unlink.
+     */
+    release(batch, sync = false) {
         if (batch.released)
             return;
         batch.released = true;
@@ -920,12 +979,32 @@ class AnalyticsSink {
             return;
         }
         this.fileRefs.delete(batch.file);
+        if (sync) {
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(batch.file);
+            }
+            catch (err) {
+                if (err?.code !== "ENOENT")
+                    this.spoolErrors += 1;
+            }
+            return;
+        }
+        const p = this.unlinkSpool(batch.file);
+        this.pendingUnlinks.add(p);
+        void p.finally(() => this.pendingUnlinks.delete(p));
+    }
+    /** Async unlink, tracked so a rescan never re-claims a file that is being deleted. Never rejects. */
+    async unlinkSpool(file) {
+        this.unlinking.add(file);
         try {
-            fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(batch.file);
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.unlink(file);
         }
         catch (err) {
             if (err?.code !== "ENOENT")
                 this.spoolErrors += 1;
+        }
+        finally {
+            this.unlinking.delete(file);
         }
     }
     /**
@@ -933,6 +1012,7 @@ class AnalyticsSink {
      * owner is dead. The rename is atomic, so two processes can never both replay one file. Files
      * older than SPOOL_MAX_AGE_MS are quarantined instead (see quarantineOld).
      */
+    /** SYNC claim: start() only (before the timer runs). The flush path uses claimSpoolFilesAsync. */
     claimSpoolFiles() {
         let names;
         try {
@@ -943,30 +1023,103 @@ class AnalyticsSink {
         }
         this.currentSpool = null; // never claim a file we are still appending to
         for (const name of names) {
-            const m = this.spoolPattern.exec(name);
-            if (!m)
+            const step = this.claimStep(name);
+            if (!step)
                 continue;
-            const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
-            const pid = m[2] ? Number(m[2]) : null;
-            if (pid !== null) {
-                if (pid === process.pid) {
-                    // Ours from this very process: already loaded or queued, unless a previous sink in this
-                    // process left it (re-init after stop).
-                    if (this.fileRefs.has(from) || this.claimedFiles.includes(from))
-                        continue;
-                    this.claimedFiles.push(from);
-                    continue;
-                }
-                if (this.isOwnerAlive(pid))
-                    continue;
+            if (step.kind === "own") {
+                this.claimedFiles.push(step.from);
+                continue;
             }
-            const base = name.replace(/\.claimed-.*$/, "");
-            const to = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`);
+            if (step.pid !== null && this.isOwnerAlive(step.pid, this.environSync(step.pid)))
+                continue;
             try {
-                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(from, to);
-                this.claimedFiles.push(to);
+                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(step.from, step.to);
+                this.claimedFiles.push(step.to);
             }
             catch { /* another process claimed it first */ }
+        }
+    }
+    /**
+     * ASYNC claim for the periodic rescan inside flush(). Stops renaming as soon as an overflow
+     * spill is scheduled or running (it may be appending to a file listed here).
+     */
+    async claimSpoolFilesAsync() {
+        if (this.spillBusy())
+            return;
+        this.currentSpool = null; // a spill from now on starts a new file
+        let names;
+        try {
+            names = (await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readdir(this.spoolDir)).sort();
+        }
+        catch {
+            return; // no spool yet
+        }
+        for (const name of names) {
+            if (this.finalSpilled || this.spillBusy())
+                return;
+            const step = this.claimStep(name);
+            if (!step)
+                continue;
+            if (step.kind === "own") {
+                this.claimedFiles.push(step.from);
+                continue;
+            }
+            if (step.pid !== null && this.isOwnerAlive(step.pid, await this.environAsync(step.pid)))
+                continue;
+            if (this.finalSpilled || this.spillBusy())
+                return;
+            try {
+                await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(step.from, step.to);
+                this.claimedFiles.push(step.to);
+            }
+            catch { /* another process claimed it first */ }
+        }
+    }
+    /** What to do with one spool dir entry: nothing (null), queue our own file, or try to claim it. */
+    claimStep(name) {
+        const m = this.spoolPattern.exec(name);
+        if (!m)
+            return null;
+        const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+        if (this.unlinking.has(from))
+            return null;
+        const pid = m[2] ? Number(m[2]) : null;
+        if (pid === process.pid) {
+            // Ours from this very process: already loaded or queued, unless a previous sink in this
+            // process left it (re-init after stop).
+            if (this.fileRefs.has(from) || this.claimedFiles.includes(from))
+                return null;
+            return { kind: "own", from };
+        }
+        const base = name.replace(/\.claimed-.*$/, "");
+        return { kind: "claim", from, to: path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`), pid };
+    }
+    environSync(pid) {
+        if (!isPidAlive(pid))
+            return null;
+        try {
+            return this.readProcEnviron(pid);
+        }
+        catch {
+            return null;
+        }
+    }
+    async environAsync(pid) {
+        if (!isPidAlive(pid))
+            return null;
+        if (this.readProcEnvironInjected) {
+            try {
+                return this.readProcEnviron(pid);
+            }
+            catch {
+                return null;
+            }
+        }
+        try {
+            return await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readFile(`/proc/${pid}/environ`, "utf8");
+        }
+        catch {
+            return null;
         }
     }
     /**
@@ -975,16 +1128,9 @@ class AnalyticsSink {
      * checked for name=<key> or clientId=<key> (Linux; unreadable elsewhere → the pid check alone).
      * A false "dead" is safe: the live owner's batches carry ids, so a double replay dedupes.
      */
-    isOwnerAlive(pid) {
+    isOwnerAlive(pid, environ) {
         if (!isPidAlive(pid))
             return false;
-        let environ = null;
-        try {
-            environ = this.readProcEnviron(pid);
-        }
-        catch {
-            environ = null;
-        }
         if (environ === null)
             return true;
         for (const entry of environ.split("\0")) {
@@ -1010,13 +1156,13 @@ class AnalyticsSink {
      * are reported once per file via onLoss. Age is per batch, not per file: a re-spill writes old
      * batches into a new file, and an overflow file can collect fresh batches for a long time.
      */
-    quarantineLines(file, lines, batches) {
+    async quarantineLines(file, lines, batches) {
         if (lines.length === 0)
             return;
         const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, "quarantine");
         try {
-            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(dir, { recursive: true });
-            fs__WEBPACK_IMPORTED_MODULE_1__.appendFileSync(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file)), lines.join("\n") + "\n");
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(dir, { recursive: true });
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.appendFile(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file)), lines.join("\n") + "\n");
             this.log("warn", `[analytics] quarantined ${lines.length} spooled row(s) (${batches} batch(es)) first attempted over 6 days ago, in ${dir}`);
             this.reportLoss(`quarantined old spool (${batches} batch(es) first attempted over 6 days ago, in ${dir})`, lines.length);
         }
@@ -1024,6 +1170,58 @@ class AnalyticsSink {
             this.spoolErrors += 1;
             this.log("warn", `[analytics] cannot quarantine ${lines.length} old row(s) from ${file}: ${describe(err)}`);
             this.reportLoss(`old spool rows could not be quarantined: ${describe(err)}`, lines.length);
+        }
+    }
+    /**
+     * start() only (sync is fine there): quarantined files older than 30 days are deleted, then the
+     * oldest go until the directory is under maxQuarantineBytes (50 MB). No onLoss: those rows were
+     * reported when they were quarantined. Shared by every instance in this spool dir; a race with
+     * another instance's prune only produces ENOENT.
+     */
+    pruneQuarantine() {
+        const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, "quarantine");
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(dir);
+        }
+        catch {
+            return;
+        }
+        const files = [];
+        for (const name of names) {
+            const file = path__WEBPACK_IMPORTED_MODULE_3__.join(dir, name);
+            try {
+                const st = fs__WEBPACK_IMPORTED_MODULE_1__.statSync(file);
+                if (st.isFile())
+                    files.push({ file, mtimeMs: st.mtimeMs, size: st.size });
+            }
+            catch { /* raced */ }
+        }
+        files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+        const now = Date.now();
+        let total = files.reduce((n, f) => n + f.size, 0);
+        const deleted = [];
+        let freed = 0;
+        for (const f of files) {
+            const expired = now - f.mtimeMs > QUARANTINE_MAX_AGE_MS;
+            if (!expired && total <= this.opts.maxQuarantineBytes)
+                break; // sorted oldest first
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(f.file);
+                deleted.push(`${path__WEBPACK_IMPORTED_MODULE_3__.basename(f.file)} (${f.size} B, ${expired ? "older than 30 days" : "over the size cap"})`);
+            }
+            catch (err) {
+                if (err?.code !== "ENOENT") {
+                    this.spoolErrors += 1;
+                    continue;
+                }
+            }
+            total -= f.size;
+            freed += f.size;
+        }
+        if (deleted.length > 0) {
+            this.log("warn", `[analytics] pruned ${deleted.length} quarantined spool file(s) in ${dir}, ${freed} bytes `
+                + `(rows already reported when quarantined): ${deleted.join(", ")}`);
         }
     }
     /**
@@ -1060,37 +1258,49 @@ class AnalyticsSink {
         this.log("warn", `[analytics] orphan spool files untouched > 24 h in ${this.spoolDir}: ${list}`);
         this.alert(`orphan spool in ${this.spoolDir}, not adopted: ${list}`);
     }
-    /** Loads the next claimed file into the retry queue. Returns whether anything was queued. */
-    loadNextSpoolFile() {
-        while (this.claimedFiles.length > 0) {
+    /**
+     * Loads the next claimed file into the retry queue. Returns whether anything was queued.
+     * ASYNC (fs.promises) and the parse yields every PARSE_YIELD_LINES lines: it runs inside flush(),
+     * on the event loop that serves Telegram, and a spool file can hold thousands of rows.
+     * Every spooled counter row replays, whatever its day (see "SOAK WINDOW" in the header).
+     */
+    async loadNextSpoolFile() {
+        while (this.claimedFiles.length > 0 && !this.finalSpilled) {
             const file = this.claimedFiles.shift();
             let text;
             try {
-                text = fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(file, "utf8");
+                text = await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readFile(file, "utf8");
             }
             catch (err) {
                 if (err?.code !== "ENOENT")
                     this.spoolErrors += 1;
                 continue;
             }
+            // stop()/exit spilled everything while we read: the file stays on disk, claimed by this pid,
+            // and is picked up by the next start (a dead or re-initialised owner).
+            if (this.finalSpilled)
+                return false;
             const batches = new Map();
             const oldLines = new Map();
             const fallbackAt = this.fileEpoch(file);
             let rows = 0;
             let corrupt = 0;
-            let skippedCounters = 0;
-            // Soak period (Mongo writes ON): the nightly backfill restores counter days before yesterday
-            // from Mongo with GREATEST, so replaying spooled counters for those days on top would double
-            // count. Decided per ROW (a combined daily_counters batch can mix days); the remaining rows
-            // keep the batch id, so a batch that did commit still dedupes. Event rows always replay.
-            const mongoOn = mongoDailyWritesOn();
-            const yesterday = istDay(Date.now() - 86400000);
+            let parsed = 0;
             for (const line of text.split("\n")) {
                 if (!line.trim())
                     continue;
+                if (++parsed % PARSE_YIELD_LINES === 0) {
+                    await new Promise((resolve) => setImmediate(resolve));
+                    if (this.finalSpilled)
+                        return false;
+                }
                 let rec;
                 try {
-                    rec = JSON.parse(line);
+                    const raw = JSON.parse(line);
+                    // `null`, a number, a string or an array is valid JSON but not a spool record.
+                    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+                        throw new Error("not a record");
+                    rec = raw;
                 }
                 catch {
                     this.spoolErrors += 1;
@@ -1098,10 +1308,10 @@ class AnalyticsSink {
                     continue;
                 }
                 const table = typeof rec.t === "string" ? rec.t : "";
-                const spec = TABLES[table];
+                const spec = Object.prototype.hasOwnProperty.call(TABLES, table) ? TABLES[table] : undefined;
                 // Table and columns are validated against the known schema: the SQL text is never built
                 // from file content.
-                if (!spec || typeof rec.b !== "string" || !Array.isArray(rec.v) || !Array.isArray(rec.c)
+                if (!spec || typeof rec.b !== "string" || !rec.b || !Array.isArray(rec.v) || !Array.isArray(rec.c)
                     || rec.c.length !== spec.columns.length || rec.c.some((c, i) => c !== spec.columns[i])
                     || rec.v.length !== spec.columns.length) {
                     this.spoolErrors += 1;
@@ -1115,13 +1325,6 @@ class AnalyticsSink {
                     oldLines.set(rec.b, list);
                     continue;
                 }
-                if (mongoOn && batchKind(table) === COUNTERS_KIND) {
-                    const day = rec.v[0] instanceof Date ? istDay(rec.v[0].getTime()) : String(rec.v[0] ?? "").slice(0, 10);
-                    if (day < yesterday) {
-                        skippedCounters += 1;
-                        continue;
-                    }
-                }
                 let batch = batches.get(rec.b);
                 if (!batch) {
                     batch = { id: rec.b, table: batchKind(table), rows: [], file, firstAt };
@@ -1134,17 +1337,11 @@ class AnalyticsSink {
                 this.log("warn", `[analytics] ${corrupt} corrupt/partial line(s) skipped in ${file}`);
                 this.reportLoss(`corrupt spool line (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)})`, corrupt);
             }
-            this.quarantineLines(file, [...oldLines.values()].flat(), oldLines.size);
-            if (skippedCounters > 0) {
-                this.skippedReplayMongoAuthoritative += skippedCounters;
-                this.log("info", `[analytics] ${skippedCounters} spooled counter row(s) for days before ${yesterday} not replayed `
-                    + `from ${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)}: Mongo writes are on and the nightly backfill restores them (no double count)`);
-            }
+            await this.quarantineLines(file, [...oldLines.values()].flat(), oldLines.size);
+            if (this.finalSpilled)
+                return false;
             if (batches.size === 0) {
-                try {
-                    fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(file);
-                }
-                catch { /* ignore */ }
+                await this.unlinkSpool(file);
                 continue;
             }
             this.fileRefs.set(file, batches.size);
@@ -1156,17 +1353,20 @@ class AnalyticsSink {
         return false;
     }
     /** Healthy and idle: pick up files spilled at runtime (overflow) or left by a dead process. */
-    maybeRescanSpool() {
+    async maybeRescanSpool() {
         if (this.retryQueue.length > 0 || this.buffer.length > 0 || this.claimedFiles.length > 0)
             return;
-        // claimSpoolFiles renames files; never while an async append may be writing one of them.
-        if (this.spillInFlight || this.spillScheduled || this.pendingSpill.length > 0)
+        // Claiming renames files; never while an async append may be writing one of them.
+        if (this.spillBusy())
             return;
         const now = this.opts.now();
         if (now - this.lastRescanAt < SPOOL_RESCAN_MS)
             return;
         this.lastRescanAt = now;
-        this.claimSpoolFiles();
+        await this.claimSpoolFilesAsync();
+    }
+    spillBusy() {
+        return this.spillInFlight !== null || this.spillScheduled || this.pendingSpill.length > 0;
     }
     /**
      * Synchronously writes EVERYTHING still pending — buffer, retry batches, in-flight batches (their
@@ -1281,7 +1481,7 @@ class AnalyticsSink {
             this.log("info", `[analytics] summary written=${s.written} buffered=${s.buffered} retryPending=${s.retryPending} `
                 + `spooled=${s.spooledRows} replayed=${s.replayedRows} alreadyCommitted=${s.alreadyCommitted} `
                 + `droppedOverflow=${s.droppedOverflow} droppedError=${s.droppedError} droppedSpoolFull=${s.droppedSpoolFull} `
-                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors}`);
+                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors} internalErrors=${s.internalErrors}`);
         }
         catch { /* never */ }
     }
@@ -1292,7 +1492,7 @@ class AnalyticsSink {
             buffered: this.buffer.length + this.counters.size,
             pendingSpill: this.pendingSpillRows(),
             droppedAfterStop: this.droppedAfterStop,
-            skippedReplayMongoAuthoritative: this.skippedReplayMongoAuthoritative,
+            internalErrors: this.internalErrors,
             enqueued: this.enqueued,
             written: this.written,
             droppedOverflow: this.droppedOverflow,
@@ -1574,7 +1774,7 @@ const DISABLED = {
         droppedInvalid: 0,
         flushFailures: 0, consecutiveFailures: 0, backoffUntil: 0,
         retryPending: 0, spooledRows: 0, replayedRows: 0,
-        droppedSpoolFull: 0, alreadyCommitted: 0, spoolErrors: 0, pendingSpill: 0, droppedAfterStop: 0, skippedReplayMongoAuthoritative: 0,
+        droppedSpoolFull: 0, alreadyCommitted: 0, spoolErrors: 0, pendingSpill: 0, droppedAfterStop: 0, internalErrors: 0,
     }),
 };
 
