@@ -4889,6 +4889,24 @@ function childBatchId(parentId, side) {
     const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
+/** Last line of an overflow spool file: `{"end":<record lines before it>}`. Skipped by the replay. */
+function spoolEndMarker(lines) {
+    return `${JSON.stringify({ end: lines })}\n`;
+}
+/** A spill temp is complete iff its last line is an end marker counting every record line before it. */
+function isCompleteSpill(text) {
+    const lines = text.split("\n").filter((l) => l.trim());
+    const last = lines[lines.length - 1];
+    let end;
+    try {
+        end = last === undefined ? undefined : JSON.parse(last)?.end;
+    }
+    catch {
+        end = undefined;
+    }
+    const records = typeof end === "number" ? lines.length - 1 : lines.length;
+    return { complete: typeof end === "number" && end === records, records };
+}
 /** Splits a spill plan at batch boundaries into parts of at most `maxRows` rows (one batch may exceed it). */
 function splitPlan(plan, maxRows) {
     const parts = [];
@@ -4967,6 +4985,8 @@ class AnalyticsSink {
         this.pendingSpill = [];
         /** Batches the async spill is writing right now (finalSpill re-writes them; ids dedupe). */
         this.spillingBatches = new Set();
+        /** Temp files the async spill is writing right now → the batches in each. */
+        this.spillTemps = new Map();
         this.spillScheduled = false;
         this.spillInFlight = null;
         /** When the current failure streak started (0 = healthy) and the last stall alert. */
@@ -4977,7 +4997,6 @@ class AnalyticsSink {
         this.claimedFiles = [];
         /** Loaded spool file → unresolved batches from it. */
         this.fileRefs = new Map();
-        this.currentSpool = null;
         this.lastRescanAt = 0;
         this.enabled = false;
         this.disabledReason = "not started";
@@ -5028,6 +5047,7 @@ class AnalyticsSink {
         // <key>-<13-digit epoch ms>-<rand>.jsonl[.claimed-<pid>-<key>] — the strict shape stops
         // "tg-aut" from claiming "tg-aut-1"'s files.
         this.spoolPattern = new RegExp(`^${this.instanceKey}-(\\d{13})-[a-z0-9]+\\.jsonl(?:\\.claimed-(\\d+)(?:-${this.instanceKey})?)?$`);
+        this.tempPattern = new RegExp(`^(${this.instanceKey}-\\d{13}-[a-z0-9]+\\.jsonl)\\.tmp-(\\d+)$`);
     }
     /** Rule 1: never throws, never awaits a connection. */
     async start() {
@@ -5321,17 +5341,10 @@ class AnalyticsSink {
                 this.spillingBatches.add(b);
             try {
                 const plan = await this.planSpillAsync(batches);
-                if (plan && !this.finalSpilled) {
-                    const file = this.currentSpool && this.currentSpool.rows < SPOOL_ROTATE_ROWS
-                        ? this.currentSpool.file
-                        : (this.currentSpool = { file: this.newSpoolPath(), rows: 0 }).file;
-                    try {
-                        await fs__WEBPACK_IMPORTED_MODULE_1__.promises.appendFile(file, plan.text);
-                        this.spillDone(plan, file, "overflow");
-                    }
-                    catch (err) {
-                        this.spillFailed(plan.accepted, "overflow", err);
-                    }
+                for (const part of plan ? splitPlan(plan, SPOOL_ROTATE_ROWS) : []) {
+                    if (this.finalSpilled)
+                        break; // finalSpill re-wrote every spilling batch
+                    await this.spillPartAsync(part);
                 }
             }
             catch (err) {
@@ -5341,6 +5354,47 @@ class AnalyticsSink {
                 for (const b of batches)
                     this.spillingBatches.delete(b);
             }
+        }
+    }
+    /**
+     * One overflow spool file, written WHOLE to `<final>.tmp-<pid>` with an end marker, then renamed.
+     * A replay therefore never sees a partial copy under a final name: a partial copy would commit
+     * the batch id and turn the full copy the exit hook writes into a 23505 no-op (rows silently
+     * lost). A temp left on disk is recovered at the next claim (see recoverTemp). Never throws.
+     */
+    async spillPartAsync(part) {
+        const file = this.newSpoolPath();
+        const tmp = `${file}.tmp-${process.pid}`;
+        this.spillTemps.set(tmp, part.accepted);
+        try {
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.writeFile(tmp, part.text + spoolEndMarker(part.rows));
+            if (this.finalSpilled) {
+                // finalSpill already re-wrote these batches (and removed the temp if they all landed);
+                // a complete copy that is still needed stays, under its final name (ids dedupe).
+                if (part.accepted.every((b) => b.released))
+                    await this.unlinkQuiet(tmp);
+                else
+                    await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(tmp, file).catch(() => { });
+                return;
+            }
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(tmp, file);
+            this.spillDone(part, file, "overflow");
+        }
+        catch (err) {
+            await this.unlinkQuiet(tmp);
+            this.spillFailed(part.accepted, "overflow", err);
+        }
+        finally {
+            this.spillTemps.delete(tmp);
+        }
+    }
+    async unlinkQuiet(file) {
+        try {
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.unlink(file);
+        }
+        catch (err) {
+            if (err?.code !== "ENOENT")
+                this.spoolErrors += 1;
         }
     }
     async planSpillAsync(batches) {
@@ -5656,8 +5710,6 @@ class AnalyticsSink {
         return accepted.length === 0 ? null : { text: chunks.join(""), accepted, rows, texts: chunks };
     }
     spillDone(plan, file, reason) {
-        if (this.currentSpool && this.currentSpool.file === file)
-            this.currentSpool.rows += plan.rows;
         this.spooledRows += plan.rows;
         for (const b of plan.accepted)
             this.release(b, reason !== "overflow");
@@ -5766,7 +5818,29 @@ class AnalyticsSink {
         catch {
             return; // no spool yet
         }
-        this.currentSpool = null; // never claim a file we are still appending to
+        let recovered = false;
+        for (const name of names) {
+            const t = this.tempStep(name);
+            if (!t || (t.pid !== process.pid && this.isOwnerAlive(t.pid, this.environSync(t.pid))))
+                continue;
+            let text;
+            try {
+                text = fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(t.from, "utf8");
+            }
+            catch {
+                continue;
+            }
+            if (this.settleTemp(t, text, (from, to) => fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(from, to), (f) => fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(f)))
+                recovered = true;
+        }
+        if (recovered) {
+            try {
+                names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir).sort();
+            }
+            catch {
+                return;
+            }
+        }
         for (const name of names) {
             const step = this.claimStep(name);
             if (!step)
@@ -5791,7 +5865,6 @@ class AnalyticsSink {
     async claimSpoolFilesAsync() {
         if (this.spillBusy())
             return;
-        this.currentSpool = null; // a spill from now on starts a new file
         let names;
         try {
             names = (await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readdir(this.spoolDir)).sort();
@@ -5799,6 +5872,28 @@ class AnalyticsSink {
         catch {
             return; // no spool yet
         }
+        const renames = [];
+        const recovered = [];
+        for (const name of names) {
+            if (this.finalSpilled)
+                return;
+            const t = this.tempStep(name);
+            if (!t || (t.pid !== process.pid && this.isOwnerAlive(t.pid, await this.environAsync(t.pid))))
+                continue;
+            let text;
+            try {
+                text = await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readFile(t.from, "utf8");
+            }
+            catch {
+                continue;
+            }
+            if (this.spillTemps.has(t.from))
+                continue; // started while we read
+            this.settleTemp(t, text, (from, to) => { renames.push(fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(from, to).catch(() => { })); recovered.push(path__WEBPACK_IMPORTED_MODULE_3__.basename(to)); }, (f) => { renames.push(this.unlinkQuiet(f)); });
+        }
+        await Promise.all(renames);
+        if (recovered.length > 0)
+            names = [...names, ...recovered].sort();
         for (const name of names) {
             if (this.finalSpilled || this.spillBusy())
                 return;
@@ -5819,6 +5914,45 @@ class AnalyticsSink {
             }
             catch { /* another process claimed it first */ }
         }
+    }
+    /** A leftover overflow temp of this key that no spill of this sink is writing, or null. */
+    tempStep(name) {
+        const m = this.tempPattern.exec(name);
+        if (!m)
+            return null;
+        const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+        if (this.spillTemps.has(from))
+            return null;
+        return { from, to: path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, m[1]), pid: Number(m[2]) };
+    }
+    /**
+     * A leftover temp (its writer died, or a previous sink in this process stopped). COMPLETE (end
+     * marker): renamed to its final name and replayed — it may be the only copy (killed between the
+     * write and the rename); a second complete copy from the exit hook dedupes by id. PARTIAL: deleted,
+     * never replayed, because a partial copy would commit the batch id. The exit hook re-writes the
+     * batches of an interrupted spill and deletes its temp, so a partial temp left on disk means the
+     * process was killed mid-write (no exit hook): reported as loss. Returns whether it was renamed.
+     */
+    settleTemp(t, text, rename, unlink) {
+        const { complete, records } = isCompleteSpill(text);
+        try {
+            if (complete) {
+                rename(t.from, t.to);
+                this.log("info", `[analytics] recovered complete spill temp ${path__WEBPACK_IMPORTED_MODULE_3__.basename(t.from)} (${records} rows)`);
+                return true;
+            }
+            unlink(t.from);
+        }
+        catch (err) {
+            if (err?.code !== "ENOENT")
+                this.spoolErrors += 1;
+            return false;
+        }
+        if (records > 0) {
+            this.log("warn", `[analytics] incomplete spool write discarded: ${path__WEBPACK_IMPORTED_MODULE_3__.basename(t.from)} (${records} row(s); killed mid-write)`);
+            this.reportLoss(`incomplete spool write discarded (${path__WEBPACK_IMPORTED_MODULE_3__.basename(t.from)}, killed mid-write)`, records);
+        }
+        return false;
     }
     /** What to do with one spool dir entry: nothing (null), queue our own file, or try to claim it. */
     claimStep(name) {
@@ -5905,9 +6039,21 @@ class AnalyticsSink {
         if (lines.length === 0)
             return;
         const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, "quarantine");
+        // Named by the source's base name (no .claimed suffix) and written via temp + rename: a stop
+        // during this await leaves the source claimed, and the next start finds the quarantine file
+        // already there instead of writing (and reporting) the same lines again.
+        const target = path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file).replace(/\.claimed-.*$/, ""));
         try {
             await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(dir, { recursive: true });
-            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.appendFile(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file)), lines.join("\n") + "\n");
+            try {
+                await fs__WEBPACK_IMPORTED_MODULE_1__.promises.access(target);
+                this.log("info", `[analytics] ${path__WEBPACK_IMPORTED_MODULE_3__.basename(target)} already quarantined (an earlier run stopped before deleting its source)`);
+                return;
+            }
+            catch { /* not quarantined yet */ }
+            const tmp = `${target}.tmp-${process.pid}`;
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.writeFile(tmp, lines.join("\n") + "\n");
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(tmp, target);
             this.log("warn", `[analytics] quarantined ${lines.length} spooled row(s) (${batches} batch(es)) first attempted over 6 days ago, in ${dir}`);
             this.reportLoss(`quarantined old spool (${batches} batch(es) first attempted over 6 days ago, in ${dir})`, lines.length);
         }
@@ -6052,6 +6198,8 @@ class AnalyticsSink {
                     corrupt += 1;
                     continue;
                 }
+                if (rec.b === undefined && typeof rec.end === "number")
+                    continue; // end marker
                 const table = typeof rec.t === "string" ? rec.t : "";
                 const spec = Object.prototype.hasOwnProperty.call(TABLES, table) ? TABLES[table] : undefined;
                 // Table and columns are validated against the known schema: the SQL text is never built
@@ -6134,6 +6282,19 @@ class AnalyticsSink {
             this.pendingSpill = [];
             this.buffer = [];
             this.spillSync(batches, reason);
+            // An interrupted overflow spill may have left a PARTIAL temp; its batches were just re-written
+            // in full, so the temp goes (a temp whose batches did not all land stays for recovery).
+            for (const [tmp, bs] of this.spillTemps) {
+                if (!bs.every((b) => b.released))
+                    continue;
+                try {
+                    fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(tmp);
+                }
+                catch (err) {
+                    if (err?.code !== "ENOENT")
+                        this.spoolErrors += 1;
+                }
+            }
         }
         catch (err) {
             this.spoolErrors += 1;
