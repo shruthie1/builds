@@ -83776,15 +83776,19 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
     // Same-day rule 4 (owner 2026-10-22; printed-time match, review fixes 2026-10-23): this user (any persona) was
     // already credited the same amount at the same printed time. Never a re-send when both payees were read and differ
     // (otherPayee: a second genuine payment to another of our UPI ids, UTR or not). By the UTRs:
-    //  - neither shows one: printed times within SAME_TIME_MS (2 min) = a re-send (owner 2026-10-21);
+    //  - neither shows one: in this chat printed times within SAME_TIME_MS (2 min) = a re-send (owner 2026-10-21); on
+    //    another persona only the SAME printed minute (owner rule 7; final review 2026-10-23: a new ₹100 here at T+1 min
+    //    after a keerthi1 credit at T got "This is not my Payment!! Bye!!");
     //  - only THIS screenshot shows one, the credited row none: the SAME printed minute = a re-send (fix 2026-10-23:
     //    the details page of a no-UTR credit prints the success screen's minute and shows a UTR never stored; it used
     //    to skip this rule and then G1, a fresh UTR skipping the last-call time check, and was credited and rung
     //    again). Another minute = a new payment (owner rule 7: a genuine new payment prints another minute);
     //  - both show one: the UTR rule above decides (same = repeat); different real references = two payments (journeys
     //    N / N2: two genuine ₹50s seconds apart). A one-digit misread looks the same and is NOT stopped here (L6 k);
-    //  - only the credited row shows one: a re-send when this payment is older than RESEND_WINDOW_MS, within 2 min, and
-    //    the row was credited today and before this picture arrived (unchanged); a recent one is left to the time check.
+    //  - only the credited row shows one: the SAME printed minute = a re-send at once (final review 2026-10-23: an album
+    //    with the details page first and the success screen second was credited twice); else a re-send when this
+    //    payment is older than RESEND_WINDOW_MS, within 2 min, and the row was credited today and before this picture
+    //    arrived (unchanged); a recent one at another minute is left to the time check.
     // No "credited before this arrived" test on the no-UTR-row branches: a success screen and its details page sent
     // seconds apart are checked one after the other (per-chat picture queue), the first credited after the second
     // ARRIVED; skipping that row let the second through (credited and rung twice: its claim is unique only on UTR/file).
@@ -83801,14 +83805,22 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
         if (theirTime === null || otherPayee(facts, row))
             continue;
         const withinWindow = Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS;
+        const sameMinute = Math.floor(theirTime / MINUTE_MS) === Math.floor(facts.timeMs / MINUTE_MS);
         const repeat = { kind: 'repeat', by: 'time', sameChat: sameChat(facts, row), matched: row };
         const rowUtr = normalizeUtr(row.utr);
         if (!rowUtr) {
-            if (!facts.utr ? withinWindow : Math.floor(theirTime / MINUTE_MS) === Math.floor(facts.timeMs / MINUTE_MS))
+            // No UTR on either side: this chat keeps the 2-min window; another persona only the same minute (rule 7).
+            if (!facts.utr ? (sameChat(facts, row) ? withinWindow : sameMinute) : sameMinute)
                 return repeat;
             continue;
         }
-        if (facts.utr || !withinWindow)
+        if (facts.utr)
+            continue;
+        // The credited row shows a UTR, this capture none: the same printed minute is the same payment at once (an
+        // album with the details page first, the success screen second, both checked in turn).
+        if (sameMinute)
+            return repeat;
+        if (!withinWindow)
             continue;
         const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
         if (arrivalMs - facts.timeMs > _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS && Number.isFinite(servedMs) && servedMs <= arrivalMs && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrivalMs) === 'today')
