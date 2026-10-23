@@ -29097,6 +29097,197 @@ __exportStar(__webpack_require__(/*! ./dto */ "./src/components/collection-insig
 
 /***/ },
 
+/***/ "./src/components/daily-analytics/analytics-health.check.ts"
+/*!******************************************************************!*\
+  !*** ./src/components/daily-analytics/analytics-health.check.ts ***!
+  \******************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var AnalyticsHealthCheck_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.AnalyticsHealthCheck = exports.ANALYTICS_HEALTH_CATEGORY = exports.PROBE_RETRY_DELAY_MS = exports.PROBE_RETRIES = exports.ANALYTICS_HEALTH_TRAILING_DAYS = exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = void 0;
+exports.median = median;
+exports.decideAnalyticsHealth = decideAnalyticsHealth;
+exports.istDay = istDay;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const channel_category_enum_1 = 0;
+const bot_service_instance_1 = __webpack_require__(/*! ../../utils/bot.service.instance */ "./src/utils/bot.service.instance.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const daily_analytics_service_1 = __webpack_require__(/*! ./daily-analytics.service */ "./src/components/daily-analytics/daily-analytics.service.ts");
+exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = 0.5;
+exports.ANALYTICS_HEALTH_TRAILING_DAYS = 7;
+exports.PROBE_RETRIES = 3;
+exports.PROBE_RETRY_DELAY_MS = 60_000;
+exports.ANALYTICS_HEALTH_CATEGORY = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts").ChannelCategory.CLIENT_UPDATES;
+const UNDEFINED_TABLE = '42P01';
+const DAY_MS = 24 * 60 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function median(values) {
+    if (!values.length)
+        return 0;
+    const s = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+function decideAnalyticsHealth(input) {
+    if (input.disabled)
+        return [];
+    if (input.pgError !== undefined)
+        return [`Postgres unreachable: ${input.pgError}`];
+    const missing = new Set(input.missingTables ?? []);
+    const problems = [...missing].map((t) => `${t} table is missing (${UNDEFINED_TABLE})`);
+    if (!missing.has('promotion_send')) {
+        const sends = input.promotionSendRows ?? 0;
+        const med = median(input.trailingPromotionSendRows ?? []);
+        if (sends === 0) {
+            problems.push('promotion_send has 0 rows');
+        }
+        else if (med > 0 && sends < exports.PROMOTION_SEND_MIN_MEDIAN_RATIO * med) {
+            problems.push(`promotion_send has ${sends} rows, below ${exports.PROMOTION_SEND_MIN_MEDIAN_RATIO * 100}% of the trailing ${exports.ANALYTICS_HEALTH_TRAILING_DAYS}-day median ${med}`);
+        }
+    }
+    if (!missing.has('daily_client') && (input.dailyClientRows ?? 0) === 0)
+        problems.push('daily_client has 0 rows');
+    const fromDay = input.dailyMobileFromDay;
+    if (fromDay && input.day >= fromDay && !missing.has('daily_mobile') && (input.dailyMobileRows ?? 0) === 0) {
+        problems.push('daily_mobile has 0 rows');
+    }
+    return problems;
+}
+function istDay(now, offsetDays = 0) {
+    return new Date(now + IST_OFFSET_MS + offsetDays * DAY_MS).toISOString().slice(0, 10);
+}
+let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
+    constructor(pg) {
+        this.pg = pg;
+        this.logger = new common_1.Logger(AnalyticsHealthCheck_1.name);
+        this.notify = async (input) => {
+            const bots = (0, bot_service_instance_1.tryGetBotsServiceInstance)();
+            if (!bots) {
+                this.logger.error(`Analytics health alert not sent (BotsService not ready): ${input.details}`);
+                return false;
+            }
+            return bots.sendMessageByCategory(exports.ANALYTICS_HEALTH_CATEGORY, input);
+        };
+        this.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    async probe(sql, params) {
+        let error;
+        const rows = await this.pg.query(sql, params, (e) => {
+            error = e;
+        });
+        if (rows)
+            return { rows };
+        return { error: error ?? { kind: 'query', message: 'unknown error' } };
+    }
+    async collect(now = Date.now()) {
+        const day = istDay(now, -1);
+        const first = istDay(now, -1 - exports.ANALYTICS_HEALTH_TRAILING_DAYS);
+        const today = istDay(now, 0);
+        const fromDay = (0, daily_analytics_service_1.dailyMobileFromDay)();
+        const input = { day, missingTables: [], dailyMobileFromDay: fromDay };
+        const failed = (table, error) => {
+            if (error.kind === 'disabled')
+                return { day, disabled: true };
+            if (error.code === UNDEFINED_TABLE) {
+                input.missingTables.push(table);
+                return undefined;
+            }
+            return { day, pgError: `${error.message}${error.code ? ` [${error.code}]` : ''}` };
+        };
+        const sends = await this.probe(`SELECT to_char((ts AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS d, count(*)::bigint AS n
+         FROM promotion_send
+        WHERE ts >= $1::timestamptz AND ts < $2::timestamptz
+        GROUP BY 1`, [`${first}T00:00:00+05:30`, `${today}T00:00:00+05:30`]);
+        if ('error' in sends) {
+            const stop = failed('promotion_send', sends.error);
+            if (stop)
+                return stop;
+        }
+        else {
+            const byDay = new Map(sends.rows.map((r) => [String(r.d), Number(r.n) || 0]));
+            input.promotionSendRows = byDay.get(day) ?? 0;
+            input.trailingPromotionSendRows = [];
+            for (let i = exports.ANALYTICS_HEALTH_TRAILING_DAYS; i >= 1; i -= 1) {
+                input.trailingPromotionSendRows.push(byDay.get(istDay(now, -1 - i)) ?? 0);
+            }
+        }
+        const dc = await this.probe('SELECT count(*)::bigint AS n FROM daily_client WHERE day = $1::date', [day]);
+        if ('error' in dc) {
+            const stop = failed('daily_client', dc.error);
+            if (stop)
+                return stop;
+        }
+        else {
+            input.dailyClientRows = Number(dc.rows[0]?.n) || 0;
+        }
+        if (fromDay && day >= fromDay) {
+            const dm = await this.probe('SELECT count(*)::bigint AS n FROM daily_mobile WHERE day = $1::date', [day]);
+            if ('error' in dm) {
+                const stop = failed('daily_mobile', dm.error);
+                if (stop)
+                    return stop;
+            }
+            else {
+                input.dailyMobileRows = Number(dm.rows[0]?.n) || 0;
+            }
+        }
+        return input;
+    }
+    async run(now = Date.now()) {
+        let input = await this.collect(now);
+        for (let attempt = 1; input.pgError !== undefined && attempt <= exports.PROBE_RETRIES; attempt += 1) {
+            this.logger.warn(`Analytics health probe failed for ${input.day} (${input.pgError}); retry ${attempt}/${exports.PROBE_RETRIES} in ${exports.PROBE_RETRY_DELAY_MS / 1000}s`);
+            await this.sleep(exports.PROBE_RETRY_DELAY_MS);
+            input = await this.collect(now);
+        }
+        if (input.disabled) {
+            this.logger.log(`Analytics health check skipped for ${input.day}: ANALYTICS_DB_URL not set`);
+            return [];
+        }
+        const problems = decideAnalyticsHealth(input);
+        if (!problems.length) {
+            this.logger.log(`Analytics health OK for ${input.day}: promotion_send=${input.promotionSendRows} daily_client=${input.dailyClientRows} daily_mobile=${input.dailyMobileRows ?? 'n/a'}`);
+            return problems;
+        }
+        this.logger.warn(`Analytics health FAILED for ${input.day}: ${problems.join('; ')}`);
+        await this.notify({
+            severity: 'error',
+            title: 'Analytics Postgres health check failed',
+            summary: `IST day ${input.day}`,
+            fields: [
+                { label: 'promotion_send', value: String(input.promotionSendRows ?? 'n/a') },
+                { label: '7-day median', value: String(median(input.trailingPromotionSendRows ?? [])) },
+                { label: 'daily_client', value: String(input.dailyClientRows ?? 'n/a') },
+                { label: 'daily_mobile', value: String(input.dailyMobileRows ?? 'n/a') },
+            ],
+            details: problems,
+        }).catch((err) => {
+            this.logger.error(`Analytics health alert failed to send: ${err?.message ?? err}`);
+            return false;
+        });
+        return problems;
+    }
+};
+exports.AnalyticsHealthCheck = AnalyticsHealthCheck;
+exports.AnalyticsHealthCheck = AnalyticsHealthCheck = AnalyticsHealthCheck_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __metadata("design:paramtypes", [analytics_pg_reader_1.AnalyticsPgReader])
+], AnalyticsHealthCheck);
+
+
+/***/ },
+
 /***/ "./src/components/daily-analytics/analytics-pg.reader.ts"
 /*!***************************************************************!*\
   !*** ./src/components/daily-analytics/analytics-pg.reader.ts ***!
@@ -29161,16 +29352,26 @@ let AnalyticsPgReader = AnalyticsPgReader_1 = class AnalyticsPgReader {
         this.lastLogAt = now;
         this.logger.warn(`Analytics Postgres ${what}; falling back to Mongo: ${err?.message ?? err}`);
     }
-    async query(sql, params = []) {
+    async query(sql, params = [], onError) {
         const pool = this.getPool();
-        if (!pool)
+        if (!pool) {
+            onError?.(this.isEnabled()
+                ? { kind: 'unavailable', message: 'pg module unavailable' }
+                : { kind: 'disabled', message: 'ANALYTICS_DB_URL not set' });
             return undefined;
+        }
         try {
             const res = await pool.query(sql, params);
             return res.rows;
         }
         catch (err) {
             this.logOnce('query failed', err);
+            const code = err?.code;
+            onError?.({
+                kind: 'query',
+                message: err?.message ?? String(err),
+                code: typeof code === 'string' ? code : undefined,
+            });
             return undefined;
         }
     }
@@ -29330,6 +29531,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const daily_analytics_service_1 = __webpack_require__(/*! ./daily-analytics.service */ "./src/components/daily-analytics/daily-analytics.service.ts");
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const analytics_health_check_1 = __webpack_require__(/*! ./analytics-health.check */ "./src/components/daily-analytics/analytics-health.check.ts");
 const daily_analytics_controller_1 = __webpack_require__(/*! ./daily-analytics.controller */ "./src/components/daily-analytics/daily-analytics.controller.ts");
 const daily_analytics_schema_1 = __webpack_require__(/*! ./schemas/daily-analytics.schema */ "./src/components/daily-analytics/schemas/daily-analytics.schema.ts");
 let DailyAnalyticsModule = class DailyAnalyticsModule {
@@ -29345,8 +29547,8 @@ exports.DailyAnalyticsModule = DailyAnalyticsModule = __decorate([
             ]),
         ],
         controllers: [daily_analytics_controller_1.DailyAnalyticsController],
-        providers: [daily_analytics_service_1.DailyAnalyticsService, analytics_pg_reader_1.AnalyticsPgReader],
-        exports: [daily_analytics_service_1.DailyAnalyticsService],
+        providers: [daily_analytics_service_1.DailyAnalyticsService, analytics_pg_reader_1.AnalyticsPgReader, analytics_health_check_1.AnalyticsHealthCheck],
+        exports: [daily_analytics_service_1.DailyAnalyticsService, analytics_health_check_1.AnalyticsHealthCheck],
     })
 ], DailyAnalyticsModule);
 
@@ -29372,8 +29574,10 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var DailyAnalyticsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DailyAnalyticsService = exports.DAILY_ANALYTICS_SOURCE_ENV = exports.MONGO_RETENTION_DAYS = exports.PROMOTION_SEND_FROM_DAY = exports.REVENUE_FROM_DAY = void 0;
+exports.DailyAnalyticsService = exports.DAILY_ANALYTICS_SOURCE_ENV = exports.MONGO_RETENTION_DAYS = exports.MONGO_FALLBACK_SOURCE = exports.DAILY_MOBILE_FROM_DAY_ENV = exports.PROMOTION_SEND_FROM_DAY = exports.REVENUE_FROM_DAY = void 0;
+exports.dailyMobileFromDay = dailyMobileFromDay;
 exports.dailyAnalyticsSource = dailyAnalyticsSource;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -29382,6 +29586,15 @@ const daily_analytics_schema_1 = __webpack_require__(/*! ./schemas/daily-analyti
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 exports.REVENUE_FROM_DAY = '2026-10-04';
 exports.PROMOTION_SEND_FROM_DAY = '2026-10-05';
+exports.DAILY_MOBILE_FROM_DAY_ENV = 'DAILY_MOBILE_FROM_DAY';
+function dailyMobileFromDay() {
+    const v = (process.env[exports.DAILY_MOBILE_FROM_DAY_ENV] || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v))
+        return undefined;
+    const d = new Date(`${v}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v ? v : undefined;
+}
+exports.MONGO_FALLBACK_SOURCE = 'mongo-fallback';
 const PG_COLUMNS = {
     promote: { sent: 'sent', success: 'delivered', failed: 'failed', banned: 'banned' },
     reaction: {
@@ -29399,12 +29612,14 @@ function dailyAnalyticsSource() {
 }
 const ALL_DAYS_FROM_PG = '9999-12-31';
 const num = (v) => Number(v) || 0;
-let DailyAnalyticsService = class DailyAnalyticsService {
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+let DailyAnalyticsService = DailyAnalyticsService_1 = class DailyAnalyticsService {
     constructor(promoteModel, reactionModel, userModel, pg) {
         this.promoteModel = promoteModel;
         this.reactionModel = reactionModel;
         this.userModel = userModel;
         this.pg = pg;
+        this.logger = new common_1.Logger(DailyAnalyticsService_1.name);
     }
     modelFor(metric) {
         if (metric === 'reaction')
@@ -29429,8 +29644,86 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         }
         return out;
     }
+    mongoFallback(method, rows, ctx) {
+        if (dailyAnalyticsSource() !== 'pg')
+            return rows;
+        const e = ctx.error;
+        this.logger.warn(`daily-analytics ${method}: Postgres unavailable, answering from Mongo (${exports.MONGO_FALLBACK_SOURCE}): ${e ? `${e.message}${e.code ? ` [${e.code}]` : ''}` : 'unknown error'}`);
+        return rows.map((r) => ({ ...r, source: exports.MONGO_FALLBACK_SOURCE }));
+    }
+    onErr(ctx) {
+        return (e) => {
+            if (!ctx.error)
+                ctx.error = e;
+        };
+    }
+    splitDailyMobile(dates) {
+        const from = dailyAnalyticsSource() === 'pg' ? dailyMobileFromDay() : undefined;
+        if (!from)
+            return { from, before: dates, fromDailyMobile: [] };
+        return {
+            from,
+            before: dates.filter((d) => d < from),
+            fromDailyMobile: dates.filter((d) => d >= from),
+        };
+    }
+    dmFilters(params, clientId, namespace, mobile) {
+        const parts = [];
+        for (const [col, v] of [['client_id', clientId], ['namespace', namespace], ['mobile', mobile]]) {
+            if (!v)
+                continue;
+            params.push(v);
+            parts.push(`AND ${col} = $${params.length}`);
+        }
+        return parts.join(' ');
+    }
+    dmNonZero(metric) {
+        return `(${Object.values(PG_COLUMNS[metric]).map((c) => `${c} <> 0`).join(' OR ')})`;
+    }
+    async dmRows(metric, dates, clientId, namespace, mobile, ctx = {}) {
+        const params = [dates];
+        const filters = this.dmFilters(params, clientId, namespace, mobile);
+        const cols = Object.entries(PG_COLUMNS[metric]).map(([key, col]) => `${col} AS "${key}"`).join(', ');
+        const found = await this.pg.query(`SELECT to_char(day, 'YYYY-MM-DD') AS d, namespace, client_id, mobile, profile, ${cols}
+         FROM daily_mobile
+        WHERE day = ANY($1::date[]) ${filters} AND ${this.dmNonZero(metric)}
+        ORDER BY day, client_id, namespace, mobile`, params, this.onErr(ctx));
+        if (!found)
+            return undefined;
+        const fields = this.numericFields(metric);
+        return found
+            .map((r) => {
+            const out = {
+                date: String(r.d),
+                namespace: r.namespace,
+                clientId: String(r.client_id),
+                mobile: String(r.mobile),
+            };
+            if (r.profile)
+                out.profile = r.profile;
+            for (const f of fields)
+                out[f] = num(r[f]);
+            if (metric === 'user') {
+                out.revenue = 0;
+                out.revenueSource = 'unavailable';
+            }
+            return out;
+        })
+            .sort((a, b) => cmp(a.date, b.date) || cmp(a.clientId, b.clientId));
+    }
     async rows(metric, days = 14, clientId, namespace, mobile) {
         const dates = this.lastNDates(days);
+        const { before, fromDailyMobile } = this.splitDailyMobile(dates);
+        if (!fromDailyMobile.length)
+            return this.mongoRows(metric, dates, clientId, namespace, mobile);
+        const ctx = {};
+        const dm = await this.dmRows(metric, fromDailyMobile, clientId, namespace, mobile, ctx);
+        if (!dm)
+            return this.mongoFallback('rows', await this.mongoRows(metric, dates, clientId, namespace, mobile), ctx);
+        const old = before.length ? await this.mongoRows(metric, before, clientId, namespace, mobile) : [];
+        return [...old, ...dm];
+    }
+    async mongoRows(metric, dates, clientId, namespace, mobile) {
         const filter = { date: { $in: dates } };
         if (clientId)
             filter.clientId = clientId;
@@ -29452,7 +29745,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             .map(([key, col]) => `COALESCE(SUM(${col}), 0)::bigint AS "${key}"`)
             .join(', ');
     }
-    async pgRevenue(dates) {
+    async pgRevenue(dates, ctx = {}) {
         const from = dates.find((d) => d >= exports.REVENUE_FROM_DAY);
         const out = new Map();
         if (!from)
@@ -29461,7 +29754,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
               SUM(amount)::bigint AS amt
          FROM payment_event
         WHERE ts >= $1::timestamptz AND NOT is_cheat AND amount > 0
-        GROUP BY 1, 2`, [`${from}T00:00:00+05:30`]);
+        GROUP BY 1, 2`, [`${from}T00:00:00+05:30`], this.onErr(ctx));
         if (!rows)
             return undefined;
         const set = new Set(dates);
@@ -29484,11 +29777,11 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             return ALL_DAYS_FROM_PG;
         return this.lastNDates(exports.MONGO_RETENTION_DAYS)[0];
     }
-    async pgDailyRows(metric, dates) {
+    async pgDailyRows(metric, dates, ctx = {}) {
         if (!dates.length)
             return [];
         return this.pg.query(`SELECT to_char(day, 'YYYY-MM-DD') AS d, ${this.pgSelect(metric)}
-         FROM daily_client WHERE day = ANY($1::date[]) GROUP BY day`, [dates]);
+         FROM daily_client WHERE day = ANY($1::date[]) GROUP BY day`, [dates], this.onErr(ctx));
     }
     async mongoDailyTotals(metric, dates) {
         const fields = this.numericFields(metric);
@@ -29500,14 +29793,14 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             .exec();
         return new Map(agg.map((d) => [d._id, d]));
     }
-    async hybridDailyTotals(metric, dates) {
+    async hybridDailyTotals(metric, dates, ctx = {}) {
         const cutoff = this.mongoCutoff();
         const old = dates.filter((d) => d < cutoff);
         const recent = dates.filter((d) => d >= cutoff);
-        const pgRows = await this.pgDailyRows(metric, old);
+        const pgRows = await this.pgDailyRows(metric, old, ctx);
         if (!pgRows)
             return undefined;
-        const revenue = metric === 'user' ? await this.pgRevenue(dates) : new Map();
+        const revenue = metric === 'user' ? await this.pgRevenue(dates, ctx) : new Map();
         if (!revenue)
             return undefined;
         const pgByDate = new Map(pgRows.map((r) => [String(r.d), r]));
@@ -29539,7 +29832,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             .exec();
         return agg.map((d) => ({ ...d, client_id: d._id }));
     }
-    async hybridByClient(metric, dates, namespace) {
+    async hybridByClient(metric, dates, namespace, ctx = {}) {
         const cutoff = this.mongoCutoff();
         const old = dates.filter((d) => d < cutoff);
         const recent = dates.filter((d) => d >= cutoff);
@@ -29553,13 +29846,13 @@ let DailyAnalyticsService = class DailyAnalyticsService {
                 nsClause = 'AND namespace = $2';
             }
             const r = await this.pg.query(`SELECT client_id, ${this.pgSelect(metric)}
-           FROM daily_client WHERE day = ANY($1::date[]) ${nsClause} GROUP BY client_id`, params);
+           FROM daily_client WHERE day = ANY($1::date[]) ${nsClause} GROUP BY client_id`, params, this.onErr(ctx));
             if (!r)
                 return undefined;
             pgRows = r;
         }
         const revenueApplies = metric === 'user' && (!namespace || namespace === 'tg-aut');
-        const revenue = revenueApplies ? await this.pgRevenue(dates) : new Map();
+        const revenue = revenueApplies ? await this.pgRevenue(dates, ctx) : new Map();
         if (!revenue)
             return undefined;
         const perClientRevenue = new Map();
@@ -29596,12 +29889,13 @@ let DailyAnalyticsService = class DailyAnalyticsService {
     }
     async dailyTotals(metric, days = 14) {
         const dates = this.lastNDates(days);
-        const hybrid = await this.hybridDailyTotals(metric, dates);
+        const ctx = {};
+        const hybrid = await this.hybridDailyTotals(metric, dates, ctx);
         if (hybrid)
             return hybrid;
         const fields = this.numericFields(metric);
         const byDate = await this.mongoDailyTotals(metric, dates);
-        return dates.map((date) => {
+        return this.mongoFallback('dailyTotals', dates.map((date) => {
             const row = byDate.get(date) || {};
             const out = { date };
             for (const f of fields)
@@ -29611,16 +29905,17 @@ let DailyAnalyticsService = class DailyAnalyticsService {
                 out.revenueSource = 'unavailable';
             }
             return out;
-        });
+        }), ctx);
     }
     async byClient(metric, days = 14, namespace) {
         const dates = this.lastNDates(days);
-        const hybrid = await this.hybridByClient(metric, dates, namespace);
+        const ctx = {};
+        const hybrid = await this.hybridByClient(metric, dates, namespace, ctx);
         if (hybrid)
             return hybrid;
         const fields = this.numericFields(metric);
         const agg = await this.mongoByClientRows(metric, dates, namespace);
-        return agg.map((d) => {
+        return this.mongoFallback('byClient', agg.map((d) => {
             const out = { clientId: d._id };
             for (const f of fields)
                 out[f] = d[f] || 0;
@@ -29629,16 +29924,36 @@ let DailyAnalyticsService = class DailyAnalyticsService {
                 out.revenueSource = 'unavailable';
             }
             return out;
-        });
+        }), ctx);
     }
     async byMobile(metric, days = 14, clientId, namespace) {
         const dates = this.lastNDates(days);
-        const fields = this.numericFields(metric);
+        const { from, before, fromDailyMobile } = this.splitDailyMobile(dates);
+        if (!fromDailyMobile.length)
+            return this.byMobileBeforeDailyMobile(metric, dates, clientId, namespace);
+        const ctx = {};
+        const dm = await this.dmByMobile(metric, fromDailyMobile, clientId, namespace, ctx);
+        const old = dm && before.length
+            ? await this.byMobileBeforeDailyMobile(metric, before, clientId, namespace, `${from}T00:00:00+05:30`, ctx)
+            : [];
+        if (!dm || !old) {
+            return this.mongoFallback('byMobile', await this.mongoByMobile(metric, dates, clientId, namespace), ctx);
+        }
+        return this.mergeByMobile(metric, [...old, ...dm]);
+    }
+    async byMobileBeforeDailyMobile(metric, dates, clientId, namespace, until, ctx = {}) {
         if (metric === 'promote' && dailyAnalyticsSource() === 'pg' && !namespace && dates[0] >= exports.PROMOTION_SEND_FROM_DAY) {
-            const pg = await this.pgPromoteByMobile(dates, clientId);
+            const pg = await this.pgPromoteByMobile(dates, clientId, until, ctx);
             if (pg)
                 return pg;
+            if (until)
+                return undefined;
+            return this.mongoFallback('byMobile', await this.mongoByMobile(metric, dates, clientId, namespace), ctx);
         }
+        return this.mongoByMobile(metric, dates, clientId, namespace);
+    }
+    async mongoByMobile(metric, dates, clientId, namespace) {
+        const fields = this.numericFields(metric);
         const match = { date: { $in: dates } };
         if (clientId)
             match.clientId = clientId;
@@ -29665,12 +29980,38 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             return out;
         });
     }
-    async pgPromoteByMobile(dates, clientId) {
+    async dmByMobile(metric, dates, clientId, namespace, ctx = {}) {
+        const params = [dates];
+        const filters = this.dmFilters(params, clientId, namespace);
+        return this.pg.query(`SELECT client_id AS "clientId", mobile, ${this.pgSelect(metric)}
+         FROM daily_mobile
+        WHERE day = ANY($1::date[]) ${filters} AND ${this.dmNonZero(metric)}
+        GROUP BY client_id, mobile`, params, this.onErr(ctx));
+    }
+    mergeByMobile(metric, rows) {
+        const fields = this.numericFields(metric);
+        const totals = new Map();
+        for (const r of rows) {
+            const key = JSON.stringify([String(r.clientId), String(r.mobile)]);
+            const t = totals.get(key) || { clientId: String(r.clientId), mobile: String(r.mobile), ...Object.fromEntries(fields.map((f) => [f, 0])) };
+            for (const f of fields)
+                t[f] = t[f] + num(r[f]);
+            totals.set(key, t);
+        }
+        return [...totals.values()]
+            .sort((a, b) => cmp(a.clientId, b.clientId) || cmp(a.mobile, b.mobile))
+            .map((t) => (metric === 'user' ? { ...t, revenue: 0, revenueSource: 'unavailable' } : t));
+    }
+    async pgPromoteByMobile(dates, clientId, until, ctx = {}) {
         const params = [`${dates[0]}T00:00:00+05:30`];
         let clientClause = '';
         if (clientId) {
             params.push(clientId);
-            clientClause = 'AND client_id = $2';
+            clientClause = `AND client_id = $${params.length}`;
+        }
+        if (until) {
+            params.push(until);
+            clientClause += ` AND ts < $${params.length}::timestamptz`;
         }
         const rows = await this.pg.query(`SELECT client_id, mobile,
               count(*) FILTER (WHERE outcome <> 'deleted')              AS sent,
@@ -29680,7 +30021,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
          FROM promotion_send
         WHERE ts >= $1::timestamptz ${clientClause}
         GROUP BY client_id, mobile
-        ORDER BY client_id, mobile`, params);
+        ORDER BY client_id, mobile`, params, this.onErr(ctx));
         if (!rows)
             return undefined;
         return rows.map((r) => ({
@@ -29702,7 +30043,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
     }
 };
 exports.DailyAnalyticsService = DailyAnalyticsService;
-exports.DailyAnalyticsService = DailyAnalyticsService = __decorate([
+exports.DailyAnalyticsService = DailyAnalyticsService = DailyAnalyticsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(daily_analytics_schema_1.PromoteStatDaily.name)),
     __param(1, (0, mongoose_1.InjectModel)(daily_analytics_schema_1.ReactionStatDaily.name)),
@@ -50868,9 +51209,10 @@ const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/ut
 const app_service_1 = __webpack_require__(/*! ../../app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ../config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
 const account_maintenance_service_1 = __webpack_require__(/*! ../maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
+const analytics_health_check_1 = __webpack_require__(/*! ../../components/daily-analytics/analytics-health.check */ "./src/components/daily-analytics/analytics-health.check.ts");
 const IST = 'Asia/Kolkata';
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
-    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection) {
+    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth) {
         this.config = config;
         this.appService = appService;
         this.maintenance = maintenance;
@@ -50878,6 +51220,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.activeChannelsService = activeChannelsService;
         this.stat1Service = stat1Service;
         this.connection = connection;
+        this.analyticsHealth = analyticsHealth;
         this.logger = new common_1.Logger(ScheduledJobsService_1.name);
         this.jobs = [];
         this.startupTimers = [];
@@ -50923,6 +51266,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             await this.appService.rotateReadyBufferClients();
         });
         this.register('cms-buffer-join', '0 */3 * * *', () => this.appService.joinBufferClients());
+        this.register('cms-analytics-health', '30 2 * * *', () => this.runAnalyticsHealth());
         this.register('cms-buffer-info-refresh', '25 0 * * *', async () => {
             if (new Date().getUTCDate() % 5 === 0)
                 await this.appService.updateBufferClientInfo();
@@ -51021,6 +51365,30 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
         const minutes = value('hour') * 60 + value('minute');
         return minutes >= 25 && minutes < 60;
+    }
+    async runAnalyticsHealth() {
+        const db = this.requireDatabase('analytics health check');
+        const runs = db.collection('controlPlaneJobRuns');
+        const jobId = `analytics-health:${this.istDateKey()}`;
+        if (!(await this.claimJob(runs, jobId))) {
+            this.logger.warn(`Analytics health check already claimed or completed: ${jobId}`);
+            return;
+        }
+        try {
+            const problems = await this.analyticsHealth.run();
+            await runs.updateOne({ _id: jobId }, { $set: { completedAt: new Date(), problems }, $unset: { leaseOwner: '', leaseExpiresAt: '' } });
+        }
+        catch (error) {
+            await runs.updateOne({ _id: jobId }, {
+                $set: {
+                    failedAt: new Date(),
+                    error: error instanceof Error ? error.message : String(error),
+                    leaseExpiresAt: new Date(0),
+                },
+                $unset: { leaseOwner: '' },
+            });
+            throw error;
+        }
     }
     async runDailyPromoteReset() {
         const db = this.requireDatabase('daily promoteStats reset');
@@ -51203,7 +51571,7 @@ exports.ScheduledJobsService = ScheduledJobsService = ScheduledJobsService_1 = _
         account_maintenance_service_1.AccountMaintenanceService,
         components_1.ClientService,
         components_1.ActiveChannelsService,
-        components_1.Stat1Service, Function])
+        components_1.Stat1Service, Function, analytics_health_check_1.AnalyticsHealthCheck])
 ], ScheduledJobsService);
 
 
