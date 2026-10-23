@@ -46453,6 +46453,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./chat-proofs */ "./src/calls/chat-proofs.ts");
+
 
 
 
@@ -46880,18 +46882,20 @@ class CallManager {
         await this.requestCall(chatId, true);
     }
     /**
-     * A chat blocked for calls (callBlock: canReply 0 here, or on another persona with no payment credited here) is
-     * never rung, whichever path queued the call (re-ring, restart restore, operator, forced); proceedWithCall and the
-     * ladder's text steps ask this too. A failed read rings: a db hiccup must not drop a paying user's call.
+     * A chat blocked for calls (callBlock: canReply 0 here, or on another persona unless a clean genuine payment here
+     * overrides it) is never rung, whichever path queued the call (re-ring, restart restore, operator, forced);
+     * proceedWithCall and the ladder's text steps ask this too. A failed userData read rings: a db hiccup must not drop
+     * a paying user's call.
      */
     async isBlocked(chatId) {
         try {
             const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
             const [own, others] = await Promise.all([db.read(chatId), db.readOtherPersonaRows(chatId)]);
-            const block = (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.callBlock)(chatId, own, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.blockedOnAnyProfile)(others ?? []));
+            const elsewhere = await (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_16__.readBlockedElsewhere)(chatId, others ?? [], (id) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_16__.readChatProofs)(db, id));
+            const block = (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.callBlock)(chatId, own, elsewhere);
             if (!block)
                 return false;
-            logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${block === 'own' ? 'this client' : 'another client, no payment credited here'}`);
+            logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${block === 'own' ? 'this client' : 'another client, not overridden by a clean payment here'}`);
             return true;
         }
         catch (error) {
@@ -47609,6 +47613,52 @@ async function calloff(client) {
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error);
     }
+}
+
+
+/***/ },
+
+/***/ "./src/calls/chat-proofs.ts"
+/*!**********************************!*\
+  !*** ./src/calls/chat-proofs.ts ***!
+  \**********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHAT_PROOF_SCAN: () => (/* binding */ CHAT_PROOF_SCAN),
+/* harmony export */   readBlockedElsewhere: () => (/* binding */ readBlockedElsewhere),
+/* harmony export */   readChatProofs: () => (/* binding */ readChatProofs)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+// The paymentProofs rows callBlock reads to tell a fake-payment block (here or on another persona) from any other
+// block. Read only when another persona's row of the chat is blocked, so an unblocked chat costs no extra query.
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("chat-proofs");
+/** Rows scanned per chat (newest first, every persona). Rows live 7 days; a chat has a handful. */
+const CHAT_PROOF_SCAN = 20;
+/**
+ * The chat's recent paymentProofs rows. [] when the store is not wired or the read fails (the repository already
+ * answers [] on a Mongo error): callBlock then cannot see a fake-payment block, and the other checks still apply.
+ */
+async function readChatProofs(source, chatId) {
+    const repo = (source?.getRepositories?.()?.paymentProofs ?? null);
+    if (!repo?.recentForChat)
+        return [];
+    try {
+        return (await repo.recentForChat(chatId, CHAT_PROOF_SCAN)) ?? [];
+    }
+    catch (error) {
+        logger.warn(`[chat-proofs] ${chatId}: paymentProofs read failed (${error?.message ?? error}); block reason unknown`);
+        return [];
+    }
+}
+/** blockedElsewhereFrom, reading the proofs only when another persona's row is blocked. */
+async function readBlockedElsewhere(chatId, others, readProofs) {
+    return (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedElsewhereFrom)(others, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others) ? await readProofs(chatId) : []);
 }
 
 
@@ -48528,7 +48578,7 @@ class InHouseCallService {
                 if (!user)
                     return { action: 'ignore' };
                 // Blocked for calls (callBlock): never picked up (no show, no pitch clip, no pay prompt); it rings out.
-                if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(await this.deps.readOtherProfiles(chatId)))) {
+                if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, await this.blockedElsewhere(chatId, await this.deps.readOtherProfiles(chatId)))) {
                     this.logger.log(`[in-house-calls] incoming call from ${chatId} ignored: chat is blocked (canReply 0)`);
                     return { action: 'ignore' };
                 }
@@ -48768,7 +48818,7 @@ class InHouseCallService {
         this.saveVoiceProofState();
         try {
             const [user, others] = await Promise.all([this.deps.readUser(chatId), this.deps.readOtherProfiles(chatId)]);
-            if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others))) {
+            if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, await this.blockedElsewhere(chatId, others))) {
                 this.releaseVoiceProofSlot(chatId, now);
                 return { status: 'skipped', reason: 'blocked' };
             }
@@ -49232,7 +49282,18 @@ class InHouseCallService {
         const user = await this.deps.readUser(chatId);
         if (!user)
             return false;
-        return (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(await this.deps.readOtherProfiles(chatId), this.now()), this.now());
+        const others = await this.deps.readOtherProfiles(chatId);
+        return (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(others, this.now(), await this.proofsIfBlocked(chatId, others)), this.now());
+    }
+    /** paymentProofs rows for callBlock, only when another persona's row is blocked (else none needed). */
+    async proofsIfBlocked(chatId, others) {
+        if (!(0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others) || !this.deps.readPaymentProofs)
+            return [];
+        return await this.deps.readPaymentProofs(chatId);
+    }
+    /** callBlock's facts about blocks on other personas. */
+    async blockedElsewhere(chatId, others) {
+        return (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedElsewhereFrom)(others, await this.proofsIfBlocked(chatId, others));
     }
     /** Eligibility, video choice and resume offset — null when VCUI would not have shown a call. */
     async plan(chatId) {
@@ -49243,7 +49304,8 @@ class InHouseCallService {
     }
     async planFor(chatId, user) {
         const now = this.now();
-        const others = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(await this.deps.readOtherProfiles(chatId), now);
+        const otherRows = await this.deps.readOtherProfiles(chatId);
+        const others = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.summariseOtherProfiles)(otherRows, now, await this.proofsIfBlocked(chatId, otherRows));
         if (!(0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)(user, others, now))
             return { plan: null, reason: 'not_eligible' };
         // Length unreadable (404, error body, not served in time): ffmpeg would fail too, and an instant stream end
@@ -49665,7 +49727,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState),
 /* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_21__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_22__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)
 /* harmony export */ });
@@ -49694,7 +49756,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
 /* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./switch */ "./src/calls/inhouse/switch.ts");
 /* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../chat-proofs */ "./src/calls/chat-proofs.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+
 
 
 
@@ -49804,7 +49868,7 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_22__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
@@ -49856,7 +49920,7 @@ async function sendInHouseText(client, chatId, text, urgent) {
 function createInHouseCallService(client, hooks) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_21__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_22__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -49888,6 +49952,7 @@ function createInHouseCallService(client, hooks) {
         }),
         readUser: async (chatId) => (await db.read(chatId)),
         readOtherProfiles: (chatId) => db.readOtherPersonaRows(chatId),
+        readPaymentProofs: (chatId) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_21__.readChatProofs)(db, chatId),
         saveProgress: async (chatId, videoId, progress) => {
             await db.update(chatId, { [`callProgress.${videoId}`]: progress });
         },
@@ -50117,6 +50182,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESUME_MAX_AGE_MS: () => (/* binding */ RESUME_MAX_AGE_MS),
 /* harmony export */   RESUME_REWIND_SEC: () => (/* binding */ RESUME_REWIND_SEC),
 /* harmony export */   VIDEO_IDS: () => (/* binding */ VIDEO_IDS),
+/* harmony export */   blockedElsewhereFrom: () => (/* binding */ blockedElsewhereFrom),
 /* harmony export */   blockedOnAnyProfile: () => (/* binding */ blockedOnAnyProfile),
 /* harmony export */   callBlock: () => (/* binding */ callBlock),
 /* harmony export */   callEchoParams: () => (/* binding */ callEchoParams),
@@ -50196,15 +50262,39 @@ function blockedOnAnyProfile(rows) {
     return rows.some((row) => row?.canReply === 0);
 }
 /**
+ * The facts callBlock weighs about blocks on other personas: false when no other row is blocked, else the blocked
+ * personas and the chat's recent paymentProofs rows (read only when some other row is blocked; [] when not read).
+ */
+function blockedElsewhereFrom(rows, proofs = []) {
+    const profiles = rows.filter((row) => row?.canReply === 0).map((row) => String(row.profile ?? ''));
+    return profiles.length ? { profiles, proofs: [...(proofs ?? [])] } : false;
+}
+/** An unresolved fake/edited-screenshot request on `profile` (a credit there resolves every open one). */
+function openFraudAsk(proofs, profile) {
+    return proofs.some((p) => p?.profile === profile && p.ask?.kind === 'fraud' && p.ask.state === 'open');
+}
+/** The fake-payment flow blocked the user on one of `profiles` and no credit there has lifted it (still open). */
+function fraudBlockOn(proofs, profiles) {
+    return proofs.some((p) => profiles.includes(String(p?.profile ?? '')) && p.ask?.kind === 'fraud' && p.ask.state === 'open' && !!p.ask.blockedAt);
+}
+/**
  * The ONE call-block decision, for every call path (ring, in-house plan, incoming pick-up, voice proof, "calling you"
  * text, ladder texts). Returns who blocks the call, or null.
  *  - 'own': this client's row has canReply 0. Always blocks.
- *  - 'other': another persona's row has canReply 0 (owner rule 2026-10-21, any age), and this client has credited no
- *    payment for the chat. Owner decision 2026-10-23: a genuine payment credited HERE overrides a block elsewhere.
- *    userData keeps no block time, so "credited after the block" is read as "credited here at all": the row's ledger
- *    (lifetimePaid > 0 or creditKeys non-empty; written only by creditPayment), or the chat's 'paymentCredited' moment,
- *    noted when the payment is accepted, seconds before the ledger write lands (processImage credits after the
- *    payment's own call). The other persona's row is never touched.
+ *  - 'other': another persona's row has canReply 0 (owner rule 2026-10-21, any age). Owner decisions 2026-10-23: a
+ *    genuine payment credited HERE overrides that block, but only when ALL of these hold (stricter rule):
+ *    1. Credit evidence on this client: the row's ledger (lifetimePaid > 0 or creditKeys non-empty; written only by
+ *       creditPayment, live since 2026-10-03), or the chat's 'paymentCredited' moment (noted when the payment is
+ *       accepted, seconds before the ledger write lands). userData has no other field written only by a genuine credit
+ *       (highestPayAmount / payAmount / paidCount are also set by demo bookings, tier drops and operator commands),
+ *       so a payer from before the ledger is not covered.
+ *    2. No open fake/edited-screenshot request on this persona in paymentProofs. cheatCount is deliberately NOT read
+ *       (owner 2026-10-23): it counts the user accusing us (fake/scam/police/recording), not payment fraud, and would
+ *       newly block genuine payers.
+ *    3. The other block is not a fake-payment block: no open paymentProofs fraud request with `blockedAt` on a blocked
+ *       persona. Other block paths (operator, abuse, banned photo, the store-down fake rule) record no reason, and
+ *       proofs live 7 days, so those blocks count as "not fraud".
+ *    `true` instead of BlockedElsewhere (no proofs read) checks 1 only. The other row is never touched.
  */
 function callBlock(chatId, own, blockedElsewhere) {
     if (own?.canReply === 0)
@@ -50213,15 +50303,24 @@ function callBlock(chatId, own, blockedElsewhere) {
         return null;
     const creditedHere = (Number(own?.lifetimePaid) || 0) > 0 || (own?.creditKeys?.length ?? 0) > 0
         || (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentCredited') !== undefined;
-    return creditedHere ? null : 'other';
+    if (!creditedHere)
+        return 'other';
+    if (blockedElsewhere === true)
+        return null;
+    const { profiles, proofs } = blockedElsewhere;
+    if (own?.profile && openFraudAsk(proofs, own.profile))
+        return 'other';
+    if (fraudBlockOn(proofs, profiles))
+        return 'other';
+    return null;
 }
 /**
  * CMS getPaymentStats, read-only: the stale-row reset it also performs is deliberately NOT ported
  * (a read must not rewrite other personas' rows). Unlike it, a block elsewhere counts at any age (callBlock).
  */
-function summariseOtherProfiles(rows, now) {
+function summariseOtherProfiles(rows, now, proofs = []) {
     const threeDaysAgo = now - 3 * DAY_MS;
-    const stats = { blockedElsewhere: blockedOnAnyProfile(rows), demoGiven: 0, latestCallTime: 0, videos: [] };
+    const stats = { blockedElsewhere: blockedElsewhereFrom(rows, proofs), demoGiven: 0, latestCallTime: 0, videos: [] };
     for (const row of rows) {
         const callTime = Number(row.callTime) || 0;
         if (callTime > threeDaysAgo) {
@@ -80926,9 +81025,11 @@ const INVALID = Object.freeze({ isValid: false, result: false });
  * genuine payer during an outage is then answered as before the same-day rule; a re-send is not credited twice.
  */
 function withoutProofStore(check, arrivalMs) {
-    if (!check.result || check.paymentMs === undefined || arrivalMs - check.paymentMs <= RESEND_WINDOW_MS)
-        return check;
-    return { ...check, result: false };
+    // No served check without the store: a UTR read proves nothing about re-use, so it no longer skips the last-call check.
+    const { reference: _unchecked, ...rest } = check;
+    if (!rest.result || rest.paymentMs === undefined || arrivalMs - rest.paymentMs <= RESEND_WINDOW_MS)
+        return rest;
+    return { ...rest, result: false };
 }
 /** A provider payment time string as a Date, or null when unparseable. No year handling. */
 function parseRawPaymentTime(input) {
@@ -81027,7 +81128,7 @@ function isRecentValidPayment(input, _userDetails, atMs = Date.now(), opts = {})
             // The transaction id is itself a reference (owner 2026-10-22 (A)): up to 24 h old counts.
             const result = txnDay === "today" || withinReferenceAge(txnMs, nowMs);
             logger.log(`[payment-time] input="${String(input ?? "").trim()}" PhonePe transaction id time ${((nowMs - txnMs) / MINUTE_MS).toFixed(2)} min before arrival: ${txnDay} whatever the printed time | ${report(paymentMs)}`);
-            return { isValid: true, result, time: report(paymentMs), paymentMs, source: "txn-id" };
+            return { isValid: true, result, time: report(paymentMs), paymentMs, source: "txn-id", ...(opts.reference ? { reference: true } : {}) };
         }
         if (!input || typeof input !== "string" || input.trim() === "") {
             notifyPaymentTime("invalidInput", "Time empty", undefined, [{ label: "Input", value: String(input) }]);
@@ -81064,7 +81165,7 @@ function isRecentValidPayment(input, _userDetails, atMs = Date.now(), opts = {})
         const result = paymentDay(paymentMs, nowMs) === "today" || (!!opts.reference && withinReferenceAge(paymentMs, nowMs));
         const time = report(paymentMs);
         logger.log(`[payment-time] input="${trimmedInput}" paymentAgeMin=${((nowMs - paymentMs) / MINUTE_MS).toFixed(2)} sameDay=${result} result=${result} | ${time}`);
-        return { isValid: true, result, time, paymentMs };
+        return { isValid: true, result, time, paymentMs, ...(opts.reference ? { reference: true } : {}) };
     }
     catch (error) {
         notifyPaymentTime("validationError", "Time check failed", undefined, [{ label: "Input", value: String(input) }], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.ERROR, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error).message);
@@ -83114,6 +83215,13 @@ function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     // Same day replaces the old 12 h limit (owner 2026-10-22): a re-send is stopped by the proof gate's identity checks.
     if (callTime < paymentMs) {
         logger.log(`SCENARIO: time valid (same day, callTime<payment) | ACCEPT | chatId=${chatId}`);
+        return accept();
+    }
+    // Owner 2026-10-23 (G1): a real UTR the proof gate found credited nowhere cannot be a re-send, so a printed time
+    // before the last call is a phone clock behind IST (UTC+3 prints 150 min behind), not an old payment. A receipt
+    // with no UTR read keeps the check below (its only re-send guard). check.reference is cleared without the store.
+    if (check.reference) {
+        logger.log(`SCENARIO: printed before the last call BUT a never-credited UTR | ACCEPT | chatId=${chatId}`);
         return accept();
     }
     const leniencyVideos = videoCount < LENIENT_VIDEO_COUNT;
