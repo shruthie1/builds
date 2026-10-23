@@ -49132,33 +49132,51 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readChatProofs: () => (/* binding */ readChatProofs)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
 // The paymentProofs rows callBlock reads to tell a fake-payment block (here or on another persona) from any other
 // block. Read only when another persona's row of the chat is blocked, so an unblocked chat costs no extra query.
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("chat-proofs");
 /** Rows scanned per chat (newest first, every persona). Rows live 7 days; a chat has a handful. */
 const CHAT_PROOF_SCAN = 20;
 /**
- * The chat's recent paymentProofs rows. [] when the store is not wired or the read fails (the repository already
- * answers [] on a Mongo error): callBlock then cannot see a fake-payment block, and the other checks still apply.
+ * The chat's recent paymentProofs rows. [] when the store is not wired, the read fails (the repository already
+ * answers [] on a Mongo error) or the read takes longer than STORE_TIMEOUT_MS (the proof gate's bound for its store
+ * reads; no retry): callBlock then cannot see a fake-payment block, and the other checks still apply. Every call path
+ * (ring, incoming pick-up, voice proof, planning) awaits this, so it must never wait on a hung store.
  */
 async function readChatProofs(source, chatId) {
     const repo = (source?.getRepositories?.()?.paymentProofs ?? null);
     if (!repo?.recentForChat)
         return [];
+    let timer;
     try {
-        return (await repo.recentForChat(chatId, CHAT_PROOF_SCAN)) ?? [];
+        const timedOut = new Promise((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_1__.STORE_TIMEOUT_MS);
+            timer.unref?.();
+        });
+        const rows = await Promise.race([repo.recentForChat(chatId, CHAT_PROOF_SCAN), timedOut]);
+        if (rows === "timeout") {
+            logger.warn(`[chat-proofs] ${chatId}: paymentProofs read timed out after ${_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_1__.STORE_TIMEOUT_MS}ms; block reason unknown`);
+            return [];
+        }
+        return rows ?? [];
     }
     catch (error) {
         logger.warn(`[chat-proofs] ${chatId}: paymentProofs read failed (${error?.message ?? error}); block reason unknown`);
         return [];
     }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
 }
 /** blockedElsewhereFrom, reading the proofs only when another persona's row is blocked. */
 async function readBlockedElsewhere(chatId, others, readProofs) {
-    return (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedElsewhereFrom)(others, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others) ? await readProofs(chatId) : []);
+    return (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_2__.blockedElsewhereFrom)(others, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_2__.blockedOnAnyProfile)(others) ? await readProofs(chatId) : []);
 }
 
 
@@ -51703,12 +51721,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
 /**
  * In-house video call policy: the VCUI rules (vcui src/utils/callPolicy.ts, pages/Idle.tsx,
  * pages/CallEnded.tsx and CMS getPaymentStats) ported server-side. Pure functions only, so the
  * decision of who gets which video, where it resumes and whether it counts as delivered is made
  * here, not in a browser.
  */
+
 
 
 
@@ -51769,9 +51789,19 @@ function blockedElsewhereFrom(rows, proofs = []) {
     const profiles = rows.filter((row) => row?.canReply === 0).map((row) => String(row.profile ?? ''));
     return profiles.length ? { profiles, proofs: [...(proofs ?? [])] } : false;
 }
-/** An unresolved fake/edited-screenshot request on `profile` (a credit there resolves every open one). */
-function openFraudAsk(proofs, profile) {
-    return proofs.some((p) => p?.profile === profile && p.ask?.kind === 'fraud' && p.ask.state === 'open');
+/**
+ * An unresolved fake/edited-screenshot request on `profile`, opened within the answer window. A credit there resolves
+ * only the open requests whose row is younger than ASK_ANSWER_WINDOW_MS (gate resolveOpenFraudAsks / openAsks), so an
+ * older one stays 'open' until its 7-day TTL and must not count, or a genuine payer is credited and never rung.
+ * A row with no readable createdAt (never in the store, which always sets it) counts, as before.
+ */
+function openFraudAsk(proofs, profile, now) {
+    return proofs.some((p) => {
+        if (p?.profile !== profile || p.ask?.kind !== 'fraud' || p.ask.state !== 'open')
+            return false;
+        const created = p.createdAt == null ? NaN : new Date(p.createdAt).getTime();
+        return !Number.isFinite(created) || now - created < _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_3__.ASK_ANSWER_WINDOW_MS;
+    });
 }
 /** The fake-payment flow blocked the user on one of `profiles` and no credit there has lifted it (still open). */
 function fraudBlockOn(proofs, profiles) {
@@ -51788,15 +51818,19 @@ function fraudBlockOn(proofs, profiles) {
  *       accepted, seconds before the ledger write lands). userData has no other field written only by a genuine credit
  *       (highestPayAmount / payAmount / paidCount are also set by demo bookings, tier drops and operator commands),
  *       so a payer from before the ledger is not covered.
- *    2. No open fake/edited-screenshot request on this persona in paymentProofs. cheatCount is deliberately NOT read
+ *    2. No open fake/edited-screenshot request on this persona in paymentProofs younger than ASK_ANSWER_WINDOW_MS
+ *       (24 h, on the row's createdAt): a credit closes only requests inside that window, so an older one left
+ *       'open' is not a fraud mark (fix 2026-10-23: such a payer was credited, then silence). cheatCount is deliberately NOT read
  *       (owner 2026-10-23): it counts the user accusing us (fake/scam/police/recording), not payment fraud, and would
  *       newly block genuine payers.
  *    3. The other block is not a fake-payment block: no open paymentProofs fraud request with `blockedAt` on a blocked
  *       persona. Other block paths (operator, abuse, banned photo, the store-down fake rule) record no reason, and
  *       proofs live 7 days, so those blocks count as "not fraud".
+ *       No age limit here (owner 2026-10-23): a fake-payment block elsewhere keeps blocking while its row exists (7 d);
+ *       a credit HERE never resolves the other persona's request, so the window of rule 2 does not apply.
  *    `true` instead of BlockedElsewhere (no proofs read) checks 1 only. The other row is never touched.
  */
-function callBlock(chatId, own, blockedElsewhere) {
+function callBlock(chatId, own, blockedElsewhere, now = Date.now()) {
     if (own?.canReply === 0)
         return 'own';
     if (!blockedElsewhere)
@@ -51808,7 +51842,7 @@ function callBlock(chatId, own, blockedElsewhere) {
     if (blockedElsewhere === true)
         return null;
     const { profiles, proofs } = blockedElsewhere;
-    if (own?.profile && openFraudAsk(proofs, own.profile))
+    if (own?.profile && openFraudAsk(proofs, own.profile, now))
         return 'other';
     if (fraudBlockOn(proofs, profiles))
         return 'other';
@@ -75954,6 +75988,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/forward-to-channel */ "./src/telegram/forward-to-channel.ts");
 /* harmony import */ var _channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channels/unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _flood_error__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./flood-error */ "./src/outbound/flood-error.ts");
+
 
 
 
@@ -75966,6 +76002,28 @@ const MAX_CLIENT_POSTS_PER_PROCESS = 20;
 const MAX_TRACKED_CHATS = 1000;
 const chatPosts = new Map();
 let processPosts = [];
+/** Account spam-limited by Telegram: no client post until the process restarts (session survival, no retry). */
+const SPAM_LIMITED = /\b(?:PEER_FLOOD|USER_RESTRICTED)\b/;
+const FLOOD_PAUSE_MARGIN_MS = 5000;
+/** Epoch ms until which every client post is skipped (bot posts instead); Infinity = until restart. */
+let clientPausedUntil = 0;
+/** FloodWait pauses all client posts for its seconds (+ margin); PEER_FLOOD / USER_RESTRICTED until restart. */
+function noteClientPostError(error, now = Date.now()) {
+    const message = errorText(error);
+    const flood = (0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error);
+    if (SPAM_LIMITED.test(message) || flood?.kind === "peer") {
+        if (clientPausedUntil !== Infinity)
+            logger.warn(`[UnwantedPhoto] client spam-limited (${message.match(SPAM_LIMITED)?.[0] ?? "PEER_FLOOD"}): photos go via the bot until restart`);
+        clientPausedUntil = Infinity;
+    }
+    else if (flood?.kind === "wait") {
+        const until = now + Math.max(0, flood.seconds) * 1000 + FLOOD_PAUSE_MARGIN_MS;
+        if (until > clientPausedUntil) {
+            clientPausedUntil = until;
+            logger.warn(`[UnwantedPhoto] client flood-wait ${flood.seconds}s: photos go via the bot until ${new Date(until).toISOString()}`);
+        }
+    }
+}
 /** Group errors no retry fixes: the client stops trying the group until the next join. */
 const GROUP_GONE = /CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ID_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|CHAT_SEND_(?:PHOTOS|MEDIA)_FORBIDDEN|CHAT_ADMIN_REQUIRED/;
 /** Takes a client-post slot for chatId when both caps allow one; false = bot fallback. */
@@ -75995,6 +76053,7 @@ function takeClientPostSlot(chatId, now = Date.now()) {
 function resetUnwantedPhotoCaps() {
     chatPosts.clear();
     processPosts = [];
+    clientPausedUntil = 0;
 }
 function errorText(error) {
     const e = error;
@@ -76006,15 +76065,21 @@ function errorText(error) {
  * resolved or the forward fails, a bot of the UNWANTED_UPDATES category posts the photo with its card to the same group.
  * Photos never go to UNVDS (videos and other media only). A failed card after a successful forward is no reason for a
  * bot post (that was a double post). Resolves true only when the photo landed. Client posts are capped per chat and
- * per process (takeClientPostSlot); a forward the group refuses for good (GROUP_GONE) drops the group.
+ * per process (takeClientPostSlot); a forward the group refuses for good (GROUP_GONE) drops the group. A FloodWait
+ * pauses every client post for its seconds and PEER_FLOOD / USER_RESTRICTED until restart (noteClientPostError):
+ * while paused the bot posts and the user session sends nothing (no forward, no card). Its only call is a read: when the
+ * caller passes a loader (forward-unwanted.ts: event.client.downloadMedia) the bot fallback downloads the photo once per
+ * paused photo; processImage passes the bytes it already has (no download).
  */
 async function postUnwantedPhoto(post) {
     const { event, chatId } = post;
     const group = (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.getUnwantedUpdatesGroup)();
-    const useClient = group != null && takeClientPostSlot(chatId);
-    if (group && !useClient)
+    const paused = group != null && Date.now() < clientPausedUntil;
+    const useClient = group != null && !paused && takeClientPostSlot(chatId);
+    if (group && !paused && !useClient)
         logger.log(`[UnwantedPhoto] client post cap reached (chat ${chatId} or process): bot posts the photo`);
     const onForwardError = (error) => {
+        noteClientPostError(error);
         const message = errorText(error);
         const gone = message.match(GROUP_GONE)?.[0];
         if (!gone || (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.getUnwantedUpdatesGroup)() !== group)
@@ -76027,6 +76092,7 @@ async function postUnwantedPhoto(post) {
             await event.client.sendMessage(group, { message: post.text.slice(0, 1000) });
         }
         catch (error) {
+            noteClientPostError(error);
             logger.warn(`[UnwantedPhoto] photo forwarded to the unwanted-updates group for ${chatId} but its text card failed (no bot post):`, error);
         }
         return true;
@@ -83513,7 +83579,8 @@ __webpack_require__.r(__webpack_exports__);
  *    credited again;
  *  - fake or edited screenshots get a rude reply and a block after FRAUD_GRACE_MS unless a genuine page arrives.
  * Owner 2026-10-22 (same-day rule): the payment time only has to be today's (payment-time.ts paymentDay); a re-send of
- * a credited payment is stopped here by identity (file / UTR / picture, every chat and persona; rule 4 without a UTR).
+ * a credited payment is stopped here by identity (file / UTR / picture, every chat and persona; rule 4 = same user, amount
+ * and printed time: a no-UTR credit stops a later screenshot of it at its printed minute, UTR or not).
  */
 
 const MINUTE_MS = 60000;
@@ -83598,6 +83665,16 @@ function samePayee(a, b) {
     const na = normalizePayeeName(a.payeeName);
     const nb = normalizePayeeName(b.payeeName);
     return !!na && !!nb && na === nb;
+}
+/** Both payees read and different: both UPI ids read and unequal, else (no UPI id on a side) both names read and unequal. */
+function otherPayee(a, b) {
+    const ua = normalizePayeeUpi(a.payeeUpiId);
+    const ub = normalizePayeeUpi(b.payeeUpiId);
+    if (ua && ub)
+        return ua !== ub;
+    const na = normalizePayeeName(a.payeeName);
+    const nb = normalizePayeeName(b.payeeName);
+    return !!na && !!nb && na !== nb;
 }
 function rowTimeMs(row) {
     return row.time?.state === 'known' && typeof row.time.epochMs === 'number' ? row.time.epochMs : null;
@@ -83696,31 +83773,46 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
             return { kind: 'repeat', by: 'payee', sameChat: sameChat(facts, row), matched: row };
         }
     }
-    // A different screenshot of a payment this chat was already credited for: neither shows a UTR, same amount, both
-    // payment times readable and agreeing (owner 2026-10-21). A UTR on either side decides by the UTR rule above.
-    // Same-day rule 4 (owner 2026-10-22): no UTR read here, the payment is older than RESEND_WINDOW_MS, and this user was
-    // already credited the same amount today (paymentDay; on any persona; the credited row may show a UTR) AT THE SAME
-    // PRINTED TIME (within SAME_TIME_MS; review fix 2026-10-23): a re-send. A credited row whose printed time is unknown
-    // or differs is another payment: a second genuine ₹100 hours later, sent 15+ min after paying, or one from a phone
-    // whose clock lags IST, is credited. A recent payment or another amount is a new payment (the ladder: ₹150, then
-    // ₹100; never "must be higher").
+    // Same-day rule 4 (owner 2026-10-22; printed-time match, review fixes 2026-10-23): this user (any persona) was
+    // already credited the same amount at the same printed time. Never a re-send when both payees were read and differ
+    // (otherPayee: a second genuine payment to another of our UPI ids, UTR or not). By the UTRs:
+    //  - neither shows one: printed times within SAME_TIME_MS (2 min) = a re-send (owner 2026-10-21);
+    //  - only THIS screenshot shows one, the credited row none: the SAME printed minute = a re-send (fix 2026-10-23:
+    //    the details page of a no-UTR credit prints the success screen's minute and shows a UTR never stored; it used
+    //    to skip this rule and then G1, a fresh UTR skipping the last-call time check, and was credited and rung
+    //    again). Another minute = a new payment (owner rule 7: a genuine new payment prints another minute);
+    //  - both show one: the UTR rule above decides (same = repeat); different real references = two payments (journeys
+    //    N / N2: two genuine ₹50s seconds apart). A one-digit misread looks the same and is NOT stopped here (L6 k);
+    //  - only the credited row shows one: a re-send when this payment is older than RESEND_WINDOW_MS, within 2 min, and
+    //    the row was credited today and before this picture arrived (unchanged); a recent one is left to the time check.
+    // No "credited before this arrived" test on the no-UTR-row branches: a success screen and its details page sent
+    // seconds apart are checked one after the other (per-chat picture queue), the first credited after the second
+    // ARRIVED; skipping that row let the second through (credited and rung twice: its claim is unique only on UTR/file).
+    // A credited row with an unknown or another printed time is another payment (a second genuine ₹100 hours later, or
+    // one from a phone whose clock lags IST). Another amount is a new payment (the ladder; never "must be higher").
+    // Same chat = the repeat reply; another persona = "not my Payment".
     const arrivalMs = facts.arrivalMs ?? nowMs;
     for (const row of chatServed) {
-        if (!sameUser(facts, row) || (sameChat(facts, row) && row.telegramMsgId === facts.msgId) || facts.utr)
+        if (!sameUser(facts, row) || (sameChat(facts, row) && row.telegramMsgId === facts.msgId))
             continue;
         if (!sameAmount(row.amount, facts.amount) || facts.timeMs === null)
             continue;
         const theirTime = rowTimeMs(row);
-        const samePrintedTime = theirTime !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS;
-        if (!samePrintedTime)
+        if (theirTime === null || otherPayee(facts, row))
             continue;
-        if (sameChat(facts, row) && !normalizeUtr(row.utr)) {
-            return { kind: 'repeat', by: 'time', sameChat: true, matched: row };
+        const withinWindow = Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS;
+        const repeat = { kind: 'repeat', by: 'time', sameChat: sameChat(facts, row), matched: row };
+        const rowUtr = normalizeUtr(row.utr);
+        if (!rowUtr) {
+            if (!facts.utr ? withinWindow : Math.floor(theirTime / MINUTE_MS) === Math.floor(facts.timeMs / MINUTE_MS))
+                return repeat;
+            continue;
         }
+        if (facts.utr || !withinWindow)
+            continue;
         const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
-        if (arrivalMs - facts.timeMs > _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS && Number.isFinite(servedMs) && servedMs <= arrivalMs && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrivalMs) === 'today') {
-            return { kind: 'repeat', by: 'time', sameChat: sameChat(facts, row), matched: row };
-        }
+        if (arrivalMs - facts.timeMs > _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS && Number.isFinite(servedMs) && servedMs <= arrivalMs && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrivalMs) === 'today')
+            return repeat;
     }
     return edited ?? { kind: 'clear' };
 }
@@ -84138,12 +84230,12 @@ class GateSession {
         return verdict;
     }
     /**
-     * This user's own credited rows (every persona), for a different screenshot of a credited payment with no UTR read
-     * (classifyAgainstServed, same-day rule 4). Read only when that rule can apply: no UTR, payment time readable. [] on failure.
+     * This user's own credited rows (every persona), for a different screenshot of a credited payment, with or without a
+     * UTR (classifyAgainstServed, same-day rule 4). Read only when that rule can apply: payment time readable. [] on failure.
      */
     async chatServed() {
         const f = this.facts;
-        if (f.utr || f.timeMs === null || !this.store.recentForChat)
+        if (f.timeMs === null || !this.store.recentForChat)
             return [];
         const rows = await this.bound(this.store.recentForChat(f.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
         return rows.filter((r) => !!r.servedAt && !(r.profile === f.profile && r.telegramMsgId === f.msgId));
