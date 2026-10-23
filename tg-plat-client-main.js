@@ -21811,6 +21811,8 @@ const ChannelCategory = Object.freeze({
     UNAUTH_CALLS: 'UNAUTH_CALLS',
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
+    /** @unwantedupdates1: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
+    UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
@@ -21959,11 +21961,15 @@ class BotConfig {
             .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
-    /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
+    /**
+     * Keep cooldowns of bots that are still in the pool across a refresh, only while the category's channel is the
+     * same: a bench for "chat not found" on a dead channel must not follow the bot to the recreated one (UNVDS,
+     * 2026-10-23). A revoked token is skipped by revokedTokens whatever the channel.
+     */
     carryBotState(previous, next) {
         for (const [category, data] of next) {
             const old = previous.get(category);
-            if (!old)
+            if (!old || old.channelId !== data.channelId)
                 continue;
             data.botCooldownUntil = data.botTokens.map(token => {
                 const i = old.botTokens.indexOf(token);
@@ -69075,7 +69081,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../telegram/file-sender */ "./src/telegram/file-sender.ts");
-/* harmony import */ var _telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../telegram/forward-to-channel */ "./src/telegram/forward-to-channel.ts");
+/* harmony import */ var _outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../outbound/unwanted-photo */ "./src/outbound/unwanted-photo.ts");
 /* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
 /* harmony import */ var _payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../payments/screenshot/download-media */ "./src/payments/screenshot/download-media.ts");
 /* harmony import */ var _payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../payments/screenshot/normalise-amount */ "./src/payments/screenshot/normalise-amount.ts");
@@ -69887,43 +69893,27 @@ async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastN
     }
 }
 /**
- * Non-payment photo: posted to @unwantedupdates1, bot card on UNVDS as the fallback. Resolves true only when the PHOTO
- * landed somewhere (forwarded to @unwantedupdates1 with its card, or the UNVDS bot photo was delivered); false when it
- * did not (a forward that failed while the text card went through is false too). Callers that delete the user's photo
- * depend on it.
+ * Non-payment photo: the client forwards it to @unwantedupdates1 with the text card; only when that forward fails, an
+ * UNWANTED_UPDATES bot posts the photo card there (postUnwantedPhoto; never UNVDS). Resolves true only when the PHOTO
+ * landed; callers that delete the user's photo depend on it.
  */
 async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg) {
-    // Primary: the client account posts to @unwantedupdates1 (forward renders the photo in-chat,
-    // then a text card with the analysis). forwardToChannel swallows its own errors, but the text
-    // send throws when the account can't post there (USER_BANNED_IN_CHANNEL / CHAT_WRITE_FORBIDDEN).
-    // Fallback then, and when the forward failed (text card only): bot photo on UNVDS (never CLIENT_UPDATES; no bot is a
-    // member of @unwantedupdates1). True only when the photo itself landed somewhere.
-    try {
-        const forwarded = await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_21__.forwardToChannel)(event, "@unwantedupdates1");
-        await event.client.sendMessage("@unwantedupdates1", {
-            message: msg.slice(0, 1000),
-        });
-        if (forwarded)
-            return true;
-        logger.warn(`[ProcessImage] unwanted-image photo NOT forwarded to @unwantedupdates1 for ${chatId} (text card only); falling back to UNVDS bot`);
-    }
-    catch (error) {
-        logger.warn(`[ProcessImage] unwanted-image post to @unwantedupdates1 failed for ${chatId}; falling back to UNVDS bot:`, error);
-    }
-    const unwantedSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.UNVDS, photoBuffer, {
-        title: "Unwanted image",
-        fields: [
-            { label: "User", value: broadcastName || "-", code: false },
-            { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
-            { label: "Invalid pics", value: invalidPhotoCount, code: false },
-        ],
-        details: msg.split("\n").slice(4).filter((l) => l.trim()),
-        detailsTitle: "Image analysis",
+    return (0,_outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_21__.postUnwantedPhoto)({
+        event,
+        chatId,
+        text: msg,
+        photo: photoBuffer,
+        card: {
+            title: "Unwanted image",
+            fields: [
+                { label: "User", value: broadcastName || "-", code: false },
+                { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_27__.chatUrl)(chatId) },
+                { label: "Invalid pics", value: invalidPhotoCount, code: false },
+            ],
+            details: msg.split("\n").slice(4).filter((l) => l.trim()),
+            detailsTitle: "Image analysis",
+        },
     });
-    if (!unwantedSent) {
-        logger.error(`[ProcessImage] unwanted-image evidence photo NOT delivered to UNVDS for ${chatId} (dead channel/no bot?)`);
-    }
-    return unwantedSent === true;
 }
 /** Failed-payment screenshot: delete, tell the user, schedule the reminder. */
 async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer) {
@@ -73430,6 +73420,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _unwanted_photo__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./unwanted-photo */ "./src/outbound/unwanted-photo.ts");
+
 
 
 
@@ -73483,6 +73475,7 @@ const inflight = new Set();
 const MAX_INFLIGHT_SIZE = 1000; // Maximum concurrent in-flight operations
 // Reasonable safety limits to reduce CPU/memory churn
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_CAPTION_CHARS = 1000; // Bot API caption limit 1024, minus the client-id line
 const REPLY_COOLDOWN_MS = 3000;
 const LAST_REPLY_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_LAST_REPLY_ENTRIES = 10000;
@@ -73564,28 +73557,57 @@ async function forwardtoUnwanted(event, broadcastName) {
         // Size pre-check for documents (avoid huge downloads)
         if (detection.sizeBytes != null && detection.sizeBytes > MAX_MEDIA_BYTES)
             return;
-        // Only download when we actually need to re-upload
-        const mediaBuffer = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => event.client.downloadMedia(event.message), {
-            timeout: 30000,
-        });
-        if (!Buffer.isBuffer(mediaBuffer) || mediaBuffer.length === 0)
-            return;
-        const captionText = event.message?.message && broadcastName
-            ? `${broadcastName}: ${event.message.message}`
-            : broadcastName ?? '';
-        const mediaContent = {
-            type: detection.mediaType,
-            media: mediaBuffer,
-            caption: captionText,
-            extension: detection.fileExtension ?? undefined,
+        const download = async () => {
+            const buffer = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => event.client.downloadMedia(event.message), { timeout: 30000 });
+            return Buffer.isBuffer(buffer) && buffer.length > 0 ? buffer : null;
         };
-        logger.log(`[Unwanted Media] Forwarding media to unwanted channel from : ${broadcastName} | ${chatId} | type: ${detection.mediaType}.${mediaContent.extension}`);
-        const forwarded = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMediaGroup(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, [mediaContent]);
-        // Unwanted media is always deleted from the source regardless of forward outcome — this is
-        // junk we don't want to keep. A failed forward is only worth a log line (it's not evidence
+        // Unwanted media is always deleted from the source regardless of the post outcome — this is
+        // junk we don't want to keep. A failed post is only worth a log line (it's not evidence
         // we need to preserve), never a reason to leave the media in place.
-        if (!forwarded) {
-            logger.error(`[Unwanted Media] UNVDS forward failed (deleting source anyway) | ${broadcastName} | ${chatId}`);
+        if (detection.mediaType === 'photo') {
+            // Photos (blocked user, over the daily limit, forwarded, image files): client to @unwantedupdates1, bot
+            // there only if the client fails; never UNVDS (owner, 2026-10-23).
+            logger.log(`[Unwanted Media] Posting photo to @unwantedupdates1 from : ${broadcastName} | ${chatId}`);
+            const saved = await (0,_unwanted_photo__WEBPACK_IMPORTED_MODULE_10__.postUnwantedPhoto)({
+                event,
+                chatId,
+                text: `UNWANTED PHOTO : @${process.env.clientId}\nChatId : ${chatId}\nUser : ${broadcastName ?? '-'}${event.message?.message ? `\n\n${event.message.message}` : ''}`,
+                card: {
+                    title: 'Unwanted photo',
+                    fields: [
+                        { label: 'User', value: broadcastName || '-', code: false },
+                        { label: 'Chat', value: chatId },
+                    ],
+                    details: event.message?.message ? [event.message.message.slice(0, MAX_CAPTION_CHARS)] : undefined,
+                    detailsTitle: 'Caption',
+                },
+                photo: download,
+            });
+            if (!saved)
+                logger.error(`[Unwanted Media] photo not saved (deleting source anyway) | ${broadcastName} | ${chatId}`);
+        }
+        else {
+            // Only download when we actually need to re-upload
+            const mediaBuffer = await download();
+            if (!mediaBuffer)
+                return;
+            const fullCaption = event.message?.message && broadcastName
+                ? `${broadcastName}: ${event.message.message}`
+                : broadcastName ?? '';
+            // Bot API captions stop at 1024 chars and the bot adds a client-id line; a longer one ("caption is too long")
+            // lost the media (Premium users caption up to 4096).
+            const captionText = fullCaption.length > MAX_CAPTION_CHARS ? `${fullCaption.slice(0, MAX_CAPTION_CHARS - 1)}…` : fullCaption;
+            const mediaContent = {
+                type: detection.mediaType,
+                media: mediaBuffer,
+                caption: captionText,
+                extension: detection.fileExtension ?? undefined,
+            };
+            logger.log(`[Unwanted Media] Forwarding media to unwanted channel from : ${broadcastName} | ${chatId} | type: ${detection.mediaType}.${mediaContent.extension}`);
+            const forwarded = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMediaGroup(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, [mediaContent]);
+            if (!forwarded) {
+                logger.error(`[Unwanted Media] UNVDS forward failed (deleting source anyway) | ${broadcastName} | ${chatId}`);
+            }
         }
         if (detection.canDeleteMessage) {
             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
@@ -74195,6 +74217,68 @@ class OutboundQueue {
     }
 }
 const outboundQueue = new OutboundQueue({}, outboundBackup());
+
+
+/***/ },
+
+/***/ "./src/outbound/unwanted-photo.ts"
+/*!****************************************!*\
+  !*** ./src/outbound/unwanted-photo.ts ***!
+  \****************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   UNWANTED_UPDATES_CHANNEL: () => (/* binding */ UNWANTED_UPDATES_CHANNEL),
+/* harmony export */   postUnwantedPhoto: () => (/* binding */ postUnwantedPhoto)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/forward-to-channel */ "./src/telegram/forward-to-channel.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:unwanted-photo");
+const UNWANTED_UPDATES_CHANNEL = "@unwantedupdates1";
+/**
+ * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to @unwantedupdates1
+ * with a text card; only when that forward fails does a bot of the UNWANTED_UPDATES category post the photo with its
+ * card to the same group. Photos never go to UNVDS (videos and other media only). A failed card after a successful
+ * forward is no reason for a bot post (that was a double post). Resolves true only when the photo landed.
+ */
+async function postUnwantedPhoto(post) {
+    const { event, chatId } = post;
+    if (await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__.forwardToChannel)(event, UNWANTED_UPDATES_CHANNEL)) {
+        try {
+            await event.client.sendMessage(UNWANTED_UPDATES_CHANNEL, { message: post.text.slice(0, 1000) });
+        }
+        catch (error) {
+            logger.warn(`[UnwantedPhoto] photo forwarded to ${UNWANTED_UPDATES_CHANNEL} for ${chatId} but its text card failed (no bot post):`, error);
+        }
+        return true;
+    }
+    const bots = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance();
+    if (!(await bots.hasCategory(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.UNWANTED_UPDATES))) {
+        logger.warn(`[UnwantedPhoto] client could not forward the photo for ${chatId} and no UNWANTED_UPDATES bot is configured: photo not saved`);
+        return false;
+    }
+    let photo;
+    try {
+        photo = typeof post.photo === "function" ? await post.photo() : post.photo;
+    }
+    catch (error) {
+        logger.warn(`[UnwantedPhoto] photo download for the bot fallback failed for ${chatId}:`, error);
+    }
+    if (!Buffer.isBuffer(photo) || photo.length === 0) {
+        logger.warn(`[UnwantedPhoto] client could not forward the photo for ${chatId} and it could not be downloaded: photo not saved`);
+        return false;
+    }
+    const sent = await bots.sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.UNWANTED_UPDATES, photo, post.card);
+    if (!sent)
+        logger.error(`[UnwantedPhoto] photo NOT delivered for ${chatId}: client forward and UNWANTED_UPDATES bot both failed`);
+    return sent === true;
+}
 
 
 /***/ },
