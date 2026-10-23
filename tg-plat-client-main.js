@@ -51475,7 +51475,8 @@ function summariseOtherProfiles(rows, now, proofs = []) {
 /**
  * VCUI Idle.tsx canCallCondition + the paymentstats gate. Mirrors VCUI exactly, including the
  * `a && b || c` precedence of the >=200 ladder and its `2 * 60 * 60 * 100` (12 min) window, so
- * switching a client to in-house calls does not change who gets a show.
+ * switching a client to in-house calls does not change who gets a show. One deliberate difference: the 12-min window
+ * is skipped when a payment was credited since the last show (see paidSinceLastShow).
  */
 function canCallUser(user, others, now) {
     const videos = cycleVideos(user);
@@ -51483,7 +51484,16 @@ function canCallUser(user, others, now) {
     const high = Number(user.highestPayAmount) || 0;
     const full = Number(user.fullShow) || 0;
     const recentWindow = now - 2 * 60 * 60 * 100;
-    const calledBefore = (Number(user.callTime) || 0) < recentWindow;
+    const callTime = Number(user.callTime) || 0;
+    // The 12-min wait limits unpaid repeat shows. A payment credited since the last show (past callTime, which
+    // completion backdates 5 min; post-show paidSinceShow's rule) paid for this one: it rings now, as the repeat
+    // payment's "calling you" says (journey N2b, 2026-10-23: a ₹100 repeat 3 min after a ₹200 payer's 6th show was
+    // told "Checking", the dial refused and the ladder cleared). The credit is the row's lastPaidAt or the chat's
+    // 'paymentCredited' moment (noted when the payment is accepted; the ledger write lands after the call is queued),
+    // as in callBlock. Not in VCUI.
+    const lastCreditAt = Math.max(Number(user.lastPaidAt) || 0, (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(String(user.chatId ?? ''), 'paymentCredited') ?? 0);
+    const paidSinceLastShow = lastCreditAt > callTime + 5 * 60 * 1000;
+    const calledBefore = callTime < recentWindow || paidSinceLastShow;
     const eligible = pay >= 30 && videos < 10 && ((pay < 100 && high >= 15 && !user.demoGiven)
         || (pay > 50 && pay < 200 && high >= 50 && !user.secondShow)
         || ((high >= 200 || pay >= 200) && ((high >= 50 && full < 2 && videos < 4)
