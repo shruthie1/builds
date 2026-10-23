@@ -4755,8 +4755,26 @@ SyncReader.prototype.process = function () {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   AnalyticsSink: () => (/* binding */ AnalyticsSink)
+/* harmony export */   AnalyticsSink: () => (/* binding */ AnalyticsSink),
+/* harmony export */   childBatchId: () => (/* binding */ childBatchId),
+/* harmony export */   classifyAnalyticsError: () => (/* binding */ classifyAnalyticsError),
+/* harmony export */   defaultSpoolDir: () => (/* binding */ defaultSpoolDir),
+/* harmony export */   sanitizeInstanceKey: () => (/* binding */ sanitizeInstanceKey)
 /* harmony export */ });
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! crypto */ "crypto");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! os */ "os");
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(os__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
+
+
+
+
+/** Batch kind of the combined daily_client + daily_mobile statement. */
+const COUNTERS_KIND = "daily_counters";
 const DEFAULTS = {
     maxBufferedRows: 10000,
     batchSize: 500,
@@ -4765,7 +4783,22 @@ const DEFAULTS = {
     backoffMaxMs: 5 * 60000,
     queryTimeoutMs: 15000,
     stopTimeoutMs: 5000,
+    killWindowMs: 8000,
+    maxSpoolBytes: 200 * 1024 * 1024,
+    counterFlushIntervalMs: 60000,
 };
+/** Statements per flush. Bounds a bisect of an all-bad batch (2N-1 statements) to one tick's worth. */
+const MAX_STATEMENTS_PER_FLUSH = 64;
+/** Rows per spool file before a new one is started, so a replay never reads a huge file. */
+const SPOOL_ROTATE_ROWS = 5000;
+const SPOOL_RESCAN_MS = 60000;
+const SUMMARY_INTERVAL_MS = 10 * 60000;
+/** Failing this long without a success fires onStall; and at most this often. */
+const STALL_AFTER_MS = 30 * 60000;
+/** Spool files older than this are quarantined: analytics_batch keeps ids 7 days (maintain.sql). */
+const SPOOL_MAX_AGE_MS = 6 * 24 * 3600000;
+/** Another instance's spool files untouched this long are reported once at start. */
+const ORPHAN_AFTER_MS = 24 * 3600000;
 /** Rejects with `message` after `ms`; resolves/rejects with `work` otherwise. Timer never leaks. */
 function withTimeout(work, ms, message) {
     let timer;
@@ -4773,58 +4806,206 @@ function withTimeout(work, ms, message) {
         timer = setTimeout(() => reject(new Error(message)), ms);
         timer?.unref?.();
     });
-    // If the timeout wins, `work` may reject later; that must not become an unhandledRejection.
     work.catch(() => { });
     return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 /**
- * The NOT NULL columns of each table, straight from analytics/schema.sql. A row missing one of
- * these fails the whole multi-row INSERT, taking up to 499 good rows with it, so it is rejected
- * at enqueue instead. Columns NOT listed here are nullable on purpose.
+ * The NOT NULL columns of each table, straight from analytics/schema.sql. A row missing one is
+ * rejected at enqueue (droppedInvalid) rather than failing a batch.
  */
 const REQUIRED_COLUMNS = {
     promotion_send: new Set(["ts", "client_id", "mobile", "channel_id", "outcome"]),
     conversion_event: new Set(["conversion_id", "chat_id", "channel_id", "weight", "kind"]),
     payment_event: new Set(["chat_id", "client_id", "persona_id", "amount"]),
     daily_client: new Set(["day", "client_id", "namespace"]),
+    daily_mobile: new Set(["day", "client_id", "namespace", "mobile"]),
 };
+/** The 11 accumulating counters shared by daily_client and daily_mobile (revenue deliberately absent). */
+const COUNTER_COLUMNS = [
+    "sent", "delivered", "banned", "failed",
+    "new_users", "active_users", "payers",
+    "reactions_success", "reactions_restricted", "reactions_failed", "reactions_floods",
+];
+const COUNTER_FIELDS = [
+    "sent", "delivered", "banned", "failed",
+    "newUsers", "activeUsers", "payers",
+    "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
+];
+const accumulate = (t) => COUNTER_COLUMNS.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
+/** Per table: column list (for spool validation), conflict tail and conflict-key length. */
+const TABLES = {
+    promotion_send: { columns: ["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type"] },
+    conversion_event: { columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"] },
+    payment_event: { columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"] },
+    daily_client: {
+        columns: ["day", "client_id", "namespace", ...COUNTER_COLUMNS],
+        keyCount: 3,
+        conflict: `ON CONFLICT (day, client_id, namespace) DO UPDATE SET ${accumulate("daily_client")}`,
+    },
+    daily_mobile: {
+        columns: ["day", "client_id", "namespace", "mobile", "profile", ...COUNTER_COLUMNS],
+        keyCount: 4,
+        conflict: "ON CONFLICT (day, client_id, namespace, mobile) DO UPDATE SET "
+            + `profile = COALESCE(daily_mobile.profile, EXCLUDED.profile), ${accumulate("daily_mobile")}`,
+    },
+};
+function sanitizeInstanceKey(raw) {
+    const cleaned = String(raw ?? "").replace(/[^A-Za-z0-9_-]/g, "_");
+    return cleaned || "default";
+}
+/**
+ * transient → keep the batch and retry behind the backoff; permanent → bisect / drop the row;
+ * committed → the batch id already landed, so the rows are written.
+ *
+ * DEFAULT IS TRANSIENT. Only SQLSTATE classes 22 (data exception) and 23 (integrity constraint)
+ * depend on the rows themselves, so only they may drop a row. Anything else (25006 read-only, 28xxx
+ * auth, 3D000, 42xxx missing schema or a bad statement, XX000, 08/53/57/40, no code, our timeouts)
+ * affects every row equally: dropping would destroy all data during an outage, a read-only
+ * failover or a deploy-before-migrate window. Those keep the rows and raise `onStall` instead.
+ */
+function classifyAnalyticsError(err) {
+    const e = err;
+    const code = typeof e?.code === "string" ? e.code : "";
+    const message = typeof e?.message === "string" ? e.message : String(err);
+    if (code === "23505" && (e?.constraint === "analytics_batch_pkey" || /analytics_batch_pkey/.test(message))) {
+        return "committed";
+    }
+    if (!/^[0-9A-Z]{5}$/.test(code))
+        return "transient";
+    const cls = code.slice(0, 2);
+    return cls === "22" || cls === "23" ? "permanent" : "transient";
+}
+/**
+ * Bisect child id: sha256(parent + ":L" | ":R") shaped as a v4 uuid. Deterministic, so a replay
+ * of the parent after a crash mid-bisect re-derives ids whose halves may already be committed.
+ */
+function childBatchId(parentId, side) {
+    const h = (0,crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)("sha256").update(`${parentId}:${side}`).digest("hex");
+    const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+/**
+ * `~/.tg-analytics-spool/<sanitized basename(cwd)>`, unless ANALYTICS_SPOOL_DIR is set. Outside the
+ * app dir on purpose: /root/clients and /root/promotions are git checkouts of the server repo, and
+ * spooled payment rows must never be committable there or wiped by a `git clean`.
+ */
+function defaultSpoolDir() {
+    if (process.env.ANALYTICS_SPOOL_DIR)
+        return process.env.ANALYTICS_SPOOL_DIR;
+    return path__WEBPACK_IMPORTED_MODULE_3__.join(os__WEBPACK_IMPORTED_MODULE_2__.homedir(), ".tg-analytics-spool", sanitizeInstanceKey(path__WEBPACK_IMPORTED_MODULE_3__.basename(process.cwd())));
+}
+const IST_OFFSET_MS = 5.5 * 3600000;
+const istDay = (ms) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+/** Read at REPLAY time: while Mongo still gets the daily writes, it is authoritative for old days. */
+function mongoDailyWritesOn() {
+    return String(process.env.DAILY_STATS_MONGO_WRITES ?? "").trim().toLowerCase() !== "off";
+}
+function batchKind(table) {
+    return table === "daily_client" || table === "daily_mobile" ? COUNTERS_KIND : table;
+}
+/** Reads /proc/<pid>/environ; null when unavailable (non-Linux, permissions). */
+function defaultReadProcEnviron(pid) {
+    try {
+        return fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(`/proc/${pid}/environ`, "utf8");
+    }
+    catch {
+        return null;
+    }
+}
+function isPidAlive(pid) {
+    if (!Number.isFinite(pid) || pid <= 0)
+        return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (err) {
+        return err?.code === "EPERM";
+    }
+}
 class AnalyticsSink {
     constructor(options = {}) {
         this.pool = null;
         this.buffer = [];
+        /** Batches with ids awaiting (re)try. Front = oldest. */
+        this.retryQueue = [];
+        this.inFlightBatches = new Set();
+        /** daily_client / daily_mobile deltas, coalesced by conflict key. Never subject to the row cap. */
+        this.counters = new Map();
         this.timer = null;
         this.flushing = false;
         this.inFlight = null;
         this.stopped = false;
+        this.finalSpilled = false;
+        this.exitHook = null;
+        this.lastCounterDrainAt = 0;
+        /** Set by stop(): drain the counters regardless of counterFlushIntervalMs. */
+        this.drainCountersNow = false;
+        /** Overflow batches awaiting the ASYNC spill (the record path never does sync IO). */
+        this.pendingSpill = [];
+        /** Batches the async spill is writing right now (finalSpill re-writes them; ids dedupe). */
+        this.spillingBatches = new Set();
+        this.spillScheduled = false;
+        this.spillInFlight = null;
+        /** When the current failure streak started (0 = healthy) and the last stall alert. */
+        this.failingSince = 0;
+        this.lastStallAlertAt = 0;
+        this.lastErrorText = "";
+        /** Spool files claimed by this process and not yet loaded. */
+        this.claimedFiles = [];
+        /** Loaded spool file → unresolved batches from it. */
+        this.fileRefs = new Map();
+        this.currentSpool = null;
+        this.lastRescanAt = 0;
         this.enabled = false;
         this.disabledReason = "not started";
         this.enqueued = 0;
         this.written = 0;
         this.droppedOverflow = 0;
         this.droppedError = 0;
-        /** Rows rejected before buffering because they would have failed the whole INSERT batch. */
         this.droppedInvalid = 0;
+        this.droppedSpoolFull = 0;
         this.flushFailures = 0;
         this.consecutiveFailures = 0;
         this.backoffUntil = 0;
+        this.spooledRows = 0;
+        this.replayedRows = 0;
+        this.alreadyCommitted = 0;
+        this.spoolErrors = 0;
+        this.droppedAfterStop = 0;
+        this.skippedReplayMongoAuthoritative = 0;
+        this.everEnabled = false;
+        this.afterStopLogged = false;
+        this.lastSummarySig = "0,0,0,0,0,0,0,0,0";
+        this.lastSummaryAt = 0;
         this.connectionString = (options.connectionString ?? "").trim();
         this.poolFactory = options.poolFactory;
         this.logger = options.logger ?? { info: () => { }, warn: () => { } };
+        this.onLoss = options.onLoss;
+        this.onStall = options.onStall;
+        this.readProcEnviron = options.readProcEnviron ?? defaultReadProcEnviron;
+        const envShutdown = Number(process.env.SHUTDOWN_TIMEOUT);
         this.opts = {
             maxBufferedRows: options.maxBufferedRows ?? DEFAULTS.maxBufferedRows,
-            batchSize: options.batchSize ?? DEFAULTS.batchSize,
+            batchSize: Math.max(1, options.batchSize ?? DEFAULTS.batchSize),
             flushIntervalMs: options.flushIntervalMs ?? DEFAULTS.flushIntervalMs,
             backoffBaseMs: options.backoffBaseMs ?? DEFAULTS.backoffBaseMs,
             backoffMaxMs: options.backoffMaxMs ?? DEFAULTS.backoffMaxMs,
             queryTimeoutMs: options.queryTimeoutMs ?? DEFAULTS.queryTimeoutMs,
             stopTimeoutMs: options.stopTimeoutMs ?? DEFAULTS.stopTimeoutMs,
+            killWindowMs: options.killWindowMs
+                ?? (Number.isFinite(envShutdown) && envShutdown > 0 ? envShutdown : DEFAULTS.killWindowMs),
+            maxSpoolBytes: options.maxSpoolBytes ?? DEFAULTS.maxSpoolBytes,
             now: options.now ?? (() => Date.now()),
+            counterFlushIntervalMs: options.counterFlushIntervalMs ?? DEFAULTS.counterFlushIntervalMs,
         };
+        this.spoolDir = options.spoolDir ?? defaultSpoolDir();
+        this.instanceKey = sanitizeInstanceKey(options.instanceKey ?? process.env.name ?? process.env.clientId ?? "default");
+        // <key>-<13-digit epoch ms>-<rand>.jsonl[.claimed-<pid>-<key>] — the strict shape stops
+        // "tg-aut" from claiming "tg-aut-1"'s files.
+        this.spoolPattern = new RegExp(`^${this.instanceKey}-(\\d{13})-[a-z0-9]+\\.jsonl(?:\\.claimed-(\\d+)(?:-${this.instanceKey})?)?$`);
     }
-    /**
-     * Rule 1: never throws, never awaits a connection. Returns whether analytics is on, purely so a
-     * caller can log it — no caller is required to check.
-     */
+    /** Rule 1: never throws, never awaits a connection. */
     async start() {
         if (!this.connectionString) {
             this.disable("ANALYTICS_DB_URL not set — analytics disabled (this is a supported configuration)");
@@ -4834,8 +5015,6 @@ class AnalyticsSink {
             this.disable("ANALYTICS_DB_URL is not a postgres:// URL — analytics disabled");
             return false;
         }
-        // loadPgFactory() returns `| null` while poolFactory is `| undefined`; the `if (!factory)`
-        // guard below treats them identically, so the local holds both rather than casting.
         let factory = this.poolFactory;
         if (!factory) {
             factory = await this.loadPgFactory();
@@ -4852,23 +5031,26 @@ class AnalyticsSink {
             return false;
         }
         this.enabled = true;
+        this.everEnabled = true;
         this.disabledReason = "";
         this.stopped = false;
+        this.finalSpilled = false;
+        this.claimSpoolFiles();
+        this.reportOrphanSpools();
+        this.lastRescanAt = this.opts.now();
+        this.lastCounterDrainAt = this.opts.now();
+        this.drainCountersNow = false;
         this.timer = setInterval(() => { void this.flush(); }, this.opts.flushIntervalMs);
-        // Never hold the process open for analytics: an idle fleet must still be able to exit.
         this.timer.unref?.();
-        this.logger.info("[analytics] enabled");
+        // A process.exit() (server.js forces one after SHUTDOWN_TIMEOUT) skips any pending await, but
+        // 'exit' listeners still run synchronously: spill there so a slow shutdown loses nothing.
+        this.exitHook = () => { this.finalSpill("exit"); };
+        process.on("exit", this.exitHook);
+        this.log("info", `[analytics] enabled (spool ${this.spoolDir}/${this.instanceKey}-*)`);
         return true;
     }
-    /**
-     * `pg` is not a declared dependency (see the class doc). Loading it dynamically means its absence
-     * is a disabled sink rather than a module-resolution crash in a revenue-earning app.
-     */
     async loadPgFactory() {
         try {
-            // The specifier is built at runtime so TypeScript does not try to resolve `pg` at compile
-            // time. It is genuinely absent from this monorepo, and a hard import specifier would make
-            // `npm run typecheck` fail on an OPTIONAL feature.
             const specifier = "pg";
             const mod = await Function("s", "return import(s)")(specifier);
             const Pool = mod?.Pool ?? mod?.default?.Pool;
@@ -4878,21 +5060,14 @@ class AnalyticsSink {
                 const pool = new Pool({
                     connectionString,
                     max: 4,
-                    // Sydney from India: fail fast rather than tie up a handler's event loop.
                     connectionTimeoutMillis: 10000,
                     idleTimeoutMillis: 30000,
-                    // Bound every query client-side (pg) and server-side, so a half-open socket cannot hang.
                     query_timeout: this.opts.queryTimeoutMs,
                     statement_timeout: this.opts.queryTimeoutMs,
                     ssl: { rejectUnauthorized: false },
                 });
-                // A pg Pool emits 'error' when a client that is IDLE in the pool dies — a Postgres
-                // restart, an idle-timeout kill, a network reset. That is an EventEmitter 'error' with
-                // no listener, which Node escalates to an uncaughtException: it does NOT surface at the
-                // query() call site and no try/catch around flush() can see it. Measured 2026-10-02:
-                // without this listener the process exits; with it, it logs and carries on.
-                // This single line is what makes "analytics is optional" true — otherwise a Supabase
-                // blip takes down a revenue-earning Telegram process.
+                // An idle pg client dying emits 'error' on the Pool; without a listener Node escalates it
+                // to an uncaughtException and the revenue-earning process exits (measured 2026-10-02).
                 pool.on("error", (err) => {
                     console.error(`[analytics] idle pool client error (ignored): ${err.message}`);
                 });
@@ -4903,18 +5078,24 @@ class AnalyticsSink {
             return null;
         }
     }
+    /** Rule 3: a throwing logger must never escape a flush/spill/replay (no unhandled rejection). */
+    log(level, msg) {
+        try {
+            this.logger[level](msg);
+        }
+        catch { /* never */ }
+    }
     disable(reason) {
         this.enabled = false;
         this.disabledReason = reason;
-        this.logger.info(`[analytics] ${reason}`);
+        this.log("info", `[analytics] ${reason}`);
     }
     // ── recording ────────────────────────────────────────────────────────────────────────────────
-    // Rule 2: all three are synchronous and return void. There is nothing here for a caller to await
-    // and nothing for a caller to catch.
+    // Rule 2: synchronous, return void.
     recordPromotionSend(row) {
         this.enqueue({
             table: "promotion_send",
-            columns: ["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type"],
+            columns: TABLES.promotion_send.columns,
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.clientId, row.mobile, row.channelId,
@@ -4926,7 +5107,7 @@ class AnalyticsSink {
     recordConversion(row) {
         this.enqueue({
             table: "conversion_event",
-            columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"],
+            columns: TABLES.conversion_event.columns,
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.conversionId, row.chatId, row.channelId,
@@ -4935,49 +5116,69 @@ class AnalyticsSink {
         });
     }
     /**
-     * The ROLLUP mirror. `daily_client` is the only long-range history in the system: Mongo's three
-     * *StatsDaily collections carry a 14-day TTL (measured 2026-10-02: exactly 15 days present), so
-     * a day not copied here is gone for good once that TTL fires.
-     *
-     * Written in-process beside the Mongo $inc rather than exported later, which is what removes the
-     * need for any migration or coordinated restart: a process on the old build simply does not
-     * mirror, and Mongo stays correct either way.
-     *
-     * ACCUMULATES. Several mobiles share one clientId and each flush carries a partial delta, so the
-     * conflict clause adds rather than replaces — the same semantics as the Mongo $inc it mirrors.
-     * `revenue` is deliberately absent: userStatsDaily.revenue is measured 3.31x inflated, and the
-     * column stays 0 until it can be sourced from userData.payAmount.
+     * Per-client daily rollup. ACCUMULATES (ON CONFLICT ... + EXCLUDED), like the Mongo $inc it
+     * replaces. Deltas are coalesced in memory by (day, client_id, namespace) and drained each flush,
+     * so they never occupy the row buffer and are never lost to its overflow. `revenue` stays 0
+     * (revenue comes from payment_event).
      */
     recordDailyClient(row) {
-        const counters = [
-            ["sent", row.sent], ["delivered", row.delivered],
-            ["banned", row.banned], ["failed", row.failed],
-            ["new_users", row.newUsers], ["active_users", row.activeUsers],
-            ["payers", row.payers],
-            ["reactions_success", row.reactionsSuccess],
-            ["reactions_restricted", row.reactionsRestricted],
-            ["reactions_failed", row.reactionsFailed],
-            ["reactions_floods", row.reactionsFloods],
-        ];
-        // Only the counters actually present are written. An all-zero row would still create the
-        // (day, client_id, namespace) key and inflate row counts for a client that did nothing.
-        const present = counters.filter(([, v]) => typeof v === "number" && v !== 0);
-        if (present.length === 0)
+        this.recordCounters("daily_client", [row.day, row.clientId, row.namespace], null, row);
+    }
+    /** Per-mobile daily rollup: daily_client's counters keyed additionally by mobile. */
+    recordDailyMobile(row) {
+        this.recordCounters("daily_mobile", [row.day, row.clientId, row.namespace, row.mobile], row.profile || null, row);
+    }
+    /**
+     * Whether a record call is accepted. A sink that never started enabled (no URL, no driver) is a
+     * silent no-op — a supported configuration. One that WAS enabled keeps accepting while stop()
+     * drains (the final spill writes those rows); after the final spill a row has nowhere to go, so
+     * it is counted (droppedAfterStop), logged once and reported — never dropped uncounted.
+     */
+    accepting(rows = 1) {
+        if (this.enabled && !this.finalSpilled)
+            return true;
+        if (!this.everEnabled)
+            return false;
+        this.droppedAfterStop += rows;
+        if (!this.afterStopLogged) {
+            this.afterStopLogged = true;
+            this.log("warn", "[analytics] rows recorded after the sink stopped are dropped (counted droppedAfterStop)");
+        }
+        this.reportLoss("recorded after the analytics sink stopped", rows);
+        return false;
+    }
+    recordCounters(table, key, profile, row) {
+        if (!this.enabled && !this.everEnabled)
             return;
-        const cols = present.map(([c]) => c);
-        this.enqueue({
-            table: "daily_client",
-            columns: ["day", "client_id", "namespace", ...cols],
-            values: [row.day, row.clientId, row.namespace, ...present.map(([, v]) => v)],
-            conflictKeyCount: 3, // day, client_id, namespace
-            conflict: "ON CONFLICT (day, client_id, namespace) DO UPDATE SET "
-                + cols.map((c) => `${c} = daily_client.${c} + EXCLUDED.${c}`).join(", "),
+        const counters = COUNTER_FIELDS.map((f) => {
+            const v = row[f];
+            return typeof v === "number" && Number.isFinite(v) ? v : 0;
         });
+        // An all-zero row would still create the key and inflate row counts for a client that did nothing.
+        if (counters.every((v) => v === 0))
+            return;
+        if (key.some((v) => typeof v !== "string" || v === "")) {
+            this.droppedInvalid += 1;
+            return;
+        }
+        if (!this.accepting())
+            return;
+        this.enqueued += 1;
+        const keyStr = `${table}\u0000${key.join("\u0000")}`;
+        const seen = this.counters.get(keyStr);
+        if (!seen) {
+            this.counters.set(keyStr, { table, key: key, profile, counters });
+            return;
+        }
+        for (let i = 0; i < counters.length; i += 1)
+            seen.counters[i] += counters[i];
+        if (!seen.profile && profile)
+            seen.profile = profile;
     }
     recordPayment(row) {
         this.enqueue({
             table: "payment_event",
-            columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"],
+            columns: TABLES.payment_event.columns,
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.chatId, row.clientId, row.personaId, row.amount,
@@ -4987,60 +5188,187 @@ class AnalyticsSink {
         });
     }
     /**
-     * A row that violates a NOT NULL or CHECK constraint does not fail alone. `insertBatch` sends up
-     * to 500 rows as ONE multi-row INSERT, so Postgres rejects the whole statement — and rule 3 drops
-     * a failed batch without retrying, so 499 good rows die with the bad one, silently.
-     *
-     * The call sites make this reachable rather than theoretical: promotion-flow-runner coalesces a
-     * missing clientId/mobile/channelId to `''`, which satisfies NOT NULL but is a meaningless row,
-     * and payment_event has `CHECK (amount <> 0)`.
-     *
-     * So: reject the single bad row here, at enqueue, where it costs one row instead of a batch.
-     * Counted as droppedInvalid, never thrown — a send must not fail because analytics is unhappy.
+     * Reject a row that would violate NOT NULL / CHECK at enqueue, where it costs one row. Counted as
+     * droppedInvalid, never thrown. conversion_event.client_id is nullable on purpose.
      */
     isValid(row) {
-        // Only the columns the SCHEMA actually declares NOT NULL. conversion_event.client_id is
-        // deliberately nullable — a conversion belongs to a channel and a chat, not to one client —
-        // so rejecting a null there would drop every conversion row. Keyed by table because the same
-        // column name has different nullability in different tables.
         const required = REQUIRED_COLUMNS[row.table];
         for (const [i, col] of row.columns.entries()) {
             const v = row.values[i];
             if (required?.has(col) && (v === null || v === undefined || v === ""))
                 return false;
-            // payment_event.amount has CHECK (amount <> 0); a zero amount kills the whole batch.
             if (col === "amount" && row.table === "payment_event" &&
                 (v === null || v === undefined || v === 0))
                 return false;
         }
         return true;
     }
-    /** Rule 4: the buffer is hard-capped and the OLDEST rows are the ones discarded. */
     enqueue(row) {
-        if (!this.enabled || this.stopped)
+        if (!this.enabled && !this.everEnabled)
             return;
         if (!this.isValid(row)) {
             this.droppedInvalid += 1;
             return;
         }
+        if (!this.accepting())
+            return;
         this.enqueued += 1;
         this.buffer.push(row);
-        if (this.buffer.length > this.opts.maxBufferedRows) {
-            const overflow = this.buffer.length - this.opts.maxBufferedRows;
-            this.buffer.splice(0, overflow);
-            this.droppedOverflow += overflow;
+        this.enforceCap();
+    }
+    retryRows() {
+        let n = 0;
+        for (const b of this.retryQueue)
+            n += b.rows.length;
+        return n;
+    }
+    pendingSpillRows() {
+        let n = 0;
+        for (const b of this.pendingSpill)
+            n += b.rows.length;
+        return n;
+    }
+    /**
+     * Rule 4: memory is hard-capped. The oldest BUFFER rows move to `pendingSpill` in chunks (one
+     * chunk per overflow, so a stalled sink appends ~batchSize rows at a time, not one) and are
+     * written by an ASYNC spill scheduled with setImmediate: the record path never touches the disk.
+     * Retry batches move only when no flush is iterating the queue. If the disk cannot keep up and
+     * pendingSpill itself exceeds maxBufferedRows, its oldest rows are dropped (droppedSpoolFull).
+     */
+    enforceCap() {
+        const max = this.opts.maxBufferedRows;
+        let over = this.buffer.length + this.retryRows() - max;
+        if (over > 0) {
+            if (this.buffer.length > 0) {
+                const chunk = Math.min(this.buffer.length, Math.max(over, Math.min(this.opts.batchSize, Math.ceil(max / 10))));
+                this.pendingSpill.push(...this.toBatches(this.buffer.splice(0, chunk)));
+                over -= chunk;
+            }
+            while (over > 0 && !this.flushing && this.retryQueue.length > 0) {
+                const b = this.retryQueue.shift();
+                this.pendingSpill.push(b);
+                over -= b.rows.length;
+            }
+        }
+        let pending = this.pendingSpillRows();
+        let dropped = 0;
+        while (pending > max && this.pendingSpill.length > 0) {
+            const b = this.pendingSpill.shift();
+            pending -= b.rows.length;
+            if (b.file)
+                continue; // still on disk in its source file (kept: not released); not lost
+            dropped += b.rows.length;
+        }
+        if (dropped > 0) {
+            this.droppedSpoolFull += dropped;
+            this.reportLoss("spool cannot keep up (pending spill over the row cap)", dropped);
+        }
+        if (this.pendingSpill.length > 0)
+            this.scheduleSpill();
+    }
+    scheduleSpill() {
+        if (this.spillScheduled || this.spillInFlight)
+            return;
+        this.spillScheduled = true;
+        setImmediate(() => {
+            this.spillScheduled = false;
+            if (this.spillInFlight || this.finalSpilled)
+                return;
+            this.spillInFlight = this.drainPendingSpill().finally(() => {
+                this.spillInFlight = null;
+                if (this.pendingSpill.length > 0 && !this.finalSpilled)
+                    this.scheduleSpill();
+            });
+        });
+    }
+    /** Writes pendingSpill with fs.promises, one append at a time. Never throws. */
+    async drainPendingSpill() {
+        while (this.pendingSpill.length > 0 && !this.finalSpilled) {
+            const batches = this.pendingSpill.splice(0);
+            for (const b of batches)
+                this.spillingBatches.add(b);
+            try {
+                const plan = await this.planSpillAsync(batches);
+                if (plan && !this.finalSpilled) {
+                    const file = this.currentSpool && this.currentSpool.rows < SPOOL_ROTATE_ROWS
+                        ? this.currentSpool.file
+                        : (this.currentSpool = { file: this.newSpoolPath(), rows: 0 }).file;
+                    try {
+                        await fs__WEBPACK_IMPORTED_MODULE_1__.promises.appendFile(file, plan.text);
+                        this.spillDone(plan, file, "overflow");
+                    }
+                    catch (err) {
+                        this.spillFailed(plan.accepted, "overflow", err);
+                    }
+                }
+            }
+            catch (err) {
+                this.spillFailed(batches, "overflow", err);
+            }
+            finally {
+                for (const b of batches)
+                    this.spillingBatches.delete(b);
+            }
         }
     }
-    // ── flushing ─────────────────────────────────────────────────────────────────────────────────
+    async planSpillAsync(batches) {
+        const live = batches.filter((b) => b.rows.length > 0);
+        if (live.length === 0)
+            return null;
+        await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(this.spoolDir, { recursive: true });
+        let used = 0;
+        for (const name of await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readdir(this.spoolDir)) {
+            if (!this.spoolPattern.test(name))
+                continue;
+            try {
+                used += (await fs__WEBPACK_IMPORTED_MODULE_1__.promises.stat(path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name))).size;
+            }
+            catch { /* raced unlink */ }
+        }
+        return this.planSpill(live, used);
+    }
+    /** Groups rows by table and chunks them into id-carrying batches. */
+    toBatches(rows) {
+        const byTable = new Map();
+        for (const row of rows) {
+            const kind = batchKind(row.table);
+            const list = byTable.get(kind);
+            if (list)
+                list.push(row);
+            else
+                byTable.set(kind, [row]);
+        }
+        const out = [];
+        for (const [table, list] of byTable) {
+            for (let i = 0; i < list.length; i += this.opts.batchSize) {
+                out.push({ id: (0,crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)(), table, rows: list.slice(i, i + this.opts.batchSize), firstAt: Date.now() });
+            }
+        }
+        return out;
+    }
     /**
-     * Rules 3 and 5. Resolves always; rejects never.
-     *
-     * A call made while a flush is already running JOINS it rather than returning at once. The old
-     * early return let stop() run pool.end() under a timer flush that was still inserting (the
-     * rest of its loop then failed against the ended pool), and let a caller see `buffered === 0`
-     * while a spliced-out batch was still mid-INSERT. The running loop drains rows enqueued after
-     * it started, so awaiting it is enough.
+     * Moves the coalesced counters into id-carrying `daily_counters` batches (end of the retry
+     * queue): daily_client and daily_mobile rows share ONE statement and ONE ledger id.
      */
+    drainCounters() {
+        this.lastCounterDrainAt = this.opts.now();
+        if (this.counters.size === 0)
+            return;
+        const rows = [];
+        for (const e of this.counters.values()) {
+            rows.push({
+                table: e.table,
+                columns: TABLES[e.table].columns,
+                values: e.table === "daily_mobile"
+                    ? [...e.key, e.profile, ...e.counters]
+                    : [...e.key, ...e.counters],
+            });
+        }
+        this.counters.clear();
+        this.retryQueue.push(...this.toBatches(rows));
+    }
+    // ── flushing ─────────────────────────────────────────────────────────────────────────────────
+    /** Rules 3 and 5. Resolves always; a concurrent call JOINS the running flush. */
     async flush() {
         if (this.inFlight)
             return this.inFlight;
@@ -5050,83 +5378,573 @@ class AnalyticsSink {
         return this.inFlight;
     }
     async flushOnce() {
-        if (!this.enabled || this.flushing || !this.pool)
+        if (!this.enabled || this.flushing || !this.pool || this.finalSpilled)
             return;
-        if (this.buffer.length === 0)
+        if (this.opts.now() < this.backoffUntil) {
+            this.maybeAlertStall();
+            this.maybeLogSummary();
             return;
-        if (this.opts.now() < this.backoffUntil)
-            return;
+        }
         this.flushing = true;
-        // A later group succeeding in the SAME flush must not clear the backoff a failing group armed
-        // (e.g. conversion_event OK while daily_client times out) — that would hammer the failing table.
         let failedThisFlush = false;
+        let statements = 0;
         try {
-            while (this.buffer.length > 0) {
-                // Stop the moment a failure has armed the backoff. Without this the `continue` below would
-                // keep draining the whole buffer one failing batch at a time during an outage — 10,000
-                // rows destroyed in a single flush instead of 500, with the backoff never consulted
-                // because it is only checked on ENTRY to flush().
-                if (this.opts.now() < this.backoffUntil)
-                    break;
-                const batch = this.buffer.splice(0, this.opts.batchSize);
-                const grouped = groupByTable(batch);
-                for (const [, rows] of grouped) {
-                    const table = rows[0].table;
+            while (!this.finalSpilled) {
+                if (this.retryQueue.length === 0) {
+                    if (failedThisFlush || statements >= MAX_STATEMENTS_PER_FLUSH)
+                        break;
+                    if (this.buffer.length > 0) {
+                        this.retryQueue.push(...this.toBatches(this.buffer.splice(0, this.opts.batchSize)));
+                    }
+                    else if (this.counters.size > 0 && (this.drainCountersNow
+                        || this.opts.now() - this.lastCounterDrainAt >= this.opts.counterFlushIntervalMs)) {
+                        this.drainCounters();
+                    }
+                    else if (!this.loadNextSpoolFile()) {
+                        break;
+                    }
+                    continue;
+                }
+                // One pass over the queue. A transient failure on a table skips that table's remaining
+                // batches for this flush but still gives the other tables their attempt (one table's
+                // outage must not stall the rest); the loop then stops on the armed backoff.
+                const failedTables = new Set();
+                let i = 0;
+                while (i < this.retryQueue.length && !this.finalSpilled) {
+                    const batch = this.retryQueue[i];
+                    if (failedTables.has(batch.table) || statements >= MAX_STATEMENTS_PER_FLUSH) {
+                        i += 1;
+                        continue;
+                    }
+                    this.retryQueue.splice(i, 1);
+                    statements += 1;
+                    this.inFlightBatches.add(batch);
+                    let outcome = "ok";
+                    let error;
                     try {
-                        await this.insertBatch(table, rows);
-                        this.written += rows.length;
+                        await this.insertBatch(batch);
+                    }
+                    catch (err) {
+                        error = err;
+                        outcome = classifyAnalyticsError(err);
+                    }
+                    this.inFlightBatches.delete(batch);
+                    if (outcome === "ok" || outcome === "committed") {
+                        this.written += batch.rows.length;
+                        if (outcome === "committed")
+                            this.alreadyCommitted += batch.rows.length;
+                        this.release(batch);
                         if (!failedThisFlush) {
                             this.consecutiveFailures = 0;
                             this.backoffUntil = 0;
+                            this.failingSince = 0;
                         }
-                    }
-                    catch (err) {
-                        // Rule 3: dropped, counted, never rethrown. These rows are gone on purpose — re-queueing
-                        // a batch that a constraint rejects would retry it forever and wedge the buffer.
-                        failedThisFlush = true;
-                        this.droppedError += rows.length;
-                        this.flushFailures += 1;
-                        this.consecutiveFailures += 1;
-                        this.applyBackoff();
-                        this.logger.warn(`[analytics] flush failed for ${table} (${rows.length} rows dropped): ${describe(err)}`);
-                        // Continue to the next GROUP rather than returning. The batch was already spliced out
-                        // of the buffer, so an early return silently discarded every remaining group in it —
-                        // including promotion_send and payment_event rows that had nothing to do with the
-                        // failure, and without counting them in droppedError. One table's bad statement must
-                        // not take the other tables' rows with it. The remaining groups in THIS batch still
-                        // get their chance; the while-loop above then breaks on the armed backoff.
                         continue;
                     }
+                    this.flushFailures += 1;
+                    if (this.finalSpilled)
+                        continue; // already on disk via the final spill
+                    if (outcome === "transient") {
+                        failedThisFlush = true;
+                        failedTables.add(batch.table);
+                        this.consecutiveFailures += 1;
+                        this.applyBackoff();
+                        this.noteFailure(error);
+                        this.retryQueue.splice(i, 0, batch); // keep its id and its place
+                        i += 1;
+                        this.log("warn", `[analytics] flush failed for ${batch.table} (${batch.rows.length} rows kept for retry): ${describe(error)}`);
+                        continue;
+                    }
+                    // Permanent: bisect to isolate the bad row(s). The failed statement committed nothing.
+                    // The halves' ids derive from the parent's, so if we crash after one half committed, the
+                    // replay of the parent (from the spool) re-derives the same id and gets 23505 = written.
+                    if (batch.rows.length > 1) {
+                        const mid = Math.ceil(batch.rows.length / 2);
+                        const halves = [
+                            { id: childBatchId(batch.id, "L"), table: batch.table, rows: batch.rows.slice(0, mid), file: batch.file, firstAt: batch.firstAt },
+                            { id: childBatchId(batch.id, "R"), table: batch.table, rows: batch.rows.slice(mid), file: batch.file, firstAt: batch.firstAt },
+                        ];
+                        if (batch.file)
+                            this.fileRefs.set(batch.file, (this.fileRefs.get(batch.file) ?? 0) + 1);
+                        batch.released = true; // replaced by its halves; the file ref moved to them
+                        this.retryQueue.splice(i, 0, ...halves);
+                        continue;
+                    }
+                    this.droppedError += 1;
+                    this.release(batch);
+                    this.log("warn", `[analytics] dropped 1 ${batch.table} row (permanent error): ${describe(error)}`);
+                    this.reportLoss(`${batch.table}: ${describe(error)}`, 1);
                 }
+                if (failedThisFlush || statements >= MAX_STATEMENTS_PER_FLUSH)
+                    break;
             }
+            if (!failedThisFlush)
+                this.maybeRescanSpool();
         }
         finally {
             this.flushing = false;
         }
+        this.enforceCap();
+        this.maybeAlertStall();
+        this.maybeLogSummary();
+    }
+    noteFailure(error) {
+        const now = this.opts.now();
+        if (this.failingSince === 0)
+            this.failingSince = now;
+        const e = error;
+        const code = typeof e?.code === "string" && e.code ? e.code : "no-code";
+        const msg = typeof e?.message === "string" ? e.message : String(error);
+        this.lastErrorText = `${code} ${msg}`.slice(0, 300);
+    }
+    /** Failing continuously for STALL_AFTER_MS → onStall, at most once per STALL_AFTER_MS. */
+    maybeAlertStall() {
+        if (!this.onStall || this.failingSince === 0 || this.consecutiveFailures === 0)
+            return;
+        const now = this.opts.now();
+        if (now - this.failingSince < STALL_AFTER_MS)
+            return;
+        if (this.lastStallAlertAt !== 0 && now - this.lastStallAlertAt < STALL_AFTER_MS)
+            return;
+        this.lastStallAlertAt = now;
+        const minutes = Math.round((now - this.failingSince) / 60000);
+        this.alert(`stalled: ${this.lastErrorText} (failing ${minutes} min, `
+            + `${this.retryRows() + this.buffer.length + this.counters.size} rows pending in memory)`);
+    }
+    alert(reason) {
+        if (!this.onStall)
+            return;
+        try {
+            this.onStall(reason);
+        }
+        catch { /* never let a notifier break the sink */ }
     }
     /** Rule 5: exponential, capped, and it STAYS backed off until the delay elapses. */
     applyBackoff() {
         const step = Math.min(this.opts.backoffMaxMs, this.opts.backoffBaseMs * 2 ** Math.min(this.consecutiveFailures - 1, 20));
         this.backoffUntil = this.opts.now() + step;
     }
-    async insertBatch(table, rows) {
-        rows = coalesceOnConflictKey(rows);
-        const columns = rows[0].columns;
-        const params = [];
-        const tuples = [];
-        for (const row of rows) {
-            const placeholders = row.values.map((value) => {
-                params.push(value);
-                return `$${params.length}`;
-            });
-            tuples.push(`(${placeholders.join(",")})`);
+    /**
+     * ONE statement: the batch marker and the rows commit or fail together. $1 is the batch id.
+     * A `daily_counters` batch writes daily_client AND daily_mobile in that same statement:
+     *   WITH _b AS (INSERT INTO analytics_batch ...), _c AS (INSERT INTO daily_client ... ON CONFLICT ...)
+     *   INSERT INTO daily_mobile ... ON CONFLICT ...
+     */
+    async insertBatch(batch) {
+        const params = [batch.id];
+        const inserts = [];
+        const tables = batch.table === COUNTERS_KIND ? ["daily_client", "daily_mobile"] : [batch.table];
+        for (const table of tables) {
+            const own = batch.table === COUNTERS_KIND ? batch.rows.filter((r) => r.table === table) : batch.rows;
+            if (own.length === 0)
+                continue;
+            const rows = coalesceOnConflictKey(own, TABLES[table]?.keyCount ?? 0);
+            const tuples = [];
+            for (const row of rows) {
+                const placeholders = row.values.map((value) => {
+                    params.push(value);
+                    return `$${params.length}`;
+                });
+                tuples.push(`(${placeholders.join(",")})`);
+            }
+            const conflict = TABLES[table]?.conflict ? ` ${TABLES[table].conflict}` : "";
+            inserts.push(`INSERT INTO ${table} (${rows[0].columns.join(",")}) VALUES ${tuples.join(",")}${conflict}`);
         }
-        const conflict = rows[0]?.conflict ? ` ${rows[0].conflict}` : "";
-        const sql = `INSERT INTO ${table} (${columns.join(",")}) VALUES ${tuples.join(",")}${conflict}`;
-        // Bounded even for an injected pool whose query never settles (rule 1: never wedge the process).
+        if (inserts.length === 0)
+            return;
+        const ctes = ["_b AS (INSERT INTO analytics_batch (batch_id) VALUES ($1))"];
+        inserts.slice(0, -1).forEach((sql, i) => ctes.push(`_c${i || ""} AS (${sql})`));
+        const sql = `WITH ${ctes.join(", ")} ${inserts[inserts.length - 1]}`;
         await withTimeout(Promise.resolve().then(() => this.pool.query(sql, params)), this.opts.queryTimeoutMs, `analytics query timed out after ${this.opts.queryTimeoutMs}ms`);
     }
-    /** Best-effort drain then close. Like everything else here, it never throws. */
+    // ── spool ────────────────────────────────────────────────────────────────────────────────────
+    newSpoolPath() {
+        const rand = Math.random().toString(36).slice(2, 10) || "0";
+        return path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${this.instanceKey}-${Date.now()}-${rand}.jsonl`);
+    }
+    spoolBytesUsed() {
+        let total = 0;
+        try {
+            for (const name of fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir)) {
+                if (!this.spoolPattern.test(name))
+                    continue;
+                try {
+                    total += fs__WEBPACK_IMPORTED_MODULE_1__.statSync(path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name)).size;
+                }
+                catch { /* raced unlink */ }
+            }
+        }
+        catch { /* no dir yet */ }
+        return total;
+    }
+    /**
+     * Picks what fits under maxSpoolBytes (given `used` bytes already on disk) and serialises it.
+     * Rows that do not fit are counted and reported — unless they came from a spool file still on
+     * disk, in which case they are not lost (the file is replayed later; ids keep it idempotent).
+     */
+    planSpill(live, used) {
+        const chunks = [];
+        const accepted = [];
+        let bytes = 0;
+        let rows = 0;
+        for (const b of live) {
+            const text = b.rows.map((r) => JSON.stringify({ b: b.id, f: b.firstAt, t: r.table, c: r.columns, v: r.values })).join("\n") + "\n";
+            const size = Buffer.byteLength(text);
+            if (used + bytes + size > this.opts.maxSpoolBytes) {
+                if (b.file)
+                    continue;
+                this.droppedSpoolFull += b.rows.length;
+                this.reportLoss(`spool full (${this.opts.maxSpoolBytes} bytes)`, b.rows.length);
+                continue;
+            }
+            chunks.push(text);
+            accepted.push(b);
+            bytes += size;
+            rows += b.rows.length;
+        }
+        return accepted.length === 0 ? null : { text: chunks.join(""), accepted, rows };
+    }
+    spillDone(plan, file, reason) {
+        if (this.currentSpool && this.currentSpool.file === file)
+            this.currentSpool.rows += plan.rows;
+        this.spooledRows += plan.rows;
+        for (const b of plan.accepted)
+            this.release(b);
+        if (reason !== "exit") {
+            this.log("warn", `[analytics] spooled ${plan.rows} rows to ${file} (${reason})`);
+        }
+    }
+    /**
+     * SYNCHRONOUS spill, used only by stop() and the process 'exit' hook (no event loop left to
+     * wait on). Never throws.
+     */
+    spillSync(batches, reason) {
+        const live = batches.filter((b) => b.rows.length > 0);
+        if (live.length === 0)
+            return;
+        let used = 0;
+        try {
+            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(this.spoolDir, { recursive: true });
+            used = this.spoolBytesUsed();
+        }
+        catch (err) {
+            this.spillFailed(live, reason, err);
+            return;
+        }
+        const plan = this.planSpill(live, used);
+        if (!plan)
+            return;
+        const file = this.newSpoolPath();
+        try {
+            fs__WEBPACK_IMPORTED_MODULE_1__.appendFileSync(file, plan.text);
+            this.spillDone(plan, file, reason);
+        }
+        catch (err) {
+            this.spillFailed(plan.accepted, reason, err);
+        }
+    }
+    spillFailed(batches, reason, err) {
+        this.spoolErrors += 1;
+        const lost = batches.filter((b) => !b.file).reduce((n, b) => n + b.rows.length, 0);
+        if (lost > 0) {
+            this.droppedOverflow += lost;
+            this.reportLoss(`spool write failed (${reason}): ${describe(err)}`, lost);
+        }
+        this.log("warn", `[analytics] spool write failed (${reason}, ${lost} rows lost): ${describe(err)}`);
+    }
+    /** A batch is resolved (written, dropped, or persisted elsewhere): release its source file. */
+    release(batch) {
+        if (batch.released)
+            return;
+        batch.released = true;
+        if (!batch.file)
+            return;
+        const left = (this.fileRefs.get(batch.file) ?? 1) - 1;
+        if (left > 0) {
+            this.fileRefs.set(batch.file, left);
+            return;
+        }
+        this.fileRefs.delete(batch.file);
+        try {
+            fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(batch.file);
+        }
+        catch (err) {
+            if (err?.code !== "ENOENT")
+                this.spoolErrors += 1;
+        }
+    }
+    /**
+     * Claims this instance's spool files: unclaimed `.jsonl`, plus `.claimed-<pid>-<key>` files whose
+     * owner is dead. The rename is atomic, so two processes can never both replay one file. Files
+     * older than SPOOL_MAX_AGE_MS are quarantined instead (see quarantineOld).
+     */
+    claimSpoolFiles() {
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir).sort();
+        }
+        catch {
+            return; // no spool yet
+        }
+        this.currentSpool = null; // never claim a file we are still appending to
+        for (const name of names) {
+            const m = this.spoolPattern.exec(name);
+            if (!m)
+                continue;
+            const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+            const pid = m[2] ? Number(m[2]) : null;
+            if (pid !== null) {
+                if (pid === process.pid) {
+                    // Ours from this very process: already loaded or queued, unless a previous sink in this
+                    // process left it (re-init after stop).
+                    if (this.fileRefs.has(from) || this.claimedFiles.includes(from))
+                        continue;
+                    this.claimedFiles.push(from);
+                    continue;
+                }
+                if (this.isOwnerAlive(pid))
+                    continue;
+            }
+            const base = name.replace(/\.claimed-.*$/, "");
+            const to = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`);
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(from, to);
+                this.claimedFiles.push(to);
+            }
+            catch { /* another process claimed it first */ }
+        }
+    }
+    /**
+     * A `.claimed-<pid>` owner is alive only if the pid exists AND is still an instance of this key:
+     * pm2 restarts recycle pids, so an unrelated process may hold the number. /proc/<pid>/environ is
+     * checked for name=<key> or clientId=<key> (Linux; unreadable elsewhere → the pid check alone).
+     * A false "dead" is safe: the live owner's batches carry ids, so a double replay dedupes.
+     */
+    isOwnerAlive(pid) {
+        if (!isPidAlive(pid))
+            return false;
+        let environ = null;
+        try {
+            environ = this.readProcEnviron(pid);
+        }
+        catch {
+            environ = null;
+        }
+        if (environ === null)
+            return true;
+        for (const entry of environ.split("\0")) {
+            const eq = entry.indexOf("=");
+            if (eq < 0)
+                continue;
+            const k = entry.slice(0, eq);
+            if ((k === "name" || k === "clientId") && sanitizeInstanceKey(entry.slice(eq + 1)) === this.instanceKey) {
+                return true;
+            }
+        }
+        return false;
+    }
+    /** Epoch ms from a spool file name; the fallback first-attempt time for lines without `f`. */
+    fileEpoch(file) {
+        const m = this.spoolPattern.exec(path__WEBPACK_IMPORTED_MODULE_3__.basename(file));
+        return m ? Number(m[1]) : Date.now();
+    }
+    /**
+     * Batches whose FIRST attempt is older than 6 days are NOT replayed: analytics_batch prunes ids
+     * after 7 days, so a replay of a batch that did commit could no longer be recognised and would
+     * double count. Their lines go to <spoolDir>/quarantine/<file> (kept for a manual decision) and
+     * are reported once per file via onLoss. Age is per batch, not per file: a re-spill writes old
+     * batches into a new file, and an overflow file can collect fresh batches for a long time.
+     */
+    quarantineLines(file, lines, batches) {
+        if (lines.length === 0)
+            return;
+        const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, "quarantine");
+        try {
+            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(dir, { recursive: true });
+            fs__WEBPACK_IMPORTED_MODULE_1__.appendFileSync(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file)), lines.join("\n") + "\n");
+            this.log("warn", `[analytics] quarantined ${lines.length} spooled row(s) (${batches} batch(es)) first attempted over 6 days ago, in ${dir}`);
+            this.reportLoss(`quarantined old spool (${batches} batch(es) first attempted over 6 days ago, in ${dir})`, lines.length);
+        }
+        catch (err) {
+            this.spoolErrors += 1;
+            this.log("warn", `[analytics] cannot quarantine ${lines.length} old row(s) from ${file}: ${describe(err)}`);
+            this.reportLoss(`old spool rows could not be quarantined: ${describe(err)}`, lines.length);
+        }
+    }
+    /**
+     * Spool files of OTHER instance keys untouched for over 24 h (an app renamed or removed from the
+     * ecosystem): never adopted (their key owns them), but logged and alerted once at start.
+     */
+    reportOrphanSpools() {
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir);
+        }
+        catch {
+            return;
+        }
+        const byKey = new Map();
+        for (const name of names) {
+            const m = /^(.+)-\d{13}-[a-z0-9]+\.jsonl(?:\.claimed-.*)?$/.exec(name);
+            if (!m || this.spoolPattern.test(name))
+                continue;
+            const file = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+            try {
+                if (Date.now() - fs__WEBPACK_IMPORTED_MODULE_1__.statSync(file).mtimeMs <= ORPHAN_AFTER_MS)
+                    continue;
+                const seen = byKey.get(m[1]) ?? { files: 0, rows: 0 };
+                seen.files += 1;
+                seen.rows += countLines(file);
+                byKey.set(m[1], seen);
+            }
+            catch { /* raced */ }
+        }
+        if (byKey.size === 0)
+            return;
+        const list = [...byKey].map(([k, v]) => `${k} (${v.files} file(s), ${v.rows} rows)`).join(", ");
+        this.log("warn", `[analytics] orphan spool files untouched > 24 h in ${this.spoolDir}: ${list}`);
+        this.alert(`orphan spool in ${this.spoolDir}, not adopted: ${list}`);
+    }
+    /** Loads the next claimed file into the retry queue. Returns whether anything was queued. */
+    loadNextSpoolFile() {
+        while (this.claimedFiles.length > 0) {
+            const file = this.claimedFiles.shift();
+            let text;
+            try {
+                text = fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(file, "utf8");
+            }
+            catch (err) {
+                if (err?.code !== "ENOENT")
+                    this.spoolErrors += 1;
+                continue;
+            }
+            const batches = new Map();
+            const oldLines = new Map();
+            const fallbackAt = this.fileEpoch(file);
+            let rows = 0;
+            let corrupt = 0;
+            let skippedCounters = 0;
+            // Soak period (Mongo writes ON): the nightly backfill restores counter days before yesterday
+            // from Mongo with GREATEST, so replaying spooled counters for those days on top would double
+            // count. Decided per ROW (a combined daily_counters batch can mix days); the remaining rows
+            // keep the batch id, so a batch that did commit still dedupes. Event rows always replay.
+            const mongoOn = mongoDailyWritesOn();
+            const yesterday = istDay(Date.now() - 86400000);
+            for (const line of text.split("\n")) {
+                if (!line.trim())
+                    continue;
+                let rec;
+                try {
+                    rec = JSON.parse(line);
+                }
+                catch {
+                    this.spoolErrors += 1;
+                    corrupt += 1;
+                    continue;
+                }
+                const table = typeof rec.t === "string" ? rec.t : "";
+                const spec = TABLES[table];
+                // Table and columns are validated against the known schema: the SQL text is never built
+                // from file content.
+                if (!spec || typeof rec.b !== "string" || !Array.isArray(rec.v) || !Array.isArray(rec.c)
+                    || rec.c.length !== spec.columns.length || rec.c.some((c, i) => c !== spec.columns[i])
+                    || rec.v.length !== spec.columns.length) {
+                    this.spoolErrors += 1;
+                    corrupt += 1;
+                    continue;
+                }
+                const firstAt = typeof rec.f === "number" && Number.isFinite(rec.f) ? rec.f : fallbackAt;
+                if (Date.now() - firstAt > SPOOL_MAX_AGE_MS) {
+                    const list = oldLines.get(rec.b) ?? [];
+                    list.push(line);
+                    oldLines.set(rec.b, list);
+                    continue;
+                }
+                if (mongoOn && batchKind(table) === COUNTERS_KIND) {
+                    const day = rec.v[0] instanceof Date ? istDay(rec.v[0].getTime()) : String(rec.v[0] ?? "").slice(0, 10);
+                    if (day < yesterday) {
+                        skippedCounters += 1;
+                        continue;
+                    }
+                }
+                let batch = batches.get(rec.b);
+                if (!batch) {
+                    batch = { id: rec.b, table: batchKind(table), rows: [], file, firstAt };
+                    batches.set(rec.b, batch);
+                }
+                batch.rows.push({ table, columns: spec.columns, values: rec.v });
+                rows += 1;
+            }
+            if (corrupt > 0) {
+                this.log("warn", `[analytics] ${corrupt} corrupt/partial line(s) skipped in ${file}`);
+                this.reportLoss(`corrupt spool line (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)})`, corrupt);
+            }
+            this.quarantineLines(file, [...oldLines.values()].flat(), oldLines.size);
+            if (skippedCounters > 0) {
+                this.skippedReplayMongoAuthoritative += skippedCounters;
+                this.log("info", `[analytics] ${skippedCounters} spooled counter row(s) for days before ${yesterday} not replayed `
+                    + `from ${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)}: Mongo writes are on and the nightly backfill restores them (no double count)`);
+            }
+            if (batches.size === 0) {
+                try {
+                    fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(file);
+                }
+                catch { /* ignore */ }
+                continue;
+            }
+            this.fileRefs.set(file, batches.size);
+            this.retryQueue.push(...batches.values());
+            this.replayedRows += rows;
+            this.log("info", `[analytics] replaying ${rows} spooled rows from ${file}`);
+            return true;
+        }
+        return false;
+    }
+    /** Healthy and idle: pick up files spilled at runtime (overflow) or left by a dead process. */
+    maybeRescanSpool() {
+        if (this.retryQueue.length > 0 || this.buffer.length > 0 || this.claimedFiles.length > 0)
+            return;
+        // claimSpoolFiles renames files; never while an async append may be writing one of them.
+        if (this.spillInFlight || this.spillScheduled || this.pendingSpill.length > 0)
+            return;
+        const now = this.opts.now();
+        if (now - this.lastRescanAt < SPOOL_RESCAN_MS)
+            return;
+        this.lastRescanAt = now;
+        this.claimSpoolFiles();
+    }
+    /**
+     * Synchronously writes EVERYTHING still pending — buffer, retry batches, in-flight batches (their
+     * query may still land; the id makes the replay a no-op then) and the coalesced counters.
+     */
+    finalSpill(reason) {
+        if (this.finalSpilled || !this.pool)
+            return;
+        this.finalSpilled = true;
+        try {
+            this.drainCounters();
+            const batches = [
+                ...this.inFlightBatches,
+                ...this.spillingBatches, // the async append may not land; a duplicate on disk dedupes by id
+                ...this.pendingSpill,
+                ...this.retryQueue,
+                ...this.toBatches(this.buffer),
+            ];
+            this.retryQueue = [];
+            this.pendingSpill = [];
+            this.buffer = [];
+            this.spillSync(batches, reason);
+        }
+        catch (err) {
+            this.spoolErrors += 1;
+            this.log("warn", `[analytics] final spill failed: ${describe(err)}`);
+        }
+    }
+    /**
+     * Bounded drain, then a synchronous spill of whatever is left, then close. Never throws.
+     * Drain budget = min(stopTimeoutMs, killWindowMs - 1 s), so the spill always runs before pm2's
+     * kill (server.js exits after SHUTDOWN_TIMEOUT; the 'exit' hook covers that too).
+     */
     async stop() {
         this.stopped = true;
         if (this.timer) {
@@ -5134,37 +5952,92 @@ class AnalyticsSink {
             this.timer = null;
         }
         const pool = this.pool;
-        try {
-            // One deadline for drain + close: a hung query or a pool.end() that never resolves must not
-            // hang application shutdown.
-            await withTimeout((async () => {
-                try {
-                    this.backoffUntil = 0;
-                    // The first call may only join a timer flush that started before stop(); the second
-                    // drains anything that flush left behind (e.g. it broke out on an armed backoff).
-                    await this.flush();
-                    this.backoffUntil = 0;
-                    await this.flush();
-                }
-                catch { /* rule 3 */ }
-                try {
-                    await pool?.end();
-                }
-                catch { /* rule 3 */ }
-            })(), this.opts.stopTimeoutMs, `analytics stop timed out after ${this.opts.stopTimeoutMs}ms`);
+        if (pool && !this.finalSpilled) {
+            const startedAt = Date.now();
+            const drainMs = Math.max(0, Math.min(this.opts.stopTimeoutMs, this.opts.killWindowMs - 1000));
+            try {
+                await withTimeout((async () => {
+                    try {
+                        this.drainCountersNow = true;
+                        this.backoffUntil = 0;
+                        await this.flush();
+                        this.backoffUntil = 0;
+                        await this.flush();
+                        if (this.spillInFlight)
+                            await this.spillInFlight;
+                    }
+                    catch { /* rule 3 */ }
+                })(), drainMs, `analytics drain timed out after ${drainMs}ms`);
+            }
+            catch (err) {
+                this.log("warn", `[analytics] ${describe(err)} (spilling the rest to disk)`);
+            }
+            this.finalSpill("stop");
+            this.maybeLogSummary(true);
+            // Close only once nothing is in flight; a query against an ended pool would fail a batch
+            // that may still succeed. Bounded either way.
+            try {
+                await withTimeout((async () => {
+                    try {
+                        await this.inFlight;
+                    }
+                    catch { /* rule 3 */ }
+                    try {
+                        await pool.end();
+                    }
+                    catch { /* rule 3 */ }
+                })(), 
+                // Whatever is left of the kill window (keeping 0.5 s for the rest of shutdown), 0.1-1 s.
+                Math.max(100, Math.min(1000, this.opts.stopTimeoutMs, startedAt + this.opts.killWindowMs - 500 - Date.now())), "analytics pool.end timed out");
+            }
+            catch (err) {
+                this.log("warn", `[analytics] ${describe(err)} (abandoning pool)`);
+            }
         }
-        catch (err) {
-            this.logger.warn(`[analytics] ${describe(err)} (abandoning pool)`);
+        if (this.exitHook) {
+            process.removeListener("exit", this.exitHook);
+            this.exitHook = null;
         }
         this.pool = null;
         this.enabled = false;
         this.disabledReason = "stopped";
     }
+    reportLoss(reason, rows) {
+        if (!this.onLoss || rows <= 0)
+            return;
+        try {
+            this.onLoss(reason, rows);
+        }
+        catch { /* never let a notifier break the sink */ }
+    }
+    /** At most every 10 min, and only when a drop/retry/spool counter changed. */
+    maybeLogSummary(force = false) {
+        const s = this.stats();
+        const sig = [s.droppedOverflow, s.droppedError, s.droppedSpoolFull, s.retryPending,
+            s.spooledRows, s.replayedRows, s.alreadyCommitted, s.flushFailures, s.spoolErrors].join(",");
+        if (sig === this.lastSummarySig)
+            return;
+        const now = this.opts.now();
+        if (!force && this.lastSummaryAt !== 0 && now - this.lastSummaryAt < SUMMARY_INTERVAL_MS)
+            return;
+        this.lastSummarySig = sig;
+        this.lastSummaryAt = now;
+        try {
+            this.log("info", `[analytics] summary written=${s.written} buffered=${s.buffered} retryPending=${s.retryPending} `
+                + `spooled=${s.spooledRows} replayed=${s.replayedRows} alreadyCommitted=${s.alreadyCommitted} `
+                + `droppedOverflow=${s.droppedOverflow} droppedError=${s.droppedError} droppedSpoolFull=${s.droppedSpoolFull} `
+                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors}`);
+        }
+        catch { /* never */ }
+    }
     stats() {
         return {
             enabled: this.enabled,
             disabledReason: this.disabledReason,
-            buffered: this.buffer.length,
+            buffered: this.buffer.length + this.counters.size,
+            pendingSpill: this.pendingSpillRows(),
+            droppedAfterStop: this.droppedAfterStop,
+            skippedReplayMongoAuthoritative: this.skippedReplayMongoAuthoritative,
             enqueued: this.enqueued,
             written: this.written,
             droppedOverflow: this.droppedOverflow,
@@ -5173,68 +6046,55 @@ class AnalyticsSink {
             flushFailures: this.flushFailures,
             consecutiveFailures: this.consecutiveFailures,
             backoffUntil: this.backoffUntil,
+            retryPending: this.retryRows(),
+            spooledRows: this.spooledRows,
+            replayedRows: this.replayedRows,
+            droppedSpoolFull: this.droppedSpoolFull,
+            alreadyCommitted: this.alreadyCommitted,
+            spoolErrors: this.spoolErrors,
         };
     }
 }
 /**
- * Groups by table AND by the exact write shape. insertBatch takes its column list and ON CONFLICT
- * tail from rows[0] and applies them to the whole batch, so two rows may only share a statement if
- * both match. Keying on the table alone was safe while every table had one shape; daily_client
- * arrives with a conflict clause, so the key has to carry it or a future second shape for the same
- * table would be written with the wrong columns.
+ * Sums rows that share a conflict key, so a multi-row upsert never names the same key twice
+ * (SQLSTATE 21000 fails the whole statement). Deterministic on a fixed row set, so a retried batch
+ * always produces the same statement. Key columns lead; numeric columns are summed, a null text
+ * column (daily_mobile.profile) takes the first non-null value.
  */
-function groupByTable(rows) {
-    const grouped = new Map();
-    for (const row of rows) {
-        const key = `${row.table}\u0000${row.columns.join(",")}\u0000${row.conflict ?? ""}`;
-        const existing = grouped.get(key);
-        if (existing)
-            existing.push(row);
-        else
-            grouped.set(key, [row]);
-    }
-    return grouped;
-}
-/**
- * Sums rows that share a conflict key, so a multi-row upsert never names the same key twice.
- *
- * Postgres fails the ENTIRE statement with SQLSTATE 21000 in that case, which would have dropped
- * every daily_client batch under real traffic (several mobiles share a clientId, and they land in
- * the same 5s flush). Reproduced against the live table 2026-10-02 before this existed.
- *
- * Only rows carrying a conflict clause are touched; the three append-only event tables want their
- * duplicates kept and pass straight through. Rows are already grouped by identical column list, so
- * summing is positional: the key columns come first and the rest are counters.
- */
-function coalesceOnConflictKey(rows) {
-    const first = rows[0];
-    if (!first?.conflict || rows.length < 2)
-        return rows;
-    const keyLen = first.conflictKeyCount ?? 0;
-    if (keyLen <= 0)
+function coalesceOnConflictKey(rows, keyLen) {
+    if (keyLen <= 0 || rows.length < 2)
         return rows;
     const merged = new Map();
     for (const row of rows) {
         const key = row.values.slice(0, keyLen).join("\u0000");
         const seen = merged.get(key);
         if (!seen) {
-            // Copy the values: the row in the buffer must not be mutated.
             merged.set(key, { ...row, values: [...row.values] });
             continue;
         }
         for (let i = keyLen; i < row.values.length; i += 1) {
             const a = seen.values[i];
             const b = row.values[i];
-            // Counters only. Anything non-numeric keeps the first value rather than guessing.
             if (typeof a === "number" && typeof b === "number")
                 seen.values[i] = a + b;
+            else if ((a === null || a === undefined) && b !== null && b !== undefined)
+                seen.values[i] = b;
         }
     }
     return [...merged.values()];
 }
+function countLines(file) {
+    let n = 0;
+    for (const line of fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(file, "utf8").split("\n"))
+        if (line.trim())
+            n += 1;
+    return n;
+}
 function describe(err) {
-    if (err instanceof Error)
-        return err.message;
+    if (err instanceof Error) {
+        const code = err.code;
+        return typeof code === "string" && code ? `${err.message} [${code}]` : err.message;
+    }
     return String(err);
 }
 
@@ -5273,6 +6133,87 @@ __webpack_require__.r(__webpack_exports__);
  */
 let instance = null;
 let initInFlight = null;
+/** Bounds of the pre-init buffer (event rows; distinct counter keys). */
+const PRE_INIT_MAX_ROWS = 5000;
+const PRE_INIT_MAX_COUNTER_KEYS = 5000;
+/**
+ * What getAnalytics() returns while no sink is live: before the first init resolves (it awaits a
+ * dynamic `import('pg')`), and while a re-init replaces a stopped/disabled sink. It BUFFERS —
+ * bounded: 5,000 event rows (ts stamped at record time) plus the daily counters coalesced by key —
+ * and drains into the sink once init resolves. If init ends disabled because ANALYTICS_DB_URL is
+ * unset (a supported configuration) the buffer is discarded silently; any other disabled outcome
+ * discards it with one log line. Overflow is counted (droppedPreInit) and reported on drain.
+ */
+class PreInitRecorder {
+    constructor() {
+        this.events = [];
+        this.counters = new Map();
+        this.dropped = 0;
+    }
+    event(method, row) {
+        if (this.events.length >= PRE_INIT_MAX_ROWS) {
+            this.dropped += 1;
+            return;
+        }
+        this.events.push({ method, row: { ...row, ts: row.ts ?? new Date() } });
+    }
+    counter(method, row) {
+        const key = [method, row.day, row.clientId, row.namespace, row.mobile ?? ""].join("\u0000");
+        const seen = this.counters.get(key);
+        if (!seen) {
+            if (this.counters.size >= PRE_INIT_MAX_COUNTER_KEYS) {
+                this.dropped += 1;
+                return;
+            }
+            this.counters.set(key, { method, row: { ...row } });
+            return;
+        }
+        for (const [k, v] of Object.entries(row)) {
+            if (typeof v !== "number" || !Number.isFinite(v))
+                continue;
+            seen.row[k] = (typeof seen.row[k] === "number" ? seen.row[k] : 0) + v;
+        }
+        if (!seen.row.profile && row.profile)
+            seen.row.profile = row.profile;
+    }
+    recordPromotionSend(row) { this.event("recordPromotionSend", row); }
+    recordConversion(row) { this.event("recordConversion", row); }
+    recordPayment(row) { this.event("recordPayment", row); }
+    recordDailyClient(row) { this.counter("recordDailyClient", row); }
+    recordDailyMobile(row) { this.counter("recordDailyMobile", row); }
+    size() { return this.events.length + this.counters.size; }
+    /** Moves everything into `target` (in record order, counters last) and empties the buffer. */
+    drainInto(target) {
+        const events = this.events;
+        const counters = [...this.counters.values()];
+        this.events = [];
+        this.counters = new Map();
+        for (const { method, row } of events) {
+            try {
+                target[method](row);
+            }
+            catch { /* rule 3 */ }
+        }
+        for (const { method, row } of counters) {
+            try {
+                target[method](row);
+            }
+            catch { /* rule 3 */ }
+        }
+    }
+    /** Empties the buffer; returns how many entries (rows + counter keys) were discarded. */
+    discard() {
+        const n = this.size();
+        this.events = [];
+        this.counters = new Map();
+        return n;
+    }
+    stats() {
+        return { ...DISABLED.stats(), disabledReason: "analytics initialising (buffering)",
+            buffered: this.size(), droppedPreInit: this.dropped };
+    }
+}
+let preInit = new PreInitRecorder();
 /** Never throws. Returns true when analytics is actually on, only for logging. */
 function initAnalytics(options = {}) {
     // Both apps call this fire-and-forget from re-enterable bootstrap paths. Overlapping calls share
@@ -5290,43 +6231,87 @@ async function initAnalyticsOnce(options) {
     if (previous && previous.stats().enabled)
         return true;
     if (previous) {
+        // A stopped/disabled sink would drop (or count as lost) what is recorded during the swap:
+        // route records to the pre-init buffer instead until the new sink is live.
         instance = null;
         try {
             await previous.stop();
         }
         catch { /* stop() is total; never let it block init */ }
     }
+    let sink;
+    let enabled = false;
     try {
-        const sink = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink(options);
-        const enabled = await sink.start();
-        instance = sink;
-        return enabled;
+        sink = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink(options);
+        enabled = await sink.start();
     }
     catch {
         // Belt and braces: start() is already total, but a disabled sink must be the worst case here.
-        instance = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink({});
-        return false;
+        sink = new _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink({});
+        enabled = false;
     }
+    instance = sink;
+    settlePreInit(sink, enabled, options);
+    return enabled;
 }
-/** Always returns a usable object, even before init or after a failed init. */
+function settlePreInit(sink, enabled, options) {
+    const dropped = preInit.dropped;
+    preInit.dropped = 0;
+    if (enabled) {
+        preInit.drainInto(sink);
+        if (dropped > 0) {
+            try {
+                options.logger?.warn(`[analytics] ${dropped} row(s) recorded before init did not fit the pre-init buffer`);
+            }
+            catch { /* never */ }
+            try {
+                options.onLoss?.("pre-init buffer full", dropped);
+            }
+            catch { /* never */ }
+        }
+        return;
+    }
+    const discarded = preInit.discard();
+    const urlUnset = !(options.connectionString ?? "").trim();
+    if (urlUnset || discarded + dropped === 0)
+        return; // analytics off by configuration: nothing lost
+    try {
+        options.logger?.warn(`[analytics] ${discarded + dropped} row(s) recorded before init discarded: `
+            + `${sink.stats().disabledReason}`);
+    }
+    catch { /* never */ }
+}
+/** Always returns a usable object: the live sink, or the bounded pre-init buffer. */
 function getAnalytics() {
-    return instance ?? DISABLED;
+    return instance ?? preInit;
 }
+/**
+ * Stops the sink (bounded drain + spill). The stopped sink stays installed so a late record is
+ * COUNTED (droppedAfterStop) instead of vanishing; a later initAnalytics replaces it.
+ */
 async function shutdownAnalytics() {
+    if (initInFlight) {
+        try {
+            await initInFlight;
+        }
+        catch { /* total */ }
+    }
     const sink = instance;
-    instance = null;
     if (sink)
         await sink.stop();
 }
-/** Test seam. */
+/** Test seam. `null` also resets the pre-init buffer. */
 function __setAnalyticsForTests(sink) {
     instance = sink;
+    if (sink === null)
+        preInit = new PreInitRecorder();
 }
 const DISABLED = {
     recordPromotionSend: () => { },
     recordConversion: () => { },
     recordPayment: () => { },
     recordDailyClient: () => { },
+    recordDailyMobile: () => { },
     stats: () => ({
         enabled: false,
         disabledReason: "analytics not initialised",
@@ -5334,6 +6319,8 @@ const DISABLED = {
         droppedOverflow: 0, droppedError: 0,
         droppedInvalid: 0,
         flushFailures: 0, consecutiveFailures: 0, backoffUntil: 0,
+        retryPending: 0, spooledRows: 0, replayedRows: 0,
+        droppedSpoolFull: 0, alreadyCommitted: 0, spoolErrors: 0, pendingSpill: 0, droppedAfterStop: 0, skippedReplayMongoAuthoritative: 0,
     }),
 };
 
@@ -5350,15 +6337,95 @@ const DISABLED = {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   AnalyticsSink: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink),
-/* harmony export */   __setAnalyticsForTests: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.__setAnalyticsForTests),
-/* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.getAnalytics),
-/* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.initAnalytics),
-/* harmony export */   shutdownAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_1__.shutdownAnalytics)
+/* harmony export */   __setAnalyticsForTests: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.__setAnalyticsForTests),
+/* harmony export */   childBatchId: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.childBatchId),
+/* harmony export */   classifyAnalyticsError: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.classifyAnalyticsError),
+/* harmony export */   createAlertNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createAlertNotifier),
+/* harmony export */   createLossNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createLossNotifier),
+/* harmony export */   defaultSpoolDir: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.defaultSpoolDir),
+/* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics),
+/* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.initAnalytics),
+/* harmony export */   sanitizeInstanceKey: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.sanitizeInstanceKey),
+/* harmony export */   shutdownAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.shutdownAnalytics)
 /* harmony export */ });
 /* harmony import */ var _analytics_sink__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./analytics-sink */ "../../packages/tg-analytics/src/analytics-sink.ts");
-/* harmony import */ var _analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./analytics */ "../../packages/tg-analytics/src/analytics.ts");
+/* harmony import */ var _loss_notifier__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./loss-notifier */ "../../packages/tg-analytics/src/loss-notifier.ts");
+/* harmony import */ var _analytics__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./analytics */ "../../packages/tg-analytics/src/analytics.ts");
 
 
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-analytics/src/loss-notifier.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-analytics/src/loss-notifier.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   createAlertNotifier: () => (/* binding */ createAlertNotifier),
+/* harmony export */   createLossNotifier: () => (/* binding */ createLossNotifier)
+/* harmony export */ });
+function createRateLimited(send, format, options) {
+    const minIntervalMs = options.minIntervalMs ?? 30 * 60000;
+    const now = options.now ?? (() => Date.now());
+    let lastSentAt = null;
+    let pendingRows = 0;
+    let pendingCount = 0;
+    let pendingReasons = new Set();
+    let trailing = null;
+    const emit = () => {
+        try {
+            if (pendingCount === 0)
+                return;
+            lastSentAt = now();
+            const text = format(pendingRows, [...pendingReasons]);
+            pendingRows = 0;
+            pendingCount = 0;
+            pendingReasons = new Set();
+            const result = send(text);
+            if (result && typeof result.catch === "function") {
+                result.catch(() => { });
+            }
+        }
+        catch { /* a notifier must never break the sink */ }
+    };
+    return (reason, rows) => {
+        try {
+            pendingRows += rows;
+            pendingCount += 1;
+            if (pendingReasons.size < 5)
+                pendingReasons.add(String(reason).slice(0, 200));
+            const t = now();
+            if (lastSentAt === null || t - lastSentAt >= minIntervalMs) {
+                if (trailing) {
+                    clearTimeout(trailing);
+                    trailing = null;
+                }
+                emit();
+                return;
+            }
+            if (trailing)
+                return;
+            trailing = setTimeout(() => { trailing = null; emit(); }, Math.max(0, lastSentAt + minIntervalMs - t));
+            trailing?.unref?.();
+        }
+        catch { /* never */ }
+    };
+}
+/** `onLoss` callback: "<n> analytics row(s) lost: <reasons>". */
+function createLossNotifier(send, options = {}) {
+    return createRateLimited(send, (rows, reasons) => `${rows} analytics row(s) lost: ${reasons.join("; ")}`, options);
+}
+/** `onStall` callback (sink stalled, orphan spool): "analytics sink needs attention: <reasons>". */
+function createAlertNotifier(send, options = {}) {
+    const notify = createRateLimited(send, (_rows, reasons) => `analytics sink needs attention: ${reasons.join("; ")}`, options);
+    return (reason) => notify(reason, 0);
+}
 
 
 /***/ },
@@ -29496,10 +30563,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* binding */ DAILY_ANALYTICS_TTL_DAYS),
 /* harmony export */   DAILY_CLIENT_FIELD_MAP: () => (/* binding */ DAILY_CLIENT_FIELD_MAP),
-/* harmony export */   DailyStatsRepository: () => (/* binding */ DailyStatsRepository)
+/* harmony export */   DailyStatsRepository: () => (/* binding */ DailyStatsRepository),
+/* harmony export */   recordDailyAnalytics: () => (/* binding */ recordDailyAnalytics)
 /* harmony export */ });
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _daily_stats_switch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../daily-stats-switch */ "../../packages/tg-db/src/daily-stats-switch.ts");
+
 
 
 const DAILY_ANALYTICS_TTL_DAYS = 14;
@@ -29569,43 +30639,27 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
             clientId: key.clientId,
             mobile: key.mobile,
         };
-        const ok = await this.guardWrite(`record(${collectionName})`, () => this.connection.collection(collectionName).updateOne(filter, {
-            $inc: inc,
-            $setOnInsert: {
-                ...filter,
-                ...(key.profile ? { profile: key.profile } : {}),
-                expireAt: new Date(Date.now() + DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60 * 1000),
-                createdAt: new Date(),
-            },
-        }, { upsert: true }));
-        // ── Mirror into the OPTIONAL analytics store ────────────────────────────────────────────
-        // Mongo above is authoritative and awaited; this is a copy and nothing waits on it.
-        //
-        // WHY HERE: all three collections funnel through this one method, so this is the single
-        // point that sees every daily counter. Mirroring in-process is also what removes the need
-        // for a migration or a coordinated restart — a process still on the old build simply does
-        // not mirror, and Mongo stays correct either way.
-        //
-        // WHY IT MATTERS: these Mongo rows carry a 14-day TTL. daily_client is the ONLY place a
-        // long-range comparison can come from, so a day not copied is lost when the TTL fires.
-        //
-        // Only mirror a write that actually landed. guardWrite swallows a Mongo failure and
-        // returns false; mirroring anyway would leave Supabase counting increments the
-        // authoritative store does not have, and the drift is invisible and permanent.
-        //
-        // Wrapped and after the write: an optional sink must never affect the authoritative one.
-        if (!ok)
-            return ok;
-        try {
-            (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_0__.getAnalytics)().recordDailyClient({
-                day: key.date,
-                clientId: key.clientId,
-                namespace: key.namespace,
-                ...DAILY_CLIENT_FIELD_MAP[collectionName]?.(inc),
-            });
+        // ── Mongo (switchable) ──────────────────────────────────────────────────────────────────
+        // DAILY_STATS_MONGO_WRITES=off (case-insensitive, trimmed) retires the Mongo copy; read at
+        // CALL time (daily-stats-switch.ts) so the remote-config value applies without a code
+        // change. Anything else, or unset, keeps writing Mongo exactly as before.
+        const mongoOn = !(0,_daily_stats_switch__WEBPACK_IMPORTED_MODULE_2__.isMongoDailyWritesOff)();
+        let ok = true;
+        if (mongoOn) {
+            ok = await this.guardWrite(`record(${collectionName})`, () => this.connection.collection(collectionName).updateOne(filter, {
+                $inc: inc,
+                $setOnInsert: {
+                    ...filter,
+                    ...(key.profile ? { profile: key.profile } : {}),
+                    expireAt: new Date(Date.now() + DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60 * 1000),
+                    createdAt: new Date(),
+                },
+            }, { upsert: true }));
         }
-        catch { /* analytics is optional */ }
-        return ok;
+        // ── Postgres (daily_client + daily_mobile) ──────────────────────────────────────────────
+        // Recorded REGARDLESS of the Mongo result or the switch (see recordDailyAnalytics).
+        recordDailyAnalytics(collectionName, key, inc);
+        return mongoOn ? ok : true;
     }
     /**
      * TTL and daily-key indexes for all three collections. Idempotent.
@@ -29628,6 +30682,41 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
             await this.guardWrite(`ensureIndexes(${name}.daily_key)`, () => collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' }));
         }
     }
+}
+/**
+ * The Postgres half of a daily counter write: daily_client + daily_mobile, through the optional
+ * analytics sink. Standalone (no Mongo connection needed) so callers whose Mongo client or
+ * repository is unavailable still record the counters — Postgres must not depend on Mongo once
+ * DAILY_STATS_MONGO_WRITES=off. DailyStatsRepository.record() calls this too, so both paths share
+ * one field map. Never throws; an incomplete key or an empty increment is a no-op.
+ *
+ * WHY THIS MATTERS: Postgres is the long-range (and, with the switch off, the only) home of these
+ * counters. Before 2026-10-23 only a landed Mongo write was mirrored; that gate would now lose
+ * rows whenever Mongo blips. The sink retries, spools to disk and de-duplicates by batch id.
+ */
+function recordDailyAnalytics(collectionName, key, fields) {
+    try {
+        const inc = toIncrement(fields);
+        if (!inc || !key.clientId || !key.mobile || !key.date)
+            return;
+        const counters = DAILY_CLIENT_FIELD_MAP[collectionName]?.(inc) ?? {};
+        const analytics = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_0__.getAnalytics)();
+        analytics.recordDailyClient({
+            day: key.date,
+            clientId: key.clientId,
+            namespace: key.namespace,
+            ...counters,
+        });
+        analytics.recordDailyMobile({
+            day: key.date,
+            clientId: key.clientId,
+            namespace: key.namespace,
+            mobile: key.mobile,
+            profile: key.profile ?? null,
+            ...counters,
+        });
+    }
+    catch { /* analytics is optional */ }
 }
 /**
  * Keep only positive, finite numbers.
@@ -31586,6 +32675,35 @@ function describeError(error) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/daily-stats-switch.ts"
+/*!******************************************************!*\
+  !*** ../../packages/tg-db/src/daily-stats-switch.ts ***!
+  \******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isMongoDailyWritesOff: () => (/* binding */ isMongoDailyWritesOff)
+/* harmony export */ });
+/**
+ * DAILY_STATS_MONGO_WRITES switch for DailyStatsRepository.
+ *
+ * Kept OUT of collections/ on purpose: repositories must not read process.env (see
+ * tests/unit/packages/tg-db/package-invariants.test.mjs). This is the one config read the daily
+ * repository needs, and it must happen at CALL time so the remote-config value (copied into
+ * process.env at boot) applies without a code change.
+ *
+ * `off` (case-insensitive, trimmed) skips the Mongo *StatsDaily upsert; anything else, or unset,
+ * keeps writing Mongo. Rollback: unset the key (or `git revert` + redeploy).
+ */
+function isMongoDailyWritesOff() {
+    return (process.env.DAILY_STATS_MONGO_WRITES ?? '').trim().toLowerCase() === 'off';
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/database-info.ts"
 /*!*************************************************!*\
   !*** ../../packages/tg-db/src/database-info.ts ***!
@@ -31656,6 +32774,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
 /* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_10__.readDatabaseSize),
+/* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
 /* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.withErrorReporter)
@@ -44532,6 +45651,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:app");
+const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+    title,
+    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+    fields: [
+        { label: "Client", value: process.env.clientId || "unknown" },
+        { label: "Process", value: process.env.name || "unknown" },
+        { label: "Detail", value: text, code: false },
+    ],
+    tags: ["analytics", tag],
+}, "Failed to send analytics notification");
+const analyticsLossNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.createLossNotifier)((text) => sendAnalyticsNotice("Analytics rows lost", text, "data-loss"));
+const analyticsStallNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.createAlertNotifier)((text) => sendAnalyticsNotice("Analytics sink needs attention", text, "stalled"));
 function redactAuthQuery(url) {
     return (url || "").replace(/([?&](?:apiKey|apikey|api_key)=)[^&]*/gi, "$1[redacted]");
 }
@@ -44918,7 +46049,15 @@ class ExpressServer {
                 // unreachable Supabase, or an absent `pg` driver all resolve to "analytics disabled" and
                 // BOOT continues untouched. Placed after the Mongo connect so a failure here can never be
                 // confused with a real database problem.
-                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.initAnalytics)({ connectionString: process.env.ANALYTICS_DB_URL })
+                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.initAnalytics)({
+                    connectionString: process.env.ANALYTICS_DB_URL,
+                    logger,
+                    // Rows the sink definitively dropped (spool full/unwritable, a permanently bad row).
+                    // One operator message per 30 min per process at most; never throws.
+                    onLoss: analyticsLossNotifier,
+                    // Failing for 30 min (rows kept, not lost yet) or orphan spool files.
+                    onStall: analyticsStallNotifier,
+                })
                     .then((enabled) => logger.info(`[analytics] ${enabled ? "enabled" : "disabled"}`))
                     .catch(() => { });
                 await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_23__["default"].getInstance();
@@ -63508,10 +64647,7 @@ class UserDataDtoCrud {
      */
     async recordDaily(collection, mobile = process.env.mobile, inc = {}) {
         const clientId = process.env.clientId;
-        if (!clientId || !this.client || !mobile)
-            return;
-        const repository = this.dailyStatsRepository();
-        if (!repository)
+        if (!clientId || !mobile)
             return;
         const key = {
             date: this.todayKey(),
@@ -63520,6 +64656,13 @@ class UserDataDtoCrud {
             mobile,
             profile: process.env.dbcoll,
         };
+        // No Mongo client/repository: still record the Postgres counters (they must not depend
+        // on Mongo once DAILY_STATS_MONGO_WRITES=off). The Mongo write is skipped exactly as before.
+        const repository = this.client ? this.dailyStatsRepository() : null;
+        if (!repository) {
+            (0,_tg_db__WEBPACK_IMPORTED_MODULE_2__.recordDailyAnalytics)(collection, key, inc);
+            return;
+        }
         switch (collection) {
             case 'userStatsDaily':
                 await repository.recordUser(key, inc);
