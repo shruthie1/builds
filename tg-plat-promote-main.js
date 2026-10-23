@@ -14947,7 +14947,7 @@ const ChannelCategory = Object.freeze({
     UNAUTH_CALLS: 'UNAUTH_CALLS',
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
-    /** @unwantedupdates1: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
+    /** @unwantedupdates2: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
     UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
