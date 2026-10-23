@@ -4987,6 +4987,8 @@ class AnalyticsSink {
         this.spillingBatches = new Set();
         /** Temp files the async spill is writing right now → the batches in each. */
         this.spillTemps = new Map();
+        /** Makes quarantine file names unique within one process and millisecond. */
+        this.quarantineSeq = 0;
         this.spillScheduled = false;
         this.spillInFlight = null;
         /** When the current failure streak started (0 = healthy) and the last stall alert. */
@@ -5807,7 +5809,7 @@ class AnalyticsSink {
     /**
      * Claims this instance's spool files: unclaimed `.jsonl`, plus `.claimed-<pid>-<key>` files whose
      * owner is dead. The rename is atomic, so two processes can never both replay one file. Files
-     * older than SPOOL_MAX_AGE_MS are quarantined instead (see quarantineOld).
+     * older than SPOOL_MAX_AGE_MS are quarantined instead (see quarantineLines).
      */
     /** SYNC claim: start() only (before the timer runs). The flush path uses claimSpoolFilesAsync. */
     claimSpoolFiles() {
@@ -5821,7 +5823,7 @@ class AnalyticsSink {
         let recovered = false;
         for (const name of names) {
             const t = this.tempStep(name);
-            if (!t || (t.pid !== process.pid && this.isOwnerAlive(t.pid, this.environSync(t.pid))))
+            if (!t || (t.pid !== process.pid && this.isTempOwnerAlive(t.pid, this.environSync(t.pid))))
                 continue;
             let text;
             try {
@@ -5878,7 +5880,7 @@ class AnalyticsSink {
             if (this.finalSpilled)
                 return;
             const t = this.tempStep(name);
-            if (!t || (t.pid !== process.pid && this.isOwnerAlive(t.pid, await this.environAsync(t.pid))))
+            if (!t || (t.pid !== process.pid && this.isTempOwnerAlive(t.pid, await this.environAsync(t.pid))))
                 continue;
             let text;
             try {
@@ -6029,28 +6031,93 @@ class AnalyticsSink {
         return m ? Number(m[1]) : Date.now();
     }
     /**
+     * A spill temp's writer is dead only if its pid is gone, or the pid now belongs to ANOTHER app
+     * (its environ shows a different explicit name/clientId). A live pid whose environ is unreadable
+     * or carries neither key is treated as the writer: settling its temp would delete (and report
+     * lost) a copy that is still being written. `.claimed` files keep isOwnerAlive.
+     */
+    isTempOwnerAlive(pid, environ) {
+        if (!isPidAlive(pid))
+            return false;
+        if (environ === null)
+            return true;
+        let other = false;
+        for (const entry of environ.split("\0")) {
+            const eq = entry.indexOf("=");
+            if (eq < 0)
+                continue;
+            const k = entry.slice(0, eq);
+            if (k !== "name" && k !== "clientId")
+                continue;
+            if (sanitizeInstanceKey(entry.slice(eq + 1)) === this.instanceKey)
+                return true;
+            other = true;
+        }
+        return !other;
+    }
+    /** Batch ids already in quarantine files of this source (`<base>` or `<base>.q…`; temps skipped). */
+    async quarantinedIds(dir, base) {
+        const ids = new Set();
+        for (const name of await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readdir(dir)) {
+            if ((name !== base && !name.startsWith(`${base}.`)) || /\.tmp-\d+$/.test(name))
+                continue;
+            let text;
+            try {
+                text = await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readFile(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, name), "utf8");
+            }
+            catch {
+                continue;
+            } // pruned meanwhile
+            for (const line of text.split("\n")) {
+                try {
+                    const b = JSON.parse(line)?.b;
+                    if (typeof b === "string")
+                        ids.add(b);
+                }
+                catch { /* blank or torn line */ }
+            }
+        }
+        return ids;
+    }
+    /**
      * Batches whose FIRST attempt is older than 6 days are NOT replayed: analytics_batch prunes ids
      * after 7 days, so a replay of a batch that did commit could no longer be recognised and would
-     * double count. Their lines go to <spoolDir>/quarantine/<file> (kept for a manual decision) and
-     * are reported once per file via onLoss. Age is per batch, not per file: a re-spill writes old
+     * double count. Their lines go to <spoolDir>/quarantine/<base>.q<ms>-<pid>-<n> (kept for a manual
+     * decision) and are reported via onLoss. Age is per batch, not per file: a re-spill writes old
      * batches into a new file, and an overflow file can collect fresh batches for a long time.
+     *
+     * Dedupe is by batch id against this source's existing quarantine files: a stop after the rename
+     * but before the source is deleted leaves the source claimed, and the next load skips (silently,
+     * they were reported) the batches already quarantined, while a batch that aged past 6 days since
+     * then is quarantined and reported now instead of being dropped with the source.
      */
-    async quarantineLines(file, lines, batches) {
-        if (lines.length === 0)
+    async quarantineLines(file, old) {
+        if (old.size === 0)
             return;
         const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, "quarantine");
-        // Named by the source's base name (no .claimed suffix) and written via temp + rename: a stop
-        // during this await leaves the source claimed, and the next start finds the quarantine file
-        // already there instead of writing (and reporting) the same lines again.
-        const target = path__WEBPACK_IMPORTED_MODULE_3__.join(dir, path__WEBPACK_IMPORTED_MODULE_3__.basename(file).replace(/\.claimed-.*$/, ""));
+        const base = path__WEBPACK_IMPORTED_MODULE_3__.basename(file).replace(/\.claimed-.*$/, "");
+        let pending = 0;
+        for (const l of old.values())
+            pending += l.length;
         try {
             await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(dir, { recursive: true });
-            try {
-                await fs__WEBPACK_IMPORTED_MODULE_1__.promises.access(target);
-                this.log("info", `[analytics] ${path__WEBPACK_IMPORTED_MODULE_3__.basename(target)} already quarantined (an earlier run stopped before deleting its source)`);
-                return;
+            const done = await this.quarantinedIds(dir, base);
+            const lines = [];
+            let batches = 0;
+            for (const [id, l] of old) {
+                if (done.has(id))
+                    continue;
+                lines.push(...l);
+                batches += 1;
             }
-            catch { /* not quarantined yet */ }
+            if (pending > lines.length) {
+                this.log("info", `[analytics] ${pending - lines.length} old row(s) of ${base} already quarantined (an earlier run stopped before deleting its source)`);
+            }
+            pending = lines.length;
+            if (lines.length === 0)
+                return;
+            this.quarantineSeq += 1;
+            const target = path__WEBPACK_IMPORTED_MODULE_3__.join(dir, `${base}.q${Date.now()}-${process.pid}-${this.quarantineSeq}`);
             const tmp = `${target}.tmp-${process.pid}`;
             await fs__WEBPACK_IMPORTED_MODULE_1__.promises.writeFile(tmp, lines.join("\n") + "\n");
             await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(tmp, target);
@@ -6059,8 +6126,8 @@ class AnalyticsSink {
         }
         catch (err) {
             this.spoolErrors += 1;
-            this.log("warn", `[analytics] cannot quarantine ${lines.length} old row(s) from ${file}: ${describe(err)}`);
-            this.reportLoss(`old spool rows could not be quarantined: ${describe(err)}`, lines.length);
+            this.log("warn", `[analytics] cannot quarantine ${pending} old row(s) from ${file}: ${describe(err)}`);
+            this.reportLoss(`old spool rows could not be quarantined: ${describe(err)}`, pending);
         }
     }
     /**
@@ -6230,7 +6297,7 @@ class AnalyticsSink {
                 this.log("warn", `[analytics] ${corrupt} corrupt/partial line(s) skipped in ${file}`);
                 this.reportLoss(`corrupt spool line (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)})`, corrupt);
             }
-            await this.quarantineLines(file, [...oldLines.values()].flat(), oldLines.size);
+            await this.quarantineLines(file, oldLines);
             if (this.finalSpilled)
                 return false;
             if (batches.size === 0) {
