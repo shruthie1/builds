@@ -21811,7 +21811,7 @@ const ChannelCategory = Object.freeze({
     UNAUTH_CALLS: 'UNAUTH_CALLS',
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
-    /** @unwantedupdates1: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
+    /** @unwantedupdates2: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
     UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
@@ -69893,7 +69893,7 @@ async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastN
     }
 }
 /**
- * Non-payment photo: the client forwards it to @unwantedupdates1 with the text card; only when that forward fails, an
+ * Non-payment photo: the client forwards it to @unwantedupdates2 with the text card; only when that forward fails, an
  * UNWANTED_UPDATES bot posts the photo card there (postUnwantedPhoto; never UNVDS). Resolves true only when the PHOTO
  * landed; callers that delete the user's photo depend on it.
  */
@@ -73565,9 +73565,9 @@ async function forwardtoUnwanted(event, broadcastName) {
         // junk we don't want to keep. A failed post is only worth a log line (it's not evidence
         // we need to preserve), never a reason to leave the media in place.
         if (detection.mediaType === 'photo') {
-            // Photos (blocked user, over the daily limit, forwarded, image files): client to @unwantedupdates1, bot
+            // Photos (blocked user, over the daily limit, forwarded, image files): client to @unwantedupdates2, bot
             // there only if the client fails; never UNVDS (owner, 2026-10-23).
-            logger.log(`[Unwanted Media] Posting photo to @unwantedupdates1 from : ${broadcastName} | ${chatId}`);
+            logger.log(`[Unwanted Media] Posting photo to @unwantedupdates2 from : ${broadcastName} | ${chatId}`);
             const saved = await (0,_unwanted_photo__WEBPACK_IMPORTED_MODULE_10__.postUnwantedPhoto)({
                 event,
                 chatId,
@@ -74240,9 +74240,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:unwanted-photo");
-const UNWANTED_UPDATES_CHANNEL = "@unwantedupdates1";
+const UNWANTED_UPDATES_CHANNEL = "@unwantedupdates2";
 /**
- * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to @unwantedupdates1
+ * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to @unwantedupdates2
  * with a text card; only when that forward fails does a bot of the UNWANTED_UPDATES category post the photo with its
  * card to the same group. Photos never go to UNVDS (videos and other media only). A failed card after a successful
  * forward is no reason for a bot post (that was a double post). Resolves true only when the photo landed.
@@ -97236,7 +97236,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // Constants for initialization
-const DEFAULT_CHANNELS = "@clientupdates|@miscmessages|@unwantedupdates1";
+const DEFAULT_CHANNELS = "@clientupdates|@miscmessages|@unwantedupdates2";
 /**
  * Initialize setup
  */
