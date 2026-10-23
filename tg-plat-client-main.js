@@ -51934,18 +51934,21 @@ function rpcMessage(error) {
     const e = error;
     return String(e?.errorMessage ?? e?.message ?? error);
 }
-/** The chat behind the invite when this account is already in it (ChatInviteAlready / ChatInvitePeek), else null. */
+/** The chat behind the invite when this account is already in it (ChatInviteAlready only: Peek is a non-member preview), else null. */
 async function memberChat(client, hash) {
     const invite = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.CheckChatInvite({ hash }));
-    if (invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInviteAlready || invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInvitePeek)
+    if (invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInviteAlready)
         return invite.chat;
     return null;
 }
 /**
  * Joins the unwanted-updates group through UNWANTED_UPDATES_INVITE and keeps its chat. Never throws; no retries (a
- * failure leaves photos on the bot fallback until the next start). Resolves the chat, or null.
+ * failure leaves photos on the bot fallback until the next start). Resolves the chat, or null. A chat already resolved
+ * (initSetup re-runs after a runtime recovery) comes back with no Telegram call.
  */
 async function joinUnwantedUpdatesGroup(client) {
+    if (group)
+        return group;
     const raw = process.env.UNWANTED_UPDATES_INVITE;
     const hash = parseInviteHash(raw);
     if (!hash) {
@@ -74331,7 +74334,8 @@ const outboundQueue = new OutboundQueue({}, outboundBackup());
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   postUnwantedPhoto: () => (/* binding */ postUnwantedPhoto)
+/* harmony export */   postUnwantedPhoto: () => (/* binding */ postUnwantedPhoto),
+/* harmony export */   resetUnwantedPhotoCaps: () => (/* binding */ resetUnwantedPhotoCaps)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/forward-to-channel */ "./src/telegram/forward-to-channel.ts");
@@ -74342,17 +74346,70 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:unwanted-photo");
+// Session survival: each client post is 2 writes (forward + card). Over these caps the bot posts instead.
+const CLIENT_POST_WINDOW_MS = 10 * 60 * 1000;
+const MAX_CLIENT_POSTS_PER_CHAT = 3;
+const MAX_CLIENT_POSTS_PER_PROCESS = 20;
+const MAX_TRACKED_CHATS = 1000;
+const chatPosts = new Map();
+let processPosts = [];
+/** Group errors no retry fixes: the client stops trying the group until the next join. */
+const GROUP_GONE = /CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ID_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|CHAT_SEND_(?:PHOTOS|MEDIA)_FORBIDDEN|CHAT_ADMIN_REQUIRED/;
+/** Takes a client-post slot for chatId when both caps allow one; false = bot fallback. */
+function takeClientPostSlot(chatId, now = Date.now()) {
+    const cutoff = now - CLIENT_POST_WINDOW_MS;
+    processPosts = processPosts.filter((ts) => ts > cutoff);
+    const recent = (chatPosts.get(chatId) ?? []).filter((ts) => ts > cutoff);
+    if (recent.length >= MAX_CLIENT_POSTS_PER_CHAT || processPosts.length >= MAX_CLIENT_POSTS_PER_PROCESS) {
+        if (recent.length)
+            chatPosts.set(chatId, recent);
+        else
+            chatPosts.delete(chatId);
+        return false;
+    }
+    recent.push(now);
+    processPosts.push(now);
+    chatPosts.delete(chatId); // re-insert: Map order = last post, oldest first
+    chatPosts.set(chatId, recent);
+    for (const key of chatPosts.keys()) {
+        if (chatPosts.size <= MAX_TRACKED_CHATS)
+            break;
+        chatPosts.delete(key);
+    }
+    return true;
+}
+/** Tests only. */
+function resetUnwantedPhotoCaps() {
+    chatPosts.clear();
+    processPosts = [];
+}
+function errorText(error) {
+    const e = error;
+    return String(e?.errorMessage ?? e?.message ?? error);
+}
 /**
  * Every unwanted (non-payment) photo goes here (owner, 2026-10-23): the client account forwards it to the
  * unwanted-updates group (private; joined via UNWANTED_UPDATES_INVITE at start) with a text card; when the group is not
  * resolved or the forward fails, a bot of the UNWANTED_UPDATES category posts the photo with its card to the same group.
  * Photos never go to UNVDS (videos and other media only). A failed card after a successful forward is no reason for a
- * bot post (that was a double post). Resolves true only when the photo landed.
+ * bot post (that was a double post). Resolves true only when the photo landed. Client posts are capped per chat and
+ * per process (takeClientPostSlot); a forward the group refuses for good (GROUP_GONE) drops the group.
  */
 async function postUnwantedPhoto(post) {
     const { event, chatId } = post;
     const group = (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.getUnwantedUpdatesGroup)();
-    if (group && (await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__.forwardToChannel)(event, group))) {
+    const useClient = group != null && takeClientPostSlot(chatId);
+    if (group && !useClient)
+        logger.log(`[UnwantedPhoto] client post cap reached (chat ${chatId} or process): bot posts the photo`);
+    const onForwardError = (error) => {
+        const message = errorText(error);
+        const gone = message.match(GROUP_GONE)?.[0];
+        if (!gone || (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.getUnwantedUpdatesGroup)() !== group)
+            return;
+        (0,_channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.setUnwantedUpdatesGroup)(null);
+        logger.warn(`[UnwantedPhoto] unwanted-updates group refused the forward (${gone}): photos go via the bot until the next join`);
+    };
+    if (group && useClient && (await (0,_telegram_forward_to_channel__WEBPACK_IMPORTED_MODULE_1__.forwardToChannel)(event, group, onForwardError))) {
         try {
             await event.client.sendMessage(group, { message: post.text.slice(0, 1000) });
         }
@@ -82027,8 +82084,11 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
     // A different screenshot of a payment this chat was already credited for: neither shows a UTR, same amount, both
     // payment times readable and agreeing (owner 2026-10-21). A UTR on either side decides by the UTR rule above.
     // Same-day rule 4 (owner 2026-10-22): no UTR read here, the payment is older than RESEND_WINDOW_MS, and this user was
-    // already credited the same amount today (paymentDay; on any persona; the credited row may show a UTR): a re-send.
-    // A recent payment or another amount is a new payment (the ladder: ₹150, then ₹100; never "must be higher").
+    // already credited the same amount today (paymentDay; on any persona; the credited row may show a UTR) AT THE SAME
+    // PRINTED TIME (within SAME_TIME_MS; review fix 2026-10-23): a re-send. A credited row whose printed time is unknown
+    // or differs is another payment: a second genuine ₹100 hours later, sent 15+ min after paying, or one from a phone
+    // whose clock lags IST, is credited. A recent payment or another amount is a new payment (the ladder: ₹150, then
+    // ₹100; never "must be higher").
     const arrivalMs = facts.arrivalMs ?? nowMs;
     for (const row of chatServed) {
         if (!sameUser(facts, row) || (sameChat(facts, row) && row.telegramMsgId === facts.msgId) || facts.utr)
@@ -82036,7 +82096,10 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
         if (!sameAmount(row.amount, facts.amount) || facts.timeMs === null)
             continue;
         const theirTime = rowTimeMs(row);
-        if (sameChat(facts, row) && !normalizeUtr(row.utr) && theirTime !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
+        const samePrintedTime = theirTime !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS;
+        if (!samePrintedTime)
+            continue;
+        if (sameChat(facts, row) && !normalizeUtr(row.utr)) {
             return { kind: 'repeat', by: 'time', sameChat: true, matched: row };
         }
         const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
@@ -98562,8 +98625,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger( true ? __webpack_filename__ : 0);
-/** Never throws. Resolves true when the forward went through, false when it failed (logged here). */
-async function forwardToChannel(event, channel) {
+/** Never throws. Resolves true when the forward went through, false when it failed (logged here; onError gets the error). */
+async function forwardToChannel(event, channel, onError) {
     try {
         await event.message.forwardTo(channel);
         return true;
@@ -98574,6 +98637,7 @@ async function forwardToChannel(event, channel) {
             logger.warn("Failed to forward Message", errMsg);
         else
             logger.error("Failed to forward Message", errMsg);
+        onError?.(error);
         return false;
     }
 }
