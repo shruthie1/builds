@@ -5691,7 +5691,8 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             userId,
             inputCall: null,
             options: { ...this.defaults, ...stripUndefined(options) },
-            pendingTracks: new Set(video ? ['audio', 'video'] : ['audio']),
+            // A video with no audio stream is over when its video is; its silent audio track never ends.
+            pendingTracks: new Set(video ? (media.audio === false ? ['video'] : ['audio', 'video']) : ['audio']),
             timers: [],
             resolve: () => undefined,
             finished: false,
@@ -5714,7 +5715,9 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             throw new Error('Unexpected DH config response');
         await this.ntg.createP2pCall(call.userId);
         const { MediaSource, StreamMode } = this.ntgLib;
-        const audioCommand = (0,_media__WEBPACK_IMPORTED_MODULE_6__.audioShellCommand)(media.file, this.audio, this.ffmpeg, media.startSec);
+        const audioCommand = media.audio === false && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media)
+            ? (0,_media__WEBPACK_IMPORTED_MODULE_6__.silenceShellCommand)(this.audio, this.ffmpeg)
+            : (0,_media__WEBPACK_IMPORTED_MODULE_6__.audioShellCommand)(media.file, this.audio, this.ffmpeg, media.startSec);
         const shellMicrophone = {
             mediaSource: MediaSource.SHELL, input: audioCommand,
             sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: false,
@@ -6141,7 +6144,8 @@ class AudioFeeder {
             if (this.stopped)
                 return;
             // A failed launch or a crash is a media failure, not "the show finished".
-            // A clean exit with zero bytes is NOT a failure: a show video without an audio stream (e.g. video_1013) does that.
+            // A clean exit with zero bytes is NOT a failure. (A video without an audio stream, e.g. video_1013, makes
+            // ffmpeg 7 exit 234, not 0: the engine feeds such files a silent lavfi source instead, see media.audio.)
             const bad = (typeof code === 'number' && code !== 0) || !!signal;
             if (!bad)
                 return;
@@ -6361,6 +6365,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   enumName: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.enumName),
 /* harmony export */   isVideoFile: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.isVideoFile),
 /* harmony export */   shellQuote: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.shellQuote),
+/* harmony export */   silenceShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.silenceShellCommand),
 /* harmony export */   toBigInt: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toBigInt),
 /* harmony export */   toByteArray: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toByteArray),
 /* harmony export */   toRtcServers: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toRtcServers),
@@ -6401,6 +6406,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   audioShellCommand: () => (/* binding */ audioShellCommand),
 /* harmony export */   isVideoFile: () => (/* binding */ isVideoFile),
 /* harmony export */   shellQuote: () => (/* binding */ shellQuote),
+/* harmony export */   silenceShellCommand: () => (/* binding */ silenceShellCommand),
 /* harmony export */   videoShellCommand: () => (/* binding */ videoShellCommand),
 /* harmony export */   wantsVideo: () => (/* binding */ wantsVideo)
 /* harmony export */ });
@@ -6435,6 +6441,10 @@ function reconnectArgs(file) {
 // video (~13% of a core per call on the 2-vCPU VMs, measured 2026-10-10).
 function audioShellCommand(file, audio, ffmpeg = 'ffmpeg', startSec) {
     return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -vn -v quiet -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
+}
+/** Endless silence in the show's audio format, for a video with no audio stream (CallMedia.audio === false). */
+function silenceShellCommand(audio, ffmpeg = 'ffmpeg') {
+    return `${ffmpeg} -v quiet -f lavfi -i anullsrc=r=${audio.sampleRate}:cl=${audio.channels === 1 ? 'mono' : 'stereo'} -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
 }
 function videoShellCommand(file, video, ffmpeg = 'ffmpeg', startSec) {
     return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -an -v quiet -f rawvideo -r ${video.fps} -pix_fmt yuv420p -vf scale=${video.width}:${video.height}:force_original_aspect_ratio=increase,crop=${video.width}:${video.height},setsar=1 pipe:1`;
@@ -21827,6 +21837,8 @@ class BotConfig {
         this.refreshing = null;
         this.pendingUsage = new Map();
         this.usageFlushTimer = null;
+        /** Tokens Telegram answered 401 for: skipped for the life of the process (a revoked token never comes back). */
+        this.revokedTokens = new Set();
         this.BOT_REFRESH_MS = 30 * 60000;
         this.USAGE_FLUSH_MS = 60000;
         this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS = 60000;
@@ -21984,7 +21996,7 @@ class BotConfig {
                     logger.warn(`${key}: channel ${channelId} differs from the bots collection (${existing.channelId}); env ignored`);
                     continue;
                 }
-                const extraTokens = botTokens.filter(token => !existing?.botTokens.includes(token));
+                const extraTokens = botTokens.filter(token => !existing?.botTokens.includes(token) && !this.revokedTokens.has(token));
                 if (extraTokens.length === 0)
                     continue;
                 // Env tokens are not health-checked by CMS: validate them here.
@@ -22093,7 +22105,7 @@ class BotConfig {
             const channelId = typeof doc.channelId === 'string' ? doc.channelId.trim() : '';
             const token = typeof doc.token === 'string' ? doc.token.trim() : '';
             const username = typeof doc.username === 'string' ? doc.username.trim() : '';
-            if (!category || categoryMap.has(category) || !channelId || !token) {
+            if (!category || categoryMap.has(category) || !channelId || !token || this.revokedTokens.has(token)) {
                 continue;
             }
             const current = grouped.get(category) ?? {
@@ -22137,8 +22149,10 @@ class BotConfig {
         catch (error) {
             // A revoked token stays in the remote TELEGRAM_CHANNEL_CONFIG_* value (CMS's bot repair only covers the
             // bots collection) and was logged as an error on every boot of every process (2026-10-17: UNAUTH_CALLS).
-            // It is skipped either way; name it once so it can be removed from config.
+            // It is skipped either way; name it once so it can be removed from config. 2026-10-23: it was re-checked and
+            // warned at every 30-min pool refresh (bot 9218: 342 warnings/day fleet-wide); now once per process.
             if (error?.response?.status === 401) {
+                this.revokedTokens.add(token);
                 logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
                 return '';
             }
@@ -22170,7 +22184,7 @@ class BotConfig {
                 return index;
             }
         }
-        const cooldowns = data.botCooldownUntil.filter(Boolean);
+        const cooldowns = data.botCooldownUntil.filter(until => until && Number.isFinite(until));
         const earliest = cooldowns.length > 0 ? Math.min(...cooldowns) : now + this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS;
         const waitMs = Math.max(0, earliest - now);
         logger.warn(`All bots for ${category} are rate-limited or cannot reach the channel; skipping notification for ${Math.ceil(waitMs / 1000)}s`);
@@ -22199,6 +22213,21 @@ class BotConfig {
         data.botCooldownUntil[botIndex] = Date.now() + this.BOT_REFRESH_MS;
         const botId = String(data.botTokens[botIndex] ?? '').split(':')[0];
         logger.warn(`${category}: bot ${botId} cannot post to ${data.channelId} (${description.slice(0, 80)}); benched ${this.BOT_REFRESH_MS / 60000} min`);
+        return true;
+    }
+    /**
+     * A bot whose token Telegram rejects (401: revoked) is benched for the life of the process and the send moves to
+     * the next bot (2026-10-23: a revoked CLIENT_UPDATES-pool bot lost every notice routed to it).
+     */
+    markBotRevoked(data, category, botIndex, error) {
+        if (error?.response?.status !== 401 && error?.response?.data?.error_code !== 401)
+            return false;
+        const token = String(data.botTokens[botIndex] ?? '');
+        data.botCooldownUntil[botIndex] = Infinity;
+        if (!this.revokedTokens.has(token)) {
+            this.revokedTokens.add(token);
+            logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized); benched until restart`);
+        }
         return true;
     }
     hasAnotherAvailableBot(data) {
@@ -22231,7 +22260,8 @@ class BotConfig {
     }
     shouldRetryWithNextBot(data, category, botIndex, error) {
         const benched = this.markBotRateLimited(data, category, botIndex, error)
-            || this.markBotUnreachable(data, category, botIndex, error);
+            || this.markBotUnreachable(data, category, botIndex, error)
+            || this.markBotRevoked(data, category, botIndex, error);
         return benched && data.botTokens.length > 1 && this.hasAnotherAvailableBot(data);
     }
     /** Count a successful send; counts are written to the bots collection in one batch per USAGE_FLUSH_MS. */
@@ -22378,7 +22408,7 @@ class BotConfig {
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
     isBotOrChannelFailure(error) {
         const { status, description } = this.botSendFailureDetails(error);
-        return Number(status) === 429 || Number(status) === 403
+        return Number(status) === 429 || Number(status) === 403 || Number(status) === 401
             || /too many requests|retry after|chat not found|not a member|kicked|not enough rights|CHAT_WRITE_FORBIDDEN|bot was blocked/i.test(String(description));
     }
     /**
@@ -48428,6 +48458,7 @@ class InHouseCallService {
         this.unsupportedNotified = false;
         this.durations = new Map();
         this.sizes = new Map();
+        this.audioTracks = new Map();
         this.autoRetries = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('autoRetries', () => this.deps?.notes);
         this.incomingPlans = new Map();
         this.payPrompts = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('payPrompts', () => this.deps?.notes);
@@ -48504,7 +48535,7 @@ class InHouseCallService {
                     this.showPaid.set(chatId, Number(user.payAmount) || 0);
                     this.showEnds.set(chatId, this.now() + this.remainingMs(plan));
                     // A show is pending: always with video, even when they rang with the voice button.
-                    return { action: 'answer', media: { file: plan.url, video: true, videoOnVoiceCall: true, startSec: plan.startSec, size: plan.size }, options: this.callOptions(plan) };
+                    return { action: 'answer', media: { file: plan.url, video: true, videoOnVoiceCall: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, options: this.callOptions(plan) };
                 }
                 if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
                     return { action: 'ignore' };
@@ -49027,7 +49058,7 @@ class InHouseCallService {
             this.outgoingPlans.set(peerKey, plan);
             this.showEnds.set(chatId, this.now() + RING_ALLOWANCE_MS + this.remainingMs(plan));
             requesting = true;
-            record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size }, this.callOptions(plan));
+            record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, this.callOptions(plan));
         }
         catch (error) {
             void this.stopCheckpoint(chatId);
@@ -49249,7 +49280,8 @@ class InHouseCallService {
         const startSec = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.resumeOffset)(progress, durationSec, now);
         const attempts = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.priorAttempts)(progress, now) + 1;
         const size = await this.videoSize(url);
-        return { plan: { chatId, videoId, videoType, service: (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.classifyService)(videoType, user), url, durationSec, size, startSec, attempts, fullShowAtPlan: Number(user.fullShow) || 0 } };
+        const audio = (await this.hasAudio(url)) ? undefined : false;
+        return { plan: { chatId, videoId, videoType, service: (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.classifyService)(videoType, user), url, durationSec, size, ...(audio === false ? { audio } : {}), startSec, attempts, fullShowAtPlan: Number(user.fullShow) || 0 } };
     }
     remainingMs(plan) {
         return plan.durationSec ? Math.max(0, plan.durationSec - plan.startSec) * 1000 : 5 * 60 * 1000;
@@ -49290,6 +49322,28 @@ class InHouseCallService {
             this.sizes.clear();
         this.sizes.set(url, size);
         return size;
+    }
+    /**
+     * False only when the probe read the video and found no audio stream (cached per URL); a failed read is
+     * "has audio" (the old behaviour) and is retried next plan.
+     */
+    async hasAudio(url) {
+        const known = this.audioTracks.get(url);
+        if (known !== undefined)
+            return known;
+        let value = null;
+        try {
+            value = (await this.deps.probeHasAudio?.(url)) ?? null;
+        }
+        catch {
+            value = null;
+        }
+        if (value === null)
+            return true;
+        if (this.audioTracks.size >= 200)
+            this.audioTracks.clear();
+        this.audioTracks.set(url, value);
+        return value;
     }
     /**
      * This account cannot address the user at all (entity not resolvable, PEER_ID_INVALID, blocked,
@@ -49697,6 +49751,15 @@ function probeVideoSize(url) {
         return m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_20__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null;
     });
 }
+/** Whether the video has an audio stream (video_1013 has none), via ffprobe; null when the probe failed. */
+function probeHasAudio(url) {
+    // codec_type of every stream: never empty for a readable video ("video" alone = no audio).
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', url])
+        .then((stdout) => {
+        const types = String(stdout ?? '').split(/\s+/).filter(Boolean);
+        return types.length ? types.includes('audio') : null;
+    });
+}
 /** InputUser from local caches only (entity cache, then the session's own cache); never a network call. */
 function cachedInputUser(client, chatId) {
     const ref = (0,_input_user__WEBPACK_IMPORTED_MODULE_8__.usableUserRef)(_tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__.EntityCacheManager.getInstance().get(chatId));
@@ -49898,6 +49961,7 @@ function createInHouseCallService(client, hooks) {
         },
         probeDurationSec,
         probeVideoSize,
+        probeHasAudio,
         videoAvailable: (url) => /^https?:\/\//i.test(url) || fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(url),
         logger: engineLogger,
     });
@@ -82071,8 +82135,10 @@ class PaymentFlow {
                     const winner = await session.check();
                     if (winner.kind === 'repeat' && !winner.sameChat)
                         await this.notMine(session.facts.chatId, 'race', `credited in ${winner.matched.profile}/${winner.matched.chatId} at the same moment`);
+                    // Same chat: answered like any repeat (a payer still owed a call hears "calling you", not "old payment").
+                    // Also reached when the duplicate lookup timed out and failed open (nidhi1 2026-10-23).
                     else
-                        await this.repeat(session.facts.chatId, 'race', 'credited at the same moment');
+                        await this.repeat(session.facts.chatId, 'race', 'credited at the same moment', args.answerResend);
                 }
                 return { handled: true };
             }
