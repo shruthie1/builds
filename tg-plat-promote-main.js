@@ -14947,6 +14947,8 @@ const ChannelCategory = Object.freeze({
     UNAUTH_CALLS: 'UNAUTH_CALLS',
     CLIENT_PROMOTIONS_1: 'CLIENT_PROMOTIONS_1',
     CLIENT_PROMOTIONS_2: 'CLIENT_PROMOTIONS_2',
+    /** @unwantedupdates1: bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
+    UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
@@ -15095,11 +15097,15 @@ class BotConfig {
             .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
-    /** Keep rate-limit cooldowns of bots that are still in the pool across a refresh. */
+    /**
+     * Keep cooldowns of bots that are still in the pool across a refresh, only while the category's channel is the
+     * same: a bench for "chat not found" on a dead channel must not follow the bot to the recreated one (UNVDS,
+     * 2026-10-23). A revoked token is skipped by revokedTokens whatever the channel.
+     */
     carryBotState(previous, next) {
         for (const [category, data] of next) {
             const old = previous.get(category);
-            if (!old)
+            if (!old || old.channelId !== data.channelId)
                 continue;
             data.botCooldownUntil = data.botTokens.map(token => {
                 const i = old.botTokens.indexOf(token);
