@@ -46251,8 +46251,9 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
         return false;
     }
     usedUpNoticed.delete(chatId);
-    // Blocked (canReply 0) on any persona row: the ring is refused at dispatch, so no "calling you" text either
-    // (journey F3b). A failed block read is not blocked, as for the ring.
+    // Blocked for calls (CallManager.isBlocked -> callBlock: canReply 0 here, or on another persona with no payment
+    // credited here): the ring is refused at dispatch, so no "calling you" text either (journey F3b). A failed block read
+    // is not blocked, as for the ring.
     const blocked = (await callManager?.isBlocked?.(chatId)) === true;
     const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./call-me */ "./src/calls/call-me.ts"));
     const inHouse = await inHouseCallsActive(callManager);
@@ -46873,17 +46874,18 @@ class CallManager {
         await this.requestCall(chatId, true);
     }
     /**
-     * A chat blocked (canReply 0) on this client or ANY other is never rung, whichever path queued
-     * the call (re-ring, restart restore, operator, forced). A failed read rings: a db hiccup must
-     * not drop a paying user's call.
+     * A chat blocked for calls (callBlock: canReply 0 here, or on another persona with no payment credited here) is
+     * never rung, whichever path queued the call (re-ring, restart restore, operator, forced); proceedWithCall and the
+     * ladder's text steps ask this too. A failed read rings: a db hiccup must not drop a paying user's call.
      */
     async isBlocked(chatId) {
         try {
             const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
             const [own, others] = await Promise.all([db.read(chatId), db.readOtherPersonaRows(chatId)]);
-            if (own?.canReply !== 0 && !(0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.blockedOnAnyProfile)(others ?? []))
+            const block = (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.callBlock)(chatId, own, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_15__.blockedOnAnyProfile)(others ?? []));
+            if (!block)
                 return false;
-            logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${own?.canReply === 0 ? 'this' : 'another'} client`);
+            logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${block === 'own' ? 'this client' : 'another client, no payment credited here'}`);
             return true;
         }
         catch (error) {
@@ -47729,10 +47731,10 @@ async function executeEvent(event) {
                 logger.warn(`requestCall false chat=${event.chatId} — TRANSIENT`);
             return ok ? 'SUCCESS' : 'TRANSIENT';
         }
-        // action === 'SEND'. Every ladder text chases a ring; a chat blocked (canReply 0) on any persona row is never rung
-        // (CallManager), so it gets none of them (journey F3b). A failed block read sends, as the ring does.
+        // action === 'SEND'. Every ladder text chases a ring; a chat blocked for calls (CallManager.isBlocked -> callBlock)
+        // is never rung, so it gets none of them (journey F3b). A failed block read sends, as the ring does.
         if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance().callManager?.isBlocked?.(event.chatId)) {
-            logger.log(`message skipped chat=${event.chatId}: chat blocked on a persona row (no ring to chase)`);
+            logger.log(`message skipped chat=${event.chatId}: chat blocked for calls (no ring to chase)`);
             return 'PERMANENT';
         }
         await sendMessage(event.chatId, event.payload.message ?? '');
@@ -48519,8 +48521,8 @@ class InHouseCallService {
                 const user = await this.deps.readUser(chatId);
                 if (!user)
                     return { action: 'ignore' };
-                // Blocked here or on any other client: never picked up (no show, no pitch clip, no pay prompt); it rings out.
-                if (user.canReply === 0 || (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(await this.deps.readOtherProfiles(chatId))) {
+                // Blocked for calls (callBlock): never picked up (no show, no pitch clip, no pay prompt); it rings out.
+                if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(await this.deps.readOtherProfiles(chatId)))) {
                     this.logger.log(`[in-house-calls] incoming call from ${chatId} ignored: chat is blocked (canReply 0)`);
                     return { action: 'ignore' };
                 }
@@ -48760,7 +48762,7 @@ class InHouseCallService {
         this.saveVoiceProofState();
         try {
             const [user, others] = await Promise.all([this.deps.readUser(chatId), this.deps.readOtherProfiles(chatId)]);
-            if (user?.canReply === 0 || (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others)) {
+            if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.blockedOnAnyProfile)(others))) {
                 this.releaseVoiceProofSlot(chatId, now);
                 return { status: 'skipped', reason: 'blocked' };
             }
@@ -50110,6 +50112,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESUME_REWIND_SEC: () => (/* binding */ RESUME_REWIND_SEC),
 /* harmony export */   VIDEO_IDS: () => (/* binding */ VIDEO_IDS),
 /* harmony export */   blockedOnAnyProfile: () => (/* binding */ blockedOnAnyProfile),
+/* harmony export */   callBlock: () => (/* binding */ callBlock),
 /* harmony export */   callEchoParams: () => (/* binding */ callEchoParams),
 /* harmony export */   callVideoParams: () => (/* binding */ callVideoParams),
 /* harmony export */   canCallUser: () => (/* binding */ canCallUser),
@@ -50127,12 +50130,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
 /**
  * In-house video call policy: the VCUI rules (vcui src/utils/callPolicy.ts, pages/Idle.tsx,
  * pages/CallEnded.tsx and CMS getPaymentStats) ported server-side. Pure functions only, so the
  * decision of who gets which video, where it resumes and whether it counts as delivered is made
  * here, not in a browser.
  */
+
 
 
 const DEFAULT_CDN_BASE = 'https://cdn.jsdelivr.net/gh/ramyared4/stream@ideos/public';
@@ -50180,20 +50185,37 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function videoIds(values) {
     return (values || []).map(Number).filter(Number.isFinite);
 }
-/**
- * Owner rule (2026-10-21): a chat blocked (canReply 0) on ANY client is never called by any client,
- * however long ago the block was. Rows are this chat's rows on the other personas.
- */
+/** Some row of this chat on another persona is blocked (canReply 0), at any age. A fact; callBlock decides. */
 function blockedOnAnyProfile(rows) {
     return rows.some((row) => row?.canReply === 0);
 }
 /**
+ * The ONE call-block decision, for every call path (ring, in-house plan, incoming pick-up, voice proof, "calling you"
+ * text, ladder texts). Returns who blocks the call, or null.
+ *  - 'own': this client's row has canReply 0. Always blocks.
+ *  - 'other': another persona's row has canReply 0 (owner rule 2026-10-21, any age), and this client has credited no
+ *    payment for the chat. Owner decision 2026-10-23: a genuine payment credited HERE overrides a block elsewhere.
+ *    userData keeps no block time, so "credited after the block" is read as "credited here at all": the row's ledger
+ *    (lifetimePaid > 0 or creditKeys non-empty; written only by creditPayment), or the chat's 'paymentCredited' moment,
+ *    noted when the payment is accepted, seconds before the ledger write lands (processImage credits after the
+ *    payment's own call). The other persona's row is never touched.
+ */
+function callBlock(chatId, own, blockedElsewhere) {
+    if (own?.canReply === 0)
+        return 'own';
+    if (!blockedElsewhere)
+        return null;
+    const creditedHere = (Number(own?.lifetimePaid) || 0) > 0 || (own?.creditKeys?.length ?? 0) > 0
+        || (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentCredited') !== undefined;
+    return creditedHere ? null : 'other';
+}
+/**
  * CMS getPaymentStats, read-only: the stale-row reset it also performs is deliberately NOT ported
- * (a read must not rewrite other personas' rows). Unlike it, a block elsewhere counts at any age.
+ * (a read must not rewrite other personas' rows). Unlike it, a block elsewhere counts at any age (callBlock).
  */
 function summariseOtherProfiles(rows, now) {
     const threeDaysAgo = now - 3 * DAY_MS;
-    const stats = { canCall: !blockedOnAnyProfile(rows), demoGiven: 0, latestCallTime: 0, videos: [] };
+    const stats = { blockedElsewhere: blockedOnAnyProfile(rows), demoGiven: 0, latestCallTime: 0, videos: [] };
     for (const row of rows) {
         const callTime = Number(row.callTime) || 0;
         if (callTime > threeDaysAgo) {
@@ -50218,19 +50240,16 @@ function canCallUser(user, others, now) {
     const full = Number(user.fullShow) || 0;
     const recentWindow = now - 2 * 60 * 60 * 100;
     const calledBefore = (Number(user.callTime) || 0) < recentWindow;
-    const eligible = user.canReply !== 0 && pay >= 30 && videos < 10 && ((pay < 100 && high >= 15 && !user.demoGiven)
+    const eligible = pay >= 30 && videos < 10 && ((pay < 100 && high >= 15 && !user.demoGiven)
         || (pay > 50 && pay < 200 && high >= 50 && !user.secondShow)
         || ((high >= 200 || pay >= 200) && ((high >= 50 && full < 2 && videos < 4)
             || (high >= 150 && full < 3 && videos < 6)
             || (high >= 250 && (full < 3 && videos < 7) || (full < 4 && calledBefore))
             || (high >= 350 && (full < 3 && videos < 8) || (full < 6 && calledBefore))
             || (high > 350 && (full < 3 && videos < 9) || (full < 8 && calledBefore)))));
-    if (!eligible)
+    if (!eligible || callBlock(String(user.chatId ?? ''), user, others.blockedElsewhere))
         return false;
-    // Blocked on another client: never, whatever the demo count. Otherwise VCUI's start button
-    // requires (demoGiven < 5 || latest call elsewhere > 24h ago).
-    if (!others.canCall)
-        return false;
+    // VCUI's start button requires (demoGiven < 5 || latest call elsewhere > 24h ago).
     return others.demoGiven < 5 || others.latestCallTime < now - DAY_MS;
 }
 /** VCUI selectNextVideo: first video unseen on any persona, tier aligned with the completion endpoint. */
@@ -56803,7 +56822,7 @@ const RESELL_QUIET_MS = 15 * 60 * 1000;
 /** addVideo backdates callTime by 5 min, so the show ends about callTime + 5 min. */
 const SHOW_END_AFTER_CALL_TIME_MS = 5 * 60 * 1000;
 /** Other personas cannot be read here (sync); judged as neutral, the per-chat rules decide. */
-const NO_OTHER_PROFILES = { canCall: true, demoGiven: 0, latestCallTime: 0, videos: [] };
+const NO_OTHER_PROFILES = { blockedElsewhere: false, demoGiven: 0, latestCallTime: 0, videos: [] };
 /**
  * Same gates a repeat payment meets: handleRepeatPayment (imageUtils/processImage.ts) re-calls at payAmount, or
  * payAmount + 100 when no service is pending, then initiateCall (hasPendingPaidService) and the call itself
@@ -83555,7 +83574,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 /** Other personas are judged at dial time (the call itself); neutral here, the per-chat rules decide. */
-const NO_OTHER_PROFILES = { canCall: true, demoGiven: 0, latestCallTime: 0, videos: [] };
+const NO_OTHER_PROFILES = { blockedElsewhere: false, demoGiven: 0, latestCallTime: 0, videos: [] };
 /**
  * Could this user still get a show at their current pay (the same rule the call itself applies, canCallUser), ignoring
  * the wait after their last call (callTime 0)? False = the service is used up (e.g. 10 videos watched, or the tier's
