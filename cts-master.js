@@ -21148,6 +21148,7 @@ var ChannelCategory;
     ChannelCategory["UNAUTH_CALLS"] = "UNAUTH_CALLS";
     ChannelCategory["CLIENT_PROMOTIONS_1"] = "CLIENT_PROMOTIONS_1";
     ChannelCategory["CLIENT_PROMOTIONS_2"] = "CLIENT_PROMOTIONS_2";
+    ChannelCategory["UNWANTED_UPDATES"] = "UNWANTED_UPDATES";
 })(ChannelCategory || (exports.ChannelCategory = ChannelCategory = {}));
 
 
