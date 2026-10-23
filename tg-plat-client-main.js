@@ -70268,14 +70268,16 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
             let updatedAmount = userDetails.payAmount;
             if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
                 updatedAmount = userDetails.payAmount + 100;
-                // keerthi1 2026-10-22: a ₹65-179 balance with the second show done (₹70 show, then ₹50) is still owed nothing
-                // after the +100, so initiateCall held the call ("nothing owed") and the credited payment got silence. Re-owe
-                // the show as the demo branch above does (demoGiven = false): only when +100 alone leaves nothing owed and the
-                // re-owe makes it owed, so every case the +100 already serves is unchanged.
-                if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.hasPendingPaidService)({ ...userDetails, payAmount: updatedAmount })
-                    && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.hasPendingPaidService)({ ...userDetails, payAmount: updatedAmount, secondShow: false })) {
-                    userDetails.secondShow = false;
-                    logger.log(`[repeat-payment] ${chatId}: show re-owed (secondShow=false); ₹${amount} paid, payAmount ${userDetails.payAmount} -> ${updatedAmount}, highest ${userDetails.highestPayAmount}`);
+                // The +100 alone can leave nothing owed (keerthi1 2026-10-22: second show done, ₹70 -> 170; kavya2 2026-10-23:
+                // the ₹150 tier's three shows done, 150 -> 250), so initiateCall held the call ("nothing owed") and the credited
+                // payment got silence. Re-owe ONE show at the same tier, as the demo branch above does (demoGiven = false); every
+                // case the +100 already serves is unchanged. The one decision point: reOweOneShow (payments/service-eligibility).
+                const reOwed = (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.reOweOneShow)({ ...userDetails, payAmount: updatedAmount });
+                if (reOwed) {
+                    Object.assign(userDetails, reOwed);
+                    // initiateCall persists secondShow but not fullShow (and re-reads the row): store the re-owe first.
+                    await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().update(chatId, reOwed);
+                    logger.log(`[repeat-payment] ${chatId}: show re-owed (${JSON.stringify(reOwed)}); ₹${amount} paid, payAmount ${userDetails.payAmount} -> ${updatedAmount}, highest ${userDetails.highestPayAmount}`);
                 }
             }
             await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
@@ -83746,6 +83748,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   canStartService: () => (/* binding */ canStartService),
 /* harmony export */   cycleVideos: () => (/* reexport safe */ _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.cycleVideos),
 /* harmony export */   hasPendingPaidService: () => (/* binding */ hasPendingPaidService),
+/* harmony export */   reOweOneShow: () => (/* binding */ reOweOneShow),
 /* harmony export */   serviceExhausted: () => (/* binding */ serviceExhausted),
 /* harmony export */   serviceUsedUp: () => (/* binding */ serviceUsedUp),
 /* harmony export */   showStillServable: () => (/* binding */ showStillServable),
@@ -83855,6 +83858,28 @@ function hasPendingPaidService(userDetail) {
         (userDetail.highestPayAmount >= 250 && userDetail.fullShow < 4) ||
         (userDetail.highestPayAmount >= 350 && userDetail.fullShow < 6) ||
         (userDetail.highestPayAmount > 350 && userDetail.fullShow < 8));
+}
+/**
+ * The repeat-payment re-owe rule (processImage handleRepeatPayment, after its +100 bump): a credited small repeat
+ * payment that leaves nothing owed because this tier's shows are used up re-owes exactly ONE more show at the same
+ * tier, never raising the tier (highestPayAmount) or the price. Returns the fields that re-owe it, or null when a show
+ * is already owed (the +100 serves it unchanged), the cycle is exhausted (10 videos / 8 full shows end service), or no
+ * show of this tier can be re-owed.
+ * - keerthi1 2026-10-22: the second show (₹65-199 after the bump): secondShow false.
+ * - kavya2 2026-10-23 (owner "do a"): the full shows (₹150 tier, fullShow 3, bump to 250): the served counter goes back
+ *   to one below the tier's show cap, i.e. the largest fullShow below the current one that hasPendingPaidService owes
+ *   (the cap stays defined only there). Completion sets it back (fullShow + 1), so each payment buys one show.
+ */
+function reOweOneShow(userDetail) {
+    if (hasPendingPaidService(userDetail) || serviceExhausted(userDetail))
+        return null;
+    if (hasPendingPaidService({ ...userDetail, secondShow: false }))
+        return { secondShow: false };
+    for (let fullShow = (Number(userDetail.fullShow) || 0) - 1; fullShow >= 0; fullShow--) {
+        if (hasPendingPaidService({ ...userDetail, fullShow }))
+            return { fullShow };
+    }
+    return null;
 }
 function canStartService(userDetails, paidAmount) {
     if (paidAmount >= 15 &&
