@@ -23274,6 +23274,32 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             throw error;
         }
     }
+    async reassignClientId(mobile, fromClientId, toClientId, session) {
+        const result = await this.bufferClientModel.updateOne({ mobile, clientId: fromClientId, inUse: { $ne: true }, status: 'active' }, { $set: { clientId: toClientId, message: `Reassigned from ${fromClientId} by degraded swap` } }, session ? { session } : undefined).exec();
+        if ((result.matchedCount || 0) !== 1) {
+            throw new common_1.ConflictException(`Buffer ${mobile} is no longer a free spare of ${fromClientId}`);
+        }
+        this.logger.info(`Reassigned buffer ${mobile} from ${fromClientId} to ${toClientId} (degraded swap)`);
+    }
+    async acquireProbeLease(mobile, owner, ttlMs) {
+        const now = new Date();
+        const leased = await this.bufferClientModel.findOneAndUpdate({
+            mobile,
+            $or: [
+                { probeLease: { $exists: false } },
+                { probeLease: null },
+                { 'probeLease.until': { $lte: now } },
+                { 'probeLease.owner': owner },
+            ],
+        }, { $set: { probeLease: { owner, until: new Date(now.getTime() + ttlMs) } } }, { projection: { _id: 1 } }).lean().exec();
+        return !!leased;
+    }
+    async renewProbeLeases(owner, until) {
+        await this.bufferClientModel.updateMany({ 'probeLease.owner': owner }, { $set: { 'probeLease.until': until } }).exec();
+    }
+    async releaseProbeLeases(owner, mobile) {
+        await this.bufferClientModel.updateMany({ 'probeLease.owner': owner, ...(mobile ? { mobile } : {}) }, { $unset: { probeLease: '' } }).exec();
+    }
     async setPrimaryInUse(clientId, mobile, session) {
         const now = new Date();
         const existsQuery = this.bufferClientModel.exists({ mobile, clientId });
@@ -24936,6 +24962,11 @@ __decorate([
     __metadata("design:type", String)
 ], BufferClient.prototype, "spamCheckSource", void 0);
 __decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Cross-process SpamBot-probe / connect lease held by a CMS setupClient run (owner host:pid:uuid, until).', type: Object }),
+    (0, mongoose_1.Prop)({ required: false, type: Object, default: undefined }),
+    __metadata("design:type", Object)
+], BufferClient.prototype, "probeLease", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Assigned first name from pool', required: false }),
     (0, mongoose_1.Prop)({ required: false, default: null }),
     __metadata("design:type", String)
@@ -26517,6 +26548,8 @@ const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/ut
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const path_1 = __importDefault(__webpack_require__(/*! path */ "path"));
 const fs = __importStar(__webpack_require__(/*! fs */ "fs"));
+const os = __importStar(__webpack_require__(/*! os */ "os"));
+const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
 const tl_1 = __webpack_require__(/*! telegram/tl */ "telegram/tl");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
@@ -26527,6 +26560,7 @@ const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/
 const mobile_utils_1 = __webpack_require__(/*! ../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
 const buffer_client_schema_1 = __webpack_require__(/*! ../buffer-clients/schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
+const degraded_swap_1 = __webpack_require__(/*! ./degraded-swap */ "./src/components/clients/degraded-swap.ts");
 const CONFIG = {
     REFRESH_INTERVAL: 5 * 60 * 1000,
     CACHE_TTL: 10 * 60 * 1000,
@@ -26551,6 +26585,9 @@ let ClientService = ClientService_1 = class ClientService {
         this.lastUpdateMap = new Map();
         this.setupCooldownMap = new Map();
         this.setupInFlightMap = new Map();
+        this.leaseRenewMs = degraded_swap_1.SWAP_LEASE_RENEW_MS;
+        this.degradedPlans = new Map();
+        this.noBufferNoticeEpisodes = new Set();
         this.clientsMap = new Map();
         this.cacheMetadata = { lastUpdated: 0, isStale: true };
         this.checkInterval = null;
@@ -26683,11 +26720,11 @@ let ClientService = ClientService_1 = class ClientService {
     }
     async findAllMasked() {
         const clients = await this.findAll();
-        return clients.map(({ session, mobile, password, ...maskedClient }) => maskedClient);
+        return clients.map(({ session, mobile, password, degraded, swapRetry, deadMain, swapLease, swappedAt, sessionChangedAt, ...maskedClient }) => maskedClient);
     }
     async findOneMasked(clientId) {
         const client = await this.findOne(clientId, true);
-        const { session, mobile, password, ...maskedClient } = client;
+        const { session, mobile, password, degraded, swapRetry, deadMain, swapLease, swappedAt, sessionChangedAt, ...maskedClient } = client;
         return maskedClient;
     }
     async findAllObject() {
@@ -26700,7 +26737,7 @@ let ClientService = ClientService_1 = class ClientService {
     async findAllMaskedObject(query) {
         const filteredClients = query ? await this.search(query) : await this.findAll();
         return filteredClients.reduce((acc, client) => {
-            const { session, mobile, password, ...maskedClient } = client;
+            const { session, mobile, password, degraded, swapRetry, deadMain, swapLease, swappedAt, sessionChangedAt, ...maskedClient } = client;
             acc[client.clientId] = { clientId: client.clientId, ...maskedClient };
             return acc;
         }, {});
@@ -26734,8 +26771,34 @@ let ClientService = ClientService_1 = class ClientService {
                 cleanUpdateDto.mobile = this.canonicalMobile(cleanUpdateDto.mobile);
             }
             await this.notifyClientUpdate(clientId);
+            let clientUpdate = { $set: cleanUpdateDto };
+            if (cleanUpdateDto.mobile !== undefined || cleanUpdateDto.session !== undefined) {
+                const current = await this.clientModel.findOne({ clientId }, { mobile: 1, session: 1, degraded: 1, deadMain: 1 })
+                    .lean().exec();
+                const mobileChanged = !!current && cleanUpdateDto.mobile !== undefined && this.canonicalMobile(current.mobile) !== cleanUpdateDto.mobile;
+                const sessionChanged = !!current && cleanUpdateDto.session !== undefined && current.session !== cleanUpdateDto.session;
+                const unset = {};
+                if (mobileChanged && current.degraded && cleanUpdateDto.degraded === undefined) {
+                    unset.degraded = '';
+                    this.logger.warn(`[${clientId}] Mobile changed by update; clearing the degraded marker (tier ${current.degraded.tier})`);
+                }
+                if ((mobileChanged || sessionChanged) && current.deadMain && cleanUpdateDto.deadMain === undefined) {
+                    unset.deadMain = '';
+                    this.logger.warn(`[${clientId}] ${mobileChanged ? 'Mobile' : 'Session'} changed by update; clearing the dead-main report`);
+                }
+                const extraSet = {};
+                if (sessionChanged)
+                    extraSet.swappedAt = new Date();
+                if (sessionChanged && !mobileChanged)
+                    extraSet.sessionChangedAt = extraSet.swappedAt;
+                else if (mobileChanged)
+                    unset.sessionChangedAt = '';
+                if (Object.keys(unset).length || Object.keys(extraSet).length) {
+                    clientUpdate = { $set: { ...cleanUpdateDto, ...extraSet }, ...(Object.keys(unset).length ? { $unset: unset } : {}) };
+                }
+            }
             const updatedClient = await this.executeWithRetry(() => this.clientModel
-                .findOneAndUpdate({ clientId }, { $set: cleanUpdateDto }, { returnDocument: 'after', runValidators: true })
+                .findOneAndUpdate({ clientId }, clientUpdate, { returnDocument: 'after', runValidators: true })
                 .lean()
                 .exec());
             if (!updatedClient) {
@@ -26882,6 +26945,97 @@ let ClientService = ClientService_1 = class ClientService {
         };
     }
     async setupClient(clientId, setupClientQueryDto) {
+        const screen = await this.screenSetupReport(clientId, setupClientQueryDto);
+        if (screen.answer)
+            return screen.answer;
+        if (screen.mobile && !setupClientQueryDto?.mobile) {
+            await this.recordDeadMainReport(clientId, screen.mobile, setupClientQueryDto?.reason);
+        }
+        return this.runSetup(clientId, setupClientQueryDto, {});
+    }
+    async screenSetupReport(clientId, dto) {
+        let current;
+        try {
+            current = await this.clientModel.findOne({ clientId }, { mobile: 1, swappedAt: 1, sessionChangedAt: 1 })
+                .lean().exec();
+        }
+        catch (error) {
+            this.logger.warn(`[${clientId}] Could not screen the setupClient report: ${(0, parseError_1.parseError)(error, '', false).message}`);
+            return {};
+        }
+        if (!current?.mobile)
+            return {};
+        let reported;
+        if (dto?.reportedMobile) {
+            try {
+                reported = (0, mobile_utils_1.canonicalizeMobile)(String(dto.reportedMobile));
+            }
+            catch {
+                this.logger.warn(`[${clientId}] Unparseable reportedMobile ${(0, degraded_swap_1.last4)(String(dto.reportedMobile))}; treated as absent`);
+            }
+        }
+        const main = current.mobile;
+        let mainCanonical = main;
+        try {
+            mainCanonical = (0, mobile_utils_1.canonicalizeMobile)(main);
+        }
+        catch { }
+        if (reported) {
+            if (reported === mainCanonical) {
+                const fixedAtMs = current.sessionChangedAt ? new Date(current.sessionChangedAt).getTime() : 0;
+                const fixLeftMs = fixedAtMs + degraded_swap_1.SWAP_REPORT_GRACE_MS - Date.now();
+                if (dto?.reason && !dto?.mobile && fixedAtMs && fixLeftMs > 0) {
+                    this.logger.warn(`[${clientId}] setupClient report for the main ${Math.round((Date.now() - fixedAtMs) / 1000)}s after a session change; ignored (may be the process on the old session)`, { reason: dto.reason });
+                    return {
+                        answer: {
+                            status: 'cooldown',
+                            swapped: false,
+                            clientId,
+                            message: 'Client session was just changed; a report from the process on the old session is ignored',
+                            cooldownRemainingMs: fixLeftMs,
+                        },
+                    };
+                }
+                return { mobile: main };
+            }
+            this.logger.warn(`[${clientId}] Stale setupClient report for ${(0, degraded_swap_1.last4)(reported)}; client now runs ${(0, degraded_swap_1.last4)(main)}. Ignored`, { reason: dto?.reason });
+            return {
+                answer: {
+                    status: 'stale_report',
+                    swapped: false,
+                    clientId,
+                    message: `Report is for a mobile that is no longer this client's main (now ${(0, degraded_swap_1.last4)(main)}); nothing done`,
+                    existingMobile: main,
+                },
+            };
+        }
+        const swappedAtMs = current.swappedAt ? new Date(current.swappedAt).getTime() : 0;
+        const graceLeftMs = swappedAtMs + degraded_swap_1.SWAP_REPORT_GRACE_MS - Date.now();
+        if (dto?.reason && !dto?.mobile && swappedAtMs && graceLeftMs > 0) {
+            this.logger.warn(`[${clientId}] setupClient report without reportedMobile ${Math.round((Date.now() - swappedAtMs) / 1000)}s after a cutover; ignored (may be the replaced process)`, { reason: dto.reason });
+            return {
+                answer: {
+                    status: 'cooldown',
+                    swapped: false,
+                    clientId,
+                    message: 'Client was just swapped; a report without reportedMobile may come from the replaced process and is ignored',
+                    cooldownRemainingMs: graceLeftMs,
+                },
+            };
+        }
+        return { mobile: main };
+    }
+    async recordDeadMainReport(clientId, mobile, reason) {
+        if (!reason || !(0, degraded_swap_1.isDeadSwapReason)(reason) || reason.startsWith(degraded_swap_1.DEAD_MAIN_RESCUE_REASON))
+            return;
+        try {
+            await this.clientModel.updateOne({ clientId, mobile }, { $set: { deadMain: { mobile, reason: reason.substring(0, 200), at: new Date() } } }).exec();
+        }
+        catch (error) {
+            this.logger.warn(`[${clientId}] Could not record the dead-main report: ${(0, parseError_1.parseError)(error, '', false).message}`);
+        }
+    }
+    async runSetup(clientId, setupClientQueryDto, internal) {
         this.logger.log(`Received New Client Request for - ${clientId}`);
         if (!(0, utils_1.toBoolean)(process.env.AUTO_CLIENT_SETUP)) {
             this.logger.log('Auto client setup disabled');
@@ -26909,7 +27063,7 @@ let ClientService = ClientService_1 = class ClientService {
             return inFlight;
         }
         let setupPromise;
-        setupPromise = this.handleSetupClient(clientId, setupClientQueryDto)
+        setupPromise = this.runLeasedSetup(clientId, setupClientQueryDto, internal)
             .finally(() => {
             if (this.setupInFlightMap.get(clientId) === setupPromise) {
                 this.setupInFlightMap.delete(clientId);
@@ -26918,11 +27072,56 @@ let ClientService = ClientService_1 = class ClientService {
         this.setupInFlightMap.set(clientId, setupPromise);
         return setupPromise;
     }
+    async runLeasedSetup(clientId, setupClientQueryDto, internal) {
+        const leaseOwner = `${os.hostname()}:${process.pid}:${(0, crypto_1.randomUUID)()}`;
+        const now = new Date();
+        const leased = await this.clientModel.findOneAndUpdate({ clientId, ...(0, degraded_swap_1.leaseFreeFilter)('swapLease', now) }, { $set: { swapLease: { owner: leaseOwner, until: new Date(now.getTime() + degraded_swap_1.SWAP_LEASE_TTL_MS) } } }, { projection: { _id: 1 } }).lean().exec();
+        if (!leased) {
+            const holder = await this.clientModel.findOne({ clientId }, { swapLease: 1 }).lean().exec();
+            if (holder) {
+                const untilMs = holder.swapLease?.until ? new Date(holder.swapLease.until).getTime() : now.getTime();
+                this.logger.warn(`[${clientId}] Setup already in progress in another CMS process (${holder.swapLease?.owner}); not started`);
+                return {
+                    status: 'cooldown',
+                    swapped: false,
+                    clientId,
+                    message: 'Client setup is in progress in another CMS process',
+                    cooldownRemainingMs: Math.min(CONFIG.COOLDOWN_PERIOD, Math.max(0, untilMs - now.getTime())),
+                };
+            }
+            return this.handleSetupClient(clientId, setupClientQueryDto, internal);
+        }
+        const renewal = setInterval(() => { void this.renewSetupLeases(clientId, leaseOwner); }, this.leaseRenewMs);
+        renewal.unref?.();
+        try {
+            return await this.handleSetupClient(clientId, setupClientQueryDto, { ...internal, leaseOwner });
+        }
+        finally {
+            clearInterval(renewal);
+            try {
+                await this.clientModel.updateOne({ clientId, 'swapLease.owner': leaseOwner }, { $unset: { swapLease: '' } }).exec();
+                await this.bufferClientService.releaseProbeLeases(leaseOwner);
+            }
+            catch (error) {
+                this.logger.warn(`[${clientId}] Lease release failed (expires in ${degraded_swap_1.SWAP_LEASE_TTL_MS / 60_000} min): ${(0, parseError_1.parseError)(error, '', false).message}`);
+            }
+        }
+    }
+    async renewSetupLeases(clientId, leaseOwner) {
+        const until = new Date(Date.now() + degraded_swap_1.SWAP_LEASE_TTL_MS);
+        try {
+            await this.clientModel.updateOne({ clientId, 'swapLease.owner': leaseOwner }, { $set: { 'swapLease.until': until } }).exec();
+            await this.bufferClientService.renewProbeLeases(leaseOwner, until);
+        }
+        catch (error) {
+            this.logger.warn(`[${clientId}] Lease renewal failed: ${(0, parseError_1.parseError)(error, '', false).message}`);
+        }
+    }
     canSetupClient(clientId) {
         const lastSetup = this.setupCooldownMap.get(clientId) || 0;
         return Date.now() > lastSetup + CONFIG.COOLDOWN_PERIOD;
     }
-    async handleSetupClient(clientId, setupClientQueryDto) {
+    async handleSetupClient(clientId, setupClientQueryDto, internal = {}) {
         const existingClient = await this.findOne(clientId, false);
         if (!existingClient) {
             this.logger.error(`Client not found: ${clientId}`);
@@ -26937,17 +27136,21 @@ let ClientService = ClientService_1 = class ClientService {
         this.logger.log('setupClientQueryDto:', setupClientQueryDto);
         const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
         const permanentReplacement = this.isPermanentReplacementReason(setupClientQueryDto.reason);
-        const baseCandidateQuery = {
-            clientId,
-            mobile: setupClientQueryDto.mobile || { $ne: existingClientMobile },
-            createdAt: { $lte: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
-            channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
-            status: 'active',
-            inUse: { $ne: true },
-            warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
-            ...(0, buffer_client_schema_1.buildSpamEligibleFilter)(),
-        };
-        const newProbeBudget = () => ({ clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] });
+        const upgradeFromTier = internal.upgradeFromTier;
+        const dead = !upgradeFromTier && (0, degraded_swap_1.isDeadSwapReason)(setupClientQueryDto.reason);
+        const configuredTiers = (0, degraded_swap_1.parseDegradedSwapTiers)();
+        const degradedTiers = setupClientQueryDto.mobile
+            ? []
+            : upgradeFromTier
+                ? configuredTiers.filter((tier) => tier < upgradeFromTier)
+                : dead ? configuredTiers : [];
+        const busyMobiles = await this.busyCandidateMobiles(clientId, existingClientMobile);
+        const baseCandidateQuery = this.buildEligibleBufferQuery(clientId, setupClientQueryDto.mobile ? { $eq: setupClientQueryDto.mobile, $nin: busyMobiles } : { $nin: busyMobiles });
+        const newProbeBudget = () => ({
+            clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [],
+            ...(internal.leaseOwner ? { leaseOwner: internal.leaseOwner } : {}),
+            ...(internal.jobPass ? { jobPass: true } : {}),
+        });
         const probeBudget = newProbeBudget();
         let fallbackBudget;
         const dueCandidateQuery = {
@@ -26975,8 +27178,49 @@ let ClientService = ClientService_1 = class ClientService {
                 query: futureCandidateQuery,
             });
         }
+        let degradedBudget;
+        let degradedPlan = null;
+        const tier1Pending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending);
+        if (!newBufferClient && degradedTiers.length && !tier1Pending) {
+            degradedBudget = newProbeBudget();
+            const pick = await this.findDegradedCandidate(existingClient, degradedTiers, degradedBudget, today, busyMobiles);
+            if (pick) {
+                newBufferClient = pick.candidate;
+                const previous = existingClient.degraded;
+                const marker = (0, degraded_swap_1.markerTierFromVerdict)(pick.tier, pick.candidate.spamStatus);
+                degradedPlan = {
+                    clientId,
+                    pickTier: pick.tier,
+                    markerTier: marker === 1 ? null : marker,
+                    reason: (upgradeFromTier && previous?.reason) || setupClientQueryDto.reason || 'unknown',
+                    since: (upgradeFromTier && previous?.since) ? new Date(previous.since) : new Date(),
+                    fromMobile: existingClientMobile,
+                    limitedUntil: marker === 3 ? (pick.candidate.limitedUntil ?? null) : null,
+                    ...(pick.fromClientId ? { fromClientId: pick.fromClientId } : {}),
+                };
+            }
+            this.logger.warn(`[${clientId}] Degraded swap scan completed`, {
+                existingMobile: existingClientMobile,
+                reason: setupClientQueryDto.reason,
+                tiers: degradedTiers,
+                selected: newBufferClient?.mobile,
+                pickTier: degradedPlan?.pickTier,
+                markerTier: degradedPlan?.markerTier,
+            });
+        }
         if (!newBufferClient) {
             let existingRetired = false;
+            if (upgradeFromTier) {
+                this.logger.log(`[${clientId}] No better-tier buffer for degraded client (tier ${upgradeFromTier})`);
+                return {
+                    status: 'no_candidate',
+                    swapped: false,
+                    clientId,
+                    existingMobile: existingClientMobile,
+                    degraded: true,
+                    message: `No buffer better than degraded tier ${upgradeFromTier}`,
+                };
+            }
             if (permanentReplacement) {
                 this.logger.warn(`[${clientId}] No replacement buffer available, but setup reason is permanent; marking existing mobile inactive`, {
                     existingMobile: existingClientMobile,
@@ -26985,18 +27229,29 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.retireReplacedMobile(existingClientMobile, setupClientQueryDto.reason);
                 existingRetired = true;
             }
-            const moreCandidatesPending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending);
+            const moreCandidatesPending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending || degradedBudget?.moreCandidatesPending);
             const pendingNote = moreCandidatesPending
                 ? ' (SpamBot probe budget exhausted; more unprobed candidates remain, retry to check them)'
                 : '';
-            await this.notify({
-                severity: 'warning',
-                title: 'No buffer',
-                summary: `No safe buffer clients for swap${pendingNote}`,
-                fields: [{ label: 'Client ID', value: clientId }],
-                tables: this.probeSkipTables(probeBudget, fallbackBudget),
-            });
-            this.logger.log('Buffer Clients not safely available');
+            const alreadyDegraded = !!existingClient.degraded;
+            const episodeKey = `${clientId}:${existingClientMobile}:${dead ? 'dead' : 'normal'}`;
+            if (!this.noBufferNoticeEpisodes.has(episodeKey)) {
+                this.noBufferNoticeEpisodes.add(episodeKey);
+                await this.notify({
+                    severity: dead ? 'critical' : 'warning',
+                    title: 'No buffer',
+                    summary: dead
+                        ? `Live account is dead and no buffer exists in any allowed tier (degraded tiers: ${degradedTiers.join(',') || 'off'}); client stays on the dead account${pendingNote}`
+                        : `No safe buffer clients for swap${pendingNote}`,
+                    fields: [
+                        { label: 'Client ID', value: clientId },
+                        ...(dead ? [{ label: 'Reason', value: String(setupClientQueryDto.reason).substring(0, 80), code: false }] : []),
+                        ...(alreadyDegraded ? [{ label: 'Degraded', value: `tier ${existingClient.degraded?.tier}`, code: false }] : []),
+                    ],
+                    tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget),
+                });
+            }
+            this.logger.log('Buffer Clients not safely available', { clientId, dead, moreCandidatesPending, alreadyDegraded });
             return {
                 status: 'no_candidate',
                 swapped: false,
@@ -27004,16 +27259,40 @@ let ClientService = ClientService_1 = class ClientService {
                 existingMobile: existingClientMobile,
                 existingRetired,
                 ...(moreCandidatesPending ? { moreCandidatesPending: true } : {}),
+                ...(alreadyDegraded ? { degraded: true } : {}),
                 message: `No safe buffer client is currently available${pendingNote}`,
             };
         }
+        const conflictingSetup = this.telegramService.getActiveClientSetup(newBufferClient.mobile);
+        if (conflictingSetup && conflictingSetup.clientId !== clientId) {
+            this.logger.warn(`[${clientId}] Candidate ${newBufferClient.mobile} is in an active setup for ${conflictingSetup.clientId}; not taken`);
+            return {
+                status: 'failed',
+                swapped: false,
+                clientId,
+                existingMobile: existingClientMobile,
+                message: `Candidate is being set up for another client (${conflictingSetup.clientId}); retry`,
+            };
+        }
         this.setupCooldownMap.set(clientId, Date.now());
+        const planKey = `${clientId}:${newBufferClient.mobile}`;
+        this.telegramService.setActiveClientSetup({
+            ...setupClientQueryDto,
+            clientId,
+            existingMobile: existingClientMobile,
+            newMobile: newBufferClient.mobile,
+        });
         try {
             this.logger.info(`[${clientId}] Selected replacement buffer client`, {
                 existingMobile: existingClientMobile,
                 newMobile: newBufferClient.mobile,
                 usedFutureAvailableFallback,
+                pickTier: degradedPlan?.pickTier,
+                markerTier: degradedPlan?.markerTier,
+                upgradeFromTier,
             });
+            if (degradedPlan)
+                this.degradedPlans.set(planKey, degradedPlan);
             await this.notify({
                 title: 'Swap started',
                 fields: [
@@ -27021,14 +27300,9 @@ let ClientService = ClientService_1 = class ClientService {
                     { label: 'Old mobile', value: existingClient.mobile },
                     { label: 'Old username', value: existingClient.username ? `@${existingClient.username}` : undefined },
                     { label: 'New mobile', value: newBufferClient.mobile },
+                    ...(degradedPlan ? [{ label: 'Degraded tier', value: String(degradedPlan.markerTier ?? `${degradedPlan.pickTier} (meets tier-1 rules)`), code: false }] : []),
                 ],
-                tables: this.probeSkipTables(probeBudget, fallbackBudget),
-            });
-            this.telegramService.setActiveClientSetup({
-                ...setupClientQueryDto,
-                clientId,
-                existingMobile: existingClientMobile,
-                newMobile: newBufferClient.mobile,
+                tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget),
             });
             this.logger.debug(`[${clientId}] Active client setup registered`, {
                 existingMobile: existingClientMobile,
@@ -27037,7 +27311,12 @@ let ClientService = ClientService_1 = class ClientService {
                 formalities: setupClientQueryDto.formalities,
             });
             await connection_manager_1.connectionManager.getClient(newBufferClient.mobile);
-            await this.updateClientSession(newBufferClient.session, newBufferClient.mobile);
+            await this.updateClientSession(newBufferClient.session, newBufferClient.mobile, clientId);
+            for (const key of [...this.noBufferNoticeEpisodes]) {
+                if (key.startsWith(`${clientId}:`))
+                    this.noBufferNoticeEpisodes.delete(key);
+            }
+            await this.notifyDegradedTransition(clientId, existingClient, newBufferClient.mobile, degradedPlan, upgradeFromTier);
             return {
                 status: 'swapped',
                 swapped: true,
@@ -27045,7 +27324,8 @@ let ClientService = ClientService_1 = class ClientService {
                 existingMobile: existingClientMobile,
                 newMobile: newBufferClient.mobile,
                 usedFutureAvailableFallback,
-                message: 'Client swap completed',
+                ...(degradedPlan?.markerTier ? { degradedTier: degradedPlan.markerTier } : {}),
+                message: degradedPlan?.markerTier ? `Client swap completed (degraded tier ${degradedPlan.markerTier})` : 'Client swap completed',
             };
         }
         catch (error) {
@@ -27064,14 +27344,20 @@ let ClientService = ClientService_1 = class ClientService {
                 details: errorMessage.substring(0, 500),
                 detailsTitle: 'Error message',
             });
-            if (permanent) {
+            const ownerOfMobile = await this.clientUsingMobile(newBufferClient.mobile);
+            if (ownerOfMobile) {
+                this.logger.warn(`[${clientId}] Swap failed on ${newBufferClient.mobile}, now the live main of ${ownerOfMobile}; leaving it untouched`);
+            }
+            else if (permanent) {
                 await this.usersService.expireAccount(newBufferClient.mobile, `Setup failed permanently: ${errorDetails.message}`);
             }
             else {
                 const availableDate = client_helper_utils_1.ClientHelperUtils.toDateString(Date.now() + 3 * 24 * 60 * 60 * 1000);
                 await this.bufferClientService.createOrUpdate(newBufferClient.mobile, { availableDate });
             }
-            this.telegramService.clearActiveClientSetup(newBufferClient.mobile);
+            if (this.telegramService.getActiveClientSetup(newBufferClient.mobile)?.clientId === clientId) {
+                this.telegramService.clearActiveClientSetup(newBufferClient.mobile);
+            }
             return {
                 status: 'failed',
                 swapped: false,
@@ -27082,14 +27368,20 @@ let ClientService = ClientService_1 = class ClientService {
             };
         }
         finally {
-            await connection_manager_1.connectionManager.unregisterClient(newBufferClient.mobile);
+            this.degradedPlans.delete(planKey);
+            if (!(await this.clientUsingMobile(newBufferClient.mobile))) {
+                await connection_manager_1.connectionManager.unregisterClient(newBufferClient.mobile);
+            }
         }
     }
-    async updateClientSession(newSession, setupMobile) {
+    async updateClientSession(newSession, setupMobile, expectedClientId) {
         const setup = this.telegramService.getActiveClientSetup(setupMobile);
         if (!setup) {
             const scope = setupMobile ? ` for ${setupMobile}` : '';
             throw new common_1.BadRequestException(`No active client setup found${scope}`);
+        }
+        if (expectedClientId && setup.clientId !== expectedClientId) {
+            throw new common_1.ConflictException(`Active setup for ${setupMobile} belongs to ${setup.clientId}, not ${expectedClientId}`);
         }
         const { archiveOld: returnOldToPool, clientId, existingMobile, formalities, newMobile, reason } = setup;
         const days = setup.days ?? 0;
@@ -27142,7 +27434,7 @@ let ClientService = ClientService_1 = class ClientService {
                 username: updatedUsername,
                 session: newSession,
                 name: mirroredActiveName,
-            });
+            }, this.degradedPlanFor(clientId, newMobile));
             cutoverCommitted = true;
             this.logger.info(`[${clientId}] Cutover committed`, {
                 existingMobile,
@@ -27191,23 +27483,40 @@ let ClientService = ClientService_1 = class ClientService {
             this.logger.debug(`[${clientId}] Cleared active setup state`, { newMobile });
         }
     }
-    async commitClientCutover(clientId, expectedExistingMobile, updateClientDto) {
+    async commitClientCutover(clientId, expectedExistingMobile, updateClientDto, degradedPlan = null) {
         if (!updateClientDto.session?.trim()) {
             throw new common_1.BadRequestException('Cannot update client with a blank session');
         }
         const cleanUpdateDto = this.cleanUpdateObject(updateClientDto);
         cleanUpdateDto.mobile = this.canonicalMobile(cleanUpdateDto.mobile);
         await this.notifyClientUpdate(clientId);
+        const degradedState = degradedPlan?.markerTier
+            ? {
+                since: degradedPlan.since,
+                tier: degradedPlan.markerTier,
+                reason: degradedPlan.reason,
+                fromMobile: this.canonicalMobile(expectedExistingMobile),
+                limitedUntil: degradedPlan.limitedUntil,
+                ...(degradedPlan.fromClientId ? { fromClientId: degradedPlan.fromClientId } : {}),
+            }
+            : null;
+        const swappedAt = new Date();
+        const clientUpdate = degradedState
+            ? { $set: { ...cleanUpdateDto, degraded: degradedState, swappedAt }, $unset: { swapRetry: '', deadMain: '', sessionChangedAt: '' } }
+            : { $set: { ...cleanUpdateDto, swappedAt }, $unset: { degraded: '', swapRetry: '', deadMain: '', sessionChangedAt: '' } };
         const session = await this.clientModel.db.startSession();
         let updatedClient = null;
         try {
             await session.withTransaction(async () => {
                 updatedClient = await this.clientModel
-                    .findOneAndUpdate({ clientId, mobile: this.canonicalMobile(expectedExistingMobile) }, { $set: cleanUpdateDto }, { returnDocument: 'after', runValidators: true, session })
+                    .findOneAndUpdate({ clientId, mobile: this.canonicalMobile(expectedExistingMobile) }, clientUpdate, { returnDocument: 'after', runValidators: true, session })
                     .lean()
                     .exec();
                 if (!updatedClient) {
                     throw new common_1.ConflictException(`Client "${clientId}" changed before cutover; expected mobile ${expectedExistingMobile}`);
+                }
+                if (degradedPlan?.fromClientId) {
+                    await this.bufferClientService.reassignClientId(cleanUpdateDto.mobile, degradedPlan.fromClientId, clientId, session);
                 }
                 await this.bufferClientService.setPrimaryInUse(clientId, cleanUpdateDto.mobile, session);
             });
@@ -27266,9 +27575,13 @@ let ClientService = ClientService_1 = class ClientService {
         }
     }
     isPermanentReplacementReason(reason) {
-        return !!reason && (0, isPermanentError_1.default)({ message: reason });
+        return !!reason && ((0, isPermanentError_1.default)({ message: reason }) || (0, degraded_swap_1.isDeadSwapReason)(reason));
     }
     async retireReplacedMobile(mobile, reason) {
+        if (await this.isAlreadyRetired(mobile)) {
+            this.logger.log(`Replaced account ${mobile} is already retired; not retired or announced again`);
+            return;
+        }
         try {
             await this.usersService.expireAccount(mobile, reason);
             this.logger.warn(`Replaced account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
@@ -27278,6 +27591,18 @@ let ClientService = ClientService_1 = class ClientService {
             const errorDetails = (0, parseError_1.parseError)(error, `Failed to retire replaced account: ${mobile}`, false);
             this.logger.error(`Failed to retire replaced account ${mobile}: ${errorDetails.message}`);
             await this.notify({ severity: 'error', title: 'Inactivate fail', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 100), code: false }], details: errorDetails.message.substring(0, 500), detailsTitle: 'Error message' });
+        }
+    }
+    async isAlreadyRetired(mobile) {
+        try {
+            const users = (await this.usersService.findByMobileAnyStatus(mobile)) ?? [];
+            if (!users.length || !users.every((u) => u.expired === true))
+                return false;
+            const buffer = await this.bufferClientService.findOne(mobile, false);
+            return !buffer || buffer.status === 'inactive';
+        }
+        catch {
+            return false;
         }
     }
     async handleFormalities(mobile) {
@@ -27344,7 +27669,7 @@ let ClientService = ClientService_1 = class ClientService {
             }
         }
     }
-    async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }) {
+    async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }, accept = {}) {
         for (const candidate of candidates) {
             if (!candidate?.mobile || !candidate?.session)
                 continue;
@@ -27352,22 +27677,71 @@ let ClientService = ClientService_1 = class ClientService {
                 this.logger.warn(`Skipping setup candidate ${candidate.mobile}: session matches current main client`);
                 continue;
             }
-            try {
-                const backupUser = await this.assertDistinctUserBackupSession(candidate.mobile, candidate.session);
-                if (!backupUser.session?.trim() || backupUser.session.trim() === candidate.session.trim()) {
-                    this.logger.warn(`Skipping setup candidate ${candidate.mobile}: backup session is still duplicated`);
+            if (this.setupOwnedByAnotherClient(candidate.mobile, probeBudget.clientId)) {
+                this.logger.warn(`Skipping setup candidate ${candidate.mobile}: in an active setup for another client`);
+                continue;
+            }
+            const owner = probeBudget.leaseOwner;
+            if (owner) {
+                let leased = false;
+                try {
+                    leased = await this.bufferClientService.acquireProbeLease(candidate.mobile, owner, degraded_swap_1.SWAP_LEASE_TTL_MS);
+                }
+                catch (error) {
+                    this.logger.warn(`Skipping setup candidate ${candidate.mobile}: probe lease failed (${(0, parseError_1.parseError)(error, '', false).message})`);
                     continue;
                 }
-                if (!(await this.isSpamSafeForSwap(candidate, probeBudget)))
+                if (!leased) {
+                    this.logger.warn(`[${probeBudget.clientId}] Skipping setup candidate ${candidate.mobile}: leased by another CMS process`);
+                    probeBudget.skipped.push(`${candidate.mobile} busy in another CMS process (not probed)`);
+                    probeBudget.moreCandidatesPending = true;
                     continue;
-                return { mobile: candidate.mobile, session: candidate.session, backupUser };
+                }
+            }
+            let picked = false;
+            try {
+                const backupUser = probeBudget.jobPass
+                    ? await this.storedDistinctBackup(candidate.mobile, candidate.session)
+                    : await this.assertDistinctUserBackupSession(candidate.mobile, candidate.session);
+                if (!backupUser?.session?.trim() || backupUser.session.trim() === candidate.session.trim()) {
+                    this.logger.warn(`Skipping setup candidate ${candidate.mobile}: ${probeBudget.jobPass ? 'no stored distinct backup session (job passes never create one)' : 'backup session is still duplicated'}`);
+                    continue;
+                }
+                probeBudget.lastVerdict = undefined;
+                if (!(await this.isSpamSafeForSwap(candidate, probeBudget, accept)))
+                    continue;
+                if (this.setupOwnedByAnotherClient(candidate.mobile, probeBudget.clientId)) {
+                    this.logger.warn(`Skipping setup candidate ${candidate.mobile}: taken by another client's setup during the probe`);
+                    continue;
+                }
+                const verdict = probeBudget.lastVerdict;
+                const storedLimitedUntil = candidate.limitedUntil ? new Date(candidate.limitedUntil) : null;
+                picked = true;
+                return {
+                    mobile: candidate.mobile,
+                    session: candidate.session,
+                    backupUser,
+                    ...(verdict && Object.keys(accept).length
+                        ? { spamStatus: verdict.status, limitedUntil: verdict.status === 'unknown' ? storedLimitedUntil : verdict.limitedUntil }
+                        : {}),
+                };
             }
             catch (error) {
                 this.logger.warn(`Skipping setup candidate ${candidate.mobile}: failed to ensure distinct backup session`);
                 continue;
             }
+            finally {
+                if (owner && !picked) {
+                    await this.bufferClientService.releaseProbeLeases(owner, candidate.mobile).catch((error) => this.logger.warn(`Probe lease release failed for ${candidate.mobile} (expires by TTL): ${(0, parseError_1.parseError)(error, '', false).message}`));
+                }
+            }
         }
         return null;
+    }
+    async storedDistinctBackup(mobile, candidateSession) {
+        const user = (await this.usersService.findByMobileAnyStatus(mobile))?.[0];
+        const backup = user?.session?.trim();
+        return user && backup && backup !== candidateSession.trim() ? user : null;
     }
     probeSkipTables(...budgets) {
         const rows = budgets.flatMap((b) => b?.skipped ?? []).map((entry) => {
@@ -27376,9 +27750,10 @@ let ClientService = ClientService_1 = class ClientService {
         });
         return rows.length ? [{ title: 'Skipped: SpamBot', columns: ['Mobile', 'Reason'], rows }] : [];
     }
-    async isSpamSafeForSwap(candidate, budget) {
+    async isSpamSafeForSwap(candidate, budget, accept = {}) {
         const checkedAt = candidate.spamCheckedAt ? new Date(candidate.spamCheckedAt).getTime() : 0;
         if (candidate.spamStatus === 'free' && checkedAt > 0 && Date.now() - checkedAt < SPAM_FREE_FRESH_MS) {
+            budget.lastVerdict = { status: 'free', limitedUntil: null };
             return true;
         }
         const probeTimeoutMs = Math.min(spambot_probe_1.SPAMBOT_TOTAL_TIMEOUT_MS, SETUP_PROBE_TIME_BUDGET_MS - budget.spentMs);
@@ -27415,7 +27790,13 @@ let ClientService = ClientService_1 = class ClientService {
             return false;
         }
         if (result.status === 'unknown') {
+            if (accept.rejectFrozenReply && /frozen/i.test(result.replyText || '')) {
+                this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: SpamBot reply mentions a frozen account`);
+                budget.skipped.push(`${candidate.mobile} frozen (SpamBot reply)`);
+                return false;
+            }
             this.logger.warn(`[${budget.clientId}] SpamBot probe inconclusive for ${candidate.mobile} (${result.error || 'unrecognized reply'}); allowing candidate`);
+            budget.lastVerdict = { status: 'unknown', limitedUntil: null };
             return true;
         }
         const patch = {
@@ -27434,14 +27815,472 @@ let ClientService = ClientService_1 = class ClientService {
         catch (error) {
             this.logger.warn(`[${budget.clientId}] Failed to persist SpamBot result for ${candidate.mobile}: ${(0, parseError_1.parseError)(error, '', false).message}`);
         }
-        if (result.status === 'free')
+        if (result.status === 'free'
+            || (result.status === 'limited' && accept.limited)
+            || (result.status === 'harsh' && accept.harsh)) {
+            budget.lastVerdict = { status: result.status, limitedUntil: result.status === 'limited' ? result.limitedUntil : null };
             return true;
+        }
         const detail = result.status === 'limited' && result.limitedUntil
             ? `limited until ${result.limitedUntil.toISOString().slice(0, 16).replace('T', ' ')} UTC`
             : 'harsh limit (indefinite)';
         this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${candidate.mobile}: SpamBot ${detail}`);
         budget.skipped.push(`${candidate.mobile} ${detail}`);
         return false;
+    }
+    buildEligibleBufferQuery(clientId, mobileFilter) {
+        return {
+            clientId,
+            mobile: mobileFilter,
+            createdAt: { $lte: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
+            channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
+            status: 'active',
+            inUse: { $ne: true },
+            warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
+            ...(0, buffer_client_schema_1.buildSpamEligibleFilter)(),
+        };
+    }
+    async findDegradedCandidate(existingClient, tiers, budget, today, busyMobiles) {
+        for (const tier of tiers) {
+            if (budget.remaining <= 0) {
+                budget.moreCandidatesPending = true;
+                break;
+            }
+            if (tier === 2) {
+                const pick = await this.findSiblingCandidate(existingClient, budget, today, busyMobiles);
+                if (pick)
+                    return { tier, ...pick };
+                continue;
+            }
+            const { query, sort } = tier === 3
+                ? (0, degraded_swap_1.buildTier3Query)(existingClient.clientId, busyMobiles)
+                : (0, degraded_swap_1.buildTier4Query)(existingClient.clientId, busyMobiles);
+            const candidates = await this.bufferClientService.executeQuery(query, sort, 10);
+            const healthy = await this.filterServingUsers(candidates);
+            this.logger.info(`[${existingClient.clientId}] Degraded tier ${tier} scan`, {
+                candidateCount: candidates.length,
+                healthyCount: healthy.length,
+            });
+            const candidate = await this.findSafeSetupBufferCandidate(healthy, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(tier));
+            if (candidate)
+                return { tier, candidate };
+        }
+        return null;
+    }
+    async findSiblingCandidate(existingClient, budget, today, busyMobiles) {
+        const persona = (existingClient.dbcoll || '').trim().toLowerCase();
+        if (!persona)
+            return null;
+        const siblings = (await this.findAll()).filter((client) => client.clientId !== existingClient.clientId && (client.dbcoll || '').trim().toLowerCase() === persona);
+        const ranked = [];
+        for (const sibling of siblings) {
+            const rows = await this.bufferClientService.executeQuery({
+                ...this.buildEligibleBufferQuery(sibling.clientId, { $nin: [...busyMobiles, sibling.mobile] }),
+                availableDate: { $lte: today },
+            }, { availableDate: 1, createdAt: 1 });
+            const spares = await this.filterServingUsers(rows, { requireDistinctBackup: true });
+            if (spares.length >= degraded_swap_1.SIBLING_MIN_SPARES_AFTER + 1)
+                ranked.push({ siblingId: sibling.clientId, spares });
+        }
+        ranked.sort((a, b) => b.spares.length - a.spares.length || a.siblingId.localeCompare(b.siblingId));
+        this.logger.info(`[${existingClient.clientId}] Degraded tier 2 scan`, {
+            siblings: siblings.map((s) => s.clientId),
+            lenders: ranked.map((r) => `${r.siblingId}:${r.spares.length}`),
+        });
+        for (const { siblingId, spares } of ranked) {
+            const tryable = spares.slice(0, spares.length - degraded_swap_1.SIBLING_MIN_SPARES_AFTER);
+            const candidate = await this.findSafeSetupBufferCandidate(tryable, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(2));
+            if (candidate)
+                return { candidate, fromClientId: siblingId };
+            if (budget.remaining <= 0)
+                break;
+        }
+        return null;
+    }
+    async filterServingUsers(candidates, opts = {}) {
+        const kept = [];
+        for (const candidate of candidates) {
+            try {
+                const user = (await this.usersService.findByMobileAnyStatus(candidate.mobile))?.[0];
+                const backup = user?.session?.trim();
+                const backupOk = !opts.requireDistinctBackup || (!!backup && backup !== (candidate.session || '').trim());
+                if (user && user.expired !== true && user.twoFA === true && backupOk)
+                    kept.push(candidate);
+                else
+                    this.logger.warn(`Skipping degraded candidate ${candidate.mobile}: users doc missing, expired, without 2FA${opts.requireDistinctBackup ? ' or without a distinct backup session' : ''}`);
+            }
+            catch (error) {
+                this.logger.warn(`Skipping degraded candidate ${candidate.mobile}: users lookup failed (${(0, parseError_1.parseError)(error, '', false).message})`);
+            }
+        }
+        return kept;
+    }
+    async notifyDegradedTransition(clientId, previous, newMobile, plan, upgradeFromTier) {
+        if (plan?.markerTier) {
+            const harsh = plan.markerTier === 4;
+            await this.notify({
+                severity: harsh ? 'critical' : 'warning',
+                title: upgradeFromTier ? 'Degraded upgrade' : 'Degraded swap',
+                summary: upgradeFromTier
+                    ? `Moved from degraded tier ${upgradeFromTier} to tier ${plan.markerTier}`
+                    : harsh
+                        ? 'Dead main replaced by a HARSH-limited buffer (tier 4): inbound replies only until a better buffer exists'
+                        : `Dead main replaced by a degraded buffer (tier ${plan.markerTier}); the swap-maintenance job will move it up`,
+                fields: [
+                    { label: 'Client ID', value: clientId },
+                    { label: 'Tier', value: String(plan.markerTier), code: false },
+                    { label: 'New mobile', value: (0, degraded_swap_1.last4)(newMobile) },
+                    { label: 'Old mobile', value: (0, degraded_swap_1.last4)(previous.mobile) },
+                    { label: 'Limited until', value: plan.limitedUntil ? new Date(plan.limitedUntil).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : (harsh ? 'indefinite' : 'unknown'), code: false },
+                    ...(plan.fromClientId ? [{ label: 'Borrowed from', value: plan.fromClientId }] : []),
+                    { label: 'Reason', value: plan.reason.substring(0, 80), code: false },
+                ],
+            });
+            return;
+        }
+        if (plan?.fromClientId) {
+            await this.notify({
+                severity: 'warning',
+                title: 'Buffer borrowed',
+                summary: `Dead main replaced by a spare borrowed from ${plan.fromClientId} (meets tier-1 rules; no degraded marker)`,
+                fields: [
+                    { label: 'Client ID', value: clientId },
+                    { label: 'Borrowed from', value: plan.fromClientId },
+                    { label: 'New mobile', value: (0, degraded_swap_1.last4)(newMobile) },
+                    { label: 'Old mobile', value: (0, degraded_swap_1.last4)(previous.mobile) },
+                    { label: 'Reason', value: plan.reason.substring(0, 80), code: false },
+                ],
+            });
+        }
+        if (previous.degraded) {
+            await this.notify({
+                severity: 'success',
+                title: 'Degraded cleared',
+                summary: `Moved from degraded tier ${previous.degraded.tier} to a normal (tier 1) buffer`,
+                fields: [
+                    { label: 'Client ID', value: clientId },
+                    { label: 'New mobile', value: (0, degraded_swap_1.last4)(newMobile) },
+                    { label: 'Old mobile', value: (0, degraded_swap_1.last4)(previous.mobile) },
+                ],
+            });
+        }
+    }
+    async findDegradedClients() {
+        return this.clientModel.find({ degraded: { $exists: true, $ne: null } }).lean().exec();
+    }
+    async runSwapMaintenance() {
+        const clients = await this.clientModel.find({}).lean().exec();
+        const states = new Map();
+        for (const client of clients) {
+            if (client?.clientId && client.mobile)
+                states.set(client.clientId, await this.readMainState(client));
+        }
+        const handled = new Set();
+        const rescue = await this.rescueDeadMains(clients.filter((c) => states.get(c.clientId)?.dead), states, handled, clients);
+        const upgrade = await this.upgradeDegradedClients(clients.filter((c) => !handled.has(c.clientId) && c.degraded && !states.get(c.clientId)?.dead), states, clients);
+        for (const row of upgrade)
+            handled.add(row.clientId);
+        const refill = await this.refillLimitedMains(clients.filter((c) => !handled.has(c.clientId) && !c.degraded && states.get(c.clientId)?.limited), clients);
+        return { rescue, upgrade, refill };
+    }
+    async readMainState(client) {
+        const dead = (0, degraded_swap_1.isDeadMainEvidence)(client.deadMain, client.mobile);
+        const evidence = dead ? `tg-aut reported ${String(client.deadMain.reason).substring(0, 120)}` : undefined;
+        let buffer = null;
+        let users = [];
+        try {
+            buffer = (await this.bufferClientService.findOne(client.mobile, false)) ?? null;
+            users = (await this.usersService.findByMobileAnyStatus(client.mobile)) ?? [];
+        }
+        catch (error) {
+            this.logger.warn(`[${client.clientId}] Could not read main state: ${(0, parseError_1.parseError)(error, '', false).message}`);
+            return { dead, evidence, limited: false, buffer: null, userExpired: false };
+        }
+        const userExpired = users.length > 0 && users.every((u) => u.expired === true);
+        const now = Date.now();
+        const limitedUntilMs = buffer?.limitedUntil ? new Date(buffer.limitedUntil).getTime() : 0;
+        const checkedAtMs = buffer?.spamCheckedAt ? new Date(buffer.spamCheckedAt).getTime() : 0;
+        const fresh = checkedAtMs > 0 && now - checkedAtMs <= degraded_swap_1.MAIN_SPAM_STATUS_FRESH_MS;
+        const limited = !dead && !!buffer && fresh && (buffer.spamStatus === 'harsh' || (buffer.spamStatus === 'limited' && limitedUntilMs > now));
+        return { dead, evidence, limited, buffer, userExpired };
+    }
+    async poolFingerprint(client, clients) {
+        const persona = (client.dbcoll || '').trim().toLowerCase();
+        const ids = new Set([client.clientId]);
+        if (persona) {
+            for (const other of clients) {
+                if (other.clientId && (other.dbcoll || '').trim().toLowerCase() === persona)
+                    ids.add(other.clientId);
+            }
+        }
+        const rows = await this.bufferClientService.executeQuery({ clientId: { $in: [...ids] }, status: 'active' });
+        return (0, degraded_swap_1.swapPoolFingerprint)(rows, Date.now(), client_helper_utils_1.ClientHelperUtils.getTodayDateString());
+    }
+    async passDecision(pass, client, clients) {
+        const decision = (0, degraded_swap_1.swapRetryDecision)(client.swapRetry, pass, client.mobile, await this.poolFingerprint(client, clients), Date.now());
+        if (decision.kind === 'due' && decision.rearmed) {
+            this.logger.log(`[${client.clientId}] ${pass}: candidate pool changed since attempt ${client.swapRetry?.attempts}; episode re-armed`);
+        }
+        return decision;
+    }
+    async notePassOutcome(pass, client, clients, decision, swapped) {
+        if (swapped) {
+            await this.clientModel.updateOne({ clientId: client.clientId, swapRetry: { $exists: true } }, { $unset: { swapRetry: '' } }).exec();
+            return 0;
+        }
+        const attempts = decision.attempts + 1;
+        const now = Date.now();
+        const stopped = attempts >= degraded_swap_1.PASS_MAX_ATTEMPTS;
+        const keepSince = !decision.rearmed && decision.attempts > 0 && client.swapRetry?.since;
+        const state = {
+            pass,
+            mobile: client.mobile,
+            attempts,
+            nextAt: new Date(now + (0, degraded_swap_1.passRetryDelayMs)(attempts)),
+            poolFingerprint: await this.poolFingerprint(client, clients),
+            since: keepSince ? new Date(client.swapRetry.since) : new Date(now),
+            stoppedAt: stopped ? new Date(now) : null,
+        };
+        const written = await this.clientModel.updateOne({ clientId: client.clientId, mobile: client.mobile }, { $set: { swapRetry: state } }).exec();
+        if (stopped && (written.matchedCount || 0) === 1) {
+            const text = {
+                rescue: { severity: 'critical', title: 'Rescue stopped', summary: `${client.clientId} stuck on dead main, rescue stopped after ${attempts} tries, will retry when the pool changes` },
+                upgrade: { severity: 'warning', title: 'Upgrade stopped', summary: `${client.clientId} stays on its degraded (tier ${client.degraded?.tier ?? '?'}) account, upgrade stopped after ${attempts} tries, will retry when the pool changes` },
+                refill: { severity: 'warning', title: 'Pool refill stopped', summary: `${client.clientId} stays on its SpamBot-limited main, pool refill stopped after ${attempts} tries, will retry when the pool changes` },
+            }[pass];
+            await this.notify({
+                ...text,
+                fields: [
+                    { label: 'Client ID', value: client.clientId },
+                    { label: 'Mobile', value: (0, degraded_swap_1.last4)(client.mobile) },
+                    { label: 'Since', value: state.since.toISOString() },
+                ],
+            });
+        }
+        return attempts;
+    }
+    async runPassAttempt(pass, client, all, decision, request, internal) {
+        let result;
+        try {
+            result = await this.runSetup(client.clientId, request, { ...internal, jobPass: true });
+        }
+        catch (error) {
+            (0, parseError_1.parseError)(error, `[${client.clientId}] ${pass} failed`, false);
+            return { clientId: client.clientId, status: 'failed', attempts: await this.notePassOutcome(pass, client, all, decision, false) };
+        }
+        if (result.status === 'cooldown' || result.status === 'disabled')
+            return { clientId: client.clientId, status: result.status };
+        const used = await this.notePassOutcome(pass, client, all, decision, result.swapped);
+        return {
+            clientId: client.clientId,
+            status: result.status,
+            ...(result.swapped ? {} : { attempts: used }),
+            ...(decision.rearmed ? { rearmed: true } : {}),
+            ...(result.degradedTier ? { degradedTier: result.degradedTier } : {}),
+            ...(result.newMobile ? { newMobile: result.newMobile } : {}),
+        };
+    }
+    async rescueDeadMains(clients, states, handled, all) {
+        const results = [];
+        let attempts = 0;
+        for (const client of clients) {
+            handled.add(client.clientId);
+            if (attempts >= degraded_swap_1.RESCUE_MAX_PER_RUN)
+                break;
+            try {
+                const reportedAt = client.deadMain?.at ? new Date(client.deadMain.at).getTime() : 0;
+                if (Date.now() - reportedAt < degraded_swap_1.DEAD_MAIN_HANDOFF_WAIT_MS) {
+                    results.push({ clientId: client.clientId, status: 'waiting_handoff' });
+                    continue;
+                }
+                const decision = await this.passDecision('rescue', client, all);
+                if (decision.kind !== 'due') {
+                    results.push({ clientId: client.clientId, status: decision.kind === 'stopped' ? 'stopped' : 'skipped_cooldown', attempts: decision.attempts });
+                    continue;
+                }
+                attempts++;
+                const evidence = states.get(client.clientId)?.evidence || String(client.deadMain?.reason);
+                this.logger.warn(`[${client.clientId}] Rescue: current main ${client.mobile} is dead (${evidence}); running setupClient`);
+                const row = await this.runPassAttempt('rescue', client, all, decision, { days: 0, archiveOld: false, formalities: false, reason: `${degraded_swap_1.DEAD_MAIN_RESCUE_REASON}: ${client.deadMain.reason}` }, {});
+                results.push({ ...row, ...(client.degraded?.tier ? { fromTier: client.degraded.tier } : {}) });
+            }
+            catch (error) {
+                (0, parseError_1.parseError)(error, `[${client.clientId}] rescue failed`, false);
+                results.push({ clientId: client.clientId, status: 'failed' });
+            }
+        }
+        return results;
+    }
+    async upgradeDegradedClients(clients, states, all) {
+        const results = [];
+        const list = clients ?? await this.findDegradedClients();
+        const pool = all ?? await this.clientModel.find({}).lean().exec();
+        let attempts = 0;
+        for (const client of list) {
+            const fromTier = client.degraded?.tier;
+            if (fromTier !== 2 && fromTier !== 3 && fromTier !== 4)
+                continue;
+            try {
+                const state = states?.get(client.clientId) ?? await this.readMainState(client);
+                if (this.currentMeetsTier1(client, state)) {
+                    const cleared = await this.clientModel.updateOne({ clientId: client.clientId, mobile: client.mobile, degraded: { $exists: true } }, { $unset: { degraded: '', swapRetry: '' } }).exec();
+                    if ((cleared.modifiedCount || 0) === 1) {
+                        const cached = this.clientsMap.get(client.clientId);
+                        if (cached) {
+                            const { degraded: _dropped, ...rest } = cached;
+                            this.clientsMap.set(client.clientId, rest);
+                        }
+                        await this.notify({
+                            severity: 'success',
+                            title: 'Degraded cleared',
+                            summary: `Current account now meets tier-1 rules (was degraded tier ${fromTier}); kept, no swap`,
+                            fields: [{ label: 'Client ID', value: client.clientId }, { label: 'Mobile', value: (0, degraded_swap_1.last4)(client.mobile) }],
+                        });
+                        results.push({ clientId: client.clientId, fromTier, status: 'cleared' });
+                    }
+                    continue;
+                }
+                if (attempts >= degraded_swap_1.UPGRADE_MAX_PER_RUN)
+                    continue;
+                const decision = await this.passDecision('upgrade', client, pool);
+                if (decision.kind !== 'due') {
+                    results.push({ clientId: client.clientId, fromTier, status: decision.kind === 'stopped' ? 'stopped' : 'skipped_cooldown', attempts: decision.attempts });
+                    continue;
+                }
+                attempts++;
+                const row = await this.runPassAttempt('upgrade', client, pool, decision, { days: 0, archiveOld: true, formalities: true, reason: degraded_swap_1.DEGRADED_UPGRADE_REASON }, { upgradeFromTier: fromTier });
+                results.push({ ...row, fromTier });
+            }
+            catch (error) {
+                (0, parseError_1.parseError)(error, `[${client.clientId}] degraded upgrade failed`, false);
+                results.push({ clientId: client.clientId, fromTier, status: 'failed' });
+            }
+        }
+        return results;
+    }
+    currentMeetsTier1(client, state) {
+        const buffer = state.buffer;
+        if (!buffer || state.dead || state.userExpired)
+            return false;
+        const now = Date.now();
+        const markerUntil = client.degraded?.limitedUntil ? new Date(client.degraded.limitedUntil).getTime() : 0;
+        const docUntil = buffer.limitedUntil ? new Date(buffer.limitedUntil).getTime() : 0;
+        const createdAt = buffer.createdAt;
+        return buffer.clientId === client.clientId
+            && buffer.status === 'active'
+            && buffer.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED
+            && (buffer.channels ?? 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING
+            && (!createdAt || new Date(createdAt).getTime() <= now - 15 * 24 * 60 * 60 * 1000)
+            && buffer.spamStatus !== 'harsh'
+            && docUntil <= now
+            && markerUntil <= now;
+    }
+    async refillLimitedMains(clients, all) {
+        const results = [];
+        const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
+        let attempts = 0;
+        for (const client of clients) {
+            if (attempts >= degraded_swap_1.POOL_REFILL_MAX_PER_RUN)
+                break;
+            try {
+                const decision = await this.passDecision('refill', client, all);
+                if (decision.kind !== 'due') {
+                    results.push({ clientId: client.clientId, status: decision.kind === 'stopped' ? 'stopped' : 'skipped_cooldown', attempts: decision.attempts });
+                    continue;
+                }
+                const busy = await this.busyCandidateMobiles(client.clientId, client.mobile);
+                const spare = await this.bufferClientService.executeQuery({ ...this.buildEligibleBufferQuery(client.clientId, { $nin: busy }), availableDate: { $lte: today } }, undefined, 1);
+                if (!spare.length)
+                    continue;
+                attempts++;
+                results.push(await this.runPassAttempt('refill', client, all, decision, { days: 0, archiveOld: true, formalities: true, reason: degraded_swap_1.POOL_REFILL_REASON }, {}));
+            }
+            catch (error) {
+                (0, parseError_1.parseError)(error, `[${client.clientId}] pool refill failed`, false);
+                results.push({ clientId: client.clientId, status: 'failed' });
+            }
+        }
+        return results;
+    }
+    async busyCandidateMobiles(clientId, existingMobile) {
+        const busy = new Set([existingMobile]);
+        for (const mobile of this.telegramService.getActiveClientSetupMobiles())
+            busy.add(mobile);
+        for (const client of await this.findAll()) {
+            if (client.clientId !== clientId && client.mobile)
+                busy.add(client.mobile);
+        }
+        return [...busy];
+    }
+    setupOwnedByAnotherClient(mobile, clientId) {
+        const setup = this.telegramService.getActiveClientSetup(mobile);
+        return !!setup && setup.newMobile === mobile && setup.clientId !== clientId;
+    }
+    async clientUsingMobile(mobile) {
+        try {
+            const owner = await this.clientModel.findOne({ mobile }, { clientId: 1, mobile: 1 }).lean().exec();
+            return owner && owner.mobile === mobile ? owner.clientId : null;
+        }
+        catch (error) {
+            this.logger.warn(`Could not check the owner of ${mobile}: ${(0, parseError_1.parseError)(error, '', false).message}`);
+            return 'unknown';
+        }
+    }
+    degradedPlanFor(clientId, mobile) {
+        const plan = this.degradedPlans.get(`${clientId}:${mobile}`);
+        return plan && plan.clientId === clientId ? plan : null;
+    }
+    async sendDegradedSummary() {
+        const degraded = await this.findDegradedClients();
+        const stuck = (await this.clientModel.find({ 'swapRetry.stoppedAt': { $ne: null } }).lean().exec())
+            .filter((c) => c.swapRetry?.stoppedAt && c.swapRetry.mobile === c.mobile);
+        const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
+        const emptyPools = [];
+        for (const client of await this.findAll()) {
+            const spares = await this.bufferClientService.executeQuery({ ...this.buildEligibleBufferQuery(client.clientId, { $ne: client.mobile }), availableDate: { $lte: today } }, undefined, 1);
+            if (!spares.length)
+                emptyPools.push(client.clientId);
+        }
+        if (!degraded.length && !emptyPools.length && !stuck.length)
+            return { degraded: 0, emptyPools: 0, stuck: 0 };
+        const tables = [];
+        if (degraded.length) {
+            tables.push({
+                title: 'Degraded clients',
+                columns: ['Client', 'Tier', 'Mobile', 'Since', 'Limited until'],
+                rows: degraded.map((c) => [
+                    c.clientId,
+                    String(c.degraded?.tier ?? '?'),
+                    (0, degraded_swap_1.last4)(c.mobile),
+                    c.degraded?.since ? new Date(c.degraded.since).toISOString().slice(0, 10) : '?',
+                    c.degraded?.limitedUntil ? new Date(c.degraded.limitedUntil).toISOString().slice(0, 10) : (c.degraded?.tier === 4 ? 'indefinite' : '-'),
+                ]),
+            });
+        }
+        if (emptyPools.length) {
+            tables.push({ title: 'No eligible spare (pool empty)', columns: ['Client'], rows: emptyPools.map((id) => [id]) });
+        }
+        if (stuck.length) {
+            tables.push({
+                title: 'Stuck (retries stopped until the pool changes)',
+                columns: ['Client', 'Pass', 'Mobile', 'Tries', 'Stopped'],
+                rows: stuck.map((c) => [
+                    c.clientId,
+                    c.swapRetry.pass,
+                    (0, degraded_swap_1.last4)(c.mobile),
+                    String(c.swapRetry.attempts),
+                    new Date(c.swapRetry.stoppedAt).toISOString().slice(0, 16),
+                ]),
+            });
+        }
+        const deadStuck = stuck.some((c) => c.swapRetry?.pass === 'rescue');
+        await this.notify({
+            severity: deadStuck || degraded.some((c) => c.degraded?.tier === 4) ? 'error' : 'warning',
+            title: 'Degraded daily',
+            summary: `${degraded.length} degraded client(s); ${emptyPools.length} client(s) with no eligible spare; ${stuck.length} stuck client(s)`,
+            tables,
+        });
+        return { degraded: degraded.length, emptyPools: emptyPools.length, stuck: stuck.length };
     }
     async assertDistinctUserBackupSession(mobile, activeSession) {
         let user;
@@ -27782,6 +28621,186 @@ exports.ClientService = ClientService = ClientService_1 = __decorate([
         buffer_client_service_1.BufferClientService,
         users_service_1.UsersService])
 ], ClientService);
+
+
+/***/ },
+
+/***/ "./src/components/clients/degraded-swap.ts"
+/*!*************************************************!*\
+  !*** ./src/components/clients/degraded-swap.ts ***!
+  \*************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PASS_MAX_ATTEMPTS = exports.PASS_RETRY_BASE_MS = exports.MAIN_SPAM_STATUS_FRESH_MS = exports.SWAP_REPORT_GRACE_MS = exports.SWAP_LEASE_RENEW_MS = exports.SWAP_LEASE_TTL_MS = exports.DEAD_MAIN_HANDOFF_WAIT_MS = exports.POOL_REFILL_MAX_PER_RUN = exports.UPGRADE_MAX_PER_RUN = exports.RESCUE_MAX_PER_RUN = exports.POOL_REFILL_REASON = exports.DEAD_MAIN_RESCUE_REASON = exports.DEAD_SWAP_REASON_CODES = exports.DEGRADED_UPGRADE_REASON = exports.SIBLING_MIN_SPARES_AFTER = exports.ALL_DEGRADED_TIERS = void 0;
+exports.leaseFreeFilter = leaseFreeFilter;
+exports.isDeadMainEvidence = isDeadMainEvidence;
+exports.passRetryDelayMs = passRetryDelayMs;
+exports.swapRetryDecision = swapRetryDecision;
+exports.swapPoolFingerprint = swapPoolFingerprint;
+exports.isDeadSwapReason = isDeadSwapReason;
+exports.markerTierFromVerdict = markerTierFromVerdict;
+exports.parseDegradedSwapTiers = parseDegradedSwapTiers;
+exports.buildTier3Query = buildTier3Query;
+exports.buildTier4Query = buildTier4Query;
+exports.probeAcceptanceForTier = probeAcceptanceForTier;
+exports.last4 = last4;
+const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./src/components/shared/warmup-phases.ts");
+exports.ALL_DEGRADED_TIERS = [2, 3, 4];
+exports.SIBLING_MIN_SPARES_AFTER = 2;
+exports.DEGRADED_UPGRADE_REASON = 'DEGRADED_UPGRADE';
+exports.DEAD_SWAP_REASON_CODES = [
+    'FROZEN_METHOD_INVALID',
+    'FROZEN_PARTICIPANT_MISSING',
+    'USER_DEACTIVATED',
+    'USER_DEACTIVATED_BAN',
+    'SESSION_REVOKED',
+    'AUTH_KEY_UNREGISTERED',
+    'AUTH_KEY_DUPLICATED',
+    'PHONE_NUMBER_BANNED',
+    'DEAD_MAIN_RESCUE',
+];
+exports.DEAD_MAIN_RESCUE_REASON = 'DEAD_MAIN_RESCUE';
+exports.POOL_REFILL_REASON = 'POOL_REFILL';
+const DEAD_REASON_OVERRIDES = ['INPUT_USER_DEACTIVATED'];
+exports.RESCUE_MAX_PER_RUN = 3;
+exports.UPGRADE_MAX_PER_RUN = 3;
+exports.POOL_REFILL_MAX_PER_RUN = 3;
+exports.DEAD_MAIN_HANDOFF_WAIT_MS = 35 * 60 * 1000;
+exports.SWAP_LEASE_TTL_MS = 10 * 60 * 1000;
+exports.SWAP_LEASE_RENEW_MS = 2 * 60 * 1000;
+exports.SWAP_REPORT_GRACE_MS = 15 * 60 * 1000;
+exports.MAIN_SPAM_STATUS_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+function leaseFreeFilter(field, now) {
+    return { $or: [{ [field]: { $exists: false } }, { [field]: null }, { [`${field}.until`]: { $lte: now } }] };
+}
+function isDeadMainEvidence(deadMain, currentMobile) {
+    return !!deadMain && deadMain.mobile === currentMobile && isDeadSwapReason(deadMain.reason)
+        && !String(deadMain.reason).startsWith(exports.DEAD_MAIN_RESCUE_REASON);
+}
+exports.PASS_RETRY_BASE_MS = 30 * 60 * 1000;
+exports.PASS_MAX_ATTEMPTS = 6;
+function passRetryDelayMs(misses) {
+    if (misses <= 0)
+        return 0;
+    return exports.PASS_RETRY_BASE_MS * 2 ** (misses - 1);
+}
+function swapRetryDecision(state, pass, mobile, fingerprint, nowMs) {
+    if (!state || state.pass !== pass || state.mobile !== mobile)
+        return { kind: 'due', attempts: 0, rearmed: false };
+    if (state.poolFingerprint !== fingerprint)
+        return { kind: 'due', attempts: 0, rearmed: true };
+    if (state.attempts >= exports.PASS_MAX_ATTEMPTS)
+        return { kind: 'stopped', attempts: state.attempts };
+    if (nowMs < new Date(state.nextAt).getTime())
+        return { kind: 'cooldown', attempts: state.attempts };
+    return { kind: 'due', attempts: state.attempts, rearmed: false };
+}
+function swapPoolFingerprint(rows, nowMs, today) {
+    const parts = rows
+        .filter((r) => r.status === 'active' && r.inUse !== true)
+        .map((r) => {
+        const until = r.limitedUntil ? new Date(r.limitedUntil).getTime() : 0;
+        return [
+            r.clientId ?? '',
+            r.mobile,
+            r.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED ? 'R' : '-',
+            (r.channels ?? 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING ? 'C' : '-',
+            r.availableDate && r.availableDate <= today ? 'D' : '-',
+            r.spamStatus || '',
+            until > nowMs ? 'L' : '-',
+        ].join(':');
+    })
+        .sort();
+    let hash = 0x811c9dc5;
+    const text = parts.join('|');
+    for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return `${parts.length}:${hash.toString(16).padStart(8, '0')}`;
+}
+function containsToken(text, token) {
+    const haystack = text.toUpperCase();
+    let from = 0;
+    while (true) {
+        const idx = haystack.indexOf(token, from);
+        if (idx === -1)
+            return false;
+        const before = idx === 0 ? '' : haystack[idx - 1];
+        const after = haystack[idx + token.length] ?? '';
+        const isWordChar = (c) => c !== '' && /[A-Z0-9_]/.test(c);
+        if (!isWordChar(before) && !isWordChar(after))
+            return true;
+        from = idx + 1;
+    }
+}
+function isDeadSwapReason(reason) {
+    if (typeof reason !== 'string' || !reason.trim())
+        return false;
+    if (DEAD_REASON_OVERRIDES.some((code) => containsToken(reason, code)))
+        return false;
+    return exports.DEAD_SWAP_REASON_CODES.some((code) => containsToken(reason, code));
+}
+function markerTierFromVerdict(pickTier, verdict) {
+    if (pickTier === 2)
+        return 1;
+    if (verdict === 'free')
+        return 1;
+    if (verdict === 'limited')
+        return 3;
+    if (verdict === 'harsh')
+        return 4;
+    return pickTier;
+}
+function parseDegradedSwapTiers(raw = process.env.DEGRADED_SWAP_TIERS) {
+    if (raw === undefined || raw.trim() === '')
+        return [...exports.ALL_DEGRADED_TIERS];
+    const value = raw.trim().toLowerCase();
+    if (value === 'none' || value === 'off' || value === '0' || value === 'false')
+        return [];
+    const tiers = new Set();
+    for (const token of value.split(',')) {
+        const n = Number(token.trim());
+        if (n === 2 || n === 3 || n === 4)
+            tiers.add(n);
+    }
+    return [...tiers].sort((a, b) => a - b);
+}
+function ownPoolBase(clientId, excludeMobiles) {
+    return {
+        clientId,
+        mobile: { $nin: excludeMobiles },
+        status: 'active',
+        inUse: { $ne: true },
+        warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
+        channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
+    };
+}
+function buildTier3Query(clientId, excludeMobiles, now = new Date()) {
+    return {
+        query: { ...ownPoolBase(clientId, excludeMobiles), spamStatus: 'limited', limitedUntil: { $gt: now } },
+        sort: { limitedUntil: 1, channels: -1, createdAt: 1 },
+    };
+}
+function buildTier4Query(clientId, excludeMobiles) {
+    return {
+        query: { ...ownPoolBase(clientId, excludeMobiles), spamStatus: 'harsh' },
+        sort: { channels: -1, createdAt: 1 },
+    };
+}
+function probeAcceptanceForTier(tier) {
+    if (tier === 2)
+        return { rejectFrozenReply: true };
+    if (tier === 3)
+        return { limited: true, rejectFrozenReply: true };
+    return { limited: true, harsh: true, rejectFrozenReply: true };
+}
+function last4(mobile) {
+    const m = String(mobile ?? '');
+    return m.length > 4 ? `****${m.slice(-4)}` : m;
+}
 
 
 /***/ },
@@ -28240,6 +29259,18 @@ __decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], SetupClientQueryDto.prototype, "reason", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({
+        description: 'The mobile the calling tg-aut process runs on. When present and not the client\'s current main, CMS answers stale_report and does nothing (a late report from a replaced process). Not validated strictly: an unparseable value counts as absent.',
+    }),
+    (0, class_validator_1.IsOptional)(),
+    (0, class_transformer_1.Transform)(({ value }) => {
+        const first = Array.isArray(value) ? value[0] : value;
+        return typeof first === 'string' ? first : undefined;
+    }),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], SetupClientQueryDto.prototype, "reportedMobile", void 0);
 
 
 /***/ },
@@ -28441,6 +29472,60 @@ __decorate([
     (0, mongoose_1.Prop)({ required: false, type: [String], default: [] }),
     __metadata("design:type", Array)
 ], Client.prototype, "profilePics", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Set while the client runs on a degraded-swap account (tier 2-4); cleared by the next tier-1 swap. Not returned by masked endpoints.',
+        required: false,
+        type: Object,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Object, default: undefined }),
+    __metadata("design:type", Object)
+], Client.prototype, "degraded", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Rescue / pool-refill episode of the swap-maintenance job (attempts, next try, hard stop). Not returned by masked endpoints.',
+        required: false,
+        type: Object,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Object, default: undefined }),
+    __metadata("design:type", Object)
+], Client.prototype, "swapRetry", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Set when tg-aut (the live session) reported the current main dead via /setupClient; the only evidence the rescue pass acts on. Cleared by the next swap or mobile change. Not returned by masked endpoints.',
+        required: false,
+        type: Object,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Object, default: undefined }),
+    __metadata("design:type", Object)
+], Client.prototype, "deadMain", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Cross-process setupClient lease (owner host:pid:uuid, until). Not returned by masked endpoints.',
+        required: false,
+        type: Object,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Object, default: undefined }),
+    __metadata("design:type", Object)
+], Client.prototype, "swapLease", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Time of the last setupClient cutover. Reports without reportedMobile are ignored for SWAP_REPORT_GRACE_MS after it (they may come from the replaced process). Not returned by masked endpoints.',
+        required: false,
+        type: Date,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Date, default: undefined }),
+    __metadata("design:type", Date)
+], Client.prototype, "swappedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({
+        description: 'Time of the last session-only change by update(). Reports for the same mobile are ignored for SWAP_REPORT_GRACE_MS after it (the running process may still hold the old session). Cleared by a cutover. Not returned by masked endpoints.',
+        required: false,
+        type: Date,
+    }),
+    (0, mongoose_1.Prop)({ required: false, type: Date, default: undefined }),
+    __metadata("design:type", Date)
+], Client.prototype, "sessionChangedAt", void 0);
 exports.Client = Client = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'clients', versionKey: false, autoIndex: true, timestamps: true,
@@ -51200,7 +52285,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ScheduledJobsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ScheduledJobsService = void 0;
+exports.ScheduledJobsService = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
@@ -51211,6 +52296,7 @@ const runtime_config_service_1 = __webpack_require__(/*! ../config/runtime-confi
 const account_maintenance_service_1 = __webpack_require__(/*! ../maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
 const analytics_health_check_1 = __webpack_require__(/*! ../../components/daily-analytics/analytics-health.check */ "./src/components/daily-analytics/analytics-health.check.ts");
 const IST = 'Asia/Kolkata';
+exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = 60 * 60 * 1000;
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth) {
         this.config = config;
@@ -51267,6 +52353,20 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         });
         this.register('cms-buffer-join', '0 */3 * * *', () => this.appService.joinBufferClients());
         this.register('cms-analytics-health', '30 2 * * *', () => this.runAnalyticsHealth());
+        this.register('cms-swap-maintenance', '7,37 * * * *', () => {
+            const now = new Date();
+            return this.runClaimed(`swap-maintenance:${this.halfHourSlotKey(now)}`, 'swap maintenance', async () => {
+                const results = await this.clientService.runSwapMaintenance();
+                return { results };
+            }, {
+                ttlMs: exports.SWAP_MAINTENANCE_CLAIM_TTL_MS,
+                blockedBy: `swap-maintenance:${this.halfHourSlotKey(new Date(now.getTime() - 30 * 60 * 1000))}`,
+            });
+        });
+        this.register('cms-degraded-summary', '5 10 * * *', () => this.runClaimed(`degraded-summary:${this.istDateKey()}`, 'degraded summary', async () => {
+            const summary = await this.clientService.sendDegradedSummary();
+            return { summary };
+        }));
         this.register('cms-buffer-info-refresh', '25 0 * * *', async () => {
             if (new Date().getUTCDate() % 5 === 0)
                 await this.appService.updateBufferClientInfo();
@@ -51365,6 +52465,36 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
         const minutes = value('hour') * 60 + value('minute');
         return minutes >= 25 && minutes < 60;
+    }
+    halfHourSlotKey(now = new Date()) {
+        const slot = new Date(Math.floor(now.getTime() / (30 * 60 * 1000)) * 30 * 60 * 1000);
+        return slot.toISOString().slice(0, 16);
+    }
+    async runClaimed(jobId, label, task, options = {}) {
+        const db = this.requireDatabase(label);
+        const runs = db.collection('controlPlaneJobRuns');
+        if (options.blockedBy) {
+            const previous = await runs.findOne({ _id: options.blockedBy, completedAt: { $exists: false }, leaseExpiresAt: { $gt: new Date() } });
+            if (previous) {
+                this.logger.warn(`${label} skipped: ${options.blockedBy} is still running (${previous.leaseOwner})`);
+                return;
+            }
+        }
+        if (!(await this.claimJob(runs, jobId, options.ttlMs))) {
+            this.logger.warn(`${label} already claimed or completed: ${jobId}`);
+            return;
+        }
+        try {
+            const outcome = await task();
+            await runs.updateOne({ _id: jobId }, { $set: { completedAt: new Date(), ...outcome }, $unset: { leaseOwner: '', leaseExpiresAt: '' } });
+        }
+        catch (error) {
+            await runs.updateOne({ _id: jobId }, {
+                $set: { failedAt: new Date(), error: error instanceof Error ? error.message : String(error), leaseExpiresAt: new Date(0) },
+                $unset: { leaseOwner: '' },
+            });
+            throw error;
+        }
     }
     async runAnalyticsHealth() {
         const db = this.requireDatabase('analytics health check');
@@ -51533,9 +52663,9 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         }
         return db;
     }
-    async claimJob(collection, jobId) {
+    async claimJob(collection, jobId, ttlMs = 15 * 60 * 1000) {
         const now = new Date();
-        const leaseExpiresAt = new Date(now.getTime() + 15 * 60 * 1000);
+        const leaseExpiresAt = new Date(now.getTime() + ttlMs);
         const claimed = await collection.updateOne({
             _id: jobId,
             completedAt: { $exists: false },
