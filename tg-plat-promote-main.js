@@ -4679,13 +4679,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
-/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
-/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
-/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
-/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
+/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
 
 
 
@@ -4697,8 +4698,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_5__.PromoLogger('promo');
+
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_6__.PromoLogger('pool');
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_6__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
@@ -4707,6 +4709,8 @@ const hostOf = (runner) => runner;
 class PromotionFlowRunner {
     constructor(adapter, options) {
         this.followUpTimers = new Map();
+        /** Instance field, not a prototype method: flow-runner-seams pins the prototype method list. */
+        this.isOwnChannel = (channel) => this.ownChannels.isOwnChannel(channel.channelId, channel.username ?? null);
         this.queueCheckInterval = null;
         this.queueCheckPromise = null;
         this.queueRestorePromise = null;
@@ -4743,18 +4747,19 @@ class PromotionFlowRunner {
             totalDurabilityFailures: 0,
             consecutiveCycleFailures: 0,
         };
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isAdapterLike)(adapter)) {
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isAdapterLike)(adapter)) {
             throw new Error('PromotionFlowRunner adapter is required');
         }
-        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.asRunnerOptions)(options);
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isAccountLike)(safeOptions.account)) {
+        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.asRunnerOptions)(options);
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isAccountLike)(safeOptions.account)) {
             throw new Error('PromotionFlowRunner account context is required');
         }
         this.adapter = adapter;
         this.options = safeOptions;
-        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isMessageQueueLike)(safeOptions.messageQueue)
+        this.ownChannels = safeOptions.ownChannels ?? _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_4__.OwnChannelRegistry.getInstance();
+        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
-            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_5__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -4795,19 +4800,19 @@ class PromotionFlowRunner {
         this.health.startedAt = Date.now();
         this.health.stoppedAt = null;
         this.startQueueChecker();
-        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
+        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
                 let active = false;
                 try {
-                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.isExactTrue)(await this.adapter.isActive());
+                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isExactTrue)(await this.adapter.isActive());
                 }
                 catch (error) {
                     const normalizedError = this.normalizeError(error);
                     this.recordCycleFailure(normalizedError);
                     this.log('error', `Promotion active-state check failed; keeping runner alive error=${normalizedError}`);
                     if (this.running)
-                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
                     continue;
                 }
                 if (!active)
@@ -4825,7 +4830,7 @@ class PromotionFlowRunner {
                     this.log('error', `Promotion cycle failed: ${normalizedError}`);
                 }
                 if (this.running)
-                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             }
         }
         finally {
@@ -4841,13 +4846,20 @@ class PromotionFlowRunner {
             await this.checkQueuedMessages();
             let channels = [];
             try {
-                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannels)(await this.adapter.loadChannels());
+                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeChannels)(await this.adapter.loadChannels());
             }
             catch (error) {
                 const normalizedError = this.normalizeError(error);
                 this.recordCycleFailure(`channel load failed: ${normalizedError}`);
                 this.log('warn', `Promotion channel load failed; skipping cycle error=${normalizedError}`);
                 return;
+            }
+            // Our own channels are never promotion targets (same strictness as a restricted channel).
+            await this.ownChannels.ready?.().catch(() => undefined);
+            const ownExcluded = channels.filter((channel) => this.isOwnChannel(channel));
+            if (ownExcluded.length > 0) {
+                channels = channels.filter((channel) => !this.isOwnChannel(channel));
+                this.log('info', `Promotion own-channel exclusion; excluded=${ownExcluded.length} ids=${ownExcluded.slice(0, 5).map((c) => c.channelId).join(',')}`);
             }
             if (channels.length === 0) {
                 this.log('warn', 'No channels available for promotion');
@@ -4862,7 +4874,7 @@ class PromotionFlowRunner {
                 failStreak: stats.failStreak,
                 includeJitter: true,
             });
-            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
+            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
             let selectedChannels;
             let selectionExploreDenied = 0;
             if (this.options.channelSelectionMode === 'source_order') {
@@ -5026,14 +5038,19 @@ class PromotionFlowRunner {
         }
     }
     async processChannel(rawChannel, isFollowUp, refreshBeforePlanning = false) {
-        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannel)(rawChannel);
+        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeChannel)(rawChannel);
         if (!channel) {
             this.log('warn', `Promotion channel attempt skipped; malformed channel=${this.safeJson(rawChannel)}`);
             return 'skipped';
         }
+        // Covers follow-ups and queued messages restored from before the exclusion existed.
+        if (this.isOwnChannel(channel)) {
+            this.log('debug', `Promotion channel attempt skipped; own channel; ${this.formatChannel(channel)}`);
+            return 'skipped';
+        }
         if (refreshBeforePlanning) {
             try {
-                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
+                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
                 if (!refreshed) {
                     this.log('debug', `Promotion channel attempt skipped after final state reload; ${this.formatChannel(channel)}`);
                     return 'skipped';
@@ -5057,13 +5074,13 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.mergePromotionHealthSignals)(channel, doc);
+        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
         const eligible = await this.evaluateEligibility(planningChannel, doc, percentiles, isFollowUp);
         if (!eligible)
             return 'skipped';
         const stats = await this.getStatsOrDefault('message planning');
-        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
+        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
         const messagePolicyInput = {
             isFollowUp,
             ...(planningChannel.freeformDeletedCount !== undefined
@@ -5166,10 +5183,10 @@ class PromotionFlowRunner {
         this.health.lastQueueCheckStartedAt = Date.now();
         try {
             const now = Date.now();
-            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
+            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
             let ready = [];
             try {
-                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay));
+                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay));
             }
             catch (error) {
                 this.log('warn', `Promotion queue ready check failed; skipping queue pass error=${this.normalizeError(error)}`);
@@ -5199,7 +5216,7 @@ class PromotionFlowRunner {
                 }
                 let result;
                 try {
-                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
+                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
                 }
                 catch (error) {
                     this.log('warn', [
@@ -5212,7 +5229,7 @@ class PromotionFlowRunner {
                     continue;
                 }
                 if (result.status === 'exists') {
-                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.withMessageCheckText)(message, result);
+                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.withMessageCheckText)(message, result);
                     this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
                     await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
                     await this.recordAccountSurvival(message);
@@ -5250,7 +5267,7 @@ class PromotionFlowRunner {
     }
     startQueueChecker() {
         this.stopQueueChecker();
-        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
+        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
         this.queueCheckInterval = setInterval(() => {
             if (!this.running)
                 return;
@@ -5314,7 +5331,7 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion adapter recent-queue check failed; continuing without adapter queue signal; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const healthChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.mergePromotionHealthSignals)(channel, doc);
+        const healthChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.mergePromotionHealthSignals)(channel, doc);
         const result = (0,_policy__WEBPACK_IMPORTED_MODULE_2__.evaluatePromotionChannelEligibility)({
             channel: healthChannel,
             scoringEnabled: this.options.scoringEnabled && !!percentiles,
@@ -5330,7 +5347,7 @@ class PromotionFlowRunner {
     }
     async trySendPromotion(channel, candidate, isFollowUp) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
         }
         catch (error) {
             const errorMessage = this.normalizeError(error);
@@ -5367,25 +5384,25 @@ class PromotionFlowRunner {
      * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
      */
     recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride);
     }
     recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     resolveCandidateStrategy(candidate) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.resolveCandidateStrategy)(candidate);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.resolveCandidateStrategy)(candidate);
     }
     recordDeletion(message, deletionPolicy) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordDeletion)(hostOf(this), message, deletionPolicy);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordDeletion)(hostOf(this), message, deletionPolicy);
     }
     logHookSummary(event, channelId, strategy, isFollowUp, statuses) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
     }
     resolveQueuedPoolSource(result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.resolveQueuedPoolSource)(result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.resolveQueuedPoolSource)(result, isFollowUp);
     }
     /**
      * Pool-fill lifecycle: bump this channel's seedProbeCounts[source] when a fresh (non-pool-reuse),
@@ -5395,19 +5412,19 @@ class PromotionFlowRunner {
      * account-wide counter (see ChannelIntelligenceService.incrementSeedProbe).
      */
     recordSeedProbeIfLearning(channel, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
     }
     recordPoolOutcome(message, outcome) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordPoolOutcome)(hostOf(this), message, outcome);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordPoolOutcome)(hostOf(this), message, outcome);
     }
     recordExploreFailure(channelId, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
     }
     recordExploreSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordExploreSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordExploreSurvival)(hostOf(this), message);
     }
     recordAccountSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordAccountSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordAccountSurvival)(hostOf(this), message);
     }
     /**
      * Per-mobile ban/forbidden block recording (replaces the retired cross-account channel lock).
@@ -5416,16 +5433,16 @@ class PromotionFlowRunner {
      * write/send-forbidden, private, or invalid channels never accept this account — block permanently.
      */
     recordChannelBlockOnFailure(channel, result) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_7__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
     }
     scheduleFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__.scheduleFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_9__.scheduleFollowUp)(hostOf(this), message);
     }
     runFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_8__.runFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_9__.runFollowUp)(hostOf(this), message);
     }
     async sleep(ms) {
-        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(ms, 0);
+        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(ms, 0);
         // Declare the deliberate sleep so the supervisor watchdog doesn't mistake a long post-send rest
         // (12-20 min) for a hung runner.
         this.health.sleepUntil = Date.now() + delayMs;
@@ -5458,22 +5475,22 @@ class PromotionFlowRunner {
     }
     async sleepAfterChannel(outcome) {
         if (outcome !== 'sent') {
-            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
+            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
             this.log('debug', `Promotion retry delay ${delayMs}ms (${outcome})`);
             await this.sleep(delayMs);
             return;
         }
         if (!this.options.scoringEnabled) {
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         let stats;
         try {
-            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(await this.adapter.getStats());
+            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion delay stats load failed; using configured channel loop delay error=${this.normalizeError(error)}`);
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         // Session delete rate feeds the healthy-conservative scaling: deletions / (deletions + sends).
@@ -5492,11 +5509,11 @@ class PromotionFlowRunner {
     }
     async getStatsOrDefault(context) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(await this.adapter.getStats());
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion stats load failed during ${context}; using safe zero counters error=${this.normalizeError(error)}`);
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeStats)(null);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.normalizeStats)(null);
         }
     }
     async loadPercentiles(channel) {
@@ -5511,16 +5528,16 @@ class PromotionFlowRunner {
         }
     }
     shouldProcessNextChannel(channel) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.shouldProcessNextChannel)(hostOf(this), channel);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.shouldProcessNextChannel)(hostOf(this), channel);
     }
     readDailySendBudget(channel, daysLeft) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.readDailySendBudget)(hostOf(this), channel, daysLeft);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
     reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
     settleDailySendBudget(result, reservation) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_9__.settleDailySendBudget)(hostOf(this), result, reservation);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -5539,40 +5556,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatStats)(stats);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.describeSelection)(hostOf(this), selection, intelligenceDocs);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.toChannelIdSet)(channels);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.getSkippedSelectionReason)(channel, intelligenceByChannel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.summarizeSelectionChannels)(hostOf(this), channels, label);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCounts)(counts);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCompactChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.formatCandidate)(candidate);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCandidate)(candidate);
     }
     compact(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.compact)(value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.compact)(value);
     }
     safeJson(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.safeJson)(hostOf(this), value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_10__.normalizeError)(error);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -20707,6 +20724,360 @@ function validateConfig(config) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/own-channels.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/own-channels.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   OwnChannelRegistry: () => (/* binding */ OwnChannelRegistry),
+/* harmony export */   collectEnvOwnChannels: () => (/* binding */ collectEnvOwnChannels),
+/* harmony export */   defaultOwnChannelMongoLoader: () => (/* binding */ defaultOwnChannelMongoLoader),
+/* harmony export */   isOwnChannel: () => (/* binding */ isOwnChannel),
+/* harmony export */   normalizeChannelUsername: () => (/* binding */ normalizeChannelUsername),
+/* harmony export */   normalizeOwnChannelId: () => (/* binding */ normalizeOwnChannelId)
+/* harmony export */ });
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * Own-channel registry: every Telegram channel WE own or operate (bot notification channels,
+ * updates / forwarding / video channels, client persona channels). Reactions and promotions treat
+ * an own channel exactly like a permanently reaction-restricted channel: never selected.
+ *
+ * Why code and not a DB flag: `reactRestricted` is read only inside a 7-day window
+ * (ChannelsRepository.reactRestrictedChannelIds) and CMS auto-heals it after 7 days, so a DB flag
+ * on our own channels would silently expire. The id set here is rebuilt from the real sources on
+ * every refresh, so a new bot channel is excluded as soon as it is configured.
+ *
+ * Sources (all optional, unioned):
+ *   1. env (remote config copied into process.env): the channel id of every
+ *      TELEGRAM_CHANNEL_CONFIG_* value, every value that is a -100 channel id (updatesChannel,
+ *      notifChannel, logsChatId, ...), usernames held by channel-ish keys (unwantedvideos,
+ *      SavedMessages, ...), plus the explicit OWN_CHANNEL_IDS list (ids or usernames, comma separated).
+ *   2. Mongo `bots` collection: channelId of every bot doc, any lifecycle.
+ *   3. Mongo `clients.channelLink`: each client's persona channel username.
+ *   Usernames are resolved to ids through `activeChannels` / `channels`, because reaction dialogs
+ *   carry no username.
+ *
+ * Fails safe: a failed Mongo load keeps the last known set (never shrinks it to env-only) and is
+ * retried with exponential backoff capped at the refresh interval. isOwnChannel never throws.
+ */
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-core:own-channels');
+const DEFAULT_REFRESH_MS = 30 * 60000;
+const ENV_RESCAN_MS = 60000;
+const MIN_RETRY_MS = 60000;
+const DEFAULT_READY_TIMEOUT_MS = 10000;
+const MAX_IDS = 5000;
+const MAX_USERNAMES = 1000;
+/** Config keys whose username-shaped value names one of our channels (unwantedvideos, SavedMessages, ...). */
+const CHANNEL_KEY_RE = /channel|chat|unwanted|saved|updates|notif|video|forward|news/i;
+const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
+/**
+ * Canonical channel id: digits only, `-100` / `-` prefix stripped. '-1004464574947', '4464574947'
+ * and '-4464574947' all map to '4464574947'. Returns null for anything that is not an id.
+ */
+function normalizeOwnChannelId(value) {
+    if (value === null || value === undefined)
+        return null;
+    const raw = (typeof value === 'string' ? value : String(value)).trim();
+    if (!/^-?\d{5,}$/.test(raw))
+        return null;
+    const stripped = raw.startsWith('-100') ? raw.slice(4) : raw.replace(/^-/, '');
+    return /^\d{5,}$/.test(stripped) ? stripped : null;
+}
+/** Canonical username: lower case, no '@' / t.me prefix. Invite links (t.me/+hash) are not usernames. */
+function normalizeChannelUsername(value) {
+    if (typeof value !== 'string')
+        return null;
+    const raw = value.trim()
+        .replace(/^https?:\/\//i, '')
+        .replace(/^(www\.)?(t|telegram)\.me\//i, '')
+        .replace(/^@/, '')
+        .replace(/\/+$/, '');
+    return USERNAME_RE.test(raw) ? raw.toLowerCase() : null;
+}
+/** Ids and usernames named by the remote config / env. Pure; exported for tests. */
+function collectEnvOwnChannels(env) {
+    const ids = new Set();
+    const usernames = new Set();
+    const addRef = (value) => {
+        const id = normalizeOwnChannelId(value);
+        if (id) {
+            ids.add(id);
+            return;
+        }
+        const username = normalizeChannelUsername(value);
+        if (username)
+            usernames.add(username);
+    };
+    for (const [key, value] of Object.entries(env)) {
+        if (typeof value !== 'string' || !value.trim())
+            continue;
+        if (key.startsWith('TELEGRAM_CHANNEL_CONFIG_')) {
+            const id = normalizeOwnChannelId(value.split('::')[0]);
+            if (id)
+                ids.add(id);
+            continue;
+        }
+        if (key === 'OWN_CHANNEL_IDS') {
+            value.split(',').forEach((part) => addRef(part));
+            continue;
+        }
+        const trimmed = value.trim();
+        // Only -100 ids from arbitrary keys: bare digit runs are phone numbers, ports, api ids.
+        if (/^-100\d{5,}$/.test(trimmed)) {
+            const id = normalizeOwnChannelId(trimmed);
+            if (id)
+                ids.add(id);
+            continue;
+        }
+        if (CHANNEL_KEY_RE.test(key)) {
+            const username = normalizeChannelUsername(trimmed);
+            if (username)
+                usernames.add(username);
+        }
+    }
+    return { ids: [...ids], usernames: [...usernames] };
+}
+function mongoUri() {
+    return (process.env.mongodburi ||
+        process.env.mongouri ||
+        process.env.MONGO_URI ||
+        process.env.MONGODB_URI ||
+        process.env.DB_URI ||
+        '').trim();
+}
+function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/** Default loader: one short-lived connection per refresh, same pattern as BotConfig. */
+const defaultOwnChannelMongoLoader = async (knownUsernames) => {
+    const uri = mongoUri();
+    if (!uri)
+        return null;
+    const { MongoClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! mongodb */ "mongodb", 23));
+    const client = new MongoClient(uri, { maxPoolSize: 1, serverSelectionTimeoutMS: 5000, connectTimeoutMS: 5000 });
+    try {
+        await client.connect();
+        const db = client.db((process.env.TELEGRAM_BOT_CONFIG_DB || process.env.MONGO_BOT_CONFIG_DB || 'tgclients').trim() || 'tgclients');
+        const botCollection = (process.env.TELEGRAM_BOT_CONFIG_COLLECTION || process.env.MONGO_BOT_CONFIG_COLLECTION || 'bots').trim() || 'bots';
+        const ids = new Set();
+        const usernames = new Set(knownUsernames);
+        const bots = await db.collection(botCollection)
+            .find({}, { projection: { channelId: 1 } })
+            .limit(MAX_IDS)
+            .toArray();
+        for (const bot of bots) {
+            const id = normalizeOwnChannelId(bot['channelId']);
+            if (id)
+                ids.add(id);
+        }
+        const clients = await db.collection('clients')
+            .find({}, { projection: { channelLink: 1 } })
+            .limit(MAX_USERNAMES)
+            .toArray();
+        for (const doc of clients) {
+            const id = normalizeOwnChannelId(doc['channelLink']);
+            if (id) {
+                ids.add(id);
+                continue;
+            }
+            const username = normalizeChannelUsername(doc['channelLink']);
+            if (username)
+                usernames.add(username);
+        }
+        const wanted = [...usernames].slice(0, MAX_USERNAMES);
+        if (wanted.length > 0) {
+            const patterns = wanted.map((u) => new RegExp(`^${escapeRegex(u)}$`, 'i'));
+            for (const name of ['activeChannels', 'channels']) {
+                const docs = await db.collection(name)
+                    .find({ username: { $in: patterns } }, { projection: { channelId: 1 } })
+                    .limit(MAX_USERNAMES)
+                    .toArray();
+                for (const doc of docs) {
+                    const id = normalizeOwnChannelId(doc['channelId']);
+                    if (id)
+                        ids.add(id);
+                }
+            }
+        }
+        return { ids: [...ids], usernames: wanted };
+    }
+    finally {
+        await client.close().catch(() => undefined);
+    }
+};
+class OwnChannelRegistry {
+    constructor(options = {}) {
+        this.envIds = new Set();
+        this.envUsernames = new Set();
+        this.envScannedAt = -Infinity;
+        /** Last successful Mongo load. Kept on failure: the set only grows back via a successful load. */
+        this.mongoIds = new Set();
+        this.mongoUsernames = new Set();
+        this.loadedAt = null;
+        this.nextAttemptAt = 0;
+        this.retryMs = MIN_RETRY_MS;
+        this.lastError = null;
+        this.inflight = null;
+        this.loadMongo = options.loadMongo === undefined ? defaultOwnChannelMongoLoader : options.loadMongo;
+        this.readEnv = options.env ?? (() => process.env);
+        this.refreshMs = Math.max(1000, options.refreshMs ?? DEFAULT_REFRESH_MS);
+        this.now = options.now ?? Date.now;
+    }
+    static getInstance() {
+        if (!OwnChannelRegistry.instance)
+            OwnChannelRegistry.instance = new OwnChannelRegistry();
+        return OwnChannelRegistry.instance;
+    }
+    /** Tests only: install a registry (or clear the singleton with undefined). */
+    static setInstanceForTests(instance) {
+        OwnChannelRegistry.instance = instance;
+    }
+    /** Synchronous, never throws, never awaits I/O. Kicks a background refresh when stale. */
+    isOwnChannel(channelId, username) {
+        try {
+            this.scanEnvIfStale();
+            this.refreshInBackgroundIfDue();
+            const id = normalizeOwnChannelId(channelId);
+            if (id && (this.envIds.has(id) || this.mongoIds.has(id)))
+                return true;
+            const name = normalizeChannelUsername(username ?? undefined);
+            if (name && (this.envUsernames.has(name) || this.mongoUsernames.has(name)))
+                return true;
+            return false;
+        }
+        catch (error) {
+            logger.warn('[own-channels] check failed; treating channel as not own', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return false;
+        }
+    }
+    /** Wait for the first load (bounded). Resolves even when the source fails. */
+    async ready(timeoutMs = DEFAULT_READY_TIMEOUT_MS) {
+        this.scanEnvIfStale();
+        if (this.loadedAt !== null || !this.loadMongo)
+            return;
+        // A failed load is retried on its backoff schedule, not on every ready() call.
+        if (this.lastError !== null && this.now() < this.nextAttemptAt)
+            return;
+        let timer;
+        try {
+            await Promise.race([
+                this.refresh(),
+                new Promise((resolve) => {
+                    timer = setTimeout(resolve, Math.max(0, timeoutMs));
+                    timer.unref?.();
+                }),
+            ]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+        }
+    }
+    /** Reload env + Mongo now. Concurrent calls share one load. Never rejects. */
+    refresh() {
+        if (this.inflight)
+            return this.inflight;
+        this.inflight = this.doRefresh().finally(() => { this.inflight = null; });
+        return this.inflight;
+    }
+    snapshot() {
+        this.scanEnvIfStale();
+        return {
+            ids: [...new Set([...this.envIds, ...this.mongoIds])].sort(),
+            usernames: [...new Set([...this.envUsernames, ...this.mongoUsernames])].sort(),
+            loadedAt: this.loadedAt,
+            lastError: this.lastError,
+            mongoIds: this.mongoIds.size,
+            envIds: this.envIds.size,
+        };
+    }
+    scanEnvIfStale(force = false) {
+        const now = this.now();
+        if (!force && now - this.envScannedAt < ENV_RESCAN_MS)
+            return;
+        this.envScannedAt = now;
+        try {
+            const refs = collectEnvOwnChannels(this.readEnv());
+            this.envIds = new Set(refs.ids.slice(0, MAX_IDS));
+            this.envUsernames = new Set(refs.usernames.slice(0, MAX_USERNAMES));
+        }
+        catch (error) {
+            // Keep the previous env set.
+            logger.warn('[own-channels] env scan failed; keeping previous set', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    refreshInBackgroundIfDue() {
+        if (!this.loadMongo || this.inflight || this.now() < this.nextAttemptAt)
+            return;
+        void this.refresh();
+    }
+    async doRefresh() {
+        this.scanEnvIfStale(true);
+        if (!this.loadMongo) {
+            this.loadedAt = this.now();
+            return;
+        }
+        // Set before the await so a burst of isOwnChannel calls cannot start a second load.
+        this.nextAttemptAt = this.now() + this.refreshMs;
+        try {
+            const refs = await this.loadMongo([...this.envUsernames]);
+            if (!refs) {
+                // Source not configured (no Mongo URI, e.g. local runs): env-only, nothing to keep or retry.
+                this.loadedAt = this.now();
+                logger.debug(`[own-channels] Mongo not configured; env-only set (ids=${this.envIds.size})`);
+                return;
+            }
+            const ids = new Set();
+            for (const value of refs.ids ?? []) {
+                const id = normalizeOwnChannelId(value);
+                if (id)
+                    ids.add(id);
+                if (ids.size >= MAX_IDS)
+                    break;
+            }
+            const usernames = new Set();
+            for (const value of refs.usernames ?? []) {
+                const name = normalizeChannelUsername(value);
+                if (name)
+                    usernames.add(name);
+                if (usernames.size >= MAX_USERNAMES)
+                    break;
+            }
+            this.mongoIds = ids;
+            this.mongoUsernames = usernames;
+            this.loadedAt = this.now();
+            this.lastError = null;
+            this.retryMs = MIN_RETRY_MS;
+            const snap = this.snapshot();
+            logger.info(`[own-channels] loaded ids=${snap.ids.length} (mongo=${ids.size} env=${this.envIds.size}) usernames=${snap.usernames.length}`);
+        }
+        catch (error) {
+            this.lastError = error instanceof Error ? error.message : String(error);
+            // Exponential backoff, hard-capped at the normal refresh interval.
+            this.nextAttemptAt = this.now() + this.retryMs;
+            this.retryMs = Math.min(this.retryMs * 2, this.refreshMs);
+            logger.warn(`[own-channels] load failed; keeping last known set (mongo=${this.mongoIds.size} env=${this.envIds.size})`, {
+                error: this.lastError,
+            });
+        }
+    }
+}
+/** Process-wide check used by reaction and promotion selectors. */
+function isOwnChannel(channelId, username) {
+    return OwnChannelRegistry.getInstance().isOwnChannel(channelId, username);
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/parseError.ts"
 /*!******************************************************!*\
   !*** ../../packages/tg-core/src/utils/parseError.ts ***!
@@ -31438,14 +31809,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_telegram_utils_floodSleepWatch__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/floodSleepWatch */ "../../packages/tg-core/src/telegram-utils/floodSleepWatch.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./RuntimeRestrictionStore */ "../../packages/tg-reactions/src/RuntimeRestrictionStore.ts");
-/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_13___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_13__);
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./RuntimeRestrictionStore */ "../../packages/tg-reactions/src/RuntimeRestrictionStore.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./ReactionRateLimiter */ "../../packages/tg-reactions/src/ReactionRateLimiter.ts");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_14___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_14__);
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _ReactionTypes__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./ReactionTypes */ "../../packages/tg-reactions/src/ReactionTypes.ts");
+
 
 
 
@@ -31496,7 +31869,7 @@ const HARDCODED_RESTRICTED_CHANNELS = new Set([
     "1780733848", "1685018515", "2057393918", "1887746719", "1916123414",
     "1970767061", "2057158588"
 ].filter(Boolean));
-const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_15__.DEFAULT_REACTION_CONFIG;
+const CONFIG = _ReactionTypes__WEBPACK_IMPORTED_MODULE_16__.DEFAULT_REACTION_CONFIG;
 /**
  * Reaction service that automatically reacts to messages in channels/groups
  * with adaptive rate limiting, human-like behavior, and proactive flood prevention.
@@ -31533,7 +31906,7 @@ class ReactionService {
          * and the pool could only shrink (nidhi2 fell to 4 usable channels, meghana2 to 1).
          * Backed up to `reactions::restricted::<mobile>` and reloaded in initializeAsync().
          */
-        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_10__.RuntimeRestrictionStore({ mirrorKey: () => this.restrictionMirrorKey() });
+        this.runtimeRestrictions = new _RuntimeRestrictionStore__WEBPACK_IMPORTED_MODULE_11__.RuntimeRestrictionStore({ mirrorKey: () => this.restrictionMirrorKey() });
         this.isRunning = false;
         this.isStopped = true;
         this.isDisposed = false;
@@ -31588,6 +31961,7 @@ class ReactionService {
         });
         this.dialogManager = dialogManager;
         this.db = config.store;
+        this.ownChannels = config.ownChannels ?? _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_9__.OwnChannelRegistry.getInstance();
         this.onAccountError = config.onAccountError;
         this.onTelegramRuntimeFailure = config.onTelegramRuntimeFailure;
         this.onReactionOutcome = config.onReactionOutcome;
@@ -31604,7 +31978,7 @@ class ReactionService {
         // Register this instance (replaces old entry)
         ReactionService.activeInstances.set(this.instanceId, this);
         // Initialize rate limiter
-        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_12__.ReactionRateLimiter({
+        this.rateLimiter = new _ReactionRateLimiter__WEBPACK_IMPORTED_MODULE_13__.ReactionRateLimiter({
             instanceId: this.instanceId,
             minDelayMs: this.config.MIN_DELAY_MS,
             maxDelayMs: this.config.MAX_DELAY_MS,
@@ -31621,7 +31995,7 @@ class ReactionService {
                 this.runtimeRestrictions.loadBackup()
             ]);
             // Generate per-instance emoticon preferences
-            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_15__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
+            this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_16__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
             this.instanceId);
             logger.info(`[${this.instanceId}] Reaction service initialized`);
             if (!this.autoStart || this.isDisposed) {
@@ -31939,7 +32313,7 @@ class ReactionService {
             return 'success';
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, channel.id);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, channel.id);
             if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_3__.isTelegramRuntimeFailure)(error)) {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return 'error';
@@ -31976,7 +32350,7 @@ class ReactionService {
                 useCache: false,
                 // Invalid/private targets must leave this account's rotation instead of being
                 // retried as an empty history on every reaction loop.
-                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
+                propagateError: (error) => (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED',
             });
             if (!messages || messages.length === 0) {
                 return null;
@@ -32010,7 +32384,7 @@ class ReactionService {
                 messages.length = 0;
                 messages = null;
             }
-            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
+            if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, chatId).type === 'CHANNEL_RESTRICTED') {
                 await this.onReactionError(error, chatId, undefined, chatLabel);
                 return null;
             }
@@ -32163,7 +32537,7 @@ class ReactionService {
                 void this.triggerTelegramRuntimeRecovery(error);
                 return;
             }
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_14__.parseTelegramError)(error, chatId, attemptedEmoticon);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_15__.parseTelegramError)(error, chatId, attemptedEmoticon);
             const failureLine = `[${this.instanceId}] REACT failure | ${chatId} | ${chatLabel} | ${parsed.type} | ${attemptedEmoticon || 'unknown'}`;
             if (parsed.type === 'CHANNEL_RESTRICTED') {
                 logger.debug(failureLine);
@@ -32339,7 +32713,7 @@ class ReactionService {
             }
             const oldChannels = this.channels;
             // Pre-filter: check Redis cache for channels known to have reactions disabled
-            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__.RedisClient.getClient();
+            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_10__.RedisClient.getClient();
             const dialogsWithReactionStatus = await Promise.all(allDialogs.map(async (ch) => {
                 if (!ch.id || this.isChannelRestricted(ch.id))
                     return { ch, usable: false };
@@ -32417,7 +32791,7 @@ class ReactionService {
         if (!entity || !('id' in entity)) {
             throw new Error('Invalid dialog entity');
         }
-        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_13___default()(entity.id);
+        const entityId = big_integer__WEBPACK_IMPORTED_MODULE_14___default()(entity.id);
         // Decide by entity class, not dialog flags: GramJS sets isGroup for megagroups too, so checking
         // isGroup first turned every supergroup (a Channel) into a PeerChat with the channel's id.
         const className = entity.className;
@@ -32585,13 +32959,15 @@ class ReactionService {
     }
     /** Auto-generated ids (rs_<n>_<ts>) change every process: nothing to resume, so no backup. */
     restrictionMirrorKey() {
-        return /^rs_\d+_\d+$/.test(this.instanceId) ? null : (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.stateKey)('reactions::restricted', this.instanceId);
+        return /^rs_\d+_\d+$/.test(this.instanceId) ? null : (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.stateKey)('reactions::restricted', this.instanceId);
     }
     async loadRestrictedChannels() {
         try {
             for (const id of HARDCODED_RESTRICTED_CHANNELS) {
                 this.restrictedChannelIds.add(id);
             }
+            // Bounded wait for the own-channel set; it resolves (env-only) even if Mongo is down.
+            await this.ownChannels.ready?.().catch(() => undefined);
             const dbRestricted = await this.db.reactRestrictedChannelIds();
             this.dbRestrictedChannelIds.clear();
             (dbRestricted || []).forEach(id => {
@@ -32613,7 +32989,9 @@ class ReactionService {
         const raw = typeof channelId === 'string' ? channelId : channelId.toString();
         // PERMANENT restrictions: hardcoded + DB-persisted `reactions_disabled`. These are genuine
         // channel properties and never expire.
-        const permanentlyRestricted = HARDCODED_RESTRICTED_CHANNELS.has(normalizedId) ||
+        // Our own channels (bots, updates, videos, personas) are permanent too.
+        const permanentlyRestricted = this.ownChannels.isOwnChannel(normalizedId) ||
+            HARDCODED_RESTRICTED_CHANNELS.has(normalizedId) ||
             this.dbRestrictedChannelIds.has(normalizedId) ||
             this.dbRestrictedChannelIds.has(`-100${normalizedId}`) ||
             this.dbRestrictedChannelIds.has(raw);
@@ -32725,7 +33103,7 @@ class ReactionService {
         // positive TTL within the failure window. (Before the cache-TTL change, "any TTL" meant
         // failure — that heuristic no longer holds now that confirmed markers also expire.)
         try {
-            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_9__.RedisClient.getClient();
+            const redis = _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_10__.RedisClient.getClient();
             const ttl = await redis.ttl(`reactions::${normalizedId}`);
             const isTransientFailure = ttl > 0 && ttl <= _ReactionCache__WEBPACK_IMPORTED_MODULE_4__.FETCH_FAILURE_TTL;
             if (!isTransientFailure) {
