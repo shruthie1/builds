@@ -47437,6 +47437,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CALL_ATTEMPT_BASE_GAP_MS: () => (/* binding */ CALL_ATTEMPT_BASE_GAP_MS),
 /* harmony export */   CALL_ATTEMPT_CAP: () => (/* binding */ CALL_ATTEMPT_CAP),
 /* harmony export */   CALL_ATTEMPT_MAX_CHATS: () => (/* binding */ CALL_ATTEMPT_MAX_CHATS),
+/* harmony export */   CALL_ATTEMPT_PERSIST_TTL_MS: () => (/* binding */ CALL_ATTEMPT_PERSIST_TTL_MS),
 /* harmony export */   CALL_ATTEMPT_REARM_GAP_MS: () => (/* binding */ CALL_ATTEMPT_REARM_GAP_MS),
 /* harmony export */   CALL_ATTEMPT_SAME_CREDIT_MS: () => (/* binding */ CALL_ATTEMPT_SAME_CREDIT_MS),
 /* harmony export */   CALL_TEXT_MAX_LEAD_MS: () => (/* binding */ CALL_TEXT_MAX_LEAD_MS),
@@ -47444,9 +47445,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   attemptGapMs: () => (/* binding */ attemptGapMs),
 /* harmony export */   callAttemptCap: () => (/* binding */ callAttemptCap),
 /* harmony export */   callCappedMessages: () => (/* binding */ callCappedMessages),
-/* harmony export */   callingTextHeld: () => (/* binding */ callingTextHeld)
+/* harmony export */   callingTextHeld: () => (/* binding */ callingTextHeld),
+/* harmony export */   createCallAttemptStore: () => (/* binding */ createCallAttemptStore)
 /* harmony export */ });
 /* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+
 
 /**
  * Per-chat call attempt cap (owner rule 2026-10-11: every automatic TG retry backs off exponentially and stops at a
@@ -47472,6 +47476,12 @@ __webpack_require__.r(__webpack_exports__);
  * 80 min ...: at most 4 extra attempts in the incident's 3 h instead of ~88 rings). Inside that gap the chat is
  * capped: no ring, no deferred ring, the link instead. A capped payer still has the Zoom link (sent once at the cap)
  * and can ring us (in-house incoming calls are not capped).
+ *
+ * Restart-safe (2026-10-24): episodes are mirrored to one Redis hash per client (`tgaut::callattempts::<clientId>`, field =
+ * chatId) and restored lazily before the first dispatch after a boot (ensureSeeded). Each episode carries the account
+ * mobile it was made from: after an account swap the new account restores none of the old account's episodes (review
+ * 2026-10-24; the dead account's failed rings and deferral are not the new account's). Before this every restart (deploy, memory limit, SIGSEGV, swap) gave every chat a fresh 6 attempts
+ * while the saved ladder resumed. Redis down = memory-only, as before.
  */
 const CALL_ATTEMPT_CAP = 6;
 const CALL_ATTEMPT_BASE_GAP_MS = 20000;
@@ -47485,6 +47495,12 @@ const CALL_ATTEMPT_REARM_GAP_MS = 10 * 60000;
 const CALL_ATTEMPT_SAME_CREDIT_MS = 2 * 60000;
 /** Most chats remembered (oldest forgotten first). */
 const CALL_ATTEMPT_MAX_CHATS = 5000;
+/** Redis mirror: the hash expires this long after its last write; a restored episode idle longer than this is dropped. */
+const CALL_ATTEMPT_PERSIST_TTL_MS = 48 * 60 * 60000;
+/** Redis mirror of the episodes (one hash per client; null key = memory-only). */
+function createCallAttemptStore(clientId = () => process.env.clientId) {
+    return new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.RedisHash(() => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.stateKey)('tgaut::callattempts', clientId()), CALL_ATTEMPT_PERSIST_TTL_MS, 'calls.attemptcap');
+}
 function creditAt(chatId, user) {
     return Math.max(Number(user?.lastPaidAt) || 0, (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_0__.momentAt)(chatId, 'paymentCredited') ?? 0);
 }
@@ -47496,18 +47512,96 @@ function attemptGapMs(attempts) {
         return CALL_ATTEMPT_REARM_GAP_MS * 2 ** (attempts - CALL_ATTEMPT_CAP);
     return CALL_ATTEMPT_BASE_GAP_MS * 2 ** (attempts - 1);
 }
+function encodeEpisode(ep) {
+    return JSON.stringify({ a: ep.attempts, l: ep.lastAt, p: ep.paidAt, v: ep.videos, d: ep.deferredUntil, n: ep.capNoticed ? 1 : 0, u: ep.actedAt, ...(ep.mobile ? { m: ep.mobile } : {}) });
+}
+function decodeEpisode(raw) {
+    try {
+        const o = JSON.parse(raw);
+        const num = (k) => (Number.isFinite(Number(o[k])) ? Number(o[k]) : 0);
+        const ep = { attempts: num('a'), lastAt: num('l'), paidAt: num('p'), videos: num('v'), deferredUntil: num('d'), capNoticed: o.n === 1, actedAt: num('u'), mobile: typeof o.m === 'string' ? o.m : '' };
+        return ep.attempts > 0 && ep.lastAt > 0 ? ep : null;
+    }
+    catch {
+        return null;
+    }
+}
 class CallAttemptCap {
-    constructor(now = () => Date.now()) {
+    constructor(now = () => Date.now(), store = null, mobile = () => process.env.mobile) {
         this.episodes = new Map();
+        this.seeding = null;
         this.now = now;
+        this.store = store;
+        this.mobile = () => String(mobile() ?? '').trim();
+    }
+    /** Mirror chatId's episode (or its removal) to Redis. Fire-and-forget; the backup replays it after an outage. */
+    persist(chatId) {
+        if (!this.store)
+            return;
+        const ep = this.episodes.get(chatId);
+        void (ep ? this.store.set(chatId, encodeEpisode(ep)) : this.store.delete(chatId));
+    }
+    drop(chatId) {
+        if (this.episodes.delete(chatId))
+            this.persist(chatId);
+    }
+    /**
+     * Once per process (and again after reset()): merge the episodes the previous process left in Redis. Chats already in
+     * memory keep their (newer) episode. At most CALL_ATTEMPT_MAX_CHATS, the most recent; episodes idle longer than
+     * CALL_ATTEMPT_PERSIST_TTL_MS are dropped. Never throws; resolves to the number restored.
+     */
+    ensureSeeded() {
+        if (!this.store)
+            return Promise.resolve(0);
+        this.seeding ?? (this.seeding = this.seedFromStore().catch(() => 0));
+        return this.seeding;
+    }
+    async seedFromStore() {
+        const raw = await this.store?.loadRaw();
+        if (!raw)
+            return 0;
+        const now = this.now();
+        const mobile = this.mobile();
+        const restored = [];
+        const stale = [];
+        for (const [chatId, value] of Object.entries(raw)) {
+            const ep = decodeEpisode(value);
+            // Review 2026-10-24: after an account swap (same clientId key, new mobile) the dead account's failed attempts
+            // and its pending deferral do not count against the new account: that chat starts fresh.
+            if (ep && ep.mobile && mobile && ep.mobile !== mobile) {
+                stale.push(chatId);
+                continue;
+            }
+            if (!ep)
+                continue;
+            if (now - ep.lastAt <= CALL_ATTEMPT_PERSIST_TTL_MS)
+                restored.push([chatId, ep]);
+            // review3 2026-10-24: the hash's TTL is refreshed by every write, so an idle chat's field would never expire.
+            else
+                stale.push(chatId);
+        }
+        if (stale.length > 0)
+            void this.store?.delete(...stale);
+        restored.sort((a, b) => a[1].lastAt - b[1].lastAt);
+        let added = 0;
+        for (const [chatId, ep] of restored.slice(-CALL_ATTEMPT_MAX_CHATS)) {
+            if (this.episodes.has(chatId))
+                continue;
+            this.episodes.set(chatId, { ...ep, restored: true });
+            added++;
+            if (this.episodes.size > CALL_ATTEMPT_MAX_CHATS)
+                this.drop(this.episodes.keys().next().value);
+        }
+        return added;
     }
     /** The current episode, or none when a credit / delivered show since its start ended it. */
     current(chatId, user) {
         const ep = this.episodes.get(chatId);
-        if (!ep || !user)
+        if (!ep)
             return ep;
-        if (creditAt(chatId, user) > ep.paidAt + CALL_ATTEMPT_SAME_CREDIT_MS || (user.videos?.length ?? 0) > ep.videos) {
-            this.episodes.delete(chatId);
+        // No row (unreadable): the 'paymentCredited' moment alone still shows a new credit (review3 2026-10-24 (c)).
+        if (creditAt(chatId, user) > ep.paidAt + CALL_ATTEMPT_SAME_CREDIT_MS || (user?.videos?.length ?? 0) > ep.videos) {
+            this.drop(chatId);
             return undefined;
         }
         return ep;
@@ -47539,14 +47633,24 @@ class CallAttemptCap {
         const now = this.now();
         let ep = this.current(chatId, user);
         if (!ep) {
-            ep = { attempts: 0, lastAt: 0, paidAt: creditAt(chatId, user), videos: user?.videos?.length ?? 0, deferredUntil: 0, capNoticed: false, actedAt: 0 };
+            ep = { attempts: 0, lastAt: 0, paidAt: creditAt(chatId, user), videos: user?.videos?.length ?? 0, deferredUntil: 0, capNoticed: false, actedAt: 0, mobile: this.mobile() };
             this.episodes.delete(chatId);
             this.episodes.set(chatId, ep);
             if (this.episodes.size > CALL_ATTEMPT_MAX_CHATS)
-                this.episodes.delete(this.episodes.keys().next().value);
+                this.drop(this.episodes.keys().next().value);
         }
         ep.attempts += 1;
         ep.lastAt = now;
+        ep.restored = false;
+        this.persist(chatId);
+    }
+    /**
+     * True when chatId's episode came from the previous process and has had no attempt here yet. With the chat's row
+     * unreadable such an episode cannot be checked against a credit made before the restart (review3 2026-10-24 (c)), so
+     * CallManager places that one attempt ungated (still counted: the next one is gated by its backoff).
+     */
+    isRestoredUnconfirmed(chatId) {
+        return this.episodes.get(chatId)?.restored === true;
     }
     /** The attempt never reached Telegram (engine busy, not eligible, ...): give it back. */
     refund(chatId) {
@@ -47556,16 +47660,19 @@ class CallAttemptCap {
         ep.attempts = Math.max(0, ep.attempts - 1);
         if (ep.attempts === 0)
             this.episodes.delete(chatId);
+        this.persist(chatId);
     }
     /** The show was delivered: the next call starts a new episode. */
     served(chatId) {
-        this.episodes.delete(chatId);
+        this.drop(chatId);
     }
     /** The user wrote (inbound router): past the cap, the next attempt after the long gap is theirs to earn. */
     userActed(chatId) {
         const ep = this.episodes.get(chatId);
-        if (ep)
-            ep.actedAt = this.now();
+        if (!ep)
+            return;
+        ep.actedAt = this.now();
+        this.persist(chatId);
     }
     /** True once per backoff wait: the caller re-queues the chat for when it ends; later triggers meanwhile are dropped. */
     claimDeferral(chatId, waitMs) {
@@ -47576,6 +47683,7 @@ class CallAttemptCap {
         if (ep.deferredUntil > now)
             return false;
         ep.deferredUntil = now + waitMs;
+        this.persist(chatId);
         return true;
     }
     /** True the first time chatId is refused at the cap in this episode (one link text / ops notice). */
@@ -47584,14 +47692,16 @@ class CallAttemptCap {
         if (!ep || ep.capNoticed)
             return false;
         ep.capNoticed = true;
+        this.persist(chatId);
         return true;
     }
     attempts(chatId) { return this.episodes.get(chatId)?.attempts ?? 0; }
     size() { return this.episodes.size; }
-    reset() { this.episodes.clear(); }
+    /** Forget the in-memory episodes (as a restart does; the Redis mirror is kept): the next ensureSeeded() reads it again. */
+    reset() { this.episodes.clear(); this.seeding = null; }
 }
-/** The process-wide cap (one account per process; CallManager owns it). */
-const callAttemptCap = new CallAttemptCap();
+/** The process-wide cap (one account per process; CallManager owns it), mirrored to Redis. */
+const callAttemptCap = new CallAttemptCap(() => Date.now(), createCallAttemptStore());
 /** A "Wait, I am Calling you" / "Checking" text may precede its ring by at most this much. */
 const CALL_TEXT_MAX_LEAD_MS = 30000;
 /**
@@ -48232,17 +48342,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
-/* harmony import */ var _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./call-attempt-cap */ "./src/calls/call-attempt-cap.ts");
-/* harmony import */ var _conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../conversation/messages/call-messages */ "./src/conversation/messages/call-messages.ts");
-/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./inhouse/switch */ "./src/calls/inhouse/switch.ts");
-/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/* harmony import */ var _after_call_records__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./after-call-records */ "./src/calls/after-call-records.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./chat-proofs */ "./src/calls/chat-proofs.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
+/* harmony import */ var _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./call-attempt-cap */ "./src/calls/call-attempt-cap.ts");
+/* harmony import */ var _conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../conversation/messages/call-messages */ "./src/conversation/messages/call-messages.ts");
+/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./inhouse/switch */ "./src/calls/inhouse/switch.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _after_call_records__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./after-call-records */ "./src/calls/after-call-records.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./chat-proofs */ "./src/calls/chat-proofs.ts");
 
 
 
@@ -48262,7 +48373,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:call-manager");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg-aut:call-manager");
 /** When the engine is busy with an incoming in-house call, re-check the queue after this. */
 const IN_HOUSE_BUSY_WAIT_MS = 5000;
 /** Legacy ring-failure texts: at most one per chat per this window (a ladder spans ~42 min). */
@@ -48285,12 +48397,12 @@ function setAfterCallRestorer(restorer) {
     afterCallRestorer = restorer;
 }
 // Scoped to the account (clientId + mobile): after a buffer swap the new account must not call the old one's users.
-function callQueueKey() { return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.stateKey)("tgaut::callq", process.env.clientId, process.env.mobile); }
-function callQueueOperatorKey() { return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.stateKey)("tgaut::callq-oper", process.env.clientId, process.env.mobile); }
+function callQueueKey() { return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.stateKey)("tgaut::callq", process.env.clientId, process.env.mobile); }
+function callQueueOperatorKey() { return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.stateKey)("tgaut::callq-oper", process.env.clientId, process.env.mobile); }
 /** Whole-queue snapshots (queue ZSET + operator hash): the latest one missed in a Redis outage is replayed. */
-const callQueueMirror = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.RedisWrites(callQueueKey, "calls.queue");
+const callQueueMirror = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.RedisWrites(callQueueKey, "calls.queue");
 /** Pending after-call payloads (`{amount, reason, at}`), indexed by write time so boot can list them. */
-const afterCallRecords = new _after_call_records__WEBPACK_IMPORTED_MODULE_14__.RedisIndexedRecords((chatId) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.stateKey)("tgaut::aftercall", process.env.clientId, process.env.mobile, chatId), () => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.stateKey)("tgaut::aftercall-index", process.env.clientId, process.env.mobile), AFTER_CALL_TTL_MS, "calls.aftercall");
+const afterCallRecords = new _after_call_records__WEBPACK_IMPORTED_MODULE_15__.RedisIndexedRecords((chatId) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.stateKey)("tgaut::aftercall", process.env.clientId, process.env.mobile, chatId), () => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.stateKey)("tgaut::aftercall-index", process.env.clientId, process.env.mobile), AFTER_CALL_TTL_MS, "calls.aftercall");
 /** The manager the in-house requeue feeds (tg-aut runs one account per process: the latest instance). */
 let requeueTarget = null;
 /** Delayed record 'callRequeue': the in-house "no answer, retry later" requeue (survives a restart). */
@@ -48318,7 +48430,7 @@ class CallManager {
         this.MAX_QUEUE_SIZE = 1000; // Maximum queue size to prevent unbounded growth
         this.inHouse = null;
         /** Account-wide pause after PEER_FLOOD / FLOOD_WAIT on a call; shared with the in-house service. */
-        this.callCooldown = _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.callFloodCooldown;
+        this.callCooldown = _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_10__.callFloodCooldown;
         this.callTexts = new Map();
         this.inHouseLoading = null;
         /** In-house calls running in parallel, by chat. */
@@ -48533,7 +48645,7 @@ class CallManager {
         const operatorKey = callQueueOperatorKey();
         const now = Date.now();
         if (queueKey && operatorKey) {
-            const snapshot = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.readState)("calls.queue.restore", async (redis) => ({
+            const snapshot = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_14__.readState)("calls.queue.restore", async (redis) => ({
                 queue: await redis.zrangebyscore(queueKey, now - CALL_QUEUE_TTL_MS, "+inf"),
                 operators: await redis.hgetall(operatorKey),
             }));
@@ -48576,6 +48688,8 @@ class CallManager {
             return;
         this.processing = true;
         try {
+            // Before the first dispatch after a boot: the cap episodes the previous process left in Redis (bounded, once).
+            await _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.ensureSeeded();
             while (this.callQueue.length > 0 || this.inFlight.size > 0) {
                 if (this.callQueue.length === 0) {
                     // Stay alive while parallel calls run, so chats queued meanwhile are picked up at once.
@@ -48630,14 +48744,14 @@ class CallManager {
      * call is over). Anything the in-house path cannot serve falls back to the legacy ring + VCUI.
      */
     async dispatchCall(chatId) {
-        const { blocked, own } = await this.readBlock(chatId);
+        const { blocked, own, rowRead } = await this.readBlock(chatId);
         if (blocked) {
             this.clearNoLegacyRing(chatId);
             return;
         }
         // Operator calls (a human pressed the button) are not capped; everything else is (call-attempt-cap.ts).
         const counted = !this.noLegacyRing.has(chatId) && !this.callCooldown.isActive() && !this.callCooldown.isRefused(chatId);
-        if (counted && !this.claimAttempt(chatId, own))
+        if (counted && !this.claimAttempt(chatId, own, rowRead))
             return;
         const inHouse = await this.getInHouse();
         if (inHouse) {
@@ -48684,16 +48798,22 @@ class CallManager {
      * last attempt: put the chat back on the queue once for when the backoff ends (later triggers meanwhile are dropped).
      * At the cap: no call; once per episode the chat's ladder is cleared and the Zoom link sent.
      */
-    claimAttempt(chatId, user) {
-        const verdict = _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.check(chatId, user);
+    claimAttempt(chatId, user, rowRead = true) {
+        // Row unreadable and the episode restored from before a restart: it may predate a new credit we cannot see, so
+        // this one attempt is not held back (review3 2026-10-24 (c)); it is still counted.
+        if (!rowRead && _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.isRestoredUnconfirmed(chatId)) {
+            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.record(chatId, user);
+            return true;
+        }
+        const verdict = _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.check(chatId, user);
         if (verdict.reason === 'ok') {
-            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.record(chatId, user);
+            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.record(chatId, user);
             return true;
         }
         if (verdict.reason === 'backoff') {
-            if (_call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.claimDeferral(chatId, verdict.waitMs)) {
+            if (_call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.claimDeferral(chatId, verdict.waitMs)) {
                 logger.log(`[CallManager] ${chatId}: call attempt ${verdict.attempts + 1} backed off ${Math.ceil(verdict.waitMs / 1000)}s`);
-                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_15__.scheduleDelayed)(chatId, "callRequeue", {}, verdict.waitMs);
+                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_16__.scheduleDelayed)(chatId, "callRequeue", {}, verdict.waitMs);
             }
             return false;
         }
@@ -48707,25 +48827,25 @@ class CallManager {
      * goes out (journey CS6).
      */
     noticeCapped(chatId) {
-        if (!_call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.claimCapNotice(chatId))
+        if (!_call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.claimCapNotice(chatId))
             return;
         const link = `https://ZomCall.netlify.app/${process.env.clientId}/${chatId}`;
         this.stopLadder(chatId)
-            .then(() => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, { message: (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_11__.callStatusMessage)(_call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callCappedMessages, chatId, 'capped', { link }) }, { kind: 'call-text', label: 'callManager.capped', maxAgeMs: 90000 }))
+            .then(() => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.floodSafeSend)(this.client, chatId, { message: (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_12__.callStatusMessage)(_call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callCappedMessages, chatId, 'capped', { link }) }, { kind: 'call-text', label: 'callManager.capped', maxAgeMs: 90000 }))
             .catch((error) => { logger.error(`[CallManager] Error sending the capped-call link:`, error); });
     }
     /** In-house outcome of a counted attempt: a delivered show ends the episode; nothing placed gives the attempt back. */
     settleAttempt(chatId, result) {
         if (result.status === 'delivered')
-            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.served(chatId);
+            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.served(chatId);
         else if (result.status === 'busy_engine' || result.status === 'already_in_call' || result.status === 'not_eligible'
             || (result.status === 'flood_limited' && (result.reason === 'account_cooldown' || result.reason === 'chat_refused'))) {
-            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.refund(chatId);
+            _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.refund(chatId);
         }
     }
     /** True when chatId reached the call attempt cap (no ring until a payment or a delivered show): say no "calling you". */
     isCallCapped(chatId, user) {
-        return _call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__.callAttemptCap.isCapped(chatId, user);
+        return _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.isCapped(chatId, user);
     }
     /**
      * A chat blocked for calls (callBlock: canReply 0 here, or on another persona unless a clean genuine payment here
@@ -48736,23 +48856,28 @@ class CallManager {
     async isBlocked(chatId) {
         return (await this.readBlock(chatId)).blocked;
     }
-    /** isBlocked plus this chat's own row (the attempt cap reads its credit / videos from it; null when unreadable). */
+    /**
+     * isBlocked plus this chat's own row (the attempt cap reads its credit / videos from it; null when unreadable or
+     * absent) and whether the row read succeeded (rowRead).
+     */
     async readBlock(chatId) {
         let own = null;
+        let rowRead = false;
         try {
-            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_16__.UserDataDtoCrud.getInstance();
+            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance();
             const [row, others] = await Promise.all([db.read(chatId), db.readOtherPersonaRows(chatId)]);
             own = row ?? null;
-            const elsewhere = await (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_18__.readBlockedElsewhere)(chatId, others ?? [], (id) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_18__.readChatProofs)(db, id));
-            const block = (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_17__.callBlock)(chatId, row, elsewhere);
+            rowRead = true;
+            const elsewhere = await (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_19__.readBlockedElsewhere)(chatId, others ?? [], (id) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_19__.readChatProofs)(db, id));
+            const block = (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_18__.callBlock)(chatId, row, elsewhere);
             if (!block)
-                return { blocked: false, own };
+                return { blocked: false, own, rowRead };
             logger.log(`[CallManager] Call to ${chatId} skipped: chat is blocked (canReply 0) on ${block === 'own' ? 'this client' : 'another client, not overridden by a clean payment here'}`);
-            return { blocked: true, own };
+            return { blocked: true, own, rowRead };
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[CallManager] block check failed for ${chatId}; ringing`, false);
-            return { blocked: false, own };
+            return { blocked: false, own, rowRead };
         }
     }
     /** Drops chatId's operator-call mark; true when it had one. */
@@ -48761,7 +48886,7 @@ class CallManager {
     }
     /** The in-house service while the switch is on (loaded lazily, so it costs nothing when off). */
     async getInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_12__.isInHouseCallsEnabled)())
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_13__.isInHouseCallsEnabled)())
             return null;
         if (this.inHouse)
             return this.inHouse;
@@ -48769,7 +48894,7 @@ class CallManager {
             this.inHouseLoading = Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./inhouse */ "./src/calls/inhouse/index.ts"))
                 .then(({ createInHouseCallService }) => {
                 this.inHouse = createInHouseCallService(this.client, {
-                    requeue: (chatId, delayMs) => { (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_15__.scheduleDelayed)(chatId, "callRequeue", {}, delayMs); },
+                    requeue: (chatId, delayMs) => { (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_16__.scheduleDelayed)(chatId, "callRequeue", {}, delayMs); },
                     isLineBusy: () => this.isCallActive(),
                     callEnded: (chatId) => this.onInHouseCallEnded(chatId),
                     dequeue: (chatId) => { this.removeFromQueue(chatId); },
@@ -48804,7 +48929,9 @@ class CallManager {
     }
     /** Subscribe for incoming in-house calls when the switch is on. */
     async startInHouse() {
-        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_12__.isInHouseCallsEnabled)()) {
+        // Boot: restore the call attempt cap's episodes early, so "calling you" texts before the first dispatch see them.
+        void _call_attempt_cap__WEBPACK_IMPORTED_MODULE_11__.callAttemptCap.ensureSeeded();
+        if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_13__.isInHouseCallsEnabled)()) {
             // Switched off (e.g. config set off + restart): don't leave paid users able to ring us.
             if (!this.client)
                 return;
@@ -48838,7 +48965,7 @@ class CallManager {
         const deadline = Date.now() + IN_HOUSE_DRAIN_MAX_MS;
         while (this.inHouse?.hasActiveCalls?.() && Date.now() < deadline)
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(IN_HOUSE_DRAIN_POLL_MS);
-        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_12__.isInHouseCallsEnabled)())
+        if ((0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_13__.isInHouseCallsEnabled)())
             return; // switched back on meanwhile: keep the service
         await this.disposeInHouse().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "[CallManager] stopping in-house service", false));
     }
@@ -48848,6 +48975,10 @@ class CallManager {
         this.inHouse = null;
         await inHouse?.stop();
     }
+    /**
+     * The legacy ring. Private: every ring must pass dispatchCall (the per-chat attempt cap, call-attempt-cap.ts); its
+     * only callers are dispatchCall's fallback and switch-off paths.
+     */
     async requestCall(chatId, force = false) {
         if (!this.client) {
             logger.log(`[CallManager] No client available for call request`);
@@ -48903,7 +49034,7 @@ class CallManager {
                     return true;
                 }
                 catch (error) {
-                    const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.classifyCallFlood)(error);
+                    const flood = (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_10__.classifyCallFlood)(error);
                     if (flood) {
                         await this.onCallFlood(chatId, flood);
                         this.endCall();
@@ -49075,7 +49206,7 @@ class CallManager {
     // Helper to resolve chatId to InputUser
     async resolveInputUser(chatId) {
         try {
-            const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().getEntity(chatId, this.client);
+            const entity = (await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_7__.EntityCacheManager.getInstance().getEntity(chatId, this.client)) ?? (await this.resolveByStoredUsername(chatId));
             if (entity && entity instanceof telegram__WEBPACK_IMPORTED_MODULE_2__.Api.User && entity.accessHash) {
                 return new telegram__WEBPACK_IMPORTED_MODULE_2__.Api.InputUser({
                     userId: entity.id,
@@ -49087,6 +49218,21 @@ class CallManager {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "User resolution error");
         }
         return null;
+    }
+    /**
+     * Numeric id missed (after an account swap the new session has no access hash for the payer: divya2 …6824 2026-10-24,
+     * paid ₹100, unreachable after the 03:21 swap): the chat's stored @username, rate-limited and accepted only when the
+     * resolved id equals chatId (resolveByUsername). The stored accessHash belongs to the old account and is not used.
+     */
+    async resolveByStoredUsername(chatId) {
+        const row = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance().read(chatId).catch(() => null);
+        const username = row?.username;
+        if (!username)
+            return null;
+        const entity = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_8__.resolveByUsername)(this.client, chatId, username);
+        if (entity)
+            logger.warn(`[CallManager] ${chatId}: not resolvable by id on this account (swap?); resolved via its username`);
+        return entity;
     }
 }
 CallManager.instanceCounter = 0;
@@ -50134,6 +50280,179 @@ async function hydrateNoteMaps(hash, maps) {
 
 /***/ },
 
+/***/ "./src/calls/inhouse/crash-quarantine.ts"
+/*!***********************************************!*\
+  !*** ./src/calls/inhouse/crash-quarantine.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CALL_CRASH_QUARANTINE_MAX: () => (/* binding */ CALL_CRASH_QUARANTINE_MAX),
+/* harmony export */   CALL_CRASH_QUARANTINE_MS: () => (/* binding */ CALL_CRASH_QUARANTINE_MS),
+/* harmony export */   CALL_SETUP_MARKER_TTL_MS: () => (/* binding */ CALL_SETUP_MARKER_TTL_MS),
+/* harmony export */   CallCrashGuard: () => (/* binding */ CallCrashGuard),
+/* harmony export */   callCrashGuard: () => (/* binding */ callCrashGuard),
+/* harmony export */   chatTail: () => (/* binding */ chatTail),
+/* harmony export */   createCallSetupStore: () => (/* binding */ createCallSetupStore)
+/* harmony export */ });
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+
+/**
+ * ntgcalls crash-loop guard. ntgcalls 3.0.2 can segfault while setting up a private call (null deref in
+ * IncomingAudioChannel during create_channels): 24 SIGSEGVs fleet-wide since 2026-10-10, and kavya2 crashed 4 times in
+ * 5 min, each 10-15 s after queuing a call to the same payer …5239 (the restored ladder re-rang him after every restart).
+ *
+ * Before an outgoing in-house call's setup starts, the chat is written to a Redis marker hash
+ * (`calls::settingUp::<clientId>`, field chatId = epoch ms, CALL_SETUP_MARKER_TTL_MS); it is removed when setup ends
+ * (connected, or the call failed / ended first). A process that dies mid-setup leaves the field behind. At the next
+ * boot (recover(), once per process) every chat still marked from before this process started is barred from in-house
+ * calls for CALL_CRASH_QUARANTINE_MS (the legacy ring / VCUI link instead), logged, reported in one ops notice, and the
+ * marker is deleted. The bar itself is mirrored (`calls::crashBarred::<clientId>`), so another restart keeps it.
+ *
+ * This stops the loop, not the first crash. The long-term fix is running ntgcalls in a child process.
+ */
+const CALL_SETUP_MARKER_TTL_MS = 10 * 60000;
+const CALL_CRASH_QUARANTINE_MS = 6 * 60 * 60000;
+/** Most chats barred at once (oldest dropped first). */
+const CALL_CRASH_QUARANTINE_MAX = 200;
+function createCallSetupStore(clientId = () => process.env.clientId) {
+    return {
+        marker: new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisHash(() => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)('calls', 'settingUp', clientId()), CALL_SETUP_MARKER_TTL_MS, 'calls.settingUp'),
+        barred: new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisHash(() => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)('calls', 'crashBarred', clientId()), CALL_CRASH_QUARANTINE_MS, 'calls.crashBarred'),
+    };
+}
+class CallCrashGuard {
+    constructor(store, now = () => Date.now()) {
+        /** chatId -> barred since (epoch ms). */
+        this.barred = new Map();
+        /**
+         * chatId -> the service instance that marked it (review3 2026-10-24: a stale service disposed after an account swap
+         * releases only its own markers, never one the new service set for a call it is setting up now).
+         */
+        this.setting = new Map();
+        /** Marker deletions in flight (setupEnded is fire-and-forget; releaseAll awaits them before the process exits). */
+        this.deleting = new Set();
+        this.recovery = null;
+        this.unnoticed = [];
+        this.store = store;
+        this.now = now;
+        this.startedAt = now();
+    }
+    /**
+     * Once per process: chats a previous process died while setting up (marked before this process started) are barred;
+     * earlier bars still running are restored. Resolves to the newly barred chats. Never throws.
+     */
+    recover() {
+        this.recovery ?? (this.recovery = this.runRecovery().catch(() => []));
+        return this.recovery;
+    }
+    async runRecovery() {
+        if (!this.store)
+            return [];
+        const now = this.now();
+        const [marked, barred] = await Promise.all([this.store.marker.load(now), this.store.barred.load(now)]);
+        for (const [chatId, at] of barred ?? [])
+            this.remember(chatId, at);
+        // A marker written by this process (a call already being set up) is not a crash.
+        const crashed = (marked ?? []).filter(([, at]) => at < this.startedAt).map(([chatId]) => chatId);
+        for (const chatId of crashed) {
+            this.remember(chatId, now);
+            void this.store.barred.set(chatId, now);
+        }
+        if (crashed.length) {
+            this.unnoticed = crashed;
+            await this.store.marker.delete(...crashed);
+        }
+        return crashed;
+    }
+    remember(chatId, at) {
+        this.barred.delete(chatId);
+        this.barred.set(chatId, at);
+        if (this.barred.size > CALL_CRASH_QUARANTINE_MAX)
+            this.barred.delete(this.barred.keys().next().value);
+    }
+    /** The chats barred by recovery, once (the caller sends the one ops notice). */
+    takeUnnoticed() {
+        const out = this.unnoticed;
+        this.unnoticed = [];
+        return out;
+    }
+    /** True while chatId is barred from in-house calls (a previous process died setting up its call). */
+    isBarred(chatId) {
+        const at = this.barred.get(chatId);
+        if (at === undefined)
+            return false;
+        if (this.now() - at < CALL_CRASH_QUARANTINE_MS)
+            return true;
+        this.barred.delete(chatId);
+        void this.store?.barred.delete(chatId);
+        return false;
+    }
+    /**
+     * Setup of chatId's call is about to start: mark it (awaited, bounded by the state-redis deadline) before ntgcalls
+     * runs. `owner` = the service instance placing the call.
+     */
+    async settingUp(chatId, owner) {
+        this.setting.set(chatId, owner);
+        await this.store?.marker.set(chatId, this.now());
+    }
+    /**
+     * Setup of chatId's call ended (connected, failed or never answered): remove the mark. Idempotent. With `owner`, only
+     * a mark that owner set (another service's newer mark for the same chat stays).
+     */
+    setupEnded(chatId, owner) {
+        if (!this.setting.has(chatId))
+            return;
+        if (owner && this.setting.get(chatId) !== owner)
+            return;
+        this.setting.delete(chatId);
+        this.track(this.store?.marker.delete(chatId));
+    }
+    track(write) {
+        if (!write)
+            return;
+        const p = write.catch(() => undefined).finally(() => this.deleting.delete(p));
+        this.deleting.add(p);
+    }
+    /**
+     * Graceful shutdown (InHouseCallService.stop, from CallManager.disposeInHouse): remove every marker this process
+     * still holds and wait for the in-flight removals, bounded by the state-redis deadline, so a deploy / restart never
+     * leaves a marker that bars the chat for 6 h at the next boot (review 2026-10-24). With `owner` (the stopping
+     * service), only the markers it set: a stale service stopped after an account swap leaves the new service's (review3).
+     * Never throws.
+     */
+    async releaseAll(owner) {
+        const left = [...this.setting].filter(([, o]) => !owner || o === owner).map(([chatId]) => chatId);
+        for (const chatId of left)
+            this.setting.delete(chatId);
+        if (left.length)
+            this.track(this.store?.marker.delete(...left));
+        if (this.deleting.size === 0)
+            return;
+        await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.withDeadline)(Promise.allSettled([...this.deleting]), _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.STATE_REDIS_TIMEOUT_MS, 'calls.settingUp release').catch(() => undefined);
+    }
+    /** Test seam: behave as a freshly started process (memory cleared, recovery re-armed). */
+    restartForTests() {
+        this.barred.clear();
+        this.setting.clear();
+        this.deleting.clear();
+        this.recovery = null;
+        this.unnoticed = [];
+        this.startedAt = this.now();
+    }
+}
+/** The process-wide guard (one account per process), mirrored to Redis per client. */
+const callCrashGuard = new CallCrashGuard(createCallSetupStore());
+/** Last 4 digits of a chat id, for ops notices. */
+function chatTail(chatId) {
+    return `…${String(chatId).slice(-4)}`;
+}
+
+
+/***/ },
+
 /***/ "./src/calls/inhouse/ffprobe.ts"
 /*!**************************************!*\
   !*** ./src/calls/inhouse/ffprobe.ts ***!
@@ -50312,6 +50631,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /* harmony import */ var _call_pause__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../call-pause */ "./src/calls/call-pause.ts");
+/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
+
 
 
 
@@ -50452,6 +50773,8 @@ class InHouseCallService {
         this.waitNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('waitNotices', () => this.deps?.notes);
         this.mediaFailures = new Map();
         this.legacyLadders = new Map();
+        /** Owed payers reported unreachable (entity not found), once per chat per process. */
+        this.unreachableNotices = new Map();
         /** Last time each chat was sent the Zoom link because calls are paused (once per cooldown episode). */
         this.floodLinks = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('floodLinks', () => this.deps?.notes);
         /** Running progress checkpoints per chat. */
@@ -50570,6 +50893,7 @@ class InHouseCallService {
         if (!this.isEnabled() || !(await this.isAvailable()))
             return;
         await this.hydrateNotes();
+        await this.recoverFromCrash();
         this.getEngine().start();
         this.deps.allowList?.start();
     }
@@ -50588,6 +50912,26 @@ class InHouseCallService {
         catch (error) {
             this.logger.warn('[in-house-calls] restoring call notes failed', error?.message ?? error);
         }
+    }
+    /**
+     * Once per process (crash-quarantine.ts): chats a previous process died setting up a call for are barred from in-house
+     * calls for a few hours; one ops notice names them. Memoised by the guard, so later calls cost nothing.
+     */
+    async recoverFromCrash() {
+        const guard = this.deps.crashGuard;
+        if (!guard)
+            return;
+        await guard.recover();
+        const barred = guard.takeUnnoticed();
+        if (!barred.length)
+            return;
+        const tails = barred.map(_crash_quarantine__WEBPACK_IMPORTED_MODULE_9__.chatTail).join(', ');
+        this.logger.warn(`[in-house-calls] the previous process died setting up a call to ${barred.join(', ')}: no in-house calls to them for 6 h (legacy ring / link instead)`);
+        await this.safeNotify({
+            title: 'Call crash guard',
+            summary: 'The process died while setting up an in-house call (ntgcalls crash?). Those chats get the legacy ring / VCUI link for 6 h.',
+            fields: [{ label: 'Chats', value: tails, code: false }],
+        });
     }
     /** Operator switch-off: stop answering and put calls back to Nobody. */
     async closeIncoming() {
@@ -50625,6 +50969,9 @@ class InHouseCallService {
                 new Promise((resolve) => { const t = setTimeout(resolve, STOP_SETTLE_WAIT_MS); t.unref?.(); }),
             ]);
         }
+        // Graceful shutdown: no crash marker of this process may outlive it (it would bar the chat for 6 h at the next
+        // boot). Awaited, bounded by the state-redis deadline (review 2026-10-24).
+        await this.deps.crashGuard?.releaseAll?.(this);
     }
     /**
      * Ring `chatId` and stream their show. Resolves when the call is over (or was not placed).
@@ -50971,6 +51318,10 @@ class InHouseCallService {
             return { status: 'fallback', reason: 'unsupported' };
         if (this.withinWindow(this.mediaFailures, chatId, MEDIA_FAILED_WINDOW_MS))
             return { status: 'fallback', reason: 'media_failed_recently' };
+        await this.recoverFromCrash();
+        // A previous process died setting up this chat's call (ntgcalls segfault): no ntgcalls for it for now.
+        if (this.deps.crashGuard?.isBarred(chatId))
+            return { status: 'fallback', reason: 'crash_quarantine' };
         let planned;
         const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
         try {
@@ -51016,6 +51367,11 @@ class InHouseCallService {
             this.outgoingPlans.set(peerKey, plan);
             this.showEnds.set(chatId, this.now() + RING_ALLOWANCE_MS + this.remainingMs(plan));
             requesting = true;
+            await this.deps.crashGuard?.settingUp(chatId, this);
+            // A cancel (VCUI join) or stop() can land while the marker write is awaited: no call then. The finally below
+            // clears the marker (setupEnded), so an aborted setup never bars the chat (review 2026-10-24).
+            if (this.cancelled.has(chatId) || this.stopped)
+                return { status: 'cancelled' };
             record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, this.callOptions(plan));
         }
         catch (error) {
@@ -51041,6 +51397,7 @@ class InHouseCallService {
         }
         finally {
             this.outgoingPlans.delete(peerKey);
+            this.deps.crashGuard?.setupEnded(chatId, this);
         }
         return this.settle(plan, record);
     }
@@ -51125,6 +51482,8 @@ class InHouseCallService {
                     this.connectedAt.delete(this.connectedAt.keys().next().value);
                 if (!plan)
                     return; // pitch, not a show
+                if (record.direction === 'outgoing')
+                    this.deps.crashGuard?.setupEnded(plan.chatId, this); // media is up: setup is over
                 this.connectedChats.add(plan.chatId);
                 this.startCheckpoint(plan);
                 this.onShowConnected(plan);
@@ -51327,6 +51686,15 @@ class InHouseCallService {
         if (!unreachable)
             return null;
         this.logger.warn(`[in-house-calls] ${plan.chatId} unreachable from this account (${unreachable}): clearing its call ladder`);
+        // Not a silent clear for an owed payer this account cannot even look up (no access hash after a swap, and no
+        // usable @username: resolvePeer already tried it). Ops can reach them another way. One notice per chat.
+        if (unreachable === 'entity not found' && this.claimWindow(this.unreachableNotices, plan.chatId, Number.POSITIVE_INFINITY)) {
+            void this.safeNotify({
+                title: 'Owed payer unreachable',
+                summary: 'owed payer unreachable after swap: this account has no access hash for them and no usable username',
+                fields: [{ label: 'Chat', value: (0,_crash_quarantine__WEBPACK_IMPORTED_MODULE_9__.chatTail)(plan.chatId), code: false }, { label: 'Show', value: plan.videoType, code: false }],
+            });
+        }
         return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
     }
     async settle(plan, record) {
@@ -51627,7 +51995,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState),
 /* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_22__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_24__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)
 /* harmony export */ });
@@ -51657,7 +52025,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./switch */ "./src/calls/inhouse/switch.ts");
 /* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./video-policy */ "./src/calls/inhouse/video-policy.ts");
 /* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../chat-proofs */ "./src/calls/chat-proofs.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+
+
 
 
 
@@ -51768,7 +52140,7 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_22__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_24__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
@@ -51820,7 +52192,7 @@ async function sendInHouseText(client, chatId, text, urgent) {
 function createInHouseCallService(client, hooks) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_22__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_24__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -51918,6 +52290,7 @@ function createInHouseCallService(client, hooks) {
             return hasPendingEventsForChat(chatId);
         },
         vcuiLink: (chatId) => `https://ZomCall.netlify.app/${process.env.clientId}/${chatId}`,
+        crashGuard: _crash_quarantine__WEBPACK_IMPORTED_MODULE_23__.callCrashGuard,
         warn: async (notice) => {
             await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.VC_WARNINGS, notice);
         },
@@ -51930,7 +52303,15 @@ function createInHouseCallService(client, hooks) {
         isLineBusy: hooks.isLineBusy,
         resolvePeer: async (chatId) => {
             const entity = await _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_11__.EntityCacheManager.getInstance().getEntity(chatId, client);
-            return entity ?? chatId;
+            if (entity)
+                return entity;
+            // After an account swap the new session has no access hash for the payer (divya2 …6824, 2026-10-24): try the
+            // stored @username (rate-limited, id must match). Never the stored accessHash: it belongs to the old account.
+            const row = await db.read(chatId).catch(() => undefined);
+            const byName = row?.username ? await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__.resolveByUsername)(client, chatId, row.username) : null;
+            if (byName)
+                logger.warn(`[in-house-calls] ${chatId}: not resolvable by id on this account (swap?); resolved via its username`);
+            return byName ?? chatId;
         },
         probeDurationSec,
         probeVideoSize,
@@ -72030,7 +72411,7 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
-    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_40__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.parsePaymentTime)(imageDetails.time || "")?.getTime() ?? null;
+    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_40__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_17__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime() ?? null;
 }
 /** A proof-blocked screenshot: never credited. */
 async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer) {
@@ -83073,7 +83454,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime),
 /* harmony export */   paymentDay: () => (/* binding */ paymentDay),
 /* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs),
-/* harmony export */   withoutProofStore: () => (/* binding */ withoutProofStore)
+/* harmony export */   withoutProofStore: () => (/* binding */ withoutProofStore),
+/* harmony export */   yearShownIn: () => (/* binding */ yearShownIn)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -83184,9 +83566,45 @@ function parseRawPaymentTime(input) {
     const date = new Date(input.trim());
     return isNaN(date.getTime()) ? null : date;
 }
+const MONTH_WORD = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])\\.?';
+const DAY_WORD = '(?:0?[1-9]|[12]\\d|3[01])(?:st|nd|rd|th)?';
+/** A numeric day and month in either order (24/10, 10/24): both in range, one of them a month. */
+const plausibleDayMonth = (a, b) => a >= 1 && b >= 1 && a <= 31 && b <= 31 && (a <= 12 || b <= 12);
 /**
- * A provider payment time ("YYYY-MM-DDTHH:MM:SS", IST wall clock; the fleet runs with TZ=Asia/Kolkata) with
- * the current year forced on. When that lands more than a day in the future it is rolled back one year only
+ * The receipt text prints `year` AS A DATE'S YEAR (review3 2026-10-24: a bare "2025" in a Ref / UTR / mobile number or an
+ * amount, "v2.1.25" or "25 min" is no year). Counted only in a date context:
+ *  - next to a month name: "24 Oct 2025", "24-Oct-2025", "Oct 24, 2025", "October 2025"; a 2-digit year only after a day
+ *    and month name and before a comma or the line end ("24 Oct 25, 10:15"), or after an apostrophe ("Oct '25");
+ *  - a numeric day and month (plausible, same separator) before it: 24/10/2025, 24-10-25, 24.10.2025;
+ *  - ISO: 2025-10-24.
+ * Never inside a longer run of digits or letters (the date must stand on its own).
+ */
+function yearShownIn(text, year) {
+    const t = String(text ?? '').toLowerCase();
+    if (!t)
+        return false;
+    const yyyy = String(year);
+    const yy = yyyy.slice(-2);
+    const start = '(?:^|[^a-z0-9.₹])';
+    const monthYear = new RegExp(`${start}(?:${DAY_WORD}[\\s./-]*)?${MONTH_WORD}[\\s,./-]*(?:${DAY_WORD},?\\s+)?${yyyy}(?![0-9])`);
+    if (monthYear.test(t))
+        return true;
+    if (new RegExp(`${start}${DAY_WORD}[\\s./-]*${MONTH_WORD}[\\s./-]*${yy}(?=\\s*(?:,|$|\\n))`, 'm').test(t))
+        return true;
+    if (new RegExp(`${MONTH_WORD}\\s*['’]${yy}(?![0-9:])`).test(t))
+        return true;
+    if (new RegExp(`${start}${yyyy}([-/.])(0?[1-9]|1[0-2])\\1(0?[1-9]|[12]\\d|3[01])(?![0-9])`).test(t))
+        return true;
+    const numeric = new RegExp(`${start}(\\d{1,2})([/.-])(\\d{1,2})\\2(${yyyy}|${yy})(?![0-9:.])`, 'g');
+    for (const m of t.matchAll(numeric))
+        if (plausibleDayMonth(Number(m[1]), Number(m[3])))
+            return true;
+    return false;
+}
+/**
+ * A provider payment time ("YYYY-MM-DDTHH:MM:SS", IST wall clock; the fleet runs with TZ=Asia/Kolkata). An earlier
+ * year is kept only when `shownText` (the receipt text) prints it (yearShownIn: an old payment, never a fraud reply);
+ * otherwise the current year is forced on. When that lands more than a day in the future it is rolled back one year only
  * when the previous year is genuinely meant:
  *  - a December payment checked in January (the New Year case the roll-back was added for), or
  *  - the time itself carried an earlier year (a last-year screenshot: still an old payment).
@@ -83194,12 +83612,18 @@ function parseRawPaymentTime(input) {
  * read as 2026-10-26 became a 360-day-old "Old payment"), and isRecentValidPayment treats it as such.
  * Null when unparseable. Shared by the time check and the fake-time signal so both judge the same moment.
  */
-function parsePaymentTime(input, now = new Date()) {
+function parsePaymentTime(input, now = new Date(), shownText) {
     const date = parseRawPaymentTime(input);
     if (!date)
         return null;
     const readYear = date.getFullYear();
     const currentYear = now.getFullYear();
+    // An earlier year is kept only when the RECEIPT TEXT prints it: a last-year receipt is an old payment (fix
+    // 2026-10-24: "24 Oct 2025" read on 24 Oct 2026 was forced to today). The input itself always carries a year (tg-vision
+    // emits YYYY-MM-DDTHH:MM:SS, and the model may invent one: "24 Oct, 10:15 am" read as 2025), so it proves nothing;
+    // a year not printed is forced to the current one as before (review 2026-10-24: never "Old payment" on a guess).
+    if (readYear < currentYear && yearShownIn(shownText, readYear))
+        return date;
     date.setFullYear(currentYear);
     if (date.getTime() - now.getTime() > DAY_MS) {
         const newYearCase = date.getMonth() === 11 && now.getMonth() === 0;
@@ -83283,7 +83707,7 @@ function isRecentValidPayment(input, _userDetails, atMs = Date.now(), opts = {})
             return { ...INVALID };
         }
         const trimmedInput = input.trim();
-        const parsed = parsePaymentTime(trimmedInput, now);
+        const parsed = parsePaymentTime(trimmedInput, now, opts.text);
         if (!parsed) {
             notifyPaymentTime("invalidIso", "Time unparseable", undefined, [{ label: "Input", value: trimmedInput }]);
             return { ...INVALID };
@@ -83970,11 +84394,14 @@ function authenticityEnabled(env = process.env) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   FOREIGN_UPI_MAX_SIMILARITY: () => (/* binding */ FOREIGN_UPI_MAX_SIMILARITY),
+/* harmony export */   canonicalVpa: () => (/* binding */ canonicalVpa),
 /* harmony export */   checkPayeeUpi: () => (/* binding */ checkPayeeUpi),
 /* harmony export */   clientUpiIds: () => (/* binding */ clientUpiIds),
 /* harmony export */   isCompleteVpa: () => (/* binding */ isCompleteVpa),
+/* harmony export */   isExactlyOurVpa: () => (/* binding */ isExactlyOurVpa),
 /* harmony export */   isForeignPayeeUpi: () => (/* binding */ isForeignPayeeUpi),
 /* harmony export */   isMaskedVpa: () => (/* binding */ isMaskedVpa),
+/* harmony export */   isOurPayeeVpa: () => (/* binding */ isOurPayeeVpa),
 /* harmony export */   normalizeVpa: () => (/* binding */ normalizeVpa),
 /* harmony export */   ourUpiIds: () => (/* binding */ ourUpiIds),
 /* harmony export */   ownIdsFrom: () => (/* binding */ ownIdsFrom),
@@ -84017,7 +84444,8 @@ function checkPayeeUpi(payee, ownIds) {
     const own = (ownIds ?? []).map(normalizeVpa).filter(id => id.includes('@'));
     if (own.length === 0)
         return 'unknown';
-    return own.some(id => withinOneEdit(p, id)) ? 'own' : 'not_ours';
+    // One edit on the whole id, or the same id after canonical folding ("…jvo@paytrn" for "…jv0@paytm"; isExactlyOurVpa).
+    return own.some(id => withinOneEdit(p, id)) || isExactlyOurVpa(p, own) ? 'own' : 'not_ours';
 }
 /** This client's own payee ids from its `clients` doc (loaded into process.env at boot: qrId, gpayId). */
 function clientUpiIds(env = process.env) {
@@ -84043,66 +84471,182 @@ function ownIdsFrom(source, extra = []) {
     return [...new Set(out)];
 }
 /**
- * Owner 2026-10-21: a complete payee UPI id that is not one of ours, nor an OCR-garbled copy or cut-off fragment of
- * one, is a fake (nidhi1 8167003987 ₹50: banking name "Girls community" on girlscommunity@ybl; ours is
- * community01@airtel). Measured on the 1092 credited screenshots of 2026-10-14..21 (docs/PAYMENT-SCREENSHOT-FLOW.md):
- * every garbled / cut copy of ours scored >= 0.676 or was a fragment, every foreign id it blocks scored <= 0.45.
+ * Owner 2026-10-21: a complete payee UPI id that is not one of ours, nor an OCR-garbled copy or cut-off piece of one,
+ * is a fake (nidhi1 8167003987 ₹50: banking name "Girls community" on girlscommunity@ybl; ours is community01@airtel).
+ * Since 2026-10-24 this threshold applies to the LOCAL part alone, and only on one of our handles (isOurPayeeVpa).
  */
 const FOREIGN_UPI_MAX_SIMILARITY = 0.55;
-/** Lowercase, no spaces, no QR suffix, letters/digits/'@' only: "BHARATPE.8000073302@fbpe&bpsign=.." -> "bharatpe8000073302@fbpe". */
-const compactVpa = (v) => normalizeVpa(v).split('&')[0].replace(/[^a-z0-9@]/g, '');
-function editDistance(a, b) {
-    let prev = Array.from({ length: b.length + 1 }, (_, k) => k);
-    for (let i = 1; i <= a.length; i++) {
-        const cur = [i];
-        for (let k = 1; k <= b.length; k++)
-            cur[k] = Math.min(prev[k] + 1, cur[k - 1] + 1, prev[k - 1] + (a[i - 1] === b[k - 1] ? 0 : 1));
-        prev = cur;
-    }
-    return prev[b.length];
+/**
+ * OCR glyph confusions folded the same way on BOTH sides before any comparison (measured 2026-10-24 on the review
+ * cases and 7 days of paymentProofs; kept minimal): "0"->"o" (community01 / communityo1), "1", "I", "|" -> "l"
+ * (ravva.3431 / ravva.343l); with `pairs`, also "rn"/"nn"->"m" (@paytrn, @paytnn), "vv"->"w" (@vvahdfcbank), "cl"->"d" (@wahclfcbank).
+ * The two-letter folds can also hurt ("airtcl", an e/c slip of "airtel", would fold to "airtd"), so every comparison is
+ * made on both foldings, each applied to both ids alike, and either may match (FOLDS).
+ */
+const foldGlyphs = (s, pairs = true) => {
+    const lower = s.replace(/[I|]/g, 'l').toLowerCase();
+    return (pairs ? lower.replace(/rn/g, 'm').replace(/nn/g, 'm').replace(/vv/g, 'w').replace(/cl/g, 'd') : lower).replace(/0/g, 'o').replace(/1/g, 'l');
+};
+const FOLDS = [true, false];
+/**
+ * Canonical id: no QR suffix ('&...'), local part letters/digits only, handle up to the first character no handle has
+ * (so "…@fbpe (BharatPe)", "…@fbpe UPI", "…@fbpe-1" end at "fbpe"), then foldGlyphs on both parts.
+ */
+function canonicalVpa(v, pairs = true) {
+    const s = String(v ?? '').split('&')[0];
+    const at = s.indexOf('@');
+    const rawLocal = (at < 0 ? s : s.slice(0, at)).replace(/\s+/g, '');
+    const rawHandle = at < 0 ? '' : (s.slice(at + 1).trimStart().match(/^[A-Za-z0-9.|]*/)?.[0] ?? '');
+    return {
+        raw: rawLocal.toLowerCase(),
+        local: foldGlyphs(rawLocal, pairs).replace(/[^a-z0-9]/g, ''),
+        handle: foldGlyphs(rawHandle, pairs).replace(/[^a-z0-9]/g, ''),
+    };
 }
-/** 1 - edit distance / longer length over the WHOLE id (local part and handle): @ybl vs @airtel counts. */
+/** Optimal string alignment distance: insert, delete, substitute, or swap two neighbours ("aitrel" / "airtel" = 1). */
+function osaDistance(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let k = 0; k <= b.length; k++)
+        d[0][k] = k;
+    for (let i = 1; i <= a.length; i++) {
+        for (let k = 1; k <= b.length; k++) {
+            const cost = a[i - 1] === b[k - 1] ? 0 : 1;
+            d[i][k] = Math.min(d[i - 1][k] + 1, d[i][k - 1] + 1, d[i - 1][k - 1] + cost);
+            if (i > 1 && k > 1 && a[i - 1] === b[k - 2] && a[i - 2] === b[k - 1])
+                d[i][k] = Math.min(d[i][k], d[i - 2][k - 2] + 1);
+        }
+    }
+    return d[a.length][b.length];
+}
+const similarity = (a, b) => {
+    const len = Math.max(a.length, b.length);
+    return len === 0 ? 1 : 1 - osaDistance(a, b) / len;
+};
+/** 1 - edit distance / longer length over the WHOLE canonical id (diagnostics and tests; decisions use isOurPayeeVpa). */
 function upiSimilarity(a, b) {
-    const x = compactVpa(a);
-    const y = compactVpa(b);
-    const len = Math.max(x.length, y.length);
-    return len === 0 ? 1 : 1 - editDistance(x, y) / len;
+    const x = canonicalVpa(a);
+    const y = canonicalVpa(b);
+    return similarity(`${x.local}@${x.handle}`, `${y.local}@${y.handle}`);
+}
+/**
+ * Real PSP handles (folded) that are never ours even one edit from one of ours: a receipt printing one of them is far
+ * likelier a real account there than an OCR slip. Measured 2026-10-24 over 60 common handles, two sit one edit from ours:
+ *  - @mairtel (Airtel's old handle) vs our @airtel: listed, so it is a stranger's handle;
+ *  - @ptyes (Paytm's consumer handle) vs our merchant @ptys: NOT listed. A credited genuine sneha2 ₹25 (…5157, 2026-10)
+ *    printed our exact ptys merchant id on @ptyes, and those paytmqr ids are Paytm-unique, so @ptyes stays one edit = ours.
+ * The rest guard future own handles. Our own handles are never treated as strangers (handleIsOurs).
+ */
+const REAL_PSP_HANDLES = new Set([
+    'ybl', 'ibl', 'axl', 'okaxis', 'oksbi', 'okhdfcbank', 'okicici', 'ptaxis', 'pthdfc', 'ptsbi', 'upi', 'apl',
+    'yapl', 'icici', 'sbi', 'kotak', 'axisbank', 'hdfcbank', 'fam', 'okbizaxis', 'pingpay', 'freecharge', 'idfcbank',
+    'yesbank', 'naviaxis', 'superyes', 'axis', 'ikwik', 'timecosmos', 'abfspay', 'jupiteraxis', 'slc', 'kbl', 'mahb', 'pnb',
+    'barodampay', 'mairtel', 'airtelbank', 'paytmupi', 'jiomoney', 'paytm', 'airtel', 'jio', 'fbpe', 'postbank',
+].flatMap((h) => FOLDS.map((pairs) => foldGlyphs(h, pairs))));
+/**
+ * The receipt's handle is one of ours as OCR shows it: equal, cut short ("@payt", "@f"), or one edit off ("@paytn",
+ * "@aitrel" after folding). Never a longer handle ("@airtelbank", "@paytmupi", "@jiomoney" are real, different PSPs)
+ * and never a listed real PSP handle that is not itself ours (@mairtel vs our @airtel).
+ */
+function handleIsOurs(handle, ownHandle, ownHandles) {
+    if (!handle || !ownHandle)
+        return false;
+    if (handle === ownHandle)
+        return true;
+    if (REAL_PSP_HANDLES.has(handle) && !ownHandles.has(handle))
+        return false;
+    return ownHandle.startsWith(handle) || osaDistance(handle, ownHandle) <= 1;
+}
+/** Shortest cut of one of our local parts that counts as that id ("reddygirlmin" for "reddygirlmine"). */
+const MIN_TRUNCATED_LOCAL = 5;
+/** A piece this long with a digit may carry one misread too ("…0101xv6mfg02t4m" cut AND one letter off; live arpitha1 …1483). */
+const MIN_FUZZY_PIECE = 8;
+const FUZZY_PIECE_MIN_SIMILARITY = 0.8;
+/** Least edits turning `piece` into some substring of `whole` (free cuts at both ends of `whole`; swaps count 1). */
+function pieceDistance(piece, whole) {
+    const d = Array.from({ length: piece.length + 1 }, (_, i) => [i, ...Array(whole.length).fill(0)]);
+    for (let k = 0; k <= whole.length; k++)
+        d[0][k] = 0;
+    for (let i = 1; i <= piece.length; i++) {
+        for (let k = 1; k <= whole.length; k++) {
+            const cost = piece[i - 1] === whole[k - 1] ? 0 : 1;
+            d[i][k] = Math.min(d[i - 1][k] + 1, d[i][k - 1] + 1, d[i - 1][k - 1] + cost);
+            if (i > 1 && k > 1 && piece[i - 1] === whole[k - 2] && piece[i - 2] === whole[k - 1])
+                d[i][k] = Math.min(d[i][k], d[i - 2][k - 2] + 1);
+        }
+    }
+    return Math.min(...d[piece.length]);
+}
+/** A local part and its dot / dash segments of MIN_TRUNCATED_LOCAL+ ("bharatpe.8000073302" -> "8000073302" too). */
+function localForms(id, pairs) {
+    const segments = id.raw.split(/[.\-_]/).map((s) => foldGlyphs(s, pairs).replace(/[^a-z0-9]/g, '')).filter((s) => s.length >= MIN_TRUNCATED_LOCAL);
+    return [...new Set([id.local, ...segments])];
+}
+/**
+ * The receipt's local part is that id's local part as OCR shows it: equal, a cut from the start (MIN_TRUNCATED_LOCAL+),
+ * a piece with a digit in it ("m9", "ds03", ".8000073302": OCR splits; a digit-free word like "lakshmi" or "store" is
+ * no piece; from MIN_FUZZY_PIECE characters one edit per 5 is allowed in the piece), or garbled (similarity >= FOREIGN_UPI_MAX_SIMILARITY to the local part or a segment of it).
+ */
+function localMatches(p, own, pairs) {
+    const local = p.local;
+    if (!local)
+        return false;
+    if (local.length >= MIN_TRUNCATED_LOCAL && own.local.startsWith(local))
+        return true;
+    if (/\d/.test(p.raw) && own.local.includes(local))
+        return true;
+    if (/\d/.test(p.raw) && local.length >= MIN_FUZZY_PIECE && 1 - pieceDistance(local, own.local) / local.length >= FUZZY_PIECE_MIN_SIMILARITY)
+        return true;
+    return localForms(own, pairs).some((form) => form === local || similarity(local, form) >= FOREIGN_UPI_MAX_SIMILARITY);
+}
+/**
+ * One of our ids as the receipt shows it (canonical rule, 2026-10-24; replaces the edit-distance patches):
+ *  - the handle is that id's handle (handleIsOurs) and the local part is its local part (localMatches); or
+ *  - the local part equals one of ours exactly, on any of our handles ("lakshmistores@paytm": @paytm is ours).
+ * Our local part, number or a look-alike on a stranger's handle is NOT ours (owner 2026-10-21): community01@okhdfcbank,
+ * ravva3431@okaxis, lakshmistores@okaxis, 8000073302@ybl. A look-alike on one of our handles but not that id's handle
+ * is not ours either (arpitha1 ₹150 "Reddy Girl" on reddygirlmin@paytm, ours reddygirlmine@jio).
+ */
+function isOurPayeeVpa(payee, ownIds) {
+    return FOLDS.some((pairs) => {
+        const p = canonicalVpa(payee, pairs);
+        if (!p.local || !p.handle)
+            return false;
+        const own = ownCanonical(ownIds, pairs);
+        const ownHandles = new Set(own.map((id) => id.handle));
+        if (own.some((id) => handleIsOurs(p.handle, id.handle, ownHandles) && localMatches(p, id, pairs)))
+            return true;
+        return own.some((id) => id.local === p.local) && own.some((id) => handleIsOurs(p.handle, id.handle, ownHandles));
+    });
+}
+/** Strict form for "this IS one of our ids" (checkPayeeUpi): the same canonical local part on that id's handle. */
+function isExactlyOurVpa(payee, ownIds) {
+    return FOLDS.some((pairs) => {
+        const p = canonicalVpa(payee, pairs);
+        if (!p.local || !p.handle)
+            return false;
+        const own = ownCanonical(ownIds, pairs);
+        const ownHandles = new Set(own.map((id) => id.handle));
+        return own.some((id) => id.local === p.local && handleIsOurs(p.handle, id.handle, ownHandles));
+    });
+}
+function ownCanonical(ownIds, pairs = true) {
+    return (ownIds ?? []).filter((id) => typeof id === 'string' && id.includes('@')).map((id) => canonicalVpa(id, pairs)).filter((id) => id.local.length > 0 && id.handle.length > 0);
 }
 /** A whole id: "local@handle", not cut ("..." / "…") and not masked. Only a whole id can be judged foreign. */
 function isCompleteVpa(v) {
     const n = normalizeVpa(v);
     if (/\.\.|…/.test(n) || isMaskedVpa(n))
         return false;
-    const [local = '', handle = ''] = compactVpa(n).split('@');
-    return n.includes('@') && local.length > 0 && handle.length > 0;
+    const c = canonicalVpa(n);
+    return n.includes('@') && c.local.length > 0 && c.handle.length > 0;
 }
-/**
- * OCR cut / split of one of ours ("m9@paytm", "vr3l@ptys", "8000073302@fbpe", "BHARATPE.8000073302@f"): the visible
- * local part is a run of one of our local parts with a digit in it, on that id's handle (or its start / one edit
- * off). A digit-free word (girls, community, lakshmi, store) never counts as a fragment.
- */
-function isFragmentOfOurs(payee, own) {
-    const [local, handle = ''] = payee.split('@');
-    if (!/\d/.test(local))
-        return false;
-    return own.some((id) => {
-        const [ownLocal, ownHandle = ''] = id.split('@');
-        return ownLocal.includes(local) && (ownHandle.startsWith(handle) || withinOneEdit(handle, ownHandle));
-    });
-}
-/** True only for a complete payee id below FOREIGN_UPI_MAX_SIMILARITY to every one of ours and no fragment of one. */
+/** True only for a complete payee id that is not one of ours as OCR shows it (isOurPayeeVpa); no own-id list = never. */
 function isForeignPayeeUpi(payee, ownIds) {
     if (!isCompleteVpa(payee))
         return false;
-    const own = (ownIds ?? []).map(compactVpa).filter((id) => id.includes('@'));
-    if (own.length === 0)
+    if (ownCanonical(ownIds).length === 0)
         return false;
-    const p = compactVpa(payee);
-    // owner 2026-10-21: our number on another handle is a fake (800071302@ybl vs ours 8000073302@fbpe), so digits
-    // count as ours only through isFragmentOfOurs (same handle) or the whole-id similarity.
-    if (isFragmentOfOurs(p, own))
-        return false;
-    return own.every((id) => upiSimilarity(p, id) < FOREIGN_UPI_MAX_SIMILARITY);
+    return !isOurPayeeVpa(payee, ownIds);
 }
 
 
@@ -84336,7 +84880,9 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
             if (!sameAmount(row.amount, facts.amount) || !samePayee(facts, row))
                 continue;
             const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
-            if (!Number.isFinite(servedMs) || servedMs > arrival || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrival) !== 'today')
+            // No "credited before this arrived" test (fix 2026-10-24, as on rule 4's no-UTR-row branches): shruthi2's
+            // no-UTR ₹50 arrived 2 s before ramya1's credit of the same payment landed and was credited too.
+            if (!Number.isFinite(servedMs) || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrival) !== 'today')
                 continue;
             return { kind: 'repeat', by: 'payee', sameChat: sameChat(facts, row), matched: row };
         }
@@ -85122,7 +85668,7 @@ function istParts(ms) {
 function futurePaymentTimeReasons(details, arrivalMs) {
     if (typeof details.time !== 'string' || !details.time.trim() || !Number.isFinite(arrivalMs))
         return [];
-    const readMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.parsePaymentTime)(details.time, new Date(arrivalMs))?.getTime();
+    const readMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.parsePaymentTime)(details.time, new Date(arrivalMs), details.text)?.getTime();
     if (readMs === undefined || !Number.isFinite(readMs) || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(readMs, arrivalMs) !== 'future')
         return [];
     const text = String(details.text ?? '').replace(/\s+/g, ' ');
@@ -85391,7 +85937,7 @@ function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const now = new Date(atMs);
     const nowMs = now.getTime();
     // Judge the moment the time check accepted (incl. its corrections; a lead ahead of IST is judged as the arrival).
-    const paymentMs = check.paymentMs ?? (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.parsePaymentTime)(image.time || "", now)?.getTime() ?? NaN;
+    const paymentMs = check.paymentMs ?? (0,_payment_time__WEBPACK_IMPORTED_MODULE_10__.parsePaymentTime)(image.time || "", now, image.text)?.getTime() ?? NaN;
     const age = nowMs - paymentMs;
     const ageMins = (age / MINUTE_MS).toFixed(2);
     // callTime may be unset: every comparison with it is then false, on purpose (kept as written).
@@ -85715,8 +86261,8 @@ function showsOurUpiId(text, ownIds) {
     return showsOurUpiIdAsId(text, ownIds);
 }
 /**
- * A UPI id read as an id (the payee UPI id field or a "x@handle" token in the text) that is one of ours: the whole id
- * (one edit off), the same local part on any handle, or a long cut prefix of one. A longer id that only CONTAINS one of
+ * A UPI id read as an id (the payee UPI id field or a "x@handle" token in the text) that is one of ours: not foreign
+ * (isForeignPayeeUpi) and the whole id (one edit off), the same local part, or a long cut prefix of one. A longer id that only CONTAINS one of
  * our local parts is someone else's look-alike ("reddygirl9@ybl" next to ours "reddygirl@airtel"; owner 2026-10-22).
  * A cut or masked id cannot be a look-alike and keeps the free-text rule (showsOurUpiId).
  */
@@ -85727,6 +86273,10 @@ function isOurUpiIdToken(id, ownIds) {
     if (!(0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.isCompleteVpa)(v))
         return showsOurUpiId(v, ownIds);
     const own = ownIds.filter((x) => typeof x === 'string' && x.includes('@')).map((x) => (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(x).split('&')[0]);
+    // A foreign whole id is never ours, our local part on a stranger's handle included (owner 2026-10-21: lakshmistores@ybl
+    // is not ours); isPaymentMine then agrees with payeeVerdict's NOT_OURS (review 2026-10-24 (d)).
+    if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.isForeignPayeeUpi)(id, own))
+        return false;
     if ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.checkPayeeUpi)(v, own) === 'own')
         return true;
     const local = v.split('@')[0];
@@ -85759,6 +86309,23 @@ function entitiesShowOurs(e, ownUpiIds) {
         || showsOurUpiId(e.textNoUpi, ownUpiIds)
         || showsOurAccountId(`${e.payeeName} ${e.text}`);
 }
+/**
+ * Rule 4 evidence: something of ours shown APART from the payee UPI id itself (review 2026-10-24). The payee id's own
+ * local part never counts ("myred1808@ibl" alone is someone else's id that happens to share our local part: NOT_OURS,
+ * not a fake); our banking name, an account id outside UPI ids, or one of our OTHER ids does.
+ */
+function showsOursApartFromPayeeUpi(e, ownUpiIds) {
+    if (showsOurBankingName(e) || showsOurAccountId(`${e.payeeName} ${e.textNoUpi}`))
+        return true;
+    const localOf = (id) => (0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.normalizeVpa)(id).split('&')[0].split('@')[0].replace(/[^a-z0-9]/g, '');
+    const payeeLocal = localOf(e.payeeUpiId);
+    const related = (id) => {
+        const local = localOf(id);
+        return payeeLocal.length > 0 && local.length > 0 && (local.includes(payeeLocal) || payeeLocal.includes(local));
+    };
+    const others = ownUpiIds.filter((id) => typeof id === 'string' && !related(id));
+    return e.upiTokens.some((token) => !related(token) && isOurUpiIdToken(token, others)) || showsOurUpiId(e.textNoUpi, others);
+}
 /** "laxmi" in the payee name, the note or the text outside UPI ids; inside a stranger's UPI id only, it is not ours (owner 2026-10-22). */
 function showsLaxmi(e) {
     const t = `${e.payeeName} ${e.note.replace(/[a-z0-9][a-z0-9._-]*@[a-z][a-z0-9.]*/gi, ' ')} ${e.textNoUpi}`.toLowerCase().replace(/dhan\s*laxmi/g, '');
@@ -85789,7 +86356,9 @@ function payeeVerdictOf(e, ctx) {
         reasons.push('LAXMI_PAYEE');
     if (persona || personaOnForeign)
         reasons.push('PERSONA_PAYEE');
-    if (foreignUpi && (oursShown || laxmi || persona || personaOnForeign))
+    // rule 4 needs ours shown apart from the payee id (its own local part is not "ours shown"; review 2026-10-24)
+    const oursBesidesPayee = foreignUpi && showsOursApartFromPayeeUpi(e, ctx.ownUpiIds);
+    if (foreignUpi && (oursBesidesPayee || laxmi || persona || personaOnForeign))
         reasons.push('UPI_NOT_OURS');
     if (reasons.length > 0)
         return { verdict: 'TAMPERED', reasons };
