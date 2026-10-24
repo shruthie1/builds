@@ -52509,13 +52509,16 @@ const DEFAULT_VIDEOS = [...VIDEO_IDS];
 const DEMO_VIDEOS = [1, 1012, 1011, 1013, 101, 103, 102, 104, 105, 106, 107];
 const REPEAT_DEMO_VIDEOS = [1012, 1011, 1013];
 /**
- * Show videos after the demo (owner 2026-10-24): the "2*" family first, starting with 2 (273.9 s); the "3*" family
- * only for highestPayAmount >= HIGH_TIER_PAY, once every 2* was watched. Second show and full show both pick from it
+ * Show videos after the demo. Under HIGH_TIER_PAY (owner 2026-10-24): the "2*" family only, starting with 2 (273.9 s).
+ * At or above HIGH_TIER_PAY (owner 2026-10-25): 2, then the "3*" family, then the rest of the 2* family, so a
+ * Rs 350 payer's shows play 2, 3, 302, 305, 203, 204. Second show and full show both pick the first unwatched one
  * (the videoType, not the id, says which service it was). The 2* order is the one these ids had in the old lists.
  */
 const TIER2_VIDEOS = [2, 203, 204, 201, 202, 206, 207, 205];
 const TIER3_VIDEOS = [3, 302, 305];
-const showVideos = (highestPay) => (highestPay >= HIGH_TIER_PAY ? [...TIER2_VIDEOS, ...TIER3_VIDEOS] : TIER2_VIDEOS);
+const showVideos = (highestPay) => (highestPay >= HIGH_TIER_PAY
+    ? [TIER2_VIDEOS[0], ...TIER3_VIDEOS, ...TIER2_VIDEOS.slice(1)]
+    : TIER2_VIDEOS);
 function cdnEnabled(value) {
     return ['on', 'true', '1', 'yes', 'enabled'].includes((value ?? '').trim().toLowerCase());
 }
