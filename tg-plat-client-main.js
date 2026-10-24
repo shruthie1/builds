@@ -102463,7 +102463,8 @@ async function startNewUserProcess(error, context = 'runtime') {
             permanentFailureHandoffContext = null;
             return;
         }
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=false&formalities=false&reason=${encodeURIComponent(errorMessage)}`;
+        // reportedMobile: CMS ignores this report (stale_report) once this mobile is no longer the main.
+        const url = (0,_setup_client__WEBPACK_IMPORTED_MODULE_9__.withReportedMobile)(`${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=false&formalities=false&reason=${encodeURIComponent(errorMessage)}`);
         logger.info(`[PermanentFailure] ${context}: calling setupClient`, {
             url,
             clientId: process.env.clientId,
@@ -102471,12 +102472,27 @@ async function startNewUserProcess(error, context = 'runtime') {
             permanentReplacement: true,
         });
         const setupResult = await (0,_setup_client__WEBPACK_IMPORTED_MODULE_9__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_10__.fetchWithTimeout, process.env.clientId, { bypassBackoff: true });
+        if (setupResult.status === 'stale_report') {
+            // CMS already moved the client off this mobile; it restarts this process onto the new main.
+            // Nothing to hand off and nothing to retry (each retry would get the same answer).
+            logger.info(`[PermanentFailure] ${context}: CMS says this mobile is no longer the main (stale_report); handoff not needed, waiting for the CMS restart`, {
+                clientId: process.env.clientId,
+                currentMain: setupResult.existingMobile,
+            });
+            failedHandoffs = HANDOFF_MAX_FAILURES;
+            permanentFailureHandoffInProgress = false;
+            permanentFailureHandoffContext = null;
+            return;
+        }
         if (!setupResult.swapped) {
             throw new Error(`setupClient did not swap the client: ${setupResult.status} — ${setupResult.message}`);
         }
         logger.info(`[PermanentFailure] ${context}: setupClient handoff completed, waiting before shutdown`, {
             delayMs: POST_SETUPCLIENT_SHUTDOWN_DELAY_MS,
             clientId: process.env.clientId,
+            newMobile: setupResult.newMobile,
+            // Set when CMS had no normal buffer and took a degraded-swap account (tier 2-4).
+            degradedTier: setupResult.degradedTier,
         });
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(POST_SETUPCLIENT_SHUTDOWN_DELAY_MS);
         // Trigger a graceful shutdown so PM2 restarts the process and it re-fetches env (new
@@ -102761,10 +102777,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
+/* harmony export */   SETUP_CLIENT_MAX_NO_CANDIDATE: () => (/* binding */ SETUP_CLIENT_MAX_NO_CANDIDATE),
 /* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
 /* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
-/* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff)
+/* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff),
+/* harmony export */   withReportedMobile: () => (/* binding */ withReportedMobile)
 /* harmony export */ });
 const VALID_STATUSES = new Set([
     'swapped',
@@ -102773,7 +102791,19 @@ const VALID_STATUSES = new Set([
     'client_not_found',
     'no_candidate',
     'failed',
+    'stale_report',
 ]);
+/**
+ * Every setupClient request names the mobile this process runs on (additive query param). CMS answers
+ * stale_report, and does nothing, when that is no longer the client's main: a late report from a process
+ * CMS already replaced must never swap out (or mark dead) the new main. Left alone when the URL already
+ * carries it or the mobile is unknown.
+ */
+function withReportedMobile(url, mobile = process.env.mobile) {
+    if (!mobile || /[?&]reportedMobile=/.test(url))
+        return url;
+    return `${url}${url.includes('?') ? '&' : '?'}reportedMobile=${encodeURIComponent(mobile)}`;
+}
 /** After a no_candidate answer, further swap requests are suppressed this long. */
 const SETUP_CLIENT_BACKOFF_MS = 2 * 60 * 60 * 1000;
 /**
@@ -102790,19 +102820,50 @@ const SETUP_CLIENT_POST_SWAP_MS = 5 * 60 * 1000;
  */
 const SETUP_CLIENT_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
 const SETUP_CLIENT_MAX_FAILURES = 5;
+/**
+ * Owner rule (2026-10-11) applied to no_candidate too (2026-10-24): consecutive no_candidate answers
+ * back off 2, 4, 8, 16 h (15, 30, 60, 120 min while CMS reports unprobed candidates) and stop after
+ * SETUP_CLIENT_MAX_NO_CANDIDATE in a row, until the process restarts. A no_candidate that says the
+ * client is already `degraded` stops at once: the CMS upgrade job owns moving it to a better account.
+ */
+const SETUP_CLIENT_MAX_NO_CANDIDATE = 5;
 let swapSuppressedUntil = 0;
 let inFlight = null;
 let consecutiveFailures = 0;
+let consecutiveNoCandidates = 0;
+let stopReason = null;
 function resetSetupClientBackoff() {
     swapSuppressedUntil = 0;
     inFlight = null;
     consecutiveFailures = 0;
+    consecutiveNoCandidates = 0;
+    stopReason = null;
+}
+function stopRequests(reason) {
+    swapSuppressedUntil = Number.POSITIVE_INFINITY;
+    stopReason = reason;
 }
 function noteSetupFailure() {
     consecutiveFailures++;
-    swapSuppressedUntil = consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES
-        ? Number.POSITIVE_INFINITY
-        : Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
+    if (consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES) {
+        stopRequests(`setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`);
+        return;
+    }
+    swapSuppressedUntil = Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
+}
+function noteNoCandidate(result) {
+    consecutiveFailures = 0;
+    if (result.degraded === true) {
+        stopRequests('setupClient requests stopped: this client runs on a degraded account and the CMS upgrade job moves it up; a process restart re-arms them');
+        return;
+    }
+    consecutiveNoCandidates++;
+    if (consecutiveNoCandidates >= SETUP_CLIENT_MAX_NO_CANDIDATE) {
+        stopRequests(`setupClient requests stopped after ${consecutiveNoCandidates} no_candidate answers in a row; a process restart re-arms them`);
+        return;
+    }
+    const base = result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS;
+    swapSuppressedUntil = Date.now() + base * 2 ** (consecutiveNoCandidates - 1);
 }
 /**
  * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
@@ -102820,7 +102881,7 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
             clientId: expectedClientId ?? '',
             message: Number.isFinite(remainingMs)
                 ? `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
-                : `setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`,
+                : stopReason ?? 'setupClient requests stopped; a process restart re-arms them',
             cooldownRemainingMs: remainingMs,
             suppressedLocally: true,
         };
@@ -102836,12 +102897,16 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
         // 'failed' must not block a genuine rotation for hours.
         if (result.swapped) {
             consecutiveFailures = 0;
+            consecutiveNoCandidates = 0;
             swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
         }
-        else if (result.status === 'no_candidate') {
+        else if (result.status === 'stale_report') {
+            // This process runs a replaced mobile; CMS restarts it onto the current main.
             consecutiveFailures = 0;
-            swapSuppressedUntil = Date.now()
-                + (result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS);
+            stopRequests('setupClient requests stopped: CMS says this process runs a mobile that is no longer the client main (stale_report); a process restart re-arms them');
+        }
+        else if (result.status === 'no_candidate') {
+            noteNoCandidate(result);
         }
         else if (result.status === 'cooldown') {
             // CMS's own cooldown: wait exactly that long, not a failure.
@@ -102864,7 +102929,7 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
     return pending;
 }
 async function requestClientSetupUnguarded(url, request, expectedClientId) {
-    const response = await request(url);
+    const response = await request(withReportedMobile(url));
     if (!response) {
         throw new Error('setupClient request failed without a response');
     }
@@ -102886,6 +102951,9 @@ async function requestClientSetupUnguarded(url, request, expectedClientId) {
     const futureFallbackIsValid = data?.usedFutureAvailableFallback === undefined
         || typeof data.usedFutureAvailableFallback === 'boolean';
     const pendingIsValid = data?.moreCandidatesPending === undefined || typeof data.moreCandidatesPending === 'boolean';
+    const degradedTierIsValid = data?.degradedTier === undefined
+        || (data.swapped === true && (data.degradedTier === 2 || data.degradedTier === 3 || data.degradedTier === 4));
+    const degradedIsValid = data?.degraded === undefined || typeof data.degraded === 'boolean';
     if (!data ||
         typeof data !== 'object' ||
         typeof data.status !== 'string' ||
@@ -102898,7 +102966,9 @@ async function requestClientSetupUnguarded(url, request, expectedClientId) {
         !cooldownIsValid ||
         !retirementIsValid ||
         !futureFallbackIsValid ||
-        !pendingIsValid) {
+        !pendingIsValid ||
+        !degradedTierIsValid ||
+        !degradedIsValid) {
         throw new Error('setupClient returned an invalid response contract');
     }
     return data;
