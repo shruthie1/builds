@@ -30581,6 +30581,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var AnalyticsHealthCheck_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AnalyticsHealthCheck = exports.ANALYTICS_HEALTH_CATEGORY = exports.PROBE_RETRY_DELAY_MS = exports.PROBE_RETRIES = exports.ANALYTICS_HEALTH_TRAILING_DAYS = exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = void 0;
+exports.summariseParity = summariseParity;
 exports.median = median;
 exports.decideAnalyticsHealth = decideAnalyticsHealth;
 exports.istDay = istDay;
@@ -30595,8 +30596,25 @@ exports.PROBE_RETRIES = 3;
 exports.PROBE_RETRY_DELAY_MS = 60_000;
 exports.ANALYTICS_HEALTH_CATEGORY = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts").ChannelCategory.CLIENT_UPDATES;
 const UNDEFINED_TABLE = '42P01';
+const UNDEFINED_FUNCTION = '42883';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function summariseParity(input) {
+    const out = new Map();
+    const fromDay = input.dailyMobileFromDay;
+    const mobileLive = !!fromDay && input.day >= fromDay;
+    for (const r of input.parityRows ?? []) {
+        const kind = String(r.check_name ?? 'unknown');
+        if (kind === 'client_vs_mobile' && !mobileLive)
+            continue;
+        const entry = out.get(kind) ?? { rows: 0, clients: new Set() };
+        entry.rows += 1;
+        if (r.client_id)
+            entry.clients.add(String(r.client_id));
+        out.set(kind, entry);
+    }
+    return out;
+}
 function median(values) {
     if (!values.length)
         return 0;
@@ -30626,6 +30644,9 @@ function decideAnalyticsHealth(input) {
     const fromDay = input.dailyMobileFromDay;
     if (fromDay && input.day >= fromDay && !missing.has('daily_mobile') && (input.dailyMobileRows ?? 0) === 0) {
         problems.push('daily_mobile has 0 rows');
+    }
+    for (const [kind, { rows, clients }] of summariseParity(input)) {
+        problems.push(`daily parity ${kind}: ${rows} mismatched row(s) across ${clients.size} client(s)`);
     }
     return problems;
 }
@@ -30707,6 +30728,20 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
                 input.dailyMobileRows = Number(dm.rows[0]?.n) || 0;
             }
         }
+        const parity = await this.probe('SELECT * FROM analytics_daily_parity($1::date)', [day]);
+        if ('error' in parity) {
+            if (parity.error.code === UNDEFINED_FUNCTION || parity.error.code === UNDEFINED_TABLE) {
+                this.logger.log(`Analytics daily parity skipped for ${day}: ${parity.error.message} [${parity.error.code}]`);
+            }
+            else {
+                const stop = failed('analytics_daily_parity', parity.error);
+                if (stop)
+                    return stop;
+            }
+        }
+        else {
+            input.parityRows = parity.rows;
+        }
         return input;
     }
     async run(now = Date.now()) {
@@ -30722,7 +30757,7 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
         }
         const problems = decideAnalyticsHealth(input);
         if (!problems.length) {
-            this.logger.log(`Analytics health OK for ${input.day}: promotion_send=${input.promotionSendRows} daily_client=${input.dailyClientRows} daily_mobile=${input.dailyMobileRows ?? 'n/a'}`);
+            this.logger.log(`Analytics health OK for ${input.day}: promotion_send=${input.promotionSendRows} daily_client=${input.dailyClientRows} daily_mobile=${input.dailyMobileRows ?? 'n/a'} parity_rows=${input.parityRows?.length ?? 'n/a'}`);
             return problems;
         }
         this.logger.warn(`Analytics health FAILED for ${input.day}: ${problems.join('; ')}`);
@@ -30735,6 +30770,7 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
                 { label: '7-day median', value: String(median(input.trailingPromotionSendRows ?? [])) },
                 { label: 'daily_client', value: String(input.dailyClientRows ?? 'n/a') },
                 { label: 'daily_mobile', value: String(input.dailyMobileRows ?? 'n/a') },
+                { label: 'parity mismatches', value: String(input.parityRows?.length ?? 'n/a') },
             ],
             details: problems,
         }).catch((err) => {
