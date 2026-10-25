@@ -67550,10 +67550,10 @@ const coreInitMsgs = [
     "What would you do if I was lying next to you baby....🥵",
     "Are you getting hard thinking about me??🙈",
     // --- forbidden / adultery thrill ---
-    "My boyfriend doesn't satisfy me baby.... can you??😈",
+    "My boyfriend doesn't satisfy me baby....\n\nWill you??😈",
     "My parents went out....\nI'm all alone and so bored baby🥺",
-    "Wanna be my secret baby?? No one will ever know😏",
-    "Should we be a little bad together baby....🔥",
+    "will you be my secret lover💋??\n\nNo one will ever know",
+    "We should be little bad together baby....🔥",
     // --- dirty / naughty ---
     "Are you a good boy or a bad boy baby??😈",
     "Want me to be your dirty little girl baby?? 😈",
