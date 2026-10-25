@@ -25613,6 +25613,56 @@ __exportStar(__webpack_require__(/*! ./builds.schema */ "./src/components/builds
 
 /***/ },
 
+/***/ "./src/components/channels/channel-name-deny.ts"
+/*!******************************************************!*\
+  !*** ./src/components/channels/channel-name-deny.ts ***!
+  \******************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.NAME_DENIED_PIPELINE_STAGE = exports.CHANNEL_USERNAME_DENY_REGEX = exports.CHANNEL_TITLE_DENY_REGEX = void 0;
+exports.computeChannelNameDenied = computeChannelNameDenied;
+exports.channelNameAllowedFilter = channelNameAllowedFilter;
+exports.CHANNEL_TITLE_DENY_REGEX = /online|realestat|propert|freefire|bgmi|promo|agent|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i;
+exports.CHANNEL_USERNAME_DENY_REGEX = /online|freefire|bgmi|promo|agent|realestat|propert|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i;
+function computeChannelNameDenied(title, username) {
+    return (typeof title === 'string' && exports.CHANNEL_TITLE_DENY_REGEX.test(title))
+        || (typeof username === 'string' && exports.CHANNEL_USERNAME_DENY_REGEX.test(username));
+}
+const regexMatchIfString = (field, regex) => ({
+    $cond: [
+        { $eq: [{ $type: `$${field}` }, 'string'] },
+        { $regexMatch: { input: `$${field}`, regex: regex.source, options: 'i' } },
+        false,
+    ],
+});
+exports.NAME_DENIED_PIPELINE_STAGE = {
+    $set: {
+        nameDenied: {
+            $or: [
+                regexMatchIfString('title', exports.CHANNEL_TITLE_DENY_REGEX),
+                regexMatchIfString('username', exports.CHANNEL_USERNAME_DENY_REGEX),
+            ],
+        },
+    },
+};
+function channelNameAllowedFilter() {
+    return {
+        $or: [
+            { nameDenied: false },
+            {
+                nameDenied: { $exists: false },
+                title: { $not: { $regex: exports.CHANNEL_TITLE_DENY_REGEX } },
+                username: { $not: { $regex: exports.CHANNEL_USERNAME_DENY_REGEX } },
+            },
+        ],
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/channels/channels.controller.ts"
 /*!********************************************************!*\
   !*** ./src/components/channels/channels.controller.ts ***!
@@ -25815,6 +25865,7 @@ const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
 const channel_live_facts_1 = __webpack_require__(/*! ../../utils/telegram-utils/channel-live-facts */ "./src/utils/telegram-utils/channel-live-facts.ts");
 const channel_intelligence_read_service_1 = __webpack_require__(/*! ../active-channels/channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
+const channel_name_deny_1 = __webpack_require__(/*! ./channel-name-deny */ "./src/components/channels/channel-name-deny.ts");
 let ChannelsService = class ChannelsService {
     channelKey(channelId) {
         const raw = String(channelId ?? '').trim();
@@ -25833,6 +25884,7 @@ let ChannelsService = class ChannelsService {
         const createdChannel = new this.ChannelModel({
             ...createChannelDto,
             channelId: this.channelKey(createChannelDto.channelId),
+            nameDenied: (0, channel_name_deny_1.computeChannelNameDenied)(createChannelDto.title, createChannelDto.username),
         });
         return createdChannel.save();
     }
@@ -25876,7 +25928,7 @@ let ChannelsService = class ChannelsService {
             return {
                 updateOne: {
                     filter: { channelId: this.channelKey(dto.channelId) },
-                    update: (0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto),
+                    update: [...(0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto), channel_name_deny_1.NAME_DENIED_PIPELINE_STAGE],
                     upsert: true,
                 },
             };
@@ -25915,6 +25967,11 @@ let ChannelsService = class ChannelsService {
             delete update.banned;
         if (update.private === true || update.forbidden === true || update.banned === true) {
             update.canSendMsgs = false;
+        }
+        if (update.title !== undefined || update.username !== undefined) {
+            const title = update.title !== undefined ? update.title : existing?.title;
+            const username = update.username !== undefined ? update.username : existing?.username;
+            update.nameDenied = (0, channel_name_deny_1.computeChannelNameDenied)(title, username);
         }
         const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $set: update }, { returnDocument: 'after', upsert: true }).exec();
         return updatedChannel;
@@ -26004,25 +26061,10 @@ let ChannelsService = class ChannelsService {
         const query = {
             '$and': [
                 {
-                    '$and': [
-                        {
-                            title: {
-                                $exists: true,
-                                $type: "string",
-                                $ne: '',
-                                '$not': { '$regex': /online|realestat|propert|freefire|bgmi|promo|agent|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i }
-                            }
-                        },
-                        {
-                            username: {
-                                $exists: true,
-                                $type: "string",
-                                $ne: '',
-                                '$not': { '$regex': /online|freefire|bgmi|promo|agent|realestat|propert|board|design|realt|clas|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser/i }
-                            }
-                        },
-                    ]
+                    title: { $exists: true, $type: "string", $ne: '' },
+                    username: { $exists: true, $type: "string", $ne: '' },
                 },
+                (0, channel_name_deny_1.channelNameAllowedFilter)(),
                 {
                     channelId: { '$nin': notIds },
                     participantsCount: { $gt: 1000 },
@@ -26499,6 +26541,11 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Date, required: false }),
     __metadata("design:type", Date)
 ], Channel.prototype, "joinRequestSeenAt", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ required: false, type: Boolean }),
+    (0, mongoose_1.Prop)({ type: Boolean, required: false }),
+    __metadata("design:type", Boolean)
+], Channel.prototype, "nameDenied", void 0);
 exports.Channel = Channel = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'channels', versionKey: false, autoIndex: true, timestamps: true,
@@ -26511,6 +26558,10 @@ exports.Channel = Channel = __decorate([
     })
 ], Channel);
 exports.ChannelSchema = mongoose_1.SchemaFactory.createForClass(Channel);
+exports.ChannelSchema.index({ participantsCount: -1 }, {
+    name: 'join_candidates_participants',
+    partialFilterExpression: { canSendMsgs: true, participantsCount: { $gt: 1000 } },
+});
 
 
 /***/ },
@@ -48511,18 +48562,52 @@ __exportStar(__webpack_require__(/*! ./user-data.schema */ "./src/components/use
 (__unused_webpack_module, exports, __webpack_require__) {
 
 
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
 var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
     var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
     if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
     else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
     return c > 3 && r && Object.defineProperty(target, key, r), r;
 };
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.UserDataSchema = exports.UserData = void 0;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose = __importStar(__webpack_require__(/*! mongoose */ "mongoose"));
 let UserData = class UserData {
 };
 exports.UserData = UserData;
@@ -48591,7 +48676,7 @@ __decorate([
     __metadata("design:type", String)
 ], UserData.prototype, "profile", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ required: false, index: true }),
+    (0, mongoose_1.Prop)({ required: false }),
     __metadata("design:type", String)
 ], UserData.prototype, "clientId", void 0);
 __decorate([
@@ -48658,6 +48743,18 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, required: false }),
     __metadata("design:type", Number)
 ], UserData.prototype, "lastPaidAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "cycleVideoBase", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "cyclePaid", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose.Schema.Types.Mixed, required: false, default: undefined }),
+    __metadata("design:type", Object)
+], UserData.prototype, "callProgress", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
@@ -48671,6 +48768,7 @@ exports.UserData = UserData = __decorate([
 ], UserData);
 exports.UserDataSchema = mongoose_1.SchemaFactory.createForClass(UserData);
 exports.UserDataSchema.index({ chatId: 1, profile: 1 }, { unique: true, name: 'chatId_Profile' });
+exports.UserDataSchema.index({ clientId: 1, chatId: 1 }, { name: 'clientId_chatId' });
 
 
 /***/ },
@@ -50621,7 +50719,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 var UsersService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UsersService = void 0;
+exports.UsersService = exports.USER_RECENCY_SORT = void 0;
 exports.accountLoginHtml = accountLoginHtml;
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
@@ -50641,6 +50739,7 @@ const common_chats_1 = __webpack_require__(/*! ../../utils/telegram-utils/common
 const buffer_client_service_1 = __webpack_require__(/*! ../buffer-clients/buffer-client.service */ "./src/components/buffer-clients/buffer-client.service.ts");
 const promote_client_service_1 = __webpack_require__(/*! ../promote-clients/promote-client.service */ "./src/components/promote-clients/promote-client.service.ts");
 const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
+exports.USER_RECENCY_SORT = { updatedAt: -1, _id: 1 };
 function accountLoginHtml(user, mobile) {
     const handle = user.username?.replace(/^@/, '');
     const name = [user.firstName, user.lastName].map((v) => v?.trim()).filter(Boolean).join(' ');
@@ -51108,7 +51207,7 @@ let UsersService = UsersService_1 = class UsersService {
         catch {
             return [];
         }
-        const docs = await this.userModel.find({ mobile: canonicalMobile }).sort({ updatedAt: -1 }).limit(50).exec();
+        const docs = await this.userModel.find({ mobile: canonicalMobile }).sort({ updatedAt: -1, _id: 1 }).limit(50).exec();
         const withSession = docs.filter(d => d.session && String(d.session).trim());
         const ordered = [...withSession, ...docs.filter(d => !withSession.includes(d))];
         return ordered.map(d => d.toJSON());
@@ -51127,7 +51226,7 @@ let UsersService = UsersService_1 = class UsersService {
         }
         const conflictQuery = { $or: [{ mobile: canonicalMobile }, { tgId }, { session }] };
         try {
-            const existing = await this.userModel.findOne(conflictQuery).exec();
+            const existing = await this.findOneCanonical(conflictQuery, q => q.exec());
             if (existing)
                 return existing.toJSON();
             const created = await this.userModel.findOneAndUpdate({ tgId }, {
@@ -51145,7 +51244,7 @@ let UsersService = UsersService_1 = class UsersService {
         }
         catch (error) {
             this.logger.warn(`backfillFromPool: upsert for ${canonicalMobile} raced or conflicted: ${error instanceof Error ? error.message : String(error)}`);
-            const fallback = await this.userModel.findOne(conflictQuery).exec();
+            const fallback = await this.findOneCanonical(conflictQuery, q => q.exec());
             return fallback ? fallback.toJSON() : null;
         }
     }
@@ -51173,7 +51272,7 @@ let UsersService = UsersService_1 = class UsersService {
     }
     async toggleStar(mobile) {
         const canonicalMobile = this.canonicalMobile(mobile);
-        const user = await this.userModel.findOne({ mobile: canonicalMobile }).select('mobile starred').exec();
+        const user = await this.findOneCanonical({ mobile: canonicalMobile }, q => q.select('mobile starred').exec());
         if (!user)
             throw new common_1.NotFoundException(`User with mobile ${mobile} not found`);
         const newVal = !user.starred;
@@ -51509,14 +51608,16 @@ let UsersService = UsersService_1 = class UsersService {
     }
     async getUserRelationships(mobile) {
         const canonicalMobile = this.canonicalMobile(mobile);
-        const user = await this.userModel
-            .findOne({ mobile: canonicalMobile })
-            .select('mobile firstName lastName tgId relationships')
-            .lean()
-            .exec();
+        const user = await this.findOneCanonical({ mobile: canonicalMobile }, q => q.select('mobile firstName lastName tgId relationships').lean().exec());
         if (!user)
             throw new common_1.NotFoundException(`User with mobile ${mobile} not found`);
         return user;
+    }
+    async findOneCanonical(filter, finish) {
+        const live = await finish(this.userModel.findOne({ $and: [filter, { expired: { $ne: true } }] }).sort(exports.USER_RECENCY_SORT));
+        if (live)
+            return live;
+        return finish(this.userModel.findOne(filter).sort(exports.USER_RECENCY_SORT));
     }
     canonicalMobile(mobile) {
         try {
