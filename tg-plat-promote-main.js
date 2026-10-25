@@ -8008,15 +8008,21 @@ class BasePromotionEngine {
             // AI messages (skipObfuscation) go out untouched. Otherwise PROMO_OBFUSCATION_ENABLED
             // picks the old homoglyph path (obfuscate -> naturalize, sent with no parseMode) or the
             // default compliant path (naturalize without its Unicode-font bold step -> markdown
-            // styling, sent with parseMode 'md' so `**bold**` renders).
-            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.isPromoObfuscationEnabled)();
+            // styling). The styler picks the parse mode: 'md' so `**bold**` renders, or false
+            // (plain text) when the body holds a run GramJS markdown would corrupt.
+            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.isPromoObfuscationEnabled)()
+                ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.stylePromotionMessage)(message.message, {
+                    // naturalize runs inside the styler, after protected lines are marked.
+                    naturalize: (text) => (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)(text, {
+                        maintainFormatting: message.maintainFormatting || false,
+                        boldStyling: false,
+                    }),
+                })
+                : undefined;
             const outgoing = message.skipObfuscation
                 ? message.message
                 : styled
-                    ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.stylePromotionText)((0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)(message.message, {
-                        maintainFormatting: message.maintainFormatting || false,
-                        boldStyling: false,
-                    }))
+                    ? styled.text
                     : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_2__.obfuscateText)(message.message, {
                         substitutionRate: 0.2,
                         maintainFormatting: message.maintainFormatting || false,
@@ -8031,7 +8037,9 @@ class BasePromotionEngine {
                 this.logRunnerMessage('warn', `[${this.mobile}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithTimeoutOrThrow)(this.client, entity, styled ? { message: validatedOutgoing, parseMode: _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.PROMOTION_STYLED_PARSE_MODE } : { message: validatedOutgoing });
+            // Re-check on the sanitized text: a dropped line can leave an odd `**` -> send plain instead.
+            const reconciled = styled ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.reconcilePromotionParseMode)(validatedOutgoing, styled.parseMode) : undefined;
+            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithTimeoutOrThrow)(this.client, entity, reconciled ? { message: reconciled.text, parseMode: reconciled.parseMode } : { message: validatedOutgoing });
             return { message: sentMessage, checkableByChannelId: true };
         }
         catch (error) {
@@ -22862,10 +22870,14 @@ function sanitizeLimitedDaysLeft(days) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTION_PLAIN_PARSE_MODE: () => (/* binding */ PROMOTION_PLAIN_PARSE_MODE),
 /* harmony export */   PROMOTION_STYLED_PARSE_MODE: () => (/* binding */ PROMOTION_STYLED_PARSE_MODE),
 /* harmony export */   PROMO_OBFUSCATION_ENV_KEY: () => (/* binding */ PROMO_OBFUSCATION_ENV_KEY),
 /* harmony export */   escapePromotionMarkdown: () => (/* binding */ escapePromotionMarkdown),
 /* harmony export */   isPromoObfuscationEnabled: () => (/* binding */ isPromoObfuscationEnabled),
+/* harmony export */   needsPlainTextFallback: () => (/* binding */ needsPlainTextFallback),
+/* harmony export */   reconcilePromotionParseMode: () => (/* binding */ reconcilePromotionParseMode),
+/* harmony export */   stylePromotionMessage: () => (/* binding */ stylePromotionMessage),
 /* harmony export */   stylePromotionText: () => (/* binding */ stylePromotionText)
 /* harmony export */ });
 /* harmony import */ var _obfuscateText__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
@@ -22877,65 +22889,169 @@ __webpack_require__.r(__webpack_exports__);
  * Gate: PROMO_OBFUSCATION_ENABLED (remote config -> process.env, read per call). Unset/false =
  * this styling; "true"/"1" = the old obfuscate -> naturalize path, byte-identical.
  *
- * Parse mode: GramJS's default client parse mode is its markdown parser
- * (node_modules/telegram/extensions/markdown.js, `MarkdownParser`), selected explicitly with
- * parseMode 'md'. That parser has NO escape syntax: it only reacts to the DEFAULT_DELIMITERS
- * `**` `__` `~~` `` ` `` ``` (client/messageParse.js). So "escaping" here means neutralising every
- * one of those sequences in the body BEFORE the bold markers are inserted; single `*`, `_`, `~`,
- * `[`, `]` are not delimiters for that parser and render literally.
+ * Owner rule (2026-10-25): preserve whatever emphasis exists; add markdown bold ONLY where there is
+ * none. Never alter authored text. A sentence holding an authored `**…**` pair or any
+ * Mathematical-Bold character is left exactly as written and is never dropped.
+ *
+ * Parse mode: GramJS's markdown parser (node_modules/telegram/extensions/markdown.js,
+ * `MarkdownParser`), selected with parseMode 'md'. It has NO escape syntax and toggles on every
+ * `**` `__` `~~` `` ` `` ``` message-wide (client/messageParse.js DEFAULT_DELIMITERS); single `*`,
+ * `_`, `~`, `[`, `]` are literal. A decorative `___________` therefore eats underscores and breaks
+ * an authored bold around it.
+ *
+ * Plain-text fallback (owner 2026-10-25: no invisible / zero-width characters, ever): a message
+ * whose text holds a run GramJS markdown would corrupt (`__`+, `~~`+, `***`+, a backtick, or an
+ * unmatched `**`) is NOT markdown-styled. It goes out as plain text: no bold added, authored `**`
+ * markers stripped, every other character exactly as authored, and parseMode `false`.
+ * `false` (not `undefined`) is required: GramJS falls back to the client's default parse mode,
+ * which is MarkdownParser (telegramBaseClient.js `_parseMode = MarkdownParser`), when parseMode is
+ * undefined; only a falsy-but-defined value skips parsing (messageParse.js `parseMode == false`).
  */
 
 const PROMO_OBFUSCATION_ENV_KEY = 'PROMO_OBFUSCATION_ENABLED';
 /** GramJS parse mode for styled promotion sends (sanitizeParseMode('md') -> MarkdownParser). */
 const PROMOTION_STYLED_PARSE_MODE = 'md';
+/** GramJS parse mode for plain-text fallback sends: `false` = no parsing at all. */
+const PROMOTION_PLAIN_PARSE_MODE = false;
 /** Truthy = "true" | "1" (case-insensitive, trimmed). Read on every call so a config refresh applies. */
 function isPromoObfuscationEnabled(env = process.env) {
     const raw = (env[PROMO_OBFUSCATION_ENV_KEY] || '').trim().toLowerCase();
     return raw === 'true' || raw === '1';
 }
+/** Private-use sentinels: safe-block token brackets, token index base, protected-sentence mark. */
+const TOKEN_OPEN = '\uE000';
+const TOKEN_CLOSE = '\uE001';
+const PROTECT_MARK = '\uE002';
+const TOKEN_INDEX_BASE = 0xe100;
+const SENTINEL_RE = /[\uE000-\uE002\uE100-\uE7FF]/u;
+const TOKEN_RE = /\uE000([\uE100-\uE7FF])\uE001/gu;
+/** Runs GramJS markdown mis-parses with no way to escape them: `__`+, `~~`+, `***`+, any backtick. */
+const MARKDOWN_HAZARD_RE = /_{2,}|~{2,}|\*{3,}|`/u;
+/** An exact `**` run (not part of a longer `*` run). */
+const BOLD_MARKER_RE = /(?<!\*)\*\*(?!\*)/gu;
 /**
- * Neutralise every GramJS-markdown delimiter in `text` so it parses to zero entities.
- * Order matters: backticks first (covers ```), then `*` runs are removed (existing bold markers;
- * the styler re-bolds), then `_`/`~` runs are spaced out — removing `*` first means a `_**_` cannot
- * collapse into a new `__`.
+ * True when GramJS markdown would corrupt `text`: it holds `__`+, `~~`+, `***`+, a backtick, or an
+ * odd number of `**` markers. Such a message must go out as plain text (see stylePromotionMessage).
+ * Single `_`, `*`, `~` are literal in GramJS markdown and do not trigger the fallback.
+ */
+function needsPlainTextFallback(text) {
+    if (MARKDOWN_HAZARD_RE.test(text))
+        return true;
+    return (text.match(BOLD_MARKER_RE)?.length ?? 0) % 2 === 1;
+}
+/** Plain-text body: authored `**` markers removed (they would show as asterisks), nothing else touched. */
+function stripBoldMarkers(text) {
+    return text.replace(BOLD_MARKER_RE, '');
+}
+/**
+ * Re-check the parse mode on the FINAL outgoing text, after the send-path sanitizer
+ * (sanitizePromotionRendering) has run. The sanitizer can drop a letter-less line that held an
+ * authored `**`, leaving an odd count; sent as 'md', GramJS would bold the wrong span. In that case
+ * (or any other markdown hazard) strip the `**` markers and send plain text (`false`). A plain
+ * (`false`) parse mode, or 'md' text that is still safe, is returned unchanged.
+ */
+function reconcilePromotionParseMode(text, parseMode) {
+    if (parseMode === PROMOTION_STYLED_PARSE_MODE && needsPlainTextFallback(text)) {
+        return { text: stripBoldMarkers(text), parseMode: PROMOTION_PLAIN_PARSE_MODE };
+    }
+    return { text, parseMode };
+}
+/** A delimiter pair is real emphasis only when its content is non-empty and hugs the markers. */
+function isTightPair(text, openEnd, closeStart) {
+    if (closeStart <= openEnd)
+        return false;
+    return !/\s/u.test(text[openEnd]) && !/\s/u.test(text[closeStart - 1]);
+}
+/**
+ * Normalise authored `**` markers for a markdown send. Precondition: `needsPlainTextFallback(text)`
+ * is false (no `__`, `~~`, `***`, backtick; an even number of `**`), which is the only case the
+ * styler sends as markdown. `**` markers are paired in order (as GramJS pairs them); a tight pair
+ * (non-empty content hugging the markers) is kept byte-for-byte, a loose or empty pair is removed
+ * (it is invisible markup under 'md'). Single `*`, `_`, `~` are literal and left alone. Adds nothing.
  */
 function escapePromotionMarkdown(text) {
-    return text
-        .replace(/`/g, "'")
-        .replace(/\*{2,}/g, '')
-        .replace(/_{2,}/g, (run) => Array.from(run).join(' '))
-        .replace(/~{2,}/g, (run) => Array.from(run).join(' '));
+    const marks = Array.from(text.matchAll(BOLD_MARKER_RE), (m) => m.index ?? 0);
+    const drop = new Set();
+    for (let i = 0; i < marks.length; i += 2) {
+        const open = marks[i];
+        const close = marks[i + 1];
+        if (close === undefined || !isTightPair(text, open + 2, close)) {
+            drop.add(open);
+            if (close !== undefined)
+                drop.add(close);
+        }
+    }
+    if (drop.size === 0)
+        return text;
+    let out = '';
+    let at = 0;
+    for (const start of marks) {
+        if (!drop.has(start))
+            continue;
+        out += text.slice(at, start);
+        at = start + 2;
+    }
+    return out + text.slice(at);
 }
-const SENTENCE_RE = /\S.*?(?:[.!?…]+(?=\s|$)|$)/gu;
+/** Authored bold spans in escaped markdown-safe text (every remaining `**` is a kept pair). */
+function emphasisSpans(text) {
+    const spans = [];
+    const marks = Array.from(text.matchAll(BOLD_MARKER_RE), (m) => m.index ?? 0);
+    for (let i = 0; i + 1 < marks.length; i += 2)
+        spans.push([marks[i], marks[i + 1] + 2]);
+    return spans;
+}
 const HAS_LETTER_RE = /\p{L}/u;
 const LINK_OR_HANDLE_RE = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\bt\.me\/|(?:^|\s)@\w)/iu;
+/** Call-to-action wording; checked on the authored text, before naturalize can space "DM" out. */
+const CTA_RE = /(?:^|[^\p{L}])(?:dm|inbox|ping|text|message|msg|contact|whatsapp|demo)(?![\p{L}])|𝗗𝗠/iu;
 const WORD_CORE_RE = /^[\p{L}][\p{L}\p{M}']*$/u;
 const MATH_ALNUM_RE = /[\u{1D400}-\u{1D7FF}]/u;
 const MARKDOWN_EDGE_CHARS = new Set(['*', '_', '~']);
+const TERMINATOR_RE = /[.!?…]+/gu;
+/** A single '.' after one of these words (case-insensitive) is not a sentence end. */
+const ABBREVIATIONS = new Set(['dr', 'mr', 'mrs', 'ms', 'st', 'jr', 'sr', 'vs', 'etc', 'no', 'rs', 'approx', 'prof', 'sir']);
 function pickIndex(length, random) {
     return Math.min(length - 1, Math.floor(random() * length));
 }
-function safeSpans(line, safeBlocks) {
-    const spans = [];
-    for (const block of safeBlocks) {
-        if (!block)
-            continue;
-        let from = 0;
-        for (;;) {
-            const at = line.indexOf(block, from);
-            if (at < 0)
-                break;
-            spans.push([at, at + block.length]);
-            from = at + block.length;
+/** Sentences in one line: [start, end) runs ending at a terminator followed by whitespace / EOL. */
+function splitSentences(line) {
+    const out = [];
+    let from = 0;
+    const push = (end) => {
+        const lead = line.slice(from, end).search(/\S/u);
+        if (lead >= 0)
+            out.push([from + lead, end]);
+        from = end;
+    };
+    for (const m of line.matchAll(TERMINATOR_RE)) {
+        const end = (m.index ?? 0) + m[0].length;
+        if (end < line.length && !/\s/u.test(line[end]))
+            continue; // 1.5k, 220.000, ~.~.~, "!!**"
+        if (m[0] === '.') {
+            const word = /([\p{L}]+)$/u.exec(line.slice(from, m.index ?? 0))?.[1] ?? '';
+            if (ABBREVIATIONS.has(word.toLowerCase()) || Array.from(word).length === 1)
+                continue;
         }
+        push(end);
     }
-    return spans;
+    if (from < line.length)
+        push(line.length);
+    return out.filter(([s, e]) => HAS_LETTER_RE.test(line.slice(s, e)));
+}
+function collectSentences(lines) {
+    const sentences = [];
+    lines.forEach((line, lineIndex) => {
+        for (const [start, end] of splitSentences(line))
+            sentences.push({ line: lineIndex, start, end });
+    });
+    return sentences;
 }
 function overlaps(start, end, spans) {
     return spans.some(([s, e]) => start < e && end > s);
 }
 /** Candidate words in [start,end) of `line`: [coreStart, coreEnd] offsets into the line. */
-function eligibleWords(line, start, end, spans) {
+function eligibleWords(line, start, end) {
     const out = [];
     const segment = line.slice(start, end);
     for (const match of segment.matchAll(/\S+/gu)) {
@@ -22954,57 +23070,122 @@ function eligibleWords(line, start, end, spans) {
         if (trail && MARKDOWN_EDGE_CHARS.has(trail[0]))
             continue;
         const coreStart = tokenStart + lead.length;
-        const coreEnd = coreStart + core.length;
-        if (overlaps(tokenStart, tokenStart + token.length, spans))
-            continue;
-        out.push([coreStart, coreEnd]);
+        out.push([coreStart, coreStart + core.length]);
     }
     return out;
 }
 /**
- * Style a promotion body for a parseMode 'md' send:
- * 1. Neutralise markdown delimiters in the body (escapePromotionMarkdown).
- * 2. When there are >= 4 sentences, drop exactly one droppable sentence. Never droppable: the
- *    first and last sentence, any sentence on the first or last content line of a multi-line
- *    message (greeting / CTA), one holding a link or @handle, or one overlapping a safe block.
- *    Fewer than 4 sentences, or nothing droppable: drop nothing. At least 3 always survive.
- * 3. Bold exactly one eligible word (>= 3 letters; not a URL, @handle, #hashtag, number/phone,
- *    emoji/symbol, Unicode math-font text, or safe-block text) per surviving sentence with `**`.
- * A "sentence" is a run on one line ending at . ! ? … followed by whitespace/end of line, and
- * containing at least one letter (connector/separator/emoji-only runs are kept untouched).
+ * Before naturalize: swap every safe block for an opaque token (so naturalize cannot rewrite it)
+ * and prefix every protected sentence except the very first with PROTECT_MARK. Protected: the
+ * first and last sentence; in a multi-line message every sentence on the first and last content
+ * line; every sentence on a line holding a safe block, a link / @handle, or CTA wording.
  */
-function stylePromotionText(text, options = {}) {
-    if (!text || !text.trim())
-        return text;
-    const random = options.random ?? Math.random;
-    const blocks = [..._obfuscateText__WEBPACK_IMPORTED_MODULE_0__.defaultSafeBlocks, ...(options.safeBlocks ?? [])];
-    const lines = escapePromotionMarkdown(text).split('\n');
-    const spansByLine = lines.map((line) => safeSpans(line, blocks));
-    const sentences = [];
-    lines.forEach((line, lineIndex) => {
-        for (const match of line.matchAll(SENTENCE_RE)) {
-            if (!HAS_LETTER_RE.test(match[0]))
+function prepare(text, blocks) {
+    // Tokenise first (longest block first) so a mark can never land inside a safe block.
+    const tokens = [];
+    let tokenised = text;
+    for (const block of [...blocks].filter(Boolean).sort((a, b) => b.length - a.length)) {
+        if (TOKEN_INDEX_BASE + tokens.length > 0xe7ff)
+            break;
+        if (!tokenised.includes(block))
+            continue;
+        const token = TOKEN_OPEN + String.fromCharCode(TOKEN_INDEX_BASE + tokens.length) + TOKEN_CLOSE;
+        tokens.push(block);
+        tokenised = tokenised.split(block).join(token);
+    }
+    const lines = tokenised.split('\n');
+    const byLine = lines.map((line) => splitSentences(line));
+    const flat = byLine.flatMap((list, line) => list.map(([start]) => ({ line, start })));
+    const firstLine = flat[0]?.line ?? -1;
+    const lastLine = flat[flat.length - 1]?.line ?? -1;
+    const multiLine = firstLine !== lastLine;
+    const marked = lines.map((line, lineIndex) => {
+        const list = byLine[lineIndex];
+        if (list.length === 0)
+            return line;
+        // Multi-line: the protection unit is the line. Single-line: the sentence (protecting "the
+        // line" would protect everything).
+        const isKey = (s) => s.includes(TOKEN_OPEN) || LINK_OR_HANDLE_RE.test(s) || CTA_RE.test(s);
+        const wholeLine = multiLine && (lineIndex === firstLine || lineIndex === lastLine || isKey(line));
+        let next = line;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const isFirst = lineIndex === firstLine && i === 0;
+            const isLast = lineIndex === lastLine && i === list.length - 1;
+            const keySentence = isKey(line.slice(list[i][0], list[i][1]));
+            if (isFirst || !(wholeLine || isLast || keySentence))
                 continue;
-            const start = match.index ?? 0;
-            sentences.push({ line: lineIndex, start, end: start + match[0].length });
+            next = next.slice(0, list[i][0]) + PROTECT_MARK + next.slice(list[i][0]);
         }
+        return next;
     });
+    return { text: marked.join('\n'), tokens };
+}
+function restore(text, tokens) {
+    return text
+        .replace(TOKEN_RE, (_m, idx) => tokens[idx.charCodeAt(0) - TOKEN_INDEX_BASE] ?? '')
+        .split(PROTECT_MARK)
+        .join('');
+}
+/**
+ * Style a promotion body and pick its GramJS parse mode:
+ * 1. Mark protected sentences and tokenise safe blocks on the AUTHORED text, then run `naturalize`.
+ * 1a. Plain-text fallback: if the authored or naturalized text needs it (needsPlainTextFallback),
+ *    return the naturalized text with authored `**` stripped, no bold added, nothing dropped, and
+ *    parseMode `false`. The same fallback applies if the styled result would still be unsafe.
+ * 2. Otherwise normalise authored `**` pairs (escapePromotionMarkdown) and send with parseMode 'md'.
+ * 3. When there are >= 4 sentences, drop exactly one droppable sentence (never a protected one, never
+ *    one with existing emphasis). Fewer than 4, or nothing droppable: drop nothing (>= 3 survive).
+ * 4. In each surviving sentence WITHOUT existing emphasis, bold exactly one eligible word (>= 3
+ *    letters; not a URL, @handle, #hashtag, number/phone, emoji/symbol or safe-block text).
+ * A "sentence" ends at a run of . ! ? … followed by whitespace/end of line (not after Dr./Mr./…,
+ * not inside 1.5k or 220.000) and contains a letter; lone '.' spacer lines are structure.
+ */
+function stylePromotionMessage(text, options = {}) {
+    if (!text || !text.trim())
+        return { text, parseMode: PROMOTION_PLAIN_PARSE_MODE };
+    const random = options.random ?? Math.random;
+    const naturalize = options.naturalize ?? ((t) => t);
+    const blocks = [..._obfuscateText__WEBPACK_IMPORTED_MODULE_0__.defaultSafeBlocks, ...(options.safeBlocks ?? [])];
+    // Input that already carries our sentinel code points cannot be marked safely: style it unmarked.
+    const sentinelFree = !SENTINEL_RE.test(text);
+    const prepared = sentinelFree ? prepare(text, blocks) : { text, tokens: [] };
+    const tokenHasEmphasis = prepared.tokens.map((b) => MATH_ALNUM_RE.test(b) || b.includes('**'));
+    const finish = (styled) => (sentinelFree ? restore(styled, prepared.tokens) : styled);
+    const naturalized = naturalize(prepared.text);
+    const plain = () => ({ text: stripBoldMarkers(finish(naturalized)), parseMode: PROMOTION_PLAIN_PARSE_MODE });
+    if (needsPlainTextFallback(text) || needsPlainTextFallback(finish(naturalized)))
+        return plain();
+    const escaped = escapePromotionMarkdown(naturalized);
+    const spans = emphasisSpans(escaped);
+    const lines = escaped.split('\n');
+    const lineOffsets = [];
+    lines.reduce((offset, line) => {
+        lineOffsets.push(offset);
+        return offset + line.length + 1;
+    }, 0);
+    const sentences = collectSentences(lines);
+    const body = (s) => lines[s.line].slice(s.start, s.end);
+    const hasEmphasis = (s) => {
+        const b = body(s);
+        if (MATH_ALNUM_RE.test(b))
+            return true;
+        for (const m of b.matchAll(TOKEN_RE))
+            if (tokenHasEmphasis[m[1].charCodeAt(0) - TOKEN_INDEX_BASE])
+                return true;
+        const base = lineOffsets[s.line];
+        return overlaps(base + s.start, base + s.end, spans);
+    };
     let dropped;
     if (sentences.length >= 4) {
         const first = sentences[0];
         const last = sentences[sentences.length - 1];
-        // Multi-line: the whole first and last content lines are protected. Single-line: only the
-        // first and last sentence (protecting "the line" would protect everything).
-        const protectLines = first.line !== last.line;
         const droppable = sentences.filter((s) => {
             if (s === first || s === last)
                 return false;
-            if (protectLines && (s.line === first.line || s.line === last.line))
+            const b = body(s);
+            if (b.includes(PROTECT_MARK) || b.includes(TOKEN_OPEN) || LINK_OR_HANDLE_RE.test(b))
                 return false;
-            const body = lines[s.line].slice(s.start, s.end);
-            if (LINK_OR_HANDLE_RE.test(body))
-                return false;
-            return !overlaps(s.start, s.end, spansByLine[s.line]);
+            return !hasEmphasis(s);
         });
         if (droppable.length >= 1)
             dropped = droppable[pickIndex(droppable.length, random)];
@@ -23020,7 +23201,9 @@ function stylePromotionText(text, options = {}) {
             addEdit(s.line, { start: s.start, end: s.end, replace: '' });
             continue;
         }
-        const words = eligibleWords(lines[s.line], s.start, s.end, spansByLine[s.line]);
+        if (hasEmphasis(s))
+            continue;
+        const words = eligibleWords(lines[s.line], s.start, s.end);
         if (words.length === 0)
             continue;
         const [coreStart, coreEnd] = words[pickIndex(words.length, random)];
@@ -23047,7 +23230,19 @@ function stylePromotionText(text, options = {}) {
         }
         out.push(next);
     });
-    return out.join('\n');
+    const styled = finish(out.join('\n'));
+    // Belt and braces: removing a loose `**` or adding bold must never leave a hazardous run.
+    if (needsPlainTextFallback(styled))
+        return plain();
+    return { text: styled, parseMode: PROMOTION_STYLED_PARSE_MODE };
+}
+/**
+ * Text-only view of stylePromotionMessage. It drops the parse mode, so a send site using it cannot
+ * tell a plain-text fallback from a markdown body; send sites must use stylePromotionMessage.
+ * @deprecated use stylePromotionMessage and pass its parseMode to GramJS.
+ */
+function stylePromotionText(text, options = {}) {
+    return stylePromotionMessage(text, options).text;
 }
 
 
@@ -40104,16 +40299,23 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.Ba
         try {
             logger.log(`[${this.mobile}] Retrying private channel via @${username}`);
             // PROMO_OBFUSCATION_ENABLED on, or an AI message (skipObfuscation): unchanged naturalize.
-            // Off (default) for pool messages: markdown styling with no Unicode-font bold, parseMode 'md'.
-            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.isPromoObfuscationEnabled)();
+            // Off (default) for pool messages: markdown styling with no Unicode-font bold, sent with the
+            // parse mode the styler picks ('md', or false = plain text when markdown would corrupt it).
+            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.isPromoObfuscationEnabled)()
+                ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.stylePromotionMessage)(message.message, {
+                    naturalize: (text) => (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(text, {
+                        maintainFormatting: message.maintainFormatting || false,
+                        boldStyling: false,
+                    }),
+                })
+                : undefined;
             const finalText = styled
-                ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.stylePromotionText)((0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, {
-                    maintainFormatting: message.maintainFormatting || false,
-                    boldStyling: false,
-                }))
+                ? styled.text
                 : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
             const validatedFinalText = this.assertSendablePromotionText(finalText);
-            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, username, styled ? { message: validatedFinalText, parseMode: _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.PROMOTION_STYLED_PARSE_MODE } : { message: validatedFinalText });
+            // Re-check on the sanitized text: a dropped line can leave an odd `**` -> send plain instead.
+            const reconciled = styled ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.reconcilePromotionParseMode)(validatedFinalText, styled.parseMode) : undefined;
+            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, username, reconciled ? { message: reconciled.text, parseMode: reconciled.parseMode } : { message: validatedFinalText });
             // A verified username send is fresh evidence that this channel is
             // reachable. Repair the stale private flag, but never let a
             // best-effort persistence failure turn a completed Telegram send
