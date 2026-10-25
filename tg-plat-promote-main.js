@@ -24635,19 +24635,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             }
             if (query.imageHash && HEX64.test(query.imageHash)) {
                 const max = query.maxHamming ?? NEAR_HASH_MAX_DISTANCE;
-                const rows = await this.collection
-                    .find({ imageHash: { $exists: true }, $or: elsewhere })
-                    .sort({ createdAt: -1 })
-                    .limit(NEAR_HASH_SCAN_LIMIT)
-                    .toArray();
+                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
                 let best = null;
-                for (const doc of rows) {
-                    if (typeof doc.imageHash !== 'string')
-                        continue;
-                    const distance = hexHamming(query.imageHash, doc.imageHash);
-                    if (distance <= max && (!best || distance < best.distance)) {
+                for (const { distance, doc } of near) {
+                    if (!best || distance < best.distance)
                         best = { by: 'imageHash', distance, doc };
-                    }
                 }
                 return best;
             }
@@ -24791,20 +24783,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (query.imageHash && HEX64.test(query.imageHash)) {
             const hash = query.imageHash;
             lookups.push(this.guard(`servedCandidates.near(${chatId})`, null, async () => {
-                const rows = await this.collection
-                    .find({ imageHash: { $exists: true }, ...served })
-                    .sort({ createdAt: -1 })
-                    .limit(SERVED_NEAR_SCAN_LIMIT)
-                    .maxTimeMS(SERVED_NEAR_SCAN_MAX_MS)
-                    .toArray();
-                const docs = [];
-                for (const doc of rows) {
-                    if (typeof doc.imageHash !== 'string')
-                        continue;
-                    const distance = hexHamming(hash, doc.imageHash);
-                    if (distance <= NEAR_HASH_MAX_DISTANCE)
-                        docs.push({ distance, doc });
-                }
+                const docs = await this.nearHashRows({ imageHash: { $exists: true }, ...served }, hash, NEAR_HASH_MAX_DISTANCE, SERVED_NEAR_SCAN_LIMIT, SERVED_NEAR_SCAN_MAX_MS);
                 return { by: 'imageHash', docs };
             }));
         }
@@ -24835,6 +24814,38 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
                 seen.add(key);
                 out.push({ by: r.by, distance, doc });
             }
+        }
+        return out;
+    }
+    /**
+     * Newest `limit` rows matching `filter` whose imageHash is within `max` bits of `hash`, newest first, as whole rows.
+     * The scan reads only `_id` + `imageHash` (~100 B/row instead of ~600 B); whole rows are fetched by `_id` only for
+     * the matches (usually none). Whole-row scans moved ~424 KB per screenshot, which at the ~100 KB/s Atlas serves this
+     * cluster took 4-5 s and timed out the payment gate (2026-10-24). Throws on failure (callers guard).
+     */
+    async nearHashRows(filter, hash, max, limit, maxTimeMs) {
+        let cursor = this.collection.find(filter, { projection: { imageHash: 1 } }).sort({ createdAt: -1 }).limit(limit);
+        if (maxTimeMs !== undefined)
+            cursor = cursor.maxTimeMS(maxTimeMs);
+        const hits = [];
+        for (const row of await cursor.toArray()) {
+            if (typeof row.imageHash !== 'string')
+                continue;
+            const distance = hexHamming(hash, row.imageHash);
+            if (distance <= max)
+                hits.push({ id: row._id, distance });
+        }
+        if (hits.length === 0)
+            return [];
+        let full = this.collection.find({ _id: { $in: hits.map((h) => h.id) } });
+        if (maxTimeMs !== undefined)
+            full = full.maxTimeMS(maxTimeMs);
+        const byId = new Map((await full.toArray()).map((doc) => [String(doc._id), doc]));
+        const out = [];
+        for (const h of hits) {
+            const doc = byId.get(String(h.id));
+            if (doc)
+                out.push({ distance: h.distance, doc }); // gone in between (TTL): no match
         }
         return out;
     }
