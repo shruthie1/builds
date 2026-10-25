@@ -31664,19 +31664,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             }
             if (query.imageHash && HEX64.test(query.imageHash)) {
                 const max = query.maxHamming ?? NEAR_HASH_MAX_DISTANCE;
-                const rows = await this.collection
-                    .find({ imageHash: { $exists: true }, $or: elsewhere })
-                    .sort({ createdAt: -1 })
-                    .limit(NEAR_HASH_SCAN_LIMIT)
-                    .toArray();
+                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
                 let best = null;
-                for (const doc of rows) {
-                    if (typeof doc.imageHash !== 'string')
-                        continue;
-                    const distance = hexHamming(query.imageHash, doc.imageHash);
-                    if (distance <= max && (!best || distance < best.distance)) {
+                for (const { distance, doc } of near) {
+                    if (!best || distance < best.distance)
                         best = { by: 'imageHash', distance, doc };
-                    }
                 }
                 return best;
             }
@@ -31820,20 +31812,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (query.imageHash && HEX64.test(query.imageHash)) {
             const hash = query.imageHash;
             lookups.push(this.guard(`servedCandidates.near(${chatId})`, null, async () => {
-                const rows = await this.collection
-                    .find({ imageHash: { $exists: true }, ...served })
-                    .sort({ createdAt: -1 })
-                    .limit(SERVED_NEAR_SCAN_LIMIT)
-                    .maxTimeMS(SERVED_NEAR_SCAN_MAX_MS)
-                    .toArray();
-                const docs = [];
-                for (const doc of rows) {
-                    if (typeof doc.imageHash !== 'string')
-                        continue;
-                    const distance = hexHamming(hash, doc.imageHash);
-                    if (distance <= NEAR_HASH_MAX_DISTANCE)
-                        docs.push({ distance, doc });
-                }
+                const docs = await this.nearHashRows({ imageHash: { $exists: true }, ...served }, hash, NEAR_HASH_MAX_DISTANCE, SERVED_NEAR_SCAN_LIMIT, SERVED_NEAR_SCAN_MAX_MS);
                 return { by: 'imageHash', docs };
             }));
         }
@@ -31864,6 +31843,38 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
                 seen.add(key);
                 out.push({ by: r.by, distance, doc });
             }
+        }
+        return out;
+    }
+    /**
+     * Newest `limit` rows matching `filter` whose imageHash is within `max` bits of `hash`, newest first, as whole rows.
+     * The scan reads only `_id` + `imageHash` (~100 B/row instead of ~600 B); whole rows are fetched by `_id` only for
+     * the matches (usually none). Whole-row scans moved ~424 KB per screenshot, which at the ~100 KB/s Atlas serves this
+     * cluster took 4-5 s and timed out the payment gate (2026-10-24). Throws on failure (callers guard).
+     */
+    async nearHashRows(filter, hash, max, limit, maxTimeMs) {
+        let cursor = this.collection.find(filter, { projection: { imageHash: 1 } }).sort({ createdAt: -1 }).limit(limit);
+        if (maxTimeMs !== undefined)
+            cursor = cursor.maxTimeMS(maxTimeMs);
+        const hits = [];
+        for (const row of await cursor.toArray()) {
+            if (typeof row.imageHash !== 'string')
+                continue;
+            const distance = hexHamming(hash, row.imageHash);
+            if (distance <= max)
+                hits.push({ id: row._id, distance });
+        }
+        if (hits.length === 0)
+            return [];
+        let full = this.collection.find({ _id: { $in: hits.map((h) => h.id) } });
+        if (maxTimeMs !== undefined)
+            full = full.maxTimeMS(maxTimeMs);
+        const byId = new Map((await full.toArray()).map((doc) => [String(doc._id), doc]));
+        const out = [];
+        for (const h of hits) {
+            const doc = byId.get(String(h.id));
+            if (doc)
+                out.push({ distance: h.distance, doc }); // gone in between (TTL): no match
         }
         return out;
     }
@@ -42800,6 +42811,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AUTHENTICITY_FIELDS: () => (/* reexport safe */ _contract_schema__WEBPACK_IMPORTED_MODULE_8__.AUTHENTICITY_FIELDS),
 /* harmony export */   AUTHENTICITY_SECOND_OPINION_SCORE: () => (/* reexport safe */ _second_opinion__WEBPACK_IMPORTED_MODULE_27__.AUTHENTICITY_SECOND_OPINION_SCORE),
 /* harmony export */   ApiKeyPool: () => (/* reexport safe */ _transport_key_pool__WEBPACK_IMPORTED_MODULE_11__.ApiKeyPool),
+/* harmony export */   CREDIT_LIMIT_AMOUNT: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.CREDIT_LIMIT_AMOUNT),
 /* harmony export */   CURRENCY_REGEX: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.CURRENCY_REGEX),
 /* harmony export */   DEFAULT_BUDGETS_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.DEFAULT_BUDGETS_MS),
 /* harmony export */   DEFAULT_CHAIN_DEADLINE_MS: () => (/* reexport safe */ _chain_config__WEBPACK_IMPORTED_MODULE_24__.DEFAULT_CHAIN_DEADLINE_MS),
@@ -42869,6 +42881,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hamming: () => (/* reexport safe */ _image_hash__WEBPACK_IMPORTED_MODULE_7__.hamming),
 /* harmony export */   inferStatusFromText: () => (/* reexport safe */ _rules_status__WEBPACK_IMPORTED_MODULE_3__.inferStatusFromText),
 /* harmony export */   isCapacityBusy: () => (/* reexport safe */ _transport_retry__WEBPACK_IMPORTED_MODULE_10__.isCapacityBusy),
+/* harmony export */   isCreditableAmount: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isCreditableAmount),
 /* harmony export */   isFalsePositive: () => (/* reexport safe */ _rules_amount__WEBPACK_IMPORTED_MODULE_1__.isFalsePositive),
 /* harmony export */   isNoVerifiableAmount: () => (/* reexport safe */ _chain_outcome__WEBPACK_IMPORTED_MODULE_25__.isNoVerifiableAmount),
 /* harmony export */   isOurChatPage: () => (/* reexport safe */ _rules_payment_evidence__WEBPACK_IMPORTED_MODULE_22__.isOurChatPage),
@@ -44220,12 +44233,14 @@ function extractAmountLegacy(text) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CREDIT_LIMIT_AMOUNT: () => (/* binding */ CREDIT_LIMIT_AMOUNT),
 /* harmony export */   MAX_PAYMENT_AMOUNT: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT),
 /* harmony export */   MIN_PAYMENT_AMOUNT: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT),
 /* harmony export */   amountOrNull: () => (/* binding */ amountOrNull),
 /* harmony export */   correctNonStandardAmount: () => (/* binding */ correctNonStandardAmount),
 /* harmony export */   extractAmount: () => (/* binding */ extractAmount),
 /* harmony export */   getNumberFromString: () => (/* binding */ getNumberFromString),
+/* harmony export */   isCreditableAmount: () => (/* binding */ isCreditableAmount),
 /* harmony export */   isFalsePositive: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.isFalsePositive),
 /* harmony export */   isValidAmount: () => (/* reexport safe */ _amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount),
 /* harmony export */   processChatGptResponse: () => (/* binding */ processChatGptResponse)
@@ -44248,6 +44263,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+/**
+ * Owner 2026-10-25: a receipt of ₹1,000 or more is never credited, with or without UTR (₹999 is, ₹1,000 is not). The
+ * one credit threshold for every tg-aut credit path. Not a read bound: the chain keeps MAX_PAYMENT_AMOUNT (15,000) as
+ * the plausible-read range, so a ₹1,000+ read is returned as read (and refused by the credit path) instead of failing
+ * over to the next provider, and glyph-prefixed reads (₹1150 -> ₹150) still reach tg-aut's normalizeAmount.
+ */
+const CREDIT_LIMIT_AMOUNT = 1000;
+/** A per-receipt amount that may be credited: above 0 and below CREDIT_LIMIT_AMOUNT. */
+function isCreditableAmount(amount) {
+    return Number.isFinite(amount) && amount > 0 && amount < CREDIT_LIMIT_AMOUNT;
+}
 /** `0` (legacy "none") or out-of-range -> null; otherwise the amount. */
 function amountOrNull(amount) {
     if (typeof amount !== 'number' || !Number.isFinite(amount))
@@ -61814,6 +61840,10 @@ const paidPatterns = [
                     if (await answerUsedUpCallRequest(event, userDetails, text, 'paid-pattern'))
                         return true;
                 }
+                // A details-page request is open (impossible reference, 15 min): the polite ask again, not call over + prices.
+                const { answerCallRequestDuringDetailsAsk } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../used-up-answer */ "./src/conversation/used-up-answer.ts"));
+                if (await answerCallRequestDuringDetailsAsk(event, userDetails.chatId.toString(), 'paid-pattern'))
+                    return true;
                 // Upsell quiet after a ₹200+ show: a call request is the user's own ask (noted 'priceAsked'), so it gets
                 // the price list, but not the "call over, pay again" line or the follow-up upsell.
                 const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.upsellQuietAnswer)(context.chatId);
@@ -63303,13 +63333,10 @@ async function respondToMsgs(event, allMsg) {
                 ((userDetails.payAmount < 250 && userDetails.callTime < Date.now() - 20 * 60 * 60 * 1000) ||
                     (userDetails.payAmount >= 250 && userDetails.callTime < Date.now() - 30 * 60 * 60 * 1000))) {
                 logger.debug(`[CallInitiation] Resetting user ${chatId} after service period`);
-                userDetails = await db.update(userDetails.chatId, {
-                    payAmount: 50,
-                    secondShow: false,
-                    fullShow: 0,
-                    highestPayAmount: 50,
-                    callTime: 0
-                });
+                // A new service cycle (startServiceCycle: fullShow 0, secondShow false, fresh cycleVideoBase). A plain
+                // update kept the old video base, so every lifetime video counted against the new cycle (live sowmya2
+                // 2026-10-24: a ₹350 payer got one show, then show completion saw > 7 cycle videos and dropped them to ₹50).
+                userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_8__.startServiceCycle)(chatId, 50, { payAmount: 50, highestPayAmount: 50, callTime: 0 });
             }
             // Used up (no show left at this pay): a call request in any words gets the call-over + next-rung price
             // once (used-up-answer); anything else is a normal paid message. Never initiateCall: it would promise a
@@ -65460,20 +65487,25 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PRICE_RUNGS: () => (/* binding */ PRICE_RUNGS),
 /* harmony export */   USED_UP_FOLLOWUP_MS: () => (/* binding */ USED_UP_FOLLOWUP_MS),
+/* harmony export */   answerCallRequestDuringDetailsAsk: () => (/* binding */ answerCallRequestDuringDetailsAsk),
 /* harmony export */   answerUsedUpCallRequest: () => (/* binding */ answerUsedUpCallRequest),
 /* harmony export */   nextRung: () => (/* binding */ nextRung),
 /* harmony export */   paidLevel: () => (/* binding */ paidLevel),
 /* harmony export */   rungPriceMsgs: () => (/* binding */ rungPriceMsgs),
 /* harmony export */   rungUpsellMsgs: () => (/* binding */ rungUpsellMsgs)
 /* harmony export */ });
-/* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
-/* harmony import */ var _messages_pick_one__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./messages/pick-one */ "./src/conversation/messages/pick-one.ts");
-/* harmony import */ var _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../pattern-handlers/regex/callRequestRegex */ "./src/pattern-handlers/regex/callRequestRegex.ts");
-/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./state/chat-moments */ "./src/conversation/state/chat-moments.ts");
-/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _payments_open_ask__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../payments/open-ask */ "./src/payments/open-ask.ts");
+/* harmony import */ var _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payments/proof-gate/messages */ "./src/payments/proof-gate/messages.ts");
+/* harmony import */ var _payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../payments/payment-chat-guard */ "./src/payments/payment-chat-guard.ts");
+/* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _messages_pick_one__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../pattern-handlers/regex/callRequestRegex */ "./src/pattern-handlers/regex/callRequestRegex.ts");
+/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -65482,7 +65514,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:used-up-answer");
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-aut:used-up-answer");
 const PRICE_RUNGS = [50, 100, 150, 350, 600];
 const USED_UP_FOLLOWUP_MS = 17000;
 /** What the user has paid at most: the cycle's level survives completion dropping highestPayAmount to 50. */
@@ -65496,46 +65532,66 @@ function nextRung(paid) {
 /** Existing copy for the rung (no new strings). */
 function rungPriceMsgs(rung) {
     if (rung === 600)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.paidHourDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidHourDurationPriceMsgs;
     if (rung === 350)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.paidThirtyMinuteDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidThirtyMinuteDurationPriceMsgs;
     if (rung === 50)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.paidShortDurationPriceMsgs;
-    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.paidTenMinuteDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidShortDurationPriceMsgs;
+    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidTenMinuteDurationPriceMsgs;
 }
 /** getUpsellMessage input that lands on the same rung's upsell (600 -> upsell600, 350 -> upsell350, ...). */
 function rungUpsellMsgs(rung) {
     const pay = rung === 600 ? 200 : rung === 350 ? 150 : rung === 50 ? 0 : 50;
-    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.getUpsellMessage(pay);
+    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(pay);
+}
+/**
+ * A call request while a details-page request over an impossible reference is open (proof-gate decide.ts
+ * impossibleReferenceAskOpen, 15 min): the receipt may be a genuine payment awaiting its details page, so the same polite
+ * ask (OLD_TIME_ASK_MESSAGES), not "time finished, pay again" + prices, and no other pay ask in that turn. No ring, no
+ * credit. Returns false when no such ask is open. Costs one openAsks read (bounded by the gate's store timeout); called
+ * only for a call request, after an owed show was answered. Fails to false.
+ */
+async function answerCallRequestDuringDetailsAsk(event, chatId, source) {
+    if (!(await (0,_payments_open_ask__WEBPACK_IMPORTED_MODULE_1__.hasOpenPaymentAsk)(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), chatId, 'impossible-reference')))
+        return false;
+    logger.info(`[call-request] ${chatId} while a details-page ask is open (${source}): the ask again`);
+    // The gate's details-page ask answers the chat (payment-chat-guard notePaymentVerdict): a pay ask started before it
+    // (the periodic prompt of this same message, its delayed QR) is superseded at its send point, as after the gate's
+    // own ask. Noted before the reply is queued, so the reply itself is not superseded.
+    (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_3__.notePaymentVerdict)(chatId);
+    await (0,_respond__WEBPACK_IMPORTED_MODULE_4__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_2__.OLD_TIME_ASK_MESSAGES));
+    return true;
 }
 /**
  * Answer a used-up user's call request. Returns false when `text` is not a call request (the caller handles it as
  * any other paid message). Within UPSELL_QUIET_MS of the last answer: one soft line, no second price list.
  */
 async function answerUsedUpCallRequest(event, userDetails, text, source) {
-    if (!(0,_pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_4__.isCallRequest)(text))
+    if (!(0,_pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_8__.isCallRequest)(text))
         return false;
     const chatId = String(userDetails.chatId);
+    if (await answerCallRequestDuringDetailsAsk(event, chatId, source))
+        return true;
     const rung = nextRung(paidLevel(userDetails));
-    if ((0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.msSince)(chatId, 'usedUpAnswered') < _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.UPSELL_QUIET_MS) {
+    if ((0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_9__.msSince)(chatId, 'usedUpAnswered') < _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.UPSELL_QUIET_MS) {
         logger.info(`[used-up] ${chatId} call request again within the window (${source}): soft reply`);
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.UPSELL_QUIET_REPLIES]));
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_4__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.UPSELL_QUIET_REPLIES]));
         return true;
     }
-    (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_5__.noteMoment)(chatId, 'usedUpAnswered');
-    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.upsellQuietAnswer)(chatId);
+    (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_9__.noteMoment)(chatId, 'usedUpAnswered');
+    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.upsellQuietAnswer)(chatId);
     logger.info(`[used-up] ${chatId} call request (${source}): call over + ₹${rung}${quiet ? ` (quiet: ${quiet})` : ''}`);
     if (quiet === 'soft') {
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.UPSELL_QUIET_REPLIES]));
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_4__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.UPSELL_QUIET_REPLIES]));
         return true;
     }
     if (quiet === 'price') {
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(rungPriceMsgs(rung)));
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_4__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(rungPriceMsgs(rung)));
         return true;
     }
-    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_2__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(rungPriceMsgs(rung))}`);
-    (0,_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_3__.schedulePatternFollowup)(event, { chatId }, USED_UP_FOLLOWUP_MS, {
-        kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(rungUpsellMsgs(rung)),
+    await (0,_respond__WEBPACK_IMPORTED_MODULE_4__.respond)(event, `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(rungPriceMsgs(rung))}`);
+    (0,_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_7__.schedulePatternFollowup)(event, { chatId }, USED_UP_FOLLOWUP_MS, {
+        kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(rungUpsellMsgs(rung)),
     }, { label: 'usedUp.callRequest.upsell' });
     return true;
 }
@@ -72987,7 +73043,7 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
         }
     }
 }
-/** Valid payment of 15..MAX_PAYMENT_AMOUNT: call, call link, pics or a re-call, then the fmp / low-pic clean-up. */
+/** Valid payment of 15..below CREDIT_LIMIT_AMOUNT (₹1,000, owner 2026-10-25): call, call link, pics or a re-call, then the fmp / low-pic clean-up. */
 async function handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, amount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted) {
     if (amount >= 30 &&
         amount >= userDetails.payAmount + 20 &&
@@ -73191,7 +73247,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
     // the legacy rise-over-highest rule, which never double-books.
     let credit;
-    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_43__.MAX_PAYMENT_AMOUNT) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_43__.isCreditableAmount)(amount)) {
         creditedSeq.delete(chatId);
         creditedSeq.set(chatId, ++holdSeq);
         capMap(creditedSeq);
@@ -73206,7 +73262,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         }
     }
     // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
-    if (amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_43__.MAX_PAYMENT_AMOUNT && tierAmount > currentUserDetails.payAmount) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_43__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
         // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
         userDetails = await db.update(chatId, {
@@ -73344,7 +73400,7 @@ async function processImage(event) {
         }
         const processedAmount = (0,_payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_25__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
-        if (blockedAnswering && !(amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_43__.MAX_PAYMENT_AMOUNT)) {
+        if (blockedAnswering && !(amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_43__.isCreditableAmount)(amount))) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
             return;
         }
@@ -73385,7 +73441,7 @@ async function processImage(event) {
         const callOwed = !blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails);
         // A resend of a payment credited in this chat was answered from the chat's state (call requested / "call soon").
         let resendAnswered = false;
-        const judgePaymentFirst = callOwed && amount > 11 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_43__.MAX_PAYMENT_AMOUNT
+        const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_43__.isCreditableAmount)(amount)
             && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
         if (callOwed && !judgePaymentFirst) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_26__.proceedWithCall)(userDetails, chatId, "Image Processed");
@@ -73448,7 +73504,10 @@ async function processImage(event) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
                         }
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
-                            if (!(amount > 0 && amount <= _tg_vision__WEBPACK_IMPORTED_MODULE_43__.MAX_PAYMENT_AMOUNT)) {
+                            // Owner 2026-10-25: a receipt of ₹1,000 or more is never credited, with or without UTR (the one threshold,
+                            // @tg/vision isCreditableAmount). Same reply as the old 15,000 ceiling; no cheat / fraud mark (a misread of a
+                            // genuine receipt must not punish the payer).
+                            if (!(0,_tg_vision__WEBPACK_IMPORTED_MODULE_43__.isCreditableAmount)(amount)) {
                                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
                                 await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
                                 await scheduleImageFollowup(event, chatId, 'amountOutOfRangeReminder', 10000);
@@ -73509,6 +73568,8 @@ async function processImage(event) {
                                         if (tierAmount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount);
                                         }
+                                        // tierAmount sums this chat's unserved receipts (each below the credit limit): ₹600 + ₹600 is served, so
+                                        // the read range bounds it, not the per-receipt credit limit.
                                         if (tierAmount !== payAmount && tierAmount < 30) {
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
@@ -85085,6 +85146,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fraudAskAnswerable: () => (/* binding */ fraudAskAnswerable),
 /* harmony export */   fraudGraceOpen: () => (/* binding */ fraudGraceOpen),
 /* harmony export */   gateBlockAnswerable: () => (/* binding */ gateBlockAnswerable),
+/* harmony export */   impossibleReferenceAskOpen: () => (/* binding */ impossibleReferenceAskOpen),
 /* harmony export */   isDifferentPicture: () => (/* binding */ isDifferentPicture),
 /* harmony export */   isImpossibleReference: () => (/* binding */ isImpossibleReference),
 /* harmony export */   isRealReference: () => (/* binding */ isRealReference),
@@ -85405,6 +85467,16 @@ function askAnswerable(row, nowMs, kind) {
     const opened = new Date(row.ask.openedAt).getTime();
     return Number.isFinite(opened) && nowMs - opened <= ASK_ANSWER_WINDOW_MS;
 }
+/**
+ * An answerable details-page request raised over an impossible reference, opened within FRAUD_GRACE_MS. While it is
+ * open a picture without a real reference is not a new payment (gate.ts check) and a used-up call request gets the same
+ * polite ask, not the call-over + price list (conversation/used-up-answer.ts).
+ */
+function impossibleReferenceAskOpen(row, nowMs) {
+    if (!askAnswerable(row, nowMs, 'old_time') || !(row.ask?.reasons ?? []).includes('IMPOSSIBLE_REFERENCE'))
+        return false;
+    return nowMs - new Date(row.ask.openedAt).getTime() < FRAUD_GRACE_MS;
+}
 /** An open fraud request that can still be answered (grace period or after the block, within the answer window). */
 function fraudAskAnswerable(row, nowMs) {
     return askAnswerable(row, nowMs, 'fraud');
@@ -85611,6 +85683,13 @@ class PaymentFlow {
             await this.fraud(session, canReply, [gate.reason], async () => { });
             return { handled: true };
         }
+        if (session && gate.kind === 'needs-real-page' && gate.ask === 'old_time') {
+            // The details page was asked for over an impossible reference: ask again, politely (it may be a misread).
+            this.io.warn(`[payment-gate] ${session.facts.chatId} was asked for the details page (impossible reference) and this screenshot shows no real transaction reference: asked again, not crediting`);
+            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
+            await notify({ title: 'Asked pay page', summary: 'Screenshot shows no real transaction reference; the details page is still awaited.' });
+            return { handled: true };
+        }
         if (session && gate.kind === 'needs-real-page') {
             this.io.warn(`[payment-gate] ${session.facts.chatId} is under a fake-payment warning and this screenshot shows no real transaction reference: not crediting`);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_WARNING_MESSAGES));
@@ -85763,8 +85842,16 @@ class GateSession {
             return { kind: 'confirms', asked };
         // Only inside the 15-min grace period or while the flow's block stands: a later, unrelated genuine payment
         // whose UTR was not read must not be refused for the rest of the day.
-        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) && open.some((r) => r.telegramMsgId !== f.msgId && ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now) || (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now))))
-            return { kind: 'needs-real-page' };
+        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr)) {
+            const others = open.filter((r) => r.telegramMsgId !== f.msgId);
+            if (others.some((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now) || (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now)))
+                return { kind: 'needs-real-page', ask: 'fraud' };
+            // A details-page request over an impossible reference (11 / 13 digits) is answered only by a real reference
+            // (confirmsAsk). Inside the same 15 min, another picture without one is not a new payment (live: sneha1
+            // 2026-10-24, a PhonePe History list read as ₹11,568 with no UTR was credited after two 11-digit ₹150 receipts).
+            if (others.some((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.impossibleReferenceAskOpen)(r, now)))
+                return { kind: 'needs-real-page', ask: 'old_time' };
+        }
         return verdict;
     }
     /**
@@ -85873,7 +85960,9 @@ class ProofGate {
             return false;
         const now = this.deps.now();
         const rows = await withTimeout(store.openAsks(chatId, profile, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
-        return (rows ?? []).some((r) => (kind === 'gate-blocked' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now) : kind === 'fraud' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now) : (0,_decide__WEBPACK_IMPORTED_MODULE_1__.askAnswerable)(r, now, kind)));
+        return (rows ?? []).some((r) => (kind === 'gate-blocked' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now)
+            : kind === 'impossible-reference' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.impossibleReferenceAskOpen)(r, now)
+                : kind === 'fraud' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now) : (0,_decide__WEBPACK_IMPORTED_MODULE_1__.askAnswerable)(r, now, kind)));
     }
     /** The delayed block fired over this warning. */
     async markAskBlocked(chatId, profile, msgId) {
