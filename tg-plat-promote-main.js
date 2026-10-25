@@ -11,6 +11,7 @@
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   AnalyticsSink: () => (/* binding */ AnalyticsSink),
+/* harmony export */   SERVICE_CODES: () => (/* binding */ SERVICE_CODES),
 /* harmony export */   childBatchId: () => (/* binding */ childBatchId),
 /* harmony export */   classifyAnalyticsError: () => (/* binding */ classifyAnalyticsError),
 /* harmony export */   defaultSpoolDir: () => (/* binding */ defaultSpoolDir),
@@ -41,7 +42,7 @@ const DEFAULTS = {
     killWindowMs: 8000,
     maxSpoolBytes: 200 * 1024 * 1024,
     maxQuarantineBytes: 50 * 1024 * 1024,
-    counterFlushIntervalMs: 60000,
+    counterFlushIntervalMs: 300000,
 };
 /** Statements per flush. Bounds a bisect of an all-bad batch (2N-1 statements) to one tick's worth. */
 const MAX_STATEMENTS_PER_FLUSH = 64;
@@ -77,6 +78,7 @@ const REQUIRED_COLUMNS = {
     promotion_send: new Set(["ts", "client_id", "mobile", "channel_id", "outcome"]),
     conversion_event: new Set(["conversion_id", "chat_id", "channel_id", "weight", "kind"]),
     payment_event: new Set(["chat_id", "client_id", "persona_id", "amount"]),
+    cheat_flag: new Set(["ts", "chat_id", "client_id", "persona_id", "cheat_count"]),
     daily_client: new Set(["day", "client_id", "namespace"]),
     daily_mobile: new Set(["day", "client_id", "namespace", "mobile"]),
 };
@@ -92,11 +94,39 @@ const COUNTER_FIELDS = [
     "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
 ];
 const accumulate = (t) => COUNTER_COLUMNS.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
-/** Per table: column list (for spool validation), conflict tail and conflict-key length. */
+/**
+ * Stored value of the `service` column (analytics/upgrade-2026-10-25-service.sql). One character,
+ * not the full name: promotion_send is the largest table on the 0.5 GB free tier and 'p' costs
+ * 2 B against 16 B for 'promote-clients' (measured, docs/design/2026-10-25-analytics-service-capture.md).
+ */
+const SERVICE_CODES = Object.freeze({
+    "tg-aut": "t",
+    "promote-clients": "p",
+});
+function serviceCode(service) {
+    return typeof service === "string" && Object.prototype.hasOwnProperty.call(SERVICE_CODES, service)
+        ? SERVICE_CODES[service]
+        : null;
+}
+/**
+ * Per table: column list (for spool validation), conflict tail and conflict-key length.
+ * `legacyColumns`: older column lists still accepted from the disk spool. A spool written by the
+ * previous build (before `service` existed) must still replay after a deploy, so a legacy line is
+ * accepted when its columns are exactly a known older list, and the missing trailing columns are
+ * filled (see AnalyticsSink.upgradeLegacyValues). Never accept an arbitrary subset: the SQL column
+ * list is always `columns`, never built from file content.
+ */
 const TABLES = {
-    promotion_send: { columns: ["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type"] },
-    conversion_event: { columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"] },
+    promotion_send: {
+        columns: ["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type", "service"],
+        legacyColumns: [["ts", "client_id", "mobile", "channel_id", "message_key", "message_source", "outcome", "error_type"]],
+    },
+    conversion_event: {
+        columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile", "service"],
+        legacyColumns: [["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"]],
+    },
     payment_event: { columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"] },
+    cheat_flag: { columns: ["ts", "chat_id", "client_id", "persona_id", "cheat_count"] },
     daily_client: {
         columns: ["day", "client_id", "namespace", ...COUNTER_COLUMNS],
         keyCount: 3,
@@ -283,6 +313,7 @@ class AnalyticsSink {
         this.onStall = options.onStall;
         this.readProcEnviron = options.readProcEnviron ?? defaultReadProcEnviron;
         this.readProcEnvironInjected = options.readProcEnviron !== undefined;
+        this.serviceCode = serviceCode(options.service);
         const envShutdown = Number(process.env.SHUTDOWN_TIMEOUT);
         this.opts = {
             maxBufferedRows: options.maxBufferedRows ?? DEFAULTS.maxBufferedRows,
@@ -405,6 +436,7 @@ class AnalyticsSink {
                 row.clientId, row.mobile, row.channelId,
                 row.messageKey ?? null, row.messageSource ?? null,
                 row.outcome, row.errorType ?? null,
+                row.service ? serviceCode(row.service) : this.serviceCode,
             ],
         });
     }
@@ -415,7 +447,8 @@ class AnalyticsSink {
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.conversionId, row.chatId, row.channelId,
-                row.clientId ?? null, row.weight ?? 1.0, row.kind, row.profile ?? null,
+                row.clientId || null, row.weight ?? 1.0, row.kind, row.profile ?? null,
+                row.service ? serviceCode(row.service) : this.serviceCode,
             ],
         });
     }
@@ -492,8 +525,26 @@ class AnalyticsSink {
         });
     }
     /**
+     * One write of userData.cheatCount (analytics/upgrade-2026-10-25-service.sql `cheat_flag`).
+     * Append-only, so it needs no UPDATE and replays exactly-once through the batch-id ledger like
+     * every other event. A non-integer count is rejected here (droppedInvalid), never sent.
+     */
+    recordCheatFlag(row) {
+        const n = row.cheatCount;
+        if (typeof n !== "number" || !Number.isInteger(n) || Math.abs(n) > 2147483647) {
+            if (this.enabled || this.everEnabled)
+                this.droppedInvalid += 1;
+            return;
+        }
+        this.enqueue({
+            table: "cheat_flag",
+            columns: TABLES.cheat_flag.columns,
+            values: [row.ts ?? new Date(this.opts.now()), row.chatId, row.clientId, row.personaId, n],
+        });
+    }
+    /**
      * Reject a row that would violate NOT NULL / CHECK at enqueue, where it costs one row. Counted as
-     * droppedInvalid, never thrown. conversion_event.client_id is nullable on purpose.
+     * droppedInvalid, never thrown. conversion_event.client_id and both `service` columns are nullable.
      */
     isValid(row) {
         const required = REQUIRED_COLUMNS[row.table];
@@ -1526,13 +1577,18 @@ class AnalyticsSink {
                 const spec = Object.prototype.hasOwnProperty.call(TABLES, table) ? TABLES[table] : undefined;
                 // Table and columns are validated against the known schema: the SQL text is never built
                 // from file content.
-                if (!spec || typeof rec.b !== "string" || !rec.b || !Array.isArray(rec.v) || !Array.isArray(rec.c)
-                    || rec.c.length !== spec.columns.length || rec.c.some((c, i) => c !== spec.columns[i])
-                    || rec.v.length !== spec.columns.length) {
+                const recCols = Array.isArray(rec.c) ? rec.c : null;
+                const known = spec && recCols && Array.isArray(rec.v)
+                    ? [spec.columns, ...(spec.legacyColumns ?? [])].find((cols) => recCols.length === cols.length && recCols.every((c, i) => c === cols[i]))
+                    : undefined;
+                if (!spec || !known || typeof rec.b !== "string" || !rec.b
+                    || rec.v.length !== known.length) {
                     this.spoolErrors += 1;
                     corrupt += 1;
                     continue;
                 }
+                if (known !== spec.columns)
+                    rec.v = this.upgradeLegacyValues(spec.columns, known, rec.v);
                 const firstAt = typeof rec.f === "number" && Number.isFinite(rec.f) ? rec.f : fallbackAt;
                 if (Date.now() - firstAt > SPOOL_MAX_AGE_MS) {
                     const list = oldLines.get(rec.b) ?? [];
@@ -1566,6 +1622,16 @@ class AnalyticsSink {
             return true;
         }
         return false;
+    }
+    /**
+     * A spool line from an older build: pad it to the current column list. `service` is filled with
+     * THIS process's code — spool files are per instance (pm2 app) and per app directory, so the line
+     * was written by the same app — and any other new column with NULL. The batch id is unchanged, so
+     * the analytics_batch ledger still makes the replay exactly-once.
+     */
+    upgradeLegacyValues(columns, legacy, values) {
+        const byName = new Map(legacy.map((c, i) => [c, values[i]]));
+        return columns.map((c) => (byName.has(c) ? byName.get(c) : c === "service" ? this.serviceCode : null));
     }
     /** Healthy and idle: pick up files spilled at runtime (overflow) or left by a dead process. */
     async maybeRescanSpool() {
@@ -1861,6 +1927,7 @@ class PreInitRecorder {
     recordPromotionSend(row) { this.event("recordPromotionSend", row); }
     recordConversion(row) { this.event("recordConversion", row); }
     recordPayment(row) { this.event("recordPayment", row); }
+    recordCheatFlag(row) { this.event("recordCheatFlag", row); }
     recordDailyClient(row) { this.counter("recordDailyClient", row); }
     recordDailyMobile(row) { this.counter("recordDailyMobile", row); }
     size() { return this.events.length + this.counters.size; }
@@ -1992,6 +2059,7 @@ const DISABLED = {
     recordPromotionSend: () => { },
     recordConversion: () => { },
     recordPayment: () => { },
+    recordCheatFlag: () => { },
     recordDailyClient: () => { },
     recordDailyMobile: () => { },
     stats: () => ({
@@ -2018,6 +2086,7 @@ const DISABLED = {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   AnalyticsSink: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.AnalyticsSink),
+/* harmony export */   SERVICE_CODES: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.SERVICE_CODES),
 /* harmony export */   __setAnalyticsForTests: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.__setAnalyticsForTests),
 /* harmony export */   childBatchId: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.childBatchId),
 /* harmony export */   classifyAnalyticsError: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.classifyAnalyticsError),
@@ -2175,19 +2244,20 @@ class ConversionAttributionService {
      *
      * @param commonChatIds - Channel IDs from GetCommonChats
      * @param conversionId - Stable profile + Telegram chat ID for exactly-once crediting
+     * @param context - Who is recording it (conversion_event.client_id)
      */
-    async attributeDMConversion(commonChatIds, conversionId) {
-        return this.attributeConversion(commonChatIds, conversionId, 1);
+    async attributeDMConversion(commonChatIds, conversionId, context = {}) {
+        return this.attributeConversion(commonChatIds, conversionId, 1, context);
     }
     /**
      * Add paid-conversion evidence to every previously attributed channel.
      * A new payer contributes 1.00 per channel; a returning payer contributes
      * 0.50 per channel. Credit is intentionally not divided between channels.
      */
-    async attributePaymentConversion(channelIds, conversionId, returningUser) {
-        return this.attributeConversion(channelIds, `payment:${conversionId}`, returningUser ? 0.5 : 1);
+    async attributePaymentConversion(channelIds, conversionId, returningUser, context = {}) {
+        return this.attributeConversion(channelIds, `payment:${conversionId}`, returningUser ? 0.5 : 1, context);
     }
-    async attributeConversion(commonChatIds, conversionId, weightPerChannel) {
+    async attributeConversion(commonChatIds, conversionId, weightPerChannel, context) {
         const uniqueChatIds = normalizeAttributionChannelIds(commonChatIds);
         if (uniqueChatIds.length === 0) {
             return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
@@ -2205,9 +2275,12 @@ class ConversionAttributionService {
             const kind = conversionId.startsWith('payment:') ? 'payment' : 'dm';
             const idParts = (kind === 'payment' ? conversionId.slice('payment:'.length) : conversionId).split(':');
             const conversionChatId = idParts[1] ?? '';
-            // Segment 0 is the persona. It is recorded instead of a clientId because a profile serves
-            // several clients (10 profiles across 20 clients), so no clientId can be inferred here.
+            // Segment 0 is the persona. A profile serves several clients (10 profiles across 20 clients),
+            // so the clientId is NOT parsed from it: the caller passes the client it is running as.
             const conversionProfile = idParts[0] || null;
+            const conversionClientId = typeof context?.clientId === 'string' && context.clientId.trim()
+                ? context.clientId.trim()
+                : null;
             for (const channelId of uniqueChatIds) {
                 const channelClaimId = `${conversionId}:${channelId}`;
                 try {
@@ -2225,7 +2298,7 @@ class ConversionAttributionService {
                             conversionId,
                             chatId: conversionChatId,
                             channelId,
-                            clientId: null,
+                            clientId: conversionClientId,
                             profile: conversionProfile,
                             weight: normalizedWeight,
                             kind,
@@ -4188,6 +4261,7 @@ function isMessageQueueLike(value) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   analyticsMessageFields: () => (/* binding */ analyticsMessageFields),
 /* harmony export */   logHookSummary: () => (/* binding */ logHookSummary),
 /* harmony export */   recordAccountSurvival: () => (/* binding */ recordAccountSurvival),
 /* harmony export */   recordChannelBlockOnFailure: () => (/* binding */ recordChannelBlockOnFailure),
@@ -4204,15 +4278,48 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
+/* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
 
 
 
 
 
-function recordSendAnalytics(host, channel, candidate, result, outcome, channelIdOverride) {
+
+/**
+ * message_key / message_source for one promotion_send row (2026-10-25).
+ *
+ * Before this, both were taken from the candidate's POOL fields only, so 36-41% of rows carried
+ * neither (measured 10-18..10-25): 98.7% of the NULL delivered rows were follow-ups (a main send to
+ * the same mobile + channel 61 min earlier, the follow-up delay), the rest fresh (non-pool) sends
+ * and deletions. Now:
+ *   - follow-up text ('followUp' candidate): source 'followup', key NULL. Its 5 texts carry random
+ *     emojis and never enter the pool; a 65-byte key on ~8.6k rows/day would cost ~17 MB at the
+ *     30-day retention to tell 5 near-identical texts apart.
+ *   - a pool candidate: its pool key and source, as before.
+ *   - a fresh ai / custom / legacy send, or a deletion: the key the pool itself would give this text
+ *     (poolEntryKey of the sent text, the same function createPoolEntryFromText uses), so it joins
+ *     channelIntelligence.messagePool.key.
+ */
+function analyticsMessageFields(candidate, result, messageText) {
+    if (candidate?.randomIndex === 'followUp')
+        return { messageKey: null, messageSource: 'followup' };
+    const text = typeof messageText === 'string' && messageText.trim() ? messageText
+        : typeof result?.messageText === 'string' && result.messageText.trim() ? result.messageText : null;
+    let messageKey = candidate?.poolKey ?? null;
+    if (!messageKey && text) {
+        try {
+            messageKey = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.poolEntryKey)(text);
+        }
+        catch {
+            messageKey = null;
+        }
+    }
+    return { messageKey, messageSource: candidate?.poolSource ?? result?.messageSource ?? null };
+}
+function recordSendAnalytics(host, channel, candidate, result, outcome, channelIdOverride, messageText) {
     // WRAPPED ON PURPOSE. The sink's own record* calls are already total, but `getAnalytics()`
     // returns whatever was installed, and a promotion send must survive even a recorder that
     // throws. Analytics is optional; a send is not. Nothing is logged here either — a broken sink
@@ -4220,16 +4327,17 @@ function recordSendAnalytics(host, channel, candidate, result, outcome, channelI
     try {
         const account = host.options.account;
         const errorMessage = result?.errorMessage ?? '';
-        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_3__.getAnalytics)().recordPromotionSend({
+        const { messageKey, messageSource } = analyticsMessageFields(candidate, result, messageText);
+        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_4__.getAnalytics)().recordPromotionSend({
             clientId: account?.clientId ?? '',
             mobile: account?.mobile ?? '',
             channelId: channelIdOverride ?? channel?.channelId ?? '',
-            messageKey: candidate?.poolKey ?? null,
-            messageSource: candidate?.poolSource ?? result?.messageSource ?? null,
+            messageKey,
+            messageSource,
             outcome,
             // The raw error STRING is never stored — only the matched Telegram token, so the column
             // stays a fixed low-cardinality vocabulary (FLOOD_WAIT, CHAT_WRITE_FORBIDDEN, ...).
-            errorType: (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.promotionErrorToken)(errorMessage),
+            errorType: (0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_3__.promotionErrorToken)(errorMessage),
         });
     }
     catch {
@@ -4238,13 +4346,13 @@ function recordSendAnalytics(host, channel, candidate, result, outcome, channelI
 }
 async function recordSuccess(host, channel, candidate, result, isFollowUp, percentiles, aggressive) {
     const strategy = host.resolveCandidateStrategy(candidate);
-    const availableMessageIds = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeAvailableMessageIds)(channel.availableMsgs);
+    const availableMessageIds = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeAvailableMessageIds)(channel.availableMsgs);
     const poolSource = host.resolveQueuedPoolSource(result, isFollowUp);
     host.recordSendAnalytics(channel, candidate, result, 'delivered');
     let durabilityFailure = null;
     await host.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
-    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_4__.isValidMessageId)(result.messageId)) {
-        const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.resolveCandidatePoolMode)(candidate, isFollowUp);
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_5__.isValidMessageId)(result.messageId)) {
+        const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.resolveCandidatePoolMode)(candidate, isFollowUp);
         const queuedMessage = {
             channelId: channel.channelId,
             messageId: result.messageId,
@@ -4373,7 +4481,9 @@ async function recordDeletion(host, message, deletionPolicy) {
     // A delivered message that the channel later removed. The send itself was already recorded as
     // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
     // history Mongo cannot answer (its messagePool counters are overwritten in place).
-    host.recordSendAnalytics(null, { poolSource: message.poolSource }, null, 'deleted', message.channelId);
+    // The queued message keeps its text and index, so the deleted row gets the same key/source
+    // as the send it describes ('followup' for a follow-up, else poolEntryKey of the text).
+    host.recordSendAnalytics(null, { ...(message.poolSource ? { poolSource: message.poolSource } : {}), randomIndex: message.messageIndex }, null, 'deleted', message.channelId, message.messageText ?? null);
     host.log('warn', [
         'Promotion deletion recorded',
         `channelId=${message.channelId}`,
@@ -4381,7 +4491,7 @@ async function recordDeletion(host, message, deletionPolicy) {
         `messageIndex=${message.messageIndex}`,
         `strategy=${strategy}`,
         `isFollowUp=${message.isFollowUp}`,
-        `survivalMs=${(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.safeElapsedMs)(message.timestamp)}`,
+        `survivalMs=${(0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.timestamp)}`,
         `actions=${deletionPolicy.actions.join('|') || 'none'}`,
     ].join('; '));
     host.health.totalDeletions += 1;
@@ -4390,7 +4500,7 @@ async function recordDeletion(host, message, deletionPolicy) {
     let intelligenceStatus = 'ok';
     const poolStatus = await host.recordPoolOutcome(message, 'deleted');
     try {
-        await host.options.account.recordDeletion(message.channelId, (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.safeElapsedMs)(message.timestamp), message.isFollowUp);
+        await host.options.account.recordDeletion(message.channelId, (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.timestamp), message.isFollowUp);
     }
     catch (error) {
         intelligenceStatus = 'fail';
@@ -4419,9 +4529,9 @@ function logHookSummary(host, event, channelId, strategy, isFollowUp, statuses) 
     ].join('; '));
 }
 function resolveQueuedPoolSource(result, isFollowUp) {
-    if (isFollowUp || !(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.isValidMessageId)(result.messageId))
+    if (isFollowUp || !(0,_normalize__WEBPACK_IMPORTED_MODULE_5__.isValidMessageId)(result.messageId))
         return null;
-    const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.createPoolEntry)(result);
+    const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.createPoolEntry)(result);
     if (!entry)
         return null;
     // The reusable pool contains only independently validated survivors. This keeps all sources
@@ -4447,7 +4557,7 @@ async function recordPoolOutcome(host, message, outcome) {
     if (message.isFollowUp)
         return 'skipped';
     try {
-        const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_4__.createPoolEntryFromText)(message.messageText, message.poolSource);
+        const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.createPoolEntryFromText)(message.messageText, message.poolSource);
         if (!entry)
             return 'skipped';
         // Only independently validated survivors earn a new pool slot.  A deletion may refer to an
@@ -4478,11 +4588,11 @@ async function recordPoolOutcome(host, message, outcome) {
     }
 }
 async function recordExploreFailure(host, channelId, candidate, result, isFollowUp) {
-    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_4__.shouldRecordExploreFromCandidate)(candidate, isFollowUp))
+    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_5__.shouldRecordExploreFromCandidate)(candidate, isFollowUp))
         return;
     if (result.checkableByChannelId === false)
         return;
-    if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
+    if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(result.errorMessage ?? '') !== 'channel')
         return;
     try {
         await host.options.account.recordExploreOutcome(channelId, 'channelSideFailed');
@@ -4492,7 +4602,7 @@ async function recordExploreFailure(host, channelId, candidate, result, isFollow
     }
 }
 async function recordExploreSurvival(host, message) {
-    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_4__.resolveQueuedPoolMode)(message) !== 'explore')
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_5__.resolveQueuedPoolMode)(message) !== 'explore')
         return;
     try {
         await host.options.account.recordExploreOutcome(message.channelId, 'survived');
@@ -4515,7 +4625,7 @@ async function recordChannelBlockOnFailure(host, channel, result) {
         if (errUpper.includes('USER_BANNED_IN_CHANNEL')) {
             await host.options.account.blockChannelTemporary(channel.channelId);
         }
-        else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_2__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
+        else if ((0,_pool_error_classification__WEBPACK_IMPORTED_MODULE_3__.classifyPoolError)(result.errorMessage ?? '') === 'channel') {
             await host.options.account.blockChannelPermanent(channel.channelId);
         }
     }
@@ -5383,8 +5493,8 @@ class PromotionFlowRunner {
      * unconfigured), the record call is synchronous and returns void, and it cannot throw. There is
      * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
      */
-    recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride);
+    recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride, messageText) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText);
     }
     recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
         return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
@@ -7665,24 +7775,26 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
 /* harmony import */ var _tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/naturalizeText */ "../../packages/tg-core/src/utils/naturalizeText.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_5__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
-/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
-/* harmony import */ var ___WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
-/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
-/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
-/* harmony import */ var _telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram-client/getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
-/* harmony import */ var _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../policy/deletion-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/deletion-policy.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./shared-engine-ops */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+/* harmony import */ var _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/stylePromotionText */ "../../packages/tg-core/src/utils/stylePromotionText.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_6___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_6__);
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
+/* harmony import */ var _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
+/* harmony import */ var ___WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../telegram-client/getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
+/* harmony import */ var _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../policy/deletion-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/deletion-policy.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./shared-engine-ops */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+
 
 
 
@@ -7706,7 +7818,7 @@ __webpack_require__.r(__webpack_exports__);
 
 /** Shared post-send liveness window used by both tg-aut and promote-clients. */
 const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
-const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_19__.PromoLogger("intelligence");
+const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_20__.PromoLogger("intelligence");
 class BasePromotionEngine {
     constructor(client, dialogManager, clientId, mobile) {
         this.promotionActive = false;
@@ -7719,7 +7831,7 @@ class BasePromotionEngine {
         this.promoteMsgsPromise = null;
         this.scheduledTimeouts = new Set();
         this.cleanupInterval = null;
-        this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_10__.DelayCalculator();
+        this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_11__.DelayCalculator();
         this.channelHydrationAttempts = new Map();
         // Intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of loadChannelsForRunner.
         // MEASURED root cause of slow hydration: 300 serial intelligence.get() findOne calls cost ~107s
@@ -7770,13 +7882,13 @@ class BasePromotionEngine {
         this.dialogManager = dialogManager;
         this.clientId = clientId;
         this.mobile = mobile;
-        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_11__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
+        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
     }
     mergeLiveChannelInfo(existing, live) {
-        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_13__.mergeLiveChannelDocument)(existing, live, {
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeLiveChannelDocument)(existing, live, {
             normalizeChannelId: (id) => this.normalizeChannelId(id),
             defaultAvailableMsgs: this.defaultAvailableMsgs,
-            mergeFacts: _channel_state__WEBPACK_IMPORTED_MODULE_13__.mergeHydratedChannelFacts,
+            mergeFacts: _channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeHydratedChannelFacts,
         });
     }
     /**
@@ -7792,13 +7904,13 @@ class BasePromotionEngine {
             return null;
         }
         try {
-            const outcome = await (0,_channel_state__WEBPACK_IMPORTED_MODULE_13__.hydrateChannelDocument)({
+            const outcome = await (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.hydrateChannelDocument)({
                 load: () => store.findActiveChannel(normalizedChannelId),
                 persist: async (patch) => { await store.updateActiveChannel(normalizedChannelId, patch); },
-                fetchLive: () => (0,_telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_14__.getChannelFromTg)(this.client, normalizedChannelId),
+                fetchLive: () => (0,_telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_15__.getChannelFromTg)(this.client, normalizedChannelId),
                 claim: () => this.claimChannelHydrationAttempt(normalizedChannelId),
                 merge: (existing, live) => this.mergeLiveChannelInfo(existing, live),
-                shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_13__.shouldHydrateBeforeFinalReject,
+                shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_14__.shouldHydrateBeforeFinalReject,
             }, this.mergeCallerLiveFacts ? liveChannelInfo : undefined);
             if (outcome.status === 'debounced') {
                 this.logRunnerMessage('debug', `[${this.mobile}] ⏳ PROMO hydrate debounced | ${normalizedChannelId} | skip stale DB decision for ${Math.round(this.CHANNEL_REHYDRATION_DEBOUNCE_MS / 1000)}s window`);
@@ -7818,7 +7930,7 @@ class BasePromotionEngine {
             return await this.finalizeChannelInfo(channelInfo);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Error getting channel info for ${channelId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Error getting channel info for ${channelId}`, false);
             return null;
         }
     }
@@ -7843,14 +7955,14 @@ class BasePromotionEngine {
     }
     /** Runtime functions handed to the pure shared ops (kept injectable for every consumer's tests). */
     engineOpsDeps() {
-        return { parseError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError, resolveFailureAction: _channel_state__WEBPACK_IMPORTED_MODULE_13__.resolvePromotionFailureAction, contains: _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_16__.contains, evaluateDeletionPolicy: _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_15__.evaluateDeletionPolicy };
+        return { parseError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError, resolveFailureAction: _channel_state__WEBPACK_IMPORTED_MODULE_14__.resolvePromotionFailureAction, contains: _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_17__.contains, evaluateDeletionPolicy: _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_16__.evaluateDeletionPolicy };
     }
     /** Shared merge of the runner's deletion policy with the local one (see resolveDeletionPolicy). */
     resolveDeletionPolicy(messageIndex, availableCount, provided) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.resolveDeletionPolicy)(this.engineOpsDeps(), messageIndex, availableCount, provided);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.resolveDeletionPolicy)(this.engineOpsDeps(), messageIndex, availableCount, provided);
     }
     async triggerTelegramRuntimeRecovery(error) {
-        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.requestTelegramRuntimeRecovery)(this.engineOpsDeps(), this.runtimeRecovery, this.onTelegramRuntimeFailure, error, this.mobile);
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.requestTelegramRuntimeRecovery)(this.engineOpsDeps(), this.runtimeRecovery, this.onTelegramRuntimeFailure, error, this.mobile);
     }
     /**
      * Build the bounded hydration working set through the same shared priority
@@ -7870,7 +7982,7 @@ class BasePromotionEngine {
             this.logRunnerMessage('warn', `Hydration priority intelligence load failed; pausing this cycle safely: ${error}`);
             return [];
         }
-        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_18__.selectPromotionChannels)({
+        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_19__.selectPromotionChannels)({
             channels,
             intelligenceDocs,
             batchTarget: Math.min(Math.floor(limit), channels.length),
@@ -7893,12 +8005,22 @@ class BasePromotionEngine {
      */
     async sendMessageToChannel(channelInfo, message) {
         try {
+            // AI messages (skipObfuscation) go out untouched. Otherwise PROMO_OBFUSCATION_ENABLED
+            // picks the old homoglyph path (obfuscate -> naturalize, sent with no parseMode) or the
+            // default compliant path (naturalize without its Unicode-font bold step -> markdown
+            // styling, sent with parseMode 'md' so `**bold**` renders).
+            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.isPromoObfuscationEnabled)();
             const outgoing = message.skipObfuscation
                 ? message.message
-                : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_2__.obfuscateText)(message.message, {
-                    substitutionRate: 0.2,
-                    maintainFormatting: message.maintainFormatting || false,
-                }), { maintainFormatting: message.maintainFormatting || false });
+                : styled
+                    ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.stylePromotionText)((0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)(message.message, {
+                        maintainFormatting: message.maintainFormatting || false,
+                        boldStyling: false,
+                    }))
+                    : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_3__.naturalizeText)((0,_tg_core_utils_obfuscateText__WEBPACK_IMPORTED_MODULE_2__.obfuscateText)(message.message, {
+                        substitutionRate: 0.2,
+                        maintainFormatting: message.maintainFormatting || false,
+                    }), { maintainFormatting: message.maintainFormatting || false });
             const validatedOutgoing = this.assertSendablePromotionText(outgoing);
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(this.delayCalculator.getBrowseDelay());
             const entity = await this.resolvePromotionEntity(channelInfo);
@@ -7909,11 +8031,11 @@ class BasePromotionEngine {
                 this.logRunnerMessage('warn', `[${this.mobile}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
-            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_4__.sendMessageWithTimeoutOrThrow)(this.client, entity, { message: validatedOutgoing });
+            const sentMessage = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_5__.sendMessageWithTimeoutOrThrow)(this.client, entity, styled ? { message: validatedOutgoing, parseMode: _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_4__.PROMOTION_STYLED_PARSE_MODE } : { message: validatedOutgoing });
             return { message: sentMessage, checkableByChannelId: true };
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_7__.parseTelegramError)(error, channelInfo.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_8__.parseTelegramError)(error, channelInfo.channelId);
             switch (parsed.type) {
                 case 'CHANNEL_RESTRICTED':
                     if (parsed.reason === 'banned') {
@@ -7960,7 +8082,7 @@ class BasePromotionEngine {
     // =================================================================
     refreshPromotionContext() {
         try {
-            const context = ___WEBPACK_IMPORTED_MODULE_11__.PromotionRuntime.getInstance().createAccountContext({
+            const context = ___WEBPACK_IMPORTED_MODULE_12__.PromotionRuntime.getInstance().createAccountContext({
                 mobile: this.mobile,
                 clientId: this.clientId,
             });
@@ -8002,7 +8124,7 @@ class BasePromotionEngine {
                 if (!cache.has(id))
                     cache.set(id, undefined);
             const rawDocs = await account.intelligence.batchGet(ids);
-            const docs = rawDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_12__.isChannelIntelligence);
+            const docs = rawDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_13__.isChannelIntelligence);
             for (const doc of docs) {
                 const id = this.normalizeChannelId(doc.channelId);
                 // Only overwrite a still-empty slot; respect a real doc a concurrent seed wrote meanwhile.
@@ -8070,7 +8192,7 @@ class BasePromotionEngine {
         };
     }
     async loadPromotionMessages() {
-        const messages = await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.loadPromoteMessagesFromStore)(this.engineOpsDeps(), this.getChannelStore(), this.mobile, (level, message) => this.logRunnerMessage(level, message));
+        const messages = await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.loadPromoteMessagesFromStore)(this.engineOpsDeps(), this.getChannelStore(), this.mobile, (level, message) => this.logRunnerMessage(level, message));
         if (messages)
             this.promoteMsgs = messages;
     }
@@ -8103,7 +8225,7 @@ class BasePromotionEngine {
             return;
         }
         const timeSinceLastMessage = Date.now() - this.lastMessageTime();
-        this.logRunnerMessage('debug', `Promotions Triggered!, ⏳ Time since last message: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_9__.getReadableTimeDifference)(this.lastMessageTime())}`);
+        this.logRunnerMessage('debug', `Promotions Triggered!, ⏳ Time since last message: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.lastMessageTime())}`);
         if (!options.force && timeSinceLastMessage < 7 * 60 * 1000) {
             const timeToWait = this.formatDuration(7 * 60 * 1000 - timeSinceLastMessage);
             this.logRunnerMessage('debug', `⏸️ Too soon since last message (wait ${timeToWait})`);
@@ -8143,10 +8265,10 @@ class BasePromotionEngine {
         }
         this.promotionActive = true;
         const lastMessageTimeStr = this.stats.lastMainMessageTime > 0
-            ? ` (last message: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_9__.getReadableTimeDifference)(this.stats.lastMainMessageTime)})`
+            ? ` (last message: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.stats.lastMainMessageTime)})`
             : '';
         this.logRunnerMessage('debug', `🎯 Starting helper-supervised promotion loop${lastMessageTimeStr}`);
-        const supervisor = new ___WEBPACK_IMPORTED_MODULE_11__.PromotionRunnerSupervisor({
+        const supervisor = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionRunnerSupervisor({
             createRunner: () => {
                 const runner = this.createPromotionFlowRunner();
                 this.promotionRunner = runner;
@@ -8175,7 +8297,7 @@ class BasePromotionEngine {
         });
         this.promotionSupervisor = supervisor;
         const run = supervisor.start().catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error in promotion supervisor", false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in promotion supervisor", false);
         });
         this.promotionSupervisorPromise = run.finally(() => {
             if (this.promotionSupervisor === supervisor) {
@@ -8193,7 +8315,7 @@ class BasePromotionEngine {
     }
     async waitForPromotionSupervisorStop(supervisorPromise, context) {
         const observedSupervisorPromise = supervisorPromise.catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, context, false);
         });
         try {
             await Promise.race([
@@ -8202,7 +8324,7 @@ class BasePromotionEngine {
             ]);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, context, false);
         }
     }
     async stopInactivePromotionSupervisorBeforeStart(reason) {
@@ -8251,7 +8373,7 @@ class BasePromotionEngine {
         const verificationQueue = typeof account.createVerificationQueue === 'function'
             ? account.createVerificationQueue(this.MAX_QUEUE_SIZE)
             : null;
-        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_11__.PromotionMessageQueue(this.MAX_QUEUE_SIZE, verificationQueue);
+        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionMessageQueue(this.MAX_QUEUE_SIZE, verificationQueue);
         const adapter = {
             isActive: () => this.promotionActive,
             getStats: () => ({
@@ -8290,10 +8412,10 @@ class BasePromotionEngine {
             sleep: async (ms) => { await this.interruptibleSleep(ms); },
             ...extras.adapter,
         };
-        const runtime = ___WEBPACK_IMPORTED_MODULE_11__.PromotionRuntime.getInstance();
+        const runtime = ___WEBPACK_IMPORTED_MODULE_12__.PromotionRuntime.getInstance();
         const attributionEnabled = !!runtime.tracker && !!runtime.attribution;
         this.logRunnerMessage('info', `[${this.mobile}] PROMO features | scoring ${extras.runnerOptions.scoringEnabled} | poolLearning=true | attribution ${attributionEnabled}`);
-        return new ___WEBPACK_IMPORTED_MODULE_11__.PromotionFlowRunner(adapter, {
+        return new ___WEBPACK_IMPORTED_MODULE_12__.PromotionFlowRunner(adapter, {
             account,
             scoringEnabled: extras.runnerOptions.scoringEnabled,
             attributionEnabled,
@@ -8366,7 +8488,7 @@ class BasePromotionEngine {
         }
         catch (error) {
             const errorDetails = this.onSendError(request, error);
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_7__.parseTelegramError)(error, request.channel.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_8__.parseTelegramError)(error, request.channel.channelId);
             const errorMessage = this.promotionErrorMessage(parsed, errorDetails?.message);
             const attempted = !this.isPromotionPreflightError(error);
             const terminal = attempted || this.isTerminalSendFailure(parsed) || this.errorMessageIndicatesMissingEntity(errorMessage);
@@ -8416,7 +8538,7 @@ class BasePromotionEngine {
      * Length is validated AFTER sanitization so we measure what is actually sent.
      */
     assertSendablePromotionText(text) {
-        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_20__.sanitizePromotionRendering)(text);
+        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_21__.sanitizePromotionRendering)(text);
         if (!sanitized) {
             throw this.createPromotionPreflightError('MSG_EMPTY_AFTER_SANITIZE', {
                 length: Array.from(text).length,
@@ -8436,7 +8558,7 @@ class BasePromotionEngine {
     }
     /** Whether an error message string should be treated as a terminal missing-entity case. */
     errorMessageIndicatesMissingEntity(errorMessage) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.errorIndicatesMissingEntity)(this.engineOpsDeps(), errorMessage);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.errorIndicatesMissingEntity)(this.engineOpsDeps(), errorMessage);
     }
     /** Send-path log hooks; default no-op (promote), tg-aut overrides for rich logs. */
     onSendAttempt(_request) { }
@@ -8482,7 +8604,7 @@ class BasePromotionEngine {
                 this.onCheckEntityNotFound(messageItem);
                 return { status: 'deleted' };
             }
-            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => this.client.getMessages(entity, { ids: [messageItem.messageId] }), { timeout: 5000, errorMessage: 'Checking Message Existence Timeout' });
+            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__.withTimeout)(() => this.client.getMessages(entity, { ids: [messageItem.messageId] }), { timeout: 5000, errorMessage: 'Checking Message Existence Timeout' });
             const message = Array.isArray(result) ? result[0] : result;
             const status = message?.id === messageItem.messageId
                 ? {
@@ -8496,18 +8618,18 @@ class BasePromotionEngine {
             return status;
         }
         catch (error) {
-            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_7__.parseTelegramError)(error, messageItem.channelId);
+            const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_8__.parseTelegramError)(error, messageItem.channelId);
             if (this.isTerminalMessageCheckFailure(parsed)) {
                 this.onCheckTerminalFailure(messageItem, parsed);
                 return { status: 'deleted' };
             }
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `Error checking helper-owned message ${messageItem.messageId} in ${messageItem.channelId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `Error checking helper-owned message ${messageItem.messageId} in ${messageItem.channelId}`, false);
             return { status: 'unknown' };
         }
     }
     /** Load the stored channel doc used to resolve the entity for a message check. */
     async loadStoredChannelForCheck(messageItem) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.loadStoredChannelForMessageCheck)(this.engineOpsDeps(), this.getChannelStore(), messageItem.channelId, this.mobile);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.loadStoredChannelForMessageCheck)(this.engineOpsDeps(), this.getChannelStore(), messageItem.channelId, this.mobile);
     }
     /** Message-check log hooks; default no-op (promote provides its own simpler logging via overrides). */
     onCheckEntityNotFound(messageItem) {
@@ -8568,7 +8690,7 @@ class BasePromotionEngine {
     //  HOOK SUPPORT: SHARED FAILURE-STATE PERSISTENCE
     // =================================================================
     async applyPromotionFailureState(channelId, errorMsg) {
-        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_17__.persistPromotionFailureState)(this.engineOpsDeps(), this.getChannelStore(), channelId, errorMsg, this.mobile, (level, message) => this.logRunnerMessage(level, message));
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.persistPromotionFailureState)(this.engineOpsDeps(), this.getChannelStore(), channelId, errorMsg, this.mobile, (level, message) => this.logRunnerMessage(level, message));
     }
     // =================================================================
     //  DELAY / SLEEP
@@ -8724,7 +8846,7 @@ class BasePromotionEngine {
                 return entity;
         }
         catch (error) {
-            this.lastEntityResolutionError = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to resolve Telegram dialog entity for ${normalized}`, false).message;
+            this.lastEntityResolutionError = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Failed to resolve Telegram dialog entity for ${normalized}`, false).message;
         }
         const telegramPeer = this.toTelegramChannelPeer(normalized);
         try {
@@ -8733,7 +8855,7 @@ class BasePromotionEngine {
             return entity;
         }
         catch (error) {
-            this.lastEntityResolutionError = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to resolve Telegram peer ${telegramPeer}`, false).message;
+            this.lastEntityResolutionError = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Failed to resolve Telegram peer ${telegramPeer}`, false).message;
         }
         if (!channel || typeof channel !== 'object')
             return null;
@@ -8741,14 +8863,14 @@ class BasePromotionEngine {
         if (/^-?\d+$/.test(accessHash)) {
             try {
                 const inputPeer = new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPeerChannel({
-                    channelId: big_integer__WEBPACK_IMPORTED_MODULE_5___default()(normalized),
-                    accessHash: big_integer__WEBPACK_IMPORTED_MODULE_5___default()(accessHash),
+                    channelId: big_integer__WEBPACK_IMPORTED_MODULE_6___default()(normalized),
+                    accessHash: big_integer__WEBPACK_IMPORTED_MODULE_6___default()(accessHash),
                 });
                 this.lastEntityResolutionError = null;
                 return inputPeer;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to build InputPeerChannel for ${telegramPeer}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] Failed to build InputPeerChannel for ${telegramPeer}`, false);
             }
         }
         const username = this.normalizeTelegramUsername(channel.username);
@@ -8775,17 +8897,17 @@ class BasePromotionEngine {
     }
     // Shared intelligence handle used by hook implementations.
     sharedIntelligence() {
-        return this.promotionContext?.intelligence || ___WEBPACK_IMPORTED_MODULE_11__.ChannelIntelligenceService.getInstance();
+        return this.promotionContext?.intelligence || ___WEBPACK_IMPORTED_MODULE_12__.ChannelIntelligenceService.getInstance();
     }
     strategyForRecord(randomIndex) {
-        return (0,___WEBPACK_IMPORTED_MODULE_11__.messageIndexToStrategy)(randomIndex);
+        return (0,___WEBPACK_IMPORTED_MODULE_12__.messageIndexToStrategy)(randomIndex);
     }
     resolveFailureAction(channelId, errorMsg) {
-        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_13__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
     }
     percentileEngineOrNull() {
         try {
-            return ___WEBPACK_IMPORTED_MODULE_11__.PercentileEngine.getInstance();
+            return ___WEBPACK_IMPORTED_MODULE_12__.PercentileEngine.getInstance();
         }
         catch {
             return null;
@@ -19944,9 +20066,11 @@ function naturalizeText(text, options = {}) {
     if (!options.maintainFormatting) {
         // 9. Add casual fillers (before bold to avoid breaking markers)
         result = addCasualFillers(result);
-        // 10. Apply bold style variation
-        const style = pickBoldStyle();
-        result = applyBoldStyle(result, style);
+        // 10. Apply bold style variation (skipped when the caller styles the text itself)
+        if (options.boldStyling !== false) {
+            const style = pickBoldStyle();
+            result = applyBoldStyle(result, style);
+        }
         // 11. Patterned layout (indent content lines in visual patterns)
         result = applyPatternedLayout(result);
     }
@@ -20215,6 +20339,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   attemptReverse: () => (/* binding */ attemptReverse),
 /* harmony export */   attemptReverseFuzzy: () => (/* binding */ attemptReverseFuzzy),
 /* harmony export */   batchObfuscate: () => (/* binding */ batchObfuscate),
+/* harmony export */   defaultSafeBlocks: () => (/* binding */ defaultSafeBlocks),
 /* harmony export */   generateVariants: () => (/* binding */ generateVariants),
 /* harmony export */   getConfig: () => (/* binding */ getConfig),
 /* harmony export */   homoglyphMap: () => (/* binding */ homoglyphMap),
@@ -22729,6 +22854,205 @@ function sanitizeLimitedDaysLeft(days) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/stylePromotionText.ts"
+/*!**************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/stylePromotionText.ts ***!
+  \**************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTION_STYLED_PARSE_MODE: () => (/* binding */ PROMOTION_STYLED_PARSE_MODE),
+/* harmony export */   PROMO_OBFUSCATION_ENV_KEY: () => (/* binding */ PROMO_OBFUSCATION_ENV_KEY),
+/* harmony export */   escapePromotionMarkdown: () => (/* binding */ escapePromotionMarkdown),
+/* harmony export */   isPromoObfuscationEnabled: () => (/* binding */ isPromoObfuscationEnabled),
+/* harmony export */   stylePromotionText: () => (/* binding */ stylePromotionText)
+/* harmony export */ });
+/* harmony import */ var _obfuscateText__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./obfuscateText */ "../../packages/tg-core/src/utils/obfuscateText.ts");
+/**
+ * Compliant promotion styling: replaces homoglyph obfuscation (obfuscateText) and Unicode
+ * Mathematical-Bold fonts (naturalizeText's bold-style step) with plain text + real Telegram
+ * markdown bold.
+ *
+ * Gate: PROMO_OBFUSCATION_ENABLED (remote config -> process.env, read per call). Unset/false =
+ * this styling; "true"/"1" = the old obfuscate -> naturalize path, byte-identical.
+ *
+ * Parse mode: GramJS's default client parse mode is its markdown parser
+ * (node_modules/telegram/extensions/markdown.js, `MarkdownParser`), selected explicitly with
+ * parseMode 'md'. That parser has NO escape syntax: it only reacts to the DEFAULT_DELIMITERS
+ * `**` `__` `~~` `` ` `` ``` (client/messageParse.js). So "escaping" here means neutralising every
+ * one of those sequences in the body BEFORE the bold markers are inserted; single `*`, `_`, `~`,
+ * `[`, `]` are not delimiters for that parser and render literally.
+ */
+
+const PROMO_OBFUSCATION_ENV_KEY = 'PROMO_OBFUSCATION_ENABLED';
+/** GramJS parse mode for styled promotion sends (sanitizeParseMode('md') -> MarkdownParser). */
+const PROMOTION_STYLED_PARSE_MODE = 'md';
+/** Truthy = "true" | "1" (case-insensitive, trimmed). Read on every call so a config refresh applies. */
+function isPromoObfuscationEnabled(env = process.env) {
+    const raw = (env[PROMO_OBFUSCATION_ENV_KEY] || '').trim().toLowerCase();
+    return raw === 'true' || raw === '1';
+}
+/**
+ * Neutralise every GramJS-markdown delimiter in `text` so it parses to zero entities.
+ * Order matters: backticks first (covers ```), then `*` runs are removed (existing bold markers;
+ * the styler re-bolds), then `_`/`~` runs are spaced out — removing `*` first means a `_**_` cannot
+ * collapse into a new `__`.
+ */
+function escapePromotionMarkdown(text) {
+    return text
+        .replace(/`/g, "'")
+        .replace(/\*{2,}/g, '')
+        .replace(/_{2,}/g, (run) => Array.from(run).join(' '))
+        .replace(/~{2,}/g, (run) => Array.from(run).join(' '));
+}
+const SENTENCE_RE = /\S.*?(?:[.!?…]+(?=\s|$)|$)/gu;
+const HAS_LETTER_RE = /\p{L}/u;
+const LINK_OR_HANDLE_RE = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\bt\.me\/|(?:^|\s)@\w)/iu;
+const WORD_CORE_RE = /^[\p{L}][\p{L}\p{M}']*$/u;
+const MATH_ALNUM_RE = /[\u{1D400}-\u{1D7FF}]/u;
+const MARKDOWN_EDGE_CHARS = new Set(['*', '_', '~']);
+function pickIndex(length, random) {
+    return Math.min(length - 1, Math.floor(random() * length));
+}
+function safeSpans(line, safeBlocks) {
+    const spans = [];
+    for (const block of safeBlocks) {
+        if (!block)
+            continue;
+        let from = 0;
+        for (;;) {
+            const at = line.indexOf(block, from);
+            if (at < 0)
+                break;
+            spans.push([at, at + block.length]);
+            from = at + block.length;
+        }
+    }
+    return spans;
+}
+function overlaps(start, end, spans) {
+    return spans.some(([s, e]) => start < e && end > s);
+}
+/** Candidate words in [start,end) of `line`: [coreStart, coreEnd] offsets into the line. */
+function eligibleWords(line, start, end, spans) {
+    const out = [];
+    const segment = line.slice(start, end);
+    for (const match of segment.matchAll(/\S+/gu)) {
+        const token = match[0];
+        const tokenStart = start + (match.index ?? 0);
+        if (/:\/\/|\/|@|^#/u.test(token) || /^www\./iu.test(token))
+            continue;
+        const parts = /^([^\p{L}\p{M}\p{N}]*)(.*?)([^\p{L}\p{M}\p{N}]*)$/u.exec(token);
+        if (!parts)
+            continue;
+        const [, lead, core, trail] = parts;
+        if (Array.from(core).length < 3 || !WORD_CORE_RE.test(core) || MATH_ALNUM_RE.test(core))
+            continue;
+        if (lead && MARKDOWN_EDGE_CHARS.has(lead[lead.length - 1]))
+            continue;
+        if (trail && MARKDOWN_EDGE_CHARS.has(trail[0]))
+            continue;
+        const coreStart = tokenStart + lead.length;
+        const coreEnd = coreStart + core.length;
+        if (overlaps(tokenStart, tokenStart + token.length, spans))
+            continue;
+        out.push([coreStart, coreEnd]);
+    }
+    return out;
+}
+/**
+ * Style a promotion body for a parseMode 'md' send:
+ * 1. Neutralise markdown delimiters in the body (escapePromotionMarkdown).
+ * 2. When there are >= 4 sentences, drop exactly one droppable sentence. Never droppable: the
+ *    first and last sentence, any sentence on the first or last content line of a multi-line
+ *    message (greeting / CTA), one holding a link or @handle, or one overlapping a safe block.
+ *    Fewer than 4 sentences, or nothing droppable: drop nothing. At least 3 always survive.
+ * 3. Bold exactly one eligible word (>= 3 letters; not a URL, @handle, #hashtag, number/phone,
+ *    emoji/symbol, Unicode math-font text, or safe-block text) per surviving sentence with `**`.
+ * A "sentence" is a run on one line ending at . ! ? … followed by whitespace/end of line, and
+ * containing at least one letter (connector/separator/emoji-only runs are kept untouched).
+ */
+function stylePromotionText(text, options = {}) {
+    if (!text || !text.trim())
+        return text;
+    const random = options.random ?? Math.random;
+    const blocks = [..._obfuscateText__WEBPACK_IMPORTED_MODULE_0__.defaultSafeBlocks, ...(options.safeBlocks ?? [])];
+    const lines = escapePromotionMarkdown(text).split('\n');
+    const spansByLine = lines.map((line) => safeSpans(line, blocks));
+    const sentences = [];
+    lines.forEach((line, lineIndex) => {
+        for (const match of line.matchAll(SENTENCE_RE)) {
+            if (!HAS_LETTER_RE.test(match[0]))
+                continue;
+            const start = match.index ?? 0;
+            sentences.push({ line: lineIndex, start, end: start + match[0].length });
+        }
+    });
+    let dropped;
+    if (sentences.length >= 4) {
+        const first = sentences[0];
+        const last = sentences[sentences.length - 1];
+        // Multi-line: the whole first and last content lines are protected. Single-line: only the
+        // first and last sentence (protecting "the line" would protect everything).
+        const protectLines = first.line !== last.line;
+        const droppable = sentences.filter((s) => {
+            if (s === first || s === last)
+                return false;
+            if (protectLines && (s.line === first.line || s.line === last.line))
+                return false;
+            const body = lines[s.line].slice(s.start, s.end);
+            if (LINK_OR_HANDLE_RE.test(body))
+                return false;
+            return !overlaps(s.start, s.end, spansByLine[s.line]);
+        });
+        if (droppable.length >= 1)
+            dropped = droppable[pickIndex(droppable.length, random)];
+    }
+    const edits = new Map();
+    const addEdit = (line, edit) => {
+        const list = edits.get(line) ?? [];
+        list.push(edit);
+        edits.set(line, list);
+    };
+    for (const s of sentences) {
+        if (s === dropped) {
+            addEdit(s.line, { start: s.start, end: s.end, replace: '' });
+            continue;
+        }
+        const words = eligibleWords(lines[s.line], s.start, s.end, spansByLine[s.line]);
+        if (words.length === 0)
+            continue;
+        const [coreStart, coreEnd] = words[pickIndex(words.length, random)];
+        const core = lines[s.line].slice(coreStart, coreEnd);
+        addEdit(s.line, { start: coreStart, end: coreEnd, replace: `**${core}**` });
+    }
+    const out = [];
+    lines.forEach((line, lineIndex) => {
+        const list = edits.get(lineIndex);
+        if (!list) {
+            out.push(line);
+            return;
+        }
+        let next = line;
+        for (const edit of list.sort((a, b) => b.start - a.start)) {
+            next = next.slice(0, edit.start) + edit.replace + next.slice(edit.end);
+        }
+        if (dropped && dropped.line === lineIndex) {
+            // Tidy the gap the dropped sentence left; a line it emptied disappears entirely.
+            if (!next.trim())
+                return;
+            const indent = next.match(/^\s*/)?.[0] ?? '';
+            next = indent + next.slice(indent.length).replace(/[^\S\n]{2,}/g, ' ').trimEnd();
+        }
+        out.push(next);
+    });
+    return out.join('\n');
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/telegram-error-parser.ts"
 /*!*****************************************************************!*\
   !*** ../../packages/tg-core/src/utils/telegram-error-parser.ts ***!
@@ -24603,6 +24927,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedService;
         delete doc.servedUtr;
         delete doc.servedSha;
+        delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
         return this.guardWrite(`insert(${chatId})`, async () => {
             try {
                 await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
@@ -24731,15 +25056,18 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * the loser gets 'duplicate' and must be treated as REJECT_DUPLICATE.
      * 'already_served' = this very message was already claimed (replay), idempotent.
      */
-    async markServed(chatId, profile, telegramMsgId, service) {
+    async markServed(chatId, profile, telegramMsgId, service, creditAmount) {
         const id = String(chatId || '').trim();
         if (!id || !profile)
             return 'missing';
         try {
             const filter = { chatId: id, profile, telegramMsgId };
+            const credit = Number(creditAmount);
             const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
-            // Pipeline update so servedUtr copies this row's own utr (absent when the row has none).
-            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256' } }]);
+            // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
+            // set here, at the credit decision, never at insert ($literal: a pipeline value is never a field path).
+            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256',
+                        ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}) } }]);
             if (res.matchedCount > 0)
                 return 'served';
             const existing = await this.collection.find(filter).limit(1).next();
@@ -24902,7 +25230,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!id || !profile)
             return false;
         return this.guard(`releaseServed(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '' } });
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -25793,7 +26121,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* binding */ USER_DATA_DEFAULTS),
-/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
+/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository),
+/* harmony export */   neverPaidFilter: () => (/* binding */ neverPaidFilter)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 /* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
@@ -25833,6 +26162,29 @@ const USER_DATA_DEFAULTS = {
 const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'];
 /** How many recent idempotency keys a row remembers. See `creditPayment`. */
 const CREDIT_KEY_HISTORY = 20;
+/**
+ * Matches only rows with NO payment marker: the guard every userData retention delete must AND in.
+ * Mirrors CMS `UserDataService.removeRedundantData` (payAmount 0 plus the six lifetime/legacy markers),
+ * so tg-aut and CMS agree on who counts as a payer. A past payer's row holds the only Mongo record that
+ * they paid (lifetimePaid/firstPaidAt are D1-only), and `payAmount` alone is a balance that decays to 0
+ * as service is delivered, so it cannot be the only test. Measured 2026-10-25: 73 of the 1,302 rows past
+ * the 30-day cutoff carried a payment marker. A fresh object per call so no caller can mutate a shared filter.
+ */
+function neverPaidFilter() {
+    const absentOrNonPositive = (field) => ({ $or: [{ [field]: { $exists: false } }, { [field]: { $lte: 0 } }] });
+    const absentOrNull = (field) => ({ $or: [{ [field]: { $exists: false } }, { [field]: null }] });
+    return {
+        $and: [
+            absentOrNonPositive('payAmount'),
+            absentOrNonPositive('lifetimePaid'),
+            absentOrNull('firstPaidAt'),
+            absentOrNonPositive('highestPayAmount'),
+            absentOrNonPositive('paidCount'),
+            absentOrNonPositive('lifetimeCredits'),
+            absentOrNull('lastPaidAt'),
+        ],
+    };
+}
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -26094,10 +26446,11 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
     }
     /**
      * Delete rows whose real numeric lastMsgTimeStamp is older than `cutoff`. `$gt: 0` never matches
-     * null/missing/strings (BSON orders them below numbers), so unanchored rows are kept. Throws.
+     * null/missing/strings (BSON orders them below numbers), so unanchored rows are kept. Rows with any
+     * payment marker are never deleted (`neverPaidFilter`, the CMS retention guard). Throws.
      */
     async deleteInactiveBefore(identity, cutoff) {
-        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff } });
+        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff }, ...neverPaidFilter() });
     }
     /** paidReply -> true on every row of this persona. Throws. */
     async enablePaidReplyForAll(identity) {
@@ -26267,6 +26620,49 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
         if (!id)
             return null;
         return this.guard(`find(${id})`, null, () => this.collection.findOne({ chatId: id }));
+    }
+    /**
+     * Retention (data-model review 2026-10-25, item 11): delete identity rows nobody has observed since `cutoff`
+     * AND whose person has no `userData` row left under ANY persona. The second condition ties this collection
+     * to the userData sweep, so a payer's row (kept by its payer guard) keeps its identity too. A row observed
+     * between the read and the delete is kept (the delete re-checks lastSeenAt). Rows with no numeric
+     * lastSeenAt are never matched. At most `limit` rows deleted per call. Returns the number deleted. Throws.
+     * The limit counts ORPHANS, not rows examined: stale rows are read in `_id` order, `limit` per page, until `limit`
+     * orphans are found or `limit * 10` stale rows have been examined (a payer's identity is kept forever, so the
+     * first `limit` stale rows may all have userData rows; limiting before the lookup would then delete nothing, ever).
+     */
+    async deleteOrphanedBefore(cutoff, limit = 5000) {
+        const maxExamined = limit * 10;
+        const orphans = [];
+        let examined = 0;
+        let lastId;
+        while (orphans.length < limit && examined < maxExamined) {
+            const pageSize = Math.min(limit, maxExamined - examined);
+            const page = await this.collection.aggregate([
+                { $match: { lastSeenAt: { $gt: 0, $lt: cutoff }, ...(lastId === undefined ? {} : { _id: { $gt: lastId } }) } },
+                { $sort: { _id: 1 } },
+                { $limit: pageSize },
+                // localField + pipeline (MongoDB 5.0+; Atlas runs 8.0) uses the userData chatId_Profile index.
+                { $lookup: { from: 'userData', localField: 'chatId', foreignField: 'chatId', as: 'rows', pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }] } },
+                { $project: { _id: 1, orphan: { $eq: [{ $size: '$rows' }, 0] } } },
+            ]).toArray();
+            if (page.length === 0)
+                break;
+            examined += page.length;
+            lastId = page[page.length - 1]._id;
+            for (const row of page)
+                if (row.orphan && orphans.length < limit)
+                    orphans.push(row._id);
+            if (page.length < pageSize)
+                break;
+        }
+        if (orphans.length === 0)
+            return 0;
+        const result = await this.collection.deleteMany({
+            _id: { $in: orphans },
+            lastSeenAt: { $gt: 0, $lt: cutoff },
+        });
+        return result.deletedCount ?? 0;
     }
     /**
      * `chatId` is the key, so it is UNIQUE here — unlike in userData, where the unique index is
@@ -26542,6 +26938,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
+/* harmony export */   neverPaidFilter: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.neverPaidFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
@@ -39582,13 +39979,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
 /* harmony import */ var _tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/naturalizeText */ "../../packages/tg-core/src/utils/naturalizeText.ts");
-/* harmony import */ var _runtime_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./runtime-messages */ "./src/promotion/runtime-messages.ts");
-/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/stylePromotionText */ "../../packages/tg-core/src/utils/stylePromotionText.ts");
+/* harmony import */ var _runtime_messages__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./runtime-messages */ "./src/promotion/runtime-messages.ts");
+/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/telegram-utils/sendMessageWithTimout */ "../../packages/tg-core/src/telegram-utils/sendMessageWithTimout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 
 
 
@@ -39605,7 +40003,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("PromotionEngine");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("PromotionEngine");
 /**
  * Promote-flavored promotion engine.
  *
@@ -39614,7 +40013,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("P
  * the private-channel send fallback. One instance PER MOBILE
  * (promote runs N telegram clients per process); all state is per-instance.
  */
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.BasePromotionEngine {
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || dialogManager.instanceName || process.env.clientId || "defaultClient", options.instanceId || dialogManager.instanceId || process.env.mobile || "defaultMobile");
         // --- Public mutable fields preserved from the old Promotion API ---
@@ -39650,9 +40049,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.generateCustomMessage)(_runtime_messages__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateCustomMessage)(_runtime_messages__WEBPACK_IMPORTED_MODULE_10__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.generateFollowupMsg)(),
         };
     }
     adapterShouldContinue() {
@@ -39682,7 +40081,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
         logger.log(`[${this.mobile}] Restarting promotion...`);
         await this.stopPromotions();
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(1000);
-        (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__.checktghealth)(this.client, this.mobile);
+        (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_11__.checktghealth)(this.client, this.mobile);
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(3000);
         await this.startPromotion({ force: true });
     }
@@ -39690,7 +40089,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
     //  SEND TO CHANNEL (promote obfuscation + private fallback)
     // =================================================================
     checkAccountHealth() {
-        return (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__.checktghealth)(this.client, this.mobile);
+        return (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_11__.checktghealth)(this.client, this.mobile);
     }
     sendViaPrivateFallback(channelInfo, message) {
         return this.handlePrivateChannel(channelInfo, message);
@@ -39704,9 +40103,17 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             return undefined;
         try {
             logger.log(`[${this.mobile}] Retrying private channel via @${username}`);
-            const finalText = (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
+            // PROMO_OBFUSCATION_ENABLED on, or an AI message (skipObfuscation): unchanged naturalize.
+            // Off (default) for pool messages: markdown styling with no Unicode-font bold, parseMode 'md'.
+            const styled = !message.skipObfuscation && !(0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.isPromoObfuscationEnabled)();
+            const finalText = styled
+                ? (0,_tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.stylePromotionText)((0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, {
+                    maintainFormatting: message.maintainFormatting || false,
+                    boldStyling: false,
+                }))
+                : (0,_tg_core_utils_naturalizeText__WEBPACK_IMPORTED_MODULE_8__.naturalizeText)(message.message, { maintainFormatting: message.maintainFormatting || false });
             const validatedFinalText = this.assertSendablePromotionText(finalText);
-            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_12__.sendMessageWithTimeoutOrThrow)(this.client, username, { message: validatedFinalText });
+            const sent = await (0,_tg_core_telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_13__.sendMessageWithTimeoutOrThrow)(this.client, username, styled ? { message: validatedFinalText, parseMode: _tg_core_utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_9__.PROMOTION_STYLED_PARSE_MODE } : { message: validatedFinalText });
             // A verified username send is fresh evidence that this channel is
             // reachable. Repair the stale private flag, but never let a
             // best-effort persistence failure turn a completed Telegram send
@@ -39774,7 +40181,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
             // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
             // remaining consumer) — this used to stamp a message cursor on activeChannels that
             // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.isPoolMessageIndex)(messageIndex)) {
+            if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(messageIndex, ["custom", "followUp", "99", 'ai']) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.isPoolMessageIndex)(messageIndex)) {
                 await _data_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore.addToAvailableMsgs(messageItem.channelId, messageIndex);
             }
         }
@@ -39837,7 +40244,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
                         { label: "Channel", value: `@${channelInfo.username}`, code: false },
                         { label: "Index", value: messageIndex },
                     ],
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.NotificationSeverity.WARNING,
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.NotificationSeverity.WARNING,
                     tags: ["promote", "message-index", "cleanup"],
                 }, `Failed to send removed-message notification for ${channelId}`);
             }
@@ -39848,7 +40255,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
     }
     async sendPromotionLog(notification, context) {
         try {
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_14__.ChannelCategory.PROM_LOGS1, notification);
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.PROM_LOGS1, notification);
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.logUnsentNotification)(sent, "Promotion log notification returned false", `[${this.mobile}] ${context}`);
         }
         catch (error) {
@@ -39924,7 +40331,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
                 includeRestricted: true,
             });
             const observedChannels = [...dialogs.channels];
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.persistObservedChannels)(_data_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_16__.persistObservedChannels)(_data_db__WEBPACK_IMPORTED_MODULE_2__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
             channelDetails = observedChannels.filter((channel) => channel.canSendMsgs === true);
             const topChannels = this.selectParticipantShortlist(channelDetails);
             logger.log([
@@ -40056,12 +40463,12 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.Ba
     }
     setDaysLeft(daysLeft) {
         this.daysLeft = daysLeft;
-        (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_10__.setDaysLeft)(this.mobile, daysLeft);
+        (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(this.mobile, daysLeft);
         const now = Date.now();
         // Healthy (-1) or released-today (0): available now. Only a real positive limit dates forward.
         // (Previously `Date.now() + daysLeft * 86400000` dated -1 to YESTERDAY, mis-flagging healthy
         // accounts as already-overdue-available — harmless but wrong; this pins today for both cases.)
-        const availableDate = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_11__.isSpamLimited)(daysLeft) && daysLeft > 0
+        const availableDate = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) && daysLeft > 0
             ? new Date(now + daysLeft * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
             : new Date(now).toISOString().split('T')[0];
         const promote = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote;
@@ -42380,6 +42787,8 @@ class ConnectionService {
             void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_9__.initAnalytics)({
                 connectionString: process.env.ANALYTICS_DB_URL,
                 logger,
+                // Stamped on promotion_send / conversion_event rows (same value as daily_client.namespace).
+                service: "promote-clients",
                 // Rows the sink definitively dropped (spool full/unwritable, a permanently bad row).
                 // One operator message per 30 min per process at most; never throws.
                 onLoss: analyticsLossNotifier,
@@ -44191,7 +44600,10 @@ class TelegramManager {
                 logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} skipped: dbcoll (persona) is not set on this process`);
                 return false;
             }
-            const result = await runtime.attribution.attributeDMConversion(commonChatIds, conversionId);
+            // client_id = the client this promote account serves, i.e. whose tg-aut got the routed DM.
+            const result = await runtime.attribution.attributeDMConversion(commonChatIds, conversionId, {
+                clientId: this.clientDetails.clientId,
+            });
             if (result.failedChannelIds.length > 0) {
                 logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} failed ${result.failedChannelIds.length} channel write(s); retaining route for retry`);
                 return false;
