@@ -6160,11 +6160,16 @@ class AnalyticsSink {
         }
         return !other;
     }
-    /** Batch ids already in quarantine files of this source (`<base>` or `<base>.q…`; temps skipped). */
-    async quarantinedIds(dir, base) {
+    /**
+     * Batch ids already in ANY quarantine file in `dir` (temps skipped). Dedup must span sources, not
+     * just this `<base>`: a re-spill writes old batches into a new overflow file under a different
+     * base, so scoping to one source would quarantine and alert the same batch twice. Scanning the
+     * whole (bounded, pruned) quarantine dir once per call is cheap.
+     */
+    async quarantinedIds(dir) {
         const ids = new Set();
         for (const name of await fs__WEBPACK_IMPORTED_MODULE_1__.promises.readdir(dir)) {
-            if ((name !== base && !name.startsWith(`${base}.`)) || /\.tmp-\d+$/.test(name))
+            if (/\.tmp-\d+$/.test(name))
                 continue;
             let text;
             try {
@@ -6191,10 +6196,12 @@ class AnalyticsSink {
      * decision) and are reported via onLoss. Age is per batch, not per file: a re-spill writes old
      * batches into a new file, and an overflow file can collect fresh batches for a long time.
      *
-     * Dedupe is by batch id against this source's existing quarantine files: a stop after the rename
-     * but before the source is deleted leaves the source claimed, and the next load skips (silently,
-     * they were reported) the batches already quarantined, while a batch that aged past 6 days since
-     * then is quarantined and reported now instead of being dropped with the source.
+     * Dedupe is by batch id against EVERY existing quarantine file (not just this source's): a stop
+     * after the rename but before the source is deleted leaves the source claimed, and the next load
+     * skips (silently, they were reported) the batches already quarantined, while a batch that aged
+     * past 6 days since then is quarantined and reported now instead of being dropped with the source.
+     * Spanning all sources also stops a re-spill — which moves old batches into a different overflow
+     * file under a new base — from quarantining and alerting the same batch a second time.
      */
     async quarantineLines(file, old) {
         if (old.size === 0)
@@ -6206,7 +6213,7 @@ class AnalyticsSink {
             pending += l.length;
         try {
             await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(dir, { recursive: true });
-            const done = await this.quarantinedIds(dir, base);
+            const done = await this.quarantinedIds(dir);
             const lines = [];
             let batches = 0;
             for (const [id, l] of old) {
@@ -6290,6 +6297,13 @@ class AnalyticsSink {
     /**
      * Spool files of OTHER instance keys untouched for over 24 h (an app renamed or removed from the
      * ecosystem): never adopted (their key owns them), but logged and alerted once at start.
+     *
+     * Includes stranded `.tmp-<pid>` overflow temps. A temp is only settled while its writer's pid is
+     * dead or carries this key (isTempOwnerAlive); a temp of ANOTHER key whose pid was reused by a
+     * live keyless process is treated as still-being-written forever, so it is never adopted and,
+     * without this, never surfaced. The `.jsonl` spool regex below does not allow a `.tmp-` suffix, so
+     * match those separately and age them the same 24 h. Rows in an unfinished temp may be incomplete,
+     * hence the distinct "(temp)" label — this flags the strand for a human, it does not replay them.
      */
     reportOrphanSpools() {
         let names;
@@ -6300,24 +6314,33 @@ class AnalyticsSink {
             return;
         }
         const byKey = new Map();
+        const tmpByKey = new Map();
         for (const name of names) {
-            const m = /^(.+)-\d{13}-[a-z0-9]+\.jsonl(?:\.claimed-.*)?$/.exec(name);
-            if (!m || this.spoolPattern.test(name))
+            const tmp = /^(.+)-\d{13}-[a-z0-9]+\.jsonl\.tmp-\d+$/.exec(name);
+            const m = tmp ?? /^(.+)-\d{13}-[a-z0-9]+\.jsonl(?:\.claimed-.*)?$/.exec(name);
+            // A temp carrying this key may be ours (adopted by settle); only other keys' temps strand here.
+            if (!m || this.spoolPattern.test(name) || (tmp && m[1] === this.instanceKey))
                 continue;
             const file = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
             try {
                 if (Date.now() - fs__WEBPACK_IMPORTED_MODULE_1__.statSync(file).mtimeMs <= ORPHAN_AFTER_MS)
                     continue;
-                const seen = byKey.get(m[1]) ?? { files: 0, rows: 0 };
+                const into = tmp ? tmpByKey : byKey;
+                const seen = into.get(m[1]) ?? { files: 0, rows: 0 };
                 seen.files += 1;
                 seen.rows += countLines(file);
-                byKey.set(m[1], seen);
+                into.set(m[1], seen);
             }
             catch { /* raced */ }
         }
-        if (byKey.size === 0)
+        if (byKey.size === 0 && tmpByKey.size === 0)
             return;
-        const list = [...byKey].map(([k, v]) => `${k} (${v.files} file(s), ${v.rows} rows)`).join(", ");
+        const parts = [];
+        if (byKey.size > 0)
+            parts.push([...byKey].map(([k, v]) => `${k} (${v.files} file(s), ${v.rows} rows)`).join(", "));
+        if (tmpByKey.size > 0)
+            parts.push([...tmpByKey].map(([k, v]) => `${k} (temp) (${v.files} file(s), ${v.rows} rows)`).join(", "));
+        const list = parts.join("; ");
         this.log("warn", `[analytics] orphan spool files untouched > 24 h in ${this.spoolDir}: ${list}`);
         this.alert(`orphan spool in ${this.spoolDir}, not adopted: ${list}`);
     }
@@ -48762,6 +48785,18 @@ const shutdown = async (signal, exitCode = 0) => {
     }
 };
 (0,_shutdown_signal__WEBPACK_IMPORTED_MODULE_2__.registerShutdown)(shutdown);
+/**
+ * server.js (the pm2 loader) runs this app in-process and, on SIGINT/SIGTERM, fires its own
+ * handler which `await`s every `service:shutdown` listener before calling process.exit. Without
+ * a listener here the loader finds none, exits in ~4ms, and our cleanup (durable queues, respondTo
+ * map, analytics drain) never runs. Register one so the loader waits for `shutdown()`. The
+ * `isShuttingDown` guard makes the app's own signal handlers above a no-op second call, so cleanup
+ * runs exactly once regardless of which handler fires first. Calling `done` lets the loader proceed
+ * if `shutdown()` exits the process first (it normally does, with the right exit code).
+ */
+process.on("service:shutdown", (done) => {
+    return shutdown("service:shutdown").catch(() => { }).finally(done);
+});
 (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_21__.setBeforeProxyRestartCallback)((event) => {
     return shutdown(`Proxy ${event.deadProxy.ip}:${event.deadProxy.port} restart requested for ${event.affectedMobiles.join(", ")}`, 1);
 });
