@@ -3207,7 +3207,7 @@ let TelegramController = class TelegramController {
         return this.telegramService.getAuths(mobile);
     }
     async terminateOtherSessions(mobile) {
-        return this.telegramService.removeOtherAuths(mobile);
+        return this.telegramService.removeExternalLoginSessions(mobile);
     }
     async createNewSession(mobile) {
         return this.telegramService.createNewSession(mobile);
@@ -5865,10 +5865,10 @@ let TelegramService = TelegramService_1 = class TelegramService {
         });
         return auths;
     }
-    async removeOtherAuths(mobile) {
+    async removeExternalLoginSessions(mobile) {
         const telegramClient = await connection_manager_1.connectionManager.getClient(mobile);
         try {
-            await telegramClient.removeOtherAuths();
+            await telegramClient.removeExternalLoginSessions();
             this.logger.info(mobile, 'Removed other authorizations');
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'success',
@@ -9068,8 +9068,8 @@ class TelegramManager {
     async deleteProfilePhotos() {
         return profileOps.deleteProfilePhotos(this.ctx);
     }
-    async removeOtherAuths() {
-        return authOps.removeOtherAuths(this.ctx);
+    async removeExternalLoginSessions() {
+        return authOps.removeExternalLoginSessions(this.ctx);
     }
     async getAuths() {
         return authOps.getAuths(this.ctx);
@@ -9120,7 +9120,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.isOwnAuth = isOwnAuth;
-exports.removeOtherAuths = removeOtherAuths;
+exports.removeExternalLoginSessions = removeExternalLoginSessions;
 exports.getAuths = getAuths;
 exports.getLastForeignActiveDate = getLastForeignActiveDate;
 exports.getLastActiveTime = getLastActiveTime;
@@ -9145,7 +9145,7 @@ function isOwnAuth(mobile, auth) {
     }
     return (0, tg_config_1.isAuthFingerprintMatch)(mobile, auth);
 }
-async function removeOtherAuths(ctx) {
+async function removeExternalLoginSessions(ctx) {
     if (!ctx.client)
         throw new Error('Client is not initialized');
     const result = await ctx.client.invoke(new telegram_1.Api.account.GetAuthorizations());
@@ -9154,7 +9154,7 @@ async function removeOtherAuths(ctx) {
     let revokedCount = 0;
     let failedCount = 0;
     const failedAuths = [];
-    ctx.logger.info(ctx.phoneNumber, `Auth cleanup starting: total=${result.authorizations.length}`, authSummary);
+    ctx.logger.info(ctx.phoneNumber, `External login cleanup starting: total=${result.authorizations.length}`, authSummary);
     for (const auth of result.authorizations) {
         if (isOwnAuth(ctx.phoneNumber, auth)) {
             keptCount++;
@@ -9186,27 +9186,27 @@ async function removeOtherAuths(ctx) {
         }
         await (0, Helpers_1.sleep)(2000 + Math.random() * 3000);
     }
-    ctx.logger.info(ctx.phoneNumber, `Auth cleanup attempted: kept=${keptCount}, revoked=${revokedCount}, failed=${failedCount}`, {
+    ctx.logger.info(ctx.phoneNumber, `External login cleanup attempted: kept=${keptCount}, revoked=${revokedCount}, failed=${failedCount}`, {
         failedAuths,
     });
     try {
         const me = await ctx.client.getMe();
         if (!me) {
-            throw new Error('Session verification failed after removeOtherAuths — getMe returned null');
+            throw new Error('Session verification failed after removeExternalLoginSessions — getMe returned null');
         }
-        ctx.logger.info(ctx.phoneNumber, `Session verified alive after auth cleanup (user: ${me.phone})`);
+        ctx.logger.info(ctx.phoneNumber, `Session verified alive after external login cleanup (user: ${me.phone})`);
     }
     catch (verifyError) {
-        ctx.logger.error(ctx.phoneNumber, 'CRITICAL: Our session may have been revoked during removeOtherAuths!', verifyError);
-        throw new Error(`Session self-check failed after removeOtherAuths: ${verifyError}`);
+        ctx.logger.error(ctx.phoneNumber, 'CRITICAL: Our session may have been revoked during removeExternalLoginSessions!', verifyError);
+        throw new Error(`Session self-check failed after removeExternalLoginSessions: ${verifyError}`);
     }
     const afterResult = await ctx.client.invoke(new telegram_1.Api.account.GetAuthorizations());
     const remainingOtherAuths = afterResult.authorizations.filter((auth) => !isOwnAuth(ctx.phoneNumber, auth));
-    ctx.logger.info(ctx.phoneNumber, `Auth cleanup verified: total=${afterResult.authorizations.length}, remainingOther=${remainingOtherAuths.length}`, {
+    ctx.logger.info(ctx.phoneNumber, `External login cleanup verified: total=${afterResult.authorizations.length}, remainingOther=${remainingOtherAuths.length}`, {
         authorizations: afterResult.authorizations.map(formatAuthForLog),
     });
     if (failedCount > 0 || remainingOtherAuths.length > 0) {
-        throw new Error(`removeOtherAuths incomplete: failed=${failedCount}, remainingOther=${remainingOtherAuths.length}, remaining=${remainingOtherAuths.map(formatAuthForLog).join('; ')}`);
+        throw new Error(`removeExternalLoginSessions incomplete: failed=${failedCount}, remainingOther=${remainingOtherAuths.length}, remaining=${remainingOtherAuths.map(formatAuthForLog).join('; ')}`);
     }
 }
 function formatAuthForLog(auth) {
@@ -23871,7 +23871,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     return acc;
                 }, {}),
                 sampleNeedingPrivacy: settlingDetails.filter(s => s.action === 'set_privacy').slice(0, 5),
-                sampleNeedingRemoveAuths: settlingDetails.filter(s => s.action === 'remove_other_auths').slice(0, 5),
+                sampleNeedingRemoveAuths: settlingDetails.filter(s => s.action === 'remove_external_login_sessions').slice(0, 5),
             },
             skippedBySlotLimit: simSkipped.filter(s => s.reason === 'slot_limit_reached').slice(0, 10),
         };
@@ -42863,11 +42863,11 @@ class BaseClientService {
             await this.safeUnregisterClient(doc.mobile);
         }
     }
-    async removeOtherAuths(doc, failedAttempts) {
+    async removeExternalLoginSessions(doc, failedAttempts) {
         const telegramClient = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
         try {
             await (0, organic_activity_1.performOrganicActivity)(telegramClient, 'medium');
-            await telegramClient.removeOtherAuths();
+            await telegramClient.removeExternalLoginSessions();
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(30000, 5000, 20000, 40000));
             await this.update(doc.mobile, {
                 lastUpdateAttempt: new Date(),
@@ -42888,10 +42888,10 @@ class BaseClientService {
                 lastUpdateFailure: new Date(),
             });
             if ((0, isPermanentError_1.default)(errorDetails)) {
-                this.logger.error(`Session permanently lost for ${doc.mobile} during removeOtherAuths — marking inactive`);
+                this.logger.error(`Session permanently lost for ${doc.mobile} during removeExternalLoginSessions — marking inactive`);
                 const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
                 const deactivated = await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                this.sendAccountNotice(this.warmupNotice('critical', 'Session lost', doc.mobile, [{ label: 'Cause', value: 'revoked during auth cleanup', code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorMsg?.substring(0, 120)));
+                this.sendAccountNotice(this.warmupNotice('critical', 'Session lost', doc.mobile, [{ label: 'Cause', value: 'revoked during external login cleanup', code: false }, { label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], undefined, errorMsg?.substring(0, 120)));
             }
             return 0;
         }
@@ -43127,19 +43127,19 @@ class BaseClientService {
                         this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'set_2fa', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'set_2fa' : null };
-                case 'remove_other_auths':
-                    this.logger.log(`Starting remove_other_auths for ${doc.mobile}`, {
+                case 'remove_external_login_sessions':
+                    this.logger.log(`Starting remove_external_login_sessions for ${doc.mobile}`, {
                         phase: warmupAction.phase,
                         twoFASetAt: doc.twoFASetAt || null,
                         otherAuthsRemovedAt: doc.otherAuthsRemovedAt || null,
                         failedAttempts,
                     });
-                    updateCount = await this.removeOtherAuths(doc, failedAttempts);
+                    updateCount = await this.removeExternalLoginSessions(doc, failedAttempts);
                     if (updateCount === 0) {
-                        this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'remove_other_auths', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
+                        this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'remove_external_login_sessions', code: false }, { label: 'Fails', value: failedAttempts + 1, code: false }]));
                     }
-                    this.logger.log(`Finished remove_other_auths for ${doc.mobile}: updateCount=${updateCount}`);
-                    return { updateCount, updateSummary: updateCount > 0 ? 'remove_other_auths' : null };
+                    this.logger.log(`Finished remove_external_login_sessions for ${doc.mobile}: updateCount=${updateCount}`);
+                    return { updateCount, updateSummary: updateCount > 0 ? 'remove_external_login_sessions' : null };
                 case 'rotate_session':
                     updateCount = (await this.rotateSession(doc.mobile)) ? 1 : 0;
                     if (updateCount > 0) {
@@ -44316,7 +44316,7 @@ class BaseClientService {
 }
 exports.BaseClientService = BaseClientService;
 BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
-    'set_2fa', 'remove_other_auths', 'update_username',
+    'set_2fa', 'remove_external_login_sessions', 'update_username',
 ]);
 BaseClientService.NO_LEAVE_WARMUP_PHASES = new Set([
     warmup_phases_1.WarmupPhase.ENROLLED,
@@ -44944,7 +44944,7 @@ const WARMUP_PHASE_PRIORITY = {
     [exports.WarmupPhase.SESSION_ROTATED]: 0,
 };
 const WARMUP_ACTION_PRIORITY = {
-    remove_other_auths: 2000,
+    remove_external_login_sessions: 2000,
     set_2fa: 1000,
     update_username: 1500,
     update_name_bio: 1000,
@@ -44954,7 +44954,7 @@ const WARMUP_ACTION_PRIORITY = {
 const WARMUP_FAIR_AGING_ACTIONS = new Set([
     'set_privacy',
     'set_2fa',
-    'remove_other_auths',
+    'remove_external_login_sessions',
     'delete_photos',
     'update_name_bio',
     'update_username',
@@ -45018,7 +45018,7 @@ function getWarmupPhaseAction(doc, now, thresholds) {
         }
         if (!authsRemoved) {
             if (daysSince(doc.twoFASetAt) >= exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS) {
-                return { phase: exports.WarmupPhase.SETTLING, action: 'remove_other_auths', organicIntensity: 'medium' };
+                return { phase: exports.WarmupPhase.SETTLING, action: 'remove_external_login_sessions', organicIntensity: 'medium' };
             }
             return { phase: exports.WarmupPhase.SETTLING, action: 'organic_only', organicIntensity: 'light' };
         }
@@ -45065,7 +45065,7 @@ function getWarmupPhaseAction(doc, now, thresholds) {
         if (!twoFADone)
             return { phase, action: 'organic_only', organicIntensity: 'medium' };
         if (!authsRemoved && daysSince(doc.twoFASetAt) >= exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS) {
-            return { phase, action: 'remove_other_auths', organicIntensity: 'medium' };
+            return { phase, action: 'remove_external_login_sessions', organicIntensity: 'medium' };
         }
         if (!authsRemoved)
             return { phase, action: 'organic_only', organicIntensity: 'light' };
