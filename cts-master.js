@@ -30589,7 +30589,6 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const channel_category_enum_1 = 0;
 const bot_service_instance_1 = __webpack_require__(/*! ../../utils/bot.service.instance */ "./src/utils/bot.service.instance.ts");
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
-const daily_analytics_service_1 = __webpack_require__(/*! ./daily-analytics.service */ "./src/components/daily-analytics/daily-analytics.service.ts");
 exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = 0.5;
 exports.ANALYTICS_HEALTH_TRAILING_DAYS = 7;
 exports.PROBE_RETRIES = 3;
@@ -30601,12 +30600,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 function summariseParity(input) {
     const out = new Map();
-    const fromDay = input.dailyMobileFromDay;
-    const mobileLive = !!fromDay && input.day >= fromDay;
     for (const r of input.parityRows ?? []) {
         const kind = String(r.check_name ?? 'unknown');
-        if (kind === 'client_vs_mobile' && !mobileLive)
-            continue;
         const entry = out.get(kind) ?? { rows: 0, clients: new Set() };
         entry.rows += 1;
         if (r.client_id)
@@ -30641,10 +30636,8 @@ function decideAnalyticsHealth(input) {
     }
     if (!missing.has('daily_client') && (input.dailyClientRows ?? 0) === 0)
         problems.push('daily_client has 0 rows');
-    const fromDay = input.dailyMobileFromDay;
-    if (fromDay && input.day >= fromDay && !missing.has('daily_mobile') && (input.dailyMobileRows ?? 0) === 0) {
+    if (!missing.has('daily_mobile') && (input.dailyMobileRows ?? 0) === 0)
         problems.push('daily_mobile has 0 rows');
-    }
     for (const [kind, { rows, clients }] of summariseParity(input)) {
         problems.push(`daily parity ${kind}: ${rows} mismatched row(s) across ${clients.size} client(s)`);
     }
@@ -30680,8 +30673,7 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
         const day = istDay(now, -1);
         const first = istDay(now, -1 - exports.ANALYTICS_HEALTH_TRAILING_DAYS);
         const today = istDay(now, 0);
-        const fromDay = (0, daily_analytics_service_1.dailyMobileFromDay)();
-        const input = { day, missingTables: [], dailyMobileFromDay: fromDay };
+        const input = { day, missingTables: [] };
         const failed = (table, error) => {
             if (error.kind === 'disabled')
                 return { day, disabled: true };
@@ -30717,16 +30709,14 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
         else {
             input.dailyClientRows = Number(dc.rows[0]?.n) || 0;
         }
-        if (fromDay && day >= fromDay) {
-            const dm = await this.probe('SELECT count(*)::bigint AS n FROM daily_mobile WHERE day = $1::date', [day]);
-            if ('error' in dm) {
-                const stop = failed('daily_mobile', dm.error);
-                if (stop)
-                    return stop;
-            }
-            else {
-                input.dailyMobileRows = Number(dm.rows[0]?.n) || 0;
-            }
+        const dm = await this.probe('SELECT count(*)::bigint AS n FROM daily_mobile WHERE day = $1::date', [day]);
+        if ('error' in dm) {
+            const stop = failed('daily_mobile', dm.error);
+            if (stop)
+                return stop;
+        }
+        else {
+            input.dailyMobileRows = Number(dm.rows[0]?.n) || 0;
         }
         const parity = await this.probe('SELECT * FROM analytics_daily_parity($1::date)', [day]);
         if ('error' in parity) {
@@ -31064,19 +31054,10 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DailyAnalyticsService = exports.DAILY_MOBILE_FROM_DAY_ENV = exports.REVENUE_FROM_DAY = void 0;
-exports.dailyMobileFromDay = dailyMobileFromDay;
+exports.DailyAnalyticsService = exports.REVENUE_FROM_DAY = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 exports.REVENUE_FROM_DAY = '2026-10-04';
-exports.DAILY_MOBILE_FROM_DAY_ENV = 'DAILY_MOBILE_FROM_DAY';
-function dailyMobileFromDay() {
-    const v = (process.env[exports.DAILY_MOBILE_FROM_DAY_ENV] || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(v))
-        return undefined;
-    const d = new Date(`${v}T00:00:00Z`);
-    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v ? v : undefined;
-}
 const PG_COLUMNS = {
     promote: { sent: 'sent', success: 'delivered', failed: 'failed', banned: 'banned' },
     reaction: {
