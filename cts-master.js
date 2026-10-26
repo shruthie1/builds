@@ -1614,6 +1614,9 @@ let AppService = AppService_1 = class AppService {
         return { count: 0 };
     }
     async getPaymentStats(chatId, profile) {
+        if (!isNonBlankString(chatId) || !isNonBlankString(profile)) {
+            throw new common_1.BadRequestException('chatId and profile are required');
+        }
         const resp = {
             paid: 0,
             demoGiven: 0,
@@ -1987,8 +1990,12 @@ let AppService = AppService_1 = class AppService {
         if (!profile) {
             profile = clientId?.replace(/\d/g, '');
         }
-        const chatId = body.chatId;
-        return await this.userDataService.update(profile, chatId, body);
+        const chatId = body?.chatId;
+        const chatIdValid = isNonBlankString(chatId) || (typeof chatId === 'number' && Number.isFinite(chatId));
+        if (!isNonBlankString(profile) || !chatIdValid) {
+            throw new common_1.BadRequestException('profile (or clientId) and body.chatId are required');
+        }
+        return await this.userDataService.update(profile, body.chatId, body);
     }
     async updateUserConfig(chatId, profile, data) {
         this.userDataService.update(profile, chatId, data);
@@ -2292,6 +2299,9 @@ function getReadableTimeDifference(ms1, ms2) {
     if (secs > 0 || result.length === 0)
         result.push(`${secs}s`);
     return result.join(' ');
+}
+function isNonBlankString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
 }
 
 
