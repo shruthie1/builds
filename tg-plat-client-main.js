@@ -13646,8 +13646,18 @@ function rawScore(counters, lastValidatedAtMs, nowMs) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   BAN_RATE_GATE_PROBE_INTERVAL_MS: () => (/* binding */ BAN_RATE_GATE_PROBE_INTERVAL_MS),
+/* harmony export */   BAN_RATE_GATE_THRESHOLD: () => (/* binding */ BAN_RATE_GATE_THRESHOLD),
+/* harmony export */   BAN_RATE_GATE_WINDOW: () => (/* binding */ BAN_RATE_GATE_WINDOW),
 /* harmony export */   BasePromotionEngine: () => (/* binding */ BasePromotionEngine),
-/* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* binding */ PROMOTION_MESSAGE_CHECK_DELAY_MS)
+/* harmony export */   PROMOTE_RESTART_RECENT_MS: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.PROMOTE_RESTART_RECENT_MS),
+/* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* binding */ PROMOTION_MESSAGE_CHECK_DELAY_MS),
+/* harmony export */   banRateGateTrips: () => (/* binding */ banRateGateTrips),
+/* harmony export */   classifyPromoteRestart: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.classifyPromoteRestart),
+/* harmony export */   decodePromoteStateSnapshot: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.decodePromoteStateSnapshot),
+/* harmony export */   preloadPromoteRestartState: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.preloadPromoteRestartState),
+/* harmony export */   resetPromoteRestartStateForTests: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.resetPromoteRestartStateForTests),
+/* harmony export */   shouldStampPromoteStatsOnBoot: () => (/* reexport safe */ _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.shouldStampPromoteStatsOnBoot)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -13663,17 +13673,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
-/* harmony import */ var ___WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
-/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
-/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
-/* harmony import */ var _telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../telegram-client/getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
-/* harmony import */ var _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../policy/deletion-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/deletion-policy.ts");
-/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
-/* harmony import */ var _shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./shared-engine-ops */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../redis/redis-account-health-store */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-health-store.ts");
+/* harmony import */ var _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../promotion-runtime-helpers/delay-calculator */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-runtime-helpers/delay-calculator.ts");
+/* harmony import */ var ___WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! .. */ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts");
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../../telegram-client/getChannelFromTg */ "../../packages/tg-channel-state/src/telegram-client/getChannelFromTg.ts");
+/* harmony import */ var _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../policy/deletion-policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/deletion-policy.ts");
+/* harmony import */ var _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/contains */ "../../packages/tg-core/src/utils/contains.ts");
+/* harmony import */ var _shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./shared-engine-ops */ "../../packages/tg-channel-state/src/channel-message-promotions/promotion-engine/shared-engine-ops.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
 
 
 
@@ -13686,6 +13698,18 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+// Restart-state helpers live in tg-core (no heavy imports) so the tg-aut Mongo boot gate can use them too.
+
+
+/** promote::state::{mobile} read + classified now (same decode as the boot read). Never rejects. */
+function readPromoteRestartState(mobile, clientId) {
+    const key = typeof mobile === 'string' ? mobile.trim() : '';
+    if (!key)
+        return Promise.resolve({ mode: 'unknown', snapshot: null });
+    return (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.promoteStateStore)(key).loadRaw()
+        .then((raw) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.classifyPromoteRestart)(raw, clientId))
+        .catch(() => ({ mode: 'unknown', snapshot: null }));
+}
 
 
 
@@ -13696,9 +13720,33 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
+// =================================================================
+//  BAN-RATE GATE (restart-state helpers: @tg/core/state/state-redis)
+// =================================================================
+/**
+ * Ban-rate gate: the last N promotion sends of this mobile that landed or hit a PERMANENT ban (owner 2026-10-26:
+ * bans only; FLOOD_WAIT / SLOWMODE_WAIT and other temporary pacing errors are not counted at all)...
+ */
+const BAN_RATE_GATE_WINDOW = 20;
+/** ...and the banned share at or above which the round stops (owner 2026-10-26: 18/20 stops, 17/20 keeps going). */
+const BAN_RATE_GATE_THRESHOLD = 0.9;
+const BAN_RATE_GATE_RECHECK_MS = 60000;
+/**
+ * Self-recovery: while tripped, one probe send is allowed this often. A tripped gate stops all sends, so without
+ * it the window would never refresh and the gate would stay latched until the bans age out of the 24 h window.
+ * Each probe adds one landed (window refreshes, gate clears once below the threshold) or one ban (stays tripped).
+ */
+const BAN_RATE_GATE_PROBE_INTERVAL_MS = 30 * 60000;
+/** True when `failed` (permanent bans) of the last `total` sends is at or above the gate (needs a full window). */
+function banRateGateTrips(outcomes) {
+    if (!outcomes || outcomes.total < BAN_RATE_GATE_WINDOW)
+        return false;
+    return outcomes.failed / outcomes.total >= BAN_RATE_GATE_THRESHOLD - 1e-9;
+}
 /** Shared post-send liveness window used by both tg-aut and promote-clients. */
 const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
-const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_20__.PromoLogger("intelligence");
+const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__.PromoLogger("intelligence");
 class BasePromotionEngine {
     constructor(client, dialogManager, clientId, mobile) {
         this.promotionActive = false;
@@ -13711,7 +13759,7 @@ class BasePromotionEngine {
         this.promoteMsgsPromise = null;
         this.scheduledTimeouts = new Set();
         this.cleanupInterval = null;
-        this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_11__.DelayCalculator();
+        this.delayCalculator = new _promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_13__.DelayCalculator();
         this.channelHydrationAttempts = new Map();
         // Intelligence-doc cache, warmed by ONE batchGet({$in}) at the top of loadChannelsForRunner.
         // MEASURED root cause of slow hydration: 300 serial intelligence.get() findOne calls cost ~107s
@@ -13744,6 +13792,19 @@ class BasePromotionEngine {
             lastMainMessageTime: Date.now() - 16 * 60 * 1000,
             deletedCount: 0,
         };
+        /** Last promotion send attempt (restart-state clock: a restart within an hour of it is not a new run). */
+        this.lastAttemptAt = 0;
+        /**
+         * When the runner paused after an accepted send could not be persisted. Saved to and restored from
+         * promote::state for visibility only: the pause is NOT enforced after a restart (a restarted process sends).
+         */
+        this.durabilityPausedAt = null;
+        /** How this engine's state was seeded (boot read, or a fresh read for an engine rebuilt mid-process); null = not yet applied. */
+        this.restartMode = null;
+        /** Boot restore of promote::state; startPromotion waits for it so no send runs on the default clock. */
+        this.restartRestore = Promise.resolve();
+        this.promotionStatePersistScheduled = false;
+        this.banRateGate = null;
         // Configuration (identical defaults across apps)
         this.MESSAGE_CHECK_DELAY = PROMOTION_MESSAGE_CHECK_DELAY_MS;
         this.MAX_QUEUE_SIZE = 200;
@@ -13762,13 +13823,162 @@ class BasePromotionEngine {
         this.dialogManager = dialogManager;
         this.clientId = clientId;
         this.mobile = mobile;
-        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
+        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_14__.PromotionMessageQueue(this.MAX_QUEUE_SIZE);
+        // The first engine for the mobile takes the boot read; an engine rebuilt later in the same process (health
+        // recovery, client restart) reads promote::state afresh, so it keeps the live clock instead of starting on
+        // the default grace and then writing that reset back to the key on its first attempt. Bounded, never throws.
+        const restored = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.takePreloadedPromoteRestartState)(mobile) ?? readPromoteRestartState(mobile, clientId);
+        this.restartRestore = restored
+            .then((state) => { this.applyPromoteRestartState(state); })
+            .catch((error) => { (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${mobile}] promote restart-state restore failed`, false); });
+    }
+    // =================================================================
+    //  RESTART STATE (promote::state::{mobile})
+    // =================================================================
+    /**
+     * Seeds the clock/counters from the boot read. restart = the previous process's real values (the swap-out
+     * deadline is not pushed back); unknown (Redis down) = as if a main message was just sent; new-run = unchanged
+     * (the default 16-min grace).
+     */
+    applyPromoteRestartState(state, now = Date.now()) {
+        this.restartMode = state.mode;
+        const snap = state.snapshot;
+        if (state.mode === 'restart' && snap) {
+            if (snap.lastMainAt !== null)
+                this.stats.lastMainMessageTime = snap.lastMainAt;
+            if (snap.lastFollowUpAt !== null)
+                this.stats.lastFollowUpMessageTime = snap.lastFollowUpAt;
+            if (snap.failStreak !== null)
+                this.stats.failStreak = Math.max(0, Math.trunc(snap.failStreak));
+            if (snap.successCount !== null)
+                this.stats.successCount = Math.max(0, Math.trunc(snap.successCount));
+            if (snap.totalFailed !== null)
+                this.stats.totalFailed = Math.max(0, Math.trunc(snap.totalFailed));
+            if (snap.deletedCount !== null)
+                this.stats.deletedCount = Math.max(0, Math.trunc(snap.deletedCount));
+            if (snap.lastAttemptAt !== null)
+                this.lastAttemptAt = snap.lastAttemptAt;
+            this.durabilityPausedAt = snap.durabilityPausedAt;
+            this.logRunnerMessage('info', `[${this.mobile}] PROMO restart state restored | lastMain ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.stats.lastMainMessageTime)} | failStreak ${this.stats.failStreak}${this.durabilityPausedAt ? ` | durability pause since ${new Date(this.durabilityPausedAt).toISOString()}` : ''}`);
+        }
+        else if (state.mode === 'unknown') {
+            this.stats.lastMainMessageTime = now;
+            this.stats.lastFollowUpMessageTime = now;
+            this.logRunnerMessage('warn', `[${this.mobile}] PROMO restart state unreadable (Redis unavailable): starting as if a message was just sent`);
+        }
+        else {
+            this.logRunnerMessage('info', `[${this.mobile}] PROMO new run: no recent restart state, default grace`);
+        }
+    }
+    getRestartMode() {
+        return this.restartMode;
+    }
+    /** The values saved to promote::state::{mobile}. */
+    getPromoteStateSnapshot(now = Date.now()) {
+        return {
+            lastMainAt: this.stats.lastMainMessageTime,
+            lastFollowUpAt: this.stats.lastFollowUpMessageTime,
+            lastAttemptAt: this.lastAttemptAt || null,
+            failStreak: this.stats.failStreak,
+            successCount: this.stats.successCount,
+            totalFailed: this.stats.totalFailed,
+            deletedCount: this.stats.deletedCount,
+            durabilityPausedAt: this.durabilityPausedAt,
+            clientId: this.clientId || null,
+            updatedAt: now,
+        };
+    }
+    /** Debounced (one write per tick): rewrites promote::state::{mobile}. Never blocks or throws. */
+    schedulePromotionStatePersist() {
+        if (this.promotionStatePersistScheduled)
+            return;
+        this.promotionStatePersistScheduled = true;
+        queueMicrotask(() => {
+            this.promotionStatePersistScheduled = false;
+            try {
+                const snapshot = this.getPromoteStateSnapshot();
+                void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.promoteStateStore)(this.mobile).replace((0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.restartStateEntries)({ ...snapshot }));
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `[${this.mobile}] promote restart-state write failed`, false);
+            }
+        });
+    }
+    // =================================================================
+    //  BAN-RATE GATE
+    // =================================================================
+    /** Last BAN_RATE_GATE_WINDOW sends of this mobile from the account-health store; null = unavailable. */
+    async readRecentSendOutcomes(limit) {
+        let store;
+        try {
+            store = _redis_redis_account_health_store__WEBPACK_IMPORTED_MODULE_12__.RedisAccountHealthStore.getInstance();
+        }
+        catch {
+            return null;
+        }
+        return store.getRecentSendOutcomes(this.mobile, limit);
+    }
+    /**
+     * False when at least BAN_RATE_GATE_THRESHOLD of the last BAN_RATE_GATE_WINDOW sends (landed + permanent bans)
+     * were permanent bans: the round stops instead of retrying the next channel, and promotion health reports the
+     * account for a swap. Only read after a failure (or while tripped); a read failure keeps the current behaviour.
+     * While tripped: re-read every BAN_RATE_GATE_RECHECK_MS, and every BAN_RATE_GATE_PROBE_INTERVAL_MS allow exactly
+     * one probe send; the next check re-reads at once, so a landed probe can clear the gate and a banned one keeps it.
+     */
+    async banRateGateAllows(now = Date.now()) {
+        const gate = this.banRateGate;
+        if (!gate?.tripped && this.stats.failStreak <= 0)
+            return true;
+        const judgingProbe = gate?.tripped === true && gate.probePending === true;
+        const probeDue = gate?.tripped === true && !judgingProbe
+            && now - (gate.probeAt ?? gate.trippedAt ?? now) >= BAN_RATE_GATE_PROBE_INTERVAL_MS;
+        if (gate?.tripped && !judgingProbe && !probeDue && now - gate.checkedAt < BAN_RATE_GATE_RECHECK_MS)
+            return false;
+        let outcomes = null;
+        try {
+            outcomes = await this.readRecentSendOutcomes(BAN_RATE_GATE_WINDOW);
+        }
+        catch (error) {
+            this.logRunnerMessage('debug', `[${this.mobile}] PROMO ban-rate read failed; continuing: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (!outcomes) {
+            if (gate?.tripped)
+                this.banRateGate = { ...gate, checkedAt: now, probePending: false };
+            return !gate?.tripped;
+        }
+        const tripped = banRateGateTrips(outcomes);
+        const lastProbeAt = gate?.tripped ? (gate.probeAt ?? null) : null;
+        // One probe per interval, never right after judging one (that probe was the one for this interval).
+        const probe = tripped && probeDue;
+        this.banRateGate = {
+            tripped,
+            failed: outcomes.failed,
+            total: outcomes.total,
+            checkedAt: now,
+            trippedAt: tripped ? (gate?.tripped ? (gate.trippedAt ?? now) : now) : null,
+            probeAt: tripped ? (probe ? now : lastProbeAt) : null,
+            probePending: probe,
+        };
+        if (tripped && !gate?.tripped) {
+            this.logRunnerMessage('warn', `[${this.mobile}] PROMO ban-rate gate: ${outcomes.failed}/${outcomes.total} recent sends permanently banned (>= ${Math.round(BAN_RATE_GATE_THRESHOLD * 100)}%); stopping the round and asking for a swap`);
+        }
+        else if (probe) {
+            this.logRunnerMessage('info', `[${this.mobile}] PROMO ban-rate gate still tripped (${outcomes.failed}/${outcomes.total}); allowing one probe send`);
+        }
+        else if (!tripped && gate?.tripped) {
+            this.logRunnerMessage('info', `[${this.mobile}] PROMO ban-rate gate cleared (${outcomes.failed}/${outcomes.total})`);
+        }
+        return !tripped || probe;
+    }
+    /** Current ban-rate gate (service health reads it to request the swap). */
+    getBanRateGateState() {
+        return this.banRateGate ? { ...this.banRateGate } : null;
     }
     mergeLiveChannelInfo(existing, live) {
-        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeLiveChannelDocument)(existing, live, {
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.mergeLiveChannelDocument)(existing, live, {
             normalizeChannelId: (id) => this.normalizeChannelId(id),
             defaultAvailableMsgs: this.defaultAvailableMsgs,
-            mergeFacts: _channel_state__WEBPACK_IMPORTED_MODULE_14__.mergeHydratedChannelFacts,
+            mergeFacts: _channel_state__WEBPACK_IMPORTED_MODULE_16__.mergeHydratedChannelFacts,
         });
     }
     /**
@@ -13784,13 +13994,13 @@ class BasePromotionEngine {
             return null;
         }
         try {
-            const outcome = await (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.hydrateChannelDocument)({
+            const outcome = await (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.hydrateChannelDocument)({
                 load: () => store.findActiveChannel(normalizedChannelId),
                 persist: async (patch) => { await store.updateActiveChannel(normalizedChannelId, patch); },
-                fetchLive: () => (0,_telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_15__.getChannelFromTg)(this.client, normalizedChannelId),
+                fetchLive: () => (0,_telegram_client_getChannelFromTg__WEBPACK_IMPORTED_MODULE_17__.getChannelFromTg)(this.client, normalizedChannelId),
                 claim: () => this.claimChannelHydrationAttempt(normalizedChannelId),
                 merge: (existing, live) => this.mergeLiveChannelInfo(existing, live),
-                shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_14__.shouldHydrateBeforeFinalReject,
+                shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_16__.shouldHydrateBeforeFinalReject,
             }, this.mergeCallerLiveFacts ? liveChannelInfo : undefined);
             if (outcome.status === 'debounced') {
                 this.logRunnerMessage('debug', `[${this.mobile}] ⏳ PROMO hydrate debounced | ${normalizedChannelId} | skip stale DB decision for ${Math.round(this.CHANNEL_REHYDRATION_DEBOUNCE_MS / 1000)}s window`);
@@ -13835,14 +14045,14 @@ class BasePromotionEngine {
     }
     /** Runtime functions handed to the pure shared ops (kept injectable for every consumer's tests). */
     engineOpsDeps() {
-        return { parseError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError, resolveFailureAction: _channel_state__WEBPACK_IMPORTED_MODULE_14__.resolvePromotionFailureAction, contains: _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_17__.contains, evaluateDeletionPolicy: _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_16__.evaluateDeletionPolicy };
+        return { parseError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError, resolveFailureAction: _channel_state__WEBPACK_IMPORTED_MODULE_16__.resolvePromotionFailureAction, contains: _tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_19__.contains, evaluateDeletionPolicy: _policy_deletion_policy__WEBPACK_IMPORTED_MODULE_18__.evaluateDeletionPolicy };
     }
     /** Shared merge of the runner's deletion policy with the local one (see resolveDeletionPolicy). */
     resolveDeletionPolicy(messageIndex, availableCount, provided) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.resolveDeletionPolicy)(this.engineOpsDeps(), messageIndex, availableCount, provided);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.resolveDeletionPolicy)(this.engineOpsDeps(), messageIndex, availableCount, provided);
     }
     async triggerTelegramRuntimeRecovery(error) {
-        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.requestTelegramRuntimeRecovery)(this.engineOpsDeps(), this.runtimeRecovery, this.onTelegramRuntimeFailure, error, this.mobile);
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.requestTelegramRuntimeRecovery)(this.engineOpsDeps(), this.runtimeRecovery, this.onTelegramRuntimeFailure, error, this.mobile);
     }
     /**
      * Build the bounded hydration working set through the same shared priority
@@ -13862,7 +14072,7 @@ class BasePromotionEngine {
             this.logRunnerMessage('warn', `Hydration priority intelligence load failed; pausing this cycle safely: ${error}`);
             return [];
         }
-        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_19__.selectPromotionChannels)({
+        const result = (0,_selection__WEBPACK_IMPORTED_MODULE_21__.selectPromotionChannels)({
             channels,
             intelligenceDocs,
             batchTarget: Math.min(Math.floor(limit), channels.length),
@@ -13970,7 +14180,7 @@ class BasePromotionEngine {
     // =================================================================
     refreshPromotionContext() {
         try {
-            const context = ___WEBPACK_IMPORTED_MODULE_12__.PromotionRuntime.getInstance().createAccountContext({
+            const context = ___WEBPACK_IMPORTED_MODULE_14__.PromotionRuntime.getInstance().createAccountContext({
                 mobile: this.mobile,
                 clientId: this.clientId,
             });
@@ -14012,7 +14222,7 @@ class BasePromotionEngine {
                 if (!cache.has(id))
                     cache.set(id, undefined);
             const rawDocs = await account.intelligence.batchGet(ids);
-            const docs = rawDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_13__.isChannelIntelligence);
+            const docs = rawDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_15__.isChannelIntelligence);
             for (const doc of docs) {
                 const id = this.normalizeChannelId(doc.channelId);
                 // Only overwrite a still-empty slot; respect a real doc a concurrent seed wrote meanwhile.
@@ -14080,7 +14290,7 @@ class BasePromotionEngine {
         };
     }
     async loadPromotionMessages() {
-        const messages = await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.loadPromoteMessagesFromStore)(this.engineOpsDeps(), this.getChannelStore(), this.mobile, (level, message) => this.logRunnerMessage(level, message));
+        const messages = await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.loadPromoteMessagesFromStore)(this.engineOpsDeps(), this.getChannelStore(), this.mobile, (level, message) => this.logRunnerMessage(level, message));
         if (messages)
             this.promoteMsgs = messages;
     }
@@ -14106,6 +14316,8 @@ class BasePromotionEngine {
     //  START / STOP
     // =================================================================
     async startPromotion(options = {}) {
+        // The boot restore (promote::state) seeds the clock this start decision reads.
+        await this.restartRestore;
         await this.stopInactivePromotionSupervisorBeforeStart('startPromotion');
         const startGeneration = this.promotionRunId;
         if (this.isPromotionSupervisorRunning()) {
@@ -14156,7 +14368,7 @@ class BasePromotionEngine {
             ? ` (last message: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.stats.lastMainMessageTime)})`
             : '';
         this.logRunnerMessage('debug', `🎯 Starting helper-supervised promotion loop${lastMessageTimeStr}`);
-        const supervisor = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionRunnerSupervisor({
+        const supervisor = new ___WEBPACK_IMPORTED_MODULE_14__.PromotionRunnerSupervisor({
             createRunner: () => {
                 const runner = this.createPromotionFlowRunner();
                 this.promotionRunner = runner;
@@ -14261,7 +14473,7 @@ class BasePromotionEngine {
         const verificationQueue = typeof account.createVerificationQueue === 'function'
             ? account.createVerificationQueue(this.MAX_QUEUE_SIZE)
             : null;
-        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_12__.PromotionMessageQueue(this.MAX_QUEUE_SIZE, verificationQueue);
+        this.promotionMessageQueue = new ___WEBPACK_IMPORTED_MODULE_14__.PromotionMessageQueue(this.MAX_QUEUE_SIZE, verificationQueue);
         const adapter = {
             isActive: () => this.promotionActive,
             getStats: () => ({
@@ -14274,21 +14486,49 @@ class BasePromotionEngine {
             getChannel: (channelId) => this.getChannelForRunner(channelId),
             getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
             getIntelligenceDoc: (channelId) => this.getIntelligenceDocForRunner(channelId),
-            shouldContinue: () => this.adapterShouldContinue(),
+            shouldContinue: async () => {
+                if (!(await this.banRateGateAllows()))
+                    return false;
+                return this.adapterShouldContinue();
+            },
             sendPromotion: (request) => this.sendPromotionFromRunner(request),
             checkMessage: (message) => this.checkMessageFromRunner(message),
-            onSendSuccess: (channel, result, isFollowUp) => this.handleSuccessfulMessage(channel, { id: result.messageId, message: this.takeSentPromoText(channel.channelId) }, result.messageIndex, isFollowUp),
+            onSendSuccess: async (channel, result, isFollowUp) => {
+                try {
+                    await this.handleSuccessfulMessage(channel, { id: result.messageId, message: this.takeSentPromoText(channel.channelId) }, result.messageIndex, isFollowUp);
+                }
+                finally {
+                    this.durabilityPausedAt = null;
+                    this.schedulePromotionStatePersist();
+                }
+            },
             onDurabilityFailure: (error) => {
                 // A Telegram send was accepted but cannot be tracked for the
                 // mandatory verification lifecycle. Do not let the supervisor
                 // restart into another send until an operator explicitly starts
                 // this account after Redis is healthy again.
                 this.promotionActive = false;
+                this.durabilityPausedAt = Date.now();
+                this.schedulePromotionStatePersist();
                 this.logRunnerMessage('error', `[${this.mobile}] Promotion paused: accepted send could not be persisted for verification; error=${error instanceof Error ? error.message : String(error)}`);
             },
-            onSendFailure: (channel, result, isFollowUp) => this.handleFailedMessage(channel, isFollowUp, result.errorMessage ?? 'Unknown promotion send error', result.attempted !== false),
+            onSendFailure: async (channel, result, isFollowUp) => {
+                try {
+                    await this.handleFailedMessage(channel, isFollowUp, result.errorMessage ?? 'Unknown promotion send error', result.attempted !== false);
+                }
+                finally {
+                    this.schedulePromotionStatePersist();
+                }
+            },
             onMessageExisting: (message) => this.handleExistingMessage(message),
-            onMessageDeleted: (message, policy) => this.handleDeletedMessage(message, policy),
+            onMessageDeleted: async (message, policy) => {
+                try {
+                    await this.handleDeletedMessage(message, policy);
+                }
+                finally {
+                    this.schedulePromotionStatePersist();
+                }
+            },
             onFollowUpScheduled: (message, delayMs) => {
                 this.logRunnerMessage('debug', `🕐 Helper scheduled follow-up for ${message.channelId} in ${this.formatDuration(delayMs)}`);
             },
@@ -14300,10 +14540,10 @@ class BasePromotionEngine {
             sleep: async (ms) => { await this.interruptibleSleep(ms); },
             ...extras.adapter,
         };
-        const runtime = ___WEBPACK_IMPORTED_MODULE_12__.PromotionRuntime.getInstance();
+        const runtime = ___WEBPACK_IMPORTED_MODULE_14__.PromotionRuntime.getInstance();
         const attributionEnabled = !!runtime.tracker && !!runtime.attribution;
         this.logRunnerMessage('info', `[${this.mobile}] PROMO features | scoring ${extras.runnerOptions.scoringEnabled} | poolLearning=true | attribution ${attributionEnabled}`);
-        return new ___WEBPACK_IMPORTED_MODULE_12__.PromotionFlowRunner(adapter, {
+        return new ___WEBPACK_IMPORTED_MODULE_14__.PromotionFlowRunner(adapter, {
             account,
             scoringEnabled: extras.runnerOptions.scoringEnabled,
             attributionEnabled,
@@ -14333,6 +14573,8 @@ class BasePromotionEngine {
         let materialized = null;
         try {
             this.onSendAttempt(request);
+            this.lastAttemptAt = Date.now();
+            this.schedulePromotionStatePersist();
             materialized = await this.materializeMessageCandidate(request.candidate, request.channel);
             if (!materialized.messageContent?.trim()) {
                 this.onSendCandidateEmpty(request, materialized.randomIndex);
@@ -14426,7 +14668,7 @@ class BasePromotionEngine {
      * Length is validated AFTER sanitization so we measure what is actually sent.
      */
     assertSendablePromotionText(text) {
-        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_21__.sanitizePromotionRendering)(text);
+        const sanitized = (0,_tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_23__.sanitizePromotionRendering)(text);
         if (!sanitized) {
             throw this.createPromotionPreflightError('MSG_EMPTY_AFTER_SANITIZE', {
                 length: Array.from(text).length,
@@ -14446,7 +14688,7 @@ class BasePromotionEngine {
     }
     /** Whether an error message string should be treated as a terminal missing-entity case. */
     errorMessageIndicatesMissingEntity(errorMessage) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.errorIndicatesMissingEntity)(this.engineOpsDeps(), errorMessage);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.errorIndicatesMissingEntity)(this.engineOpsDeps(), errorMessage);
     }
     /** Send-path log hooks; default no-op (promote), tg-aut overrides for rich logs. */
     onSendAttempt(_request) { }
@@ -14517,7 +14759,7 @@ class BasePromotionEngine {
     }
     /** Load the stored channel doc used to resolve the entity for a message check. */
     async loadStoredChannelForCheck(messageItem) {
-        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.loadStoredChannelForMessageCheck)(this.engineOpsDeps(), this.getChannelStore(), messageItem.channelId, this.mobile);
+        return (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.loadStoredChannelForMessageCheck)(this.engineOpsDeps(), this.getChannelStore(), messageItem.channelId, this.mobile);
     }
     /** Message-check log hooks; default no-op (promote provides its own simpler logging via overrides). */
     onCheckEntityNotFound(messageItem) {
@@ -14578,7 +14820,7 @@ class BasePromotionEngine {
     //  HOOK SUPPORT: SHARED FAILURE-STATE PERSISTENCE
     // =================================================================
     async applyPromotionFailureState(channelId, errorMsg) {
-        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_18__.persistPromotionFailureState)(this.engineOpsDeps(), this.getChannelStore(), channelId, errorMsg, this.mobile, (level, message) => this.logRunnerMessage(level, message));
+        await (0,_shared_engine_ops__WEBPACK_IMPORTED_MODULE_20__.persistPromotionFailureState)(this.engineOpsDeps(), this.getChannelStore(), channelId, errorMsg, this.mobile, (level, message) => this.logRunnerMessage(level, message));
     }
     // =================================================================
     //  DELAY / SLEEP
@@ -14785,17 +15027,17 @@ class BasePromotionEngine {
     }
     // Shared intelligence handle used by hook implementations.
     sharedIntelligence() {
-        return this.promotionContext?.intelligence || ___WEBPACK_IMPORTED_MODULE_12__.ChannelIntelligenceService.getInstance();
+        return this.promotionContext?.intelligence || ___WEBPACK_IMPORTED_MODULE_14__.ChannelIntelligenceService.getInstance();
     }
     strategyForRecord(randomIndex) {
-        return (0,___WEBPACK_IMPORTED_MODULE_12__.messageIndexToStrategy)(randomIndex);
+        return (0,___WEBPACK_IMPORTED_MODULE_14__.messageIndexToStrategy)(randomIndex);
     }
     resolveFailureAction(channelId, errorMsg) {
-        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_14__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
+        return (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.resolvePromotionFailureAction)({ error: errorMsg, channelId });
     }
     percentileEngineOrNull() {
         try {
-            return ___WEBPACK_IMPORTED_MODULE_12__.PercentileEngine.getInstance();
+            return ___WEBPACK_IMPORTED_MODULE_14__.PercentileEngine.getInstance();
         }
         catch {
             return null;
@@ -15946,7 +16188,8 @@ function toCount(raw) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   RedisAccountHealthStore: () => (/* binding */ RedisAccountHealthStore)
+/* harmony export */   RedisAccountHealthStore: () => (/* binding */ RedisAccountHealthStore),
+/* harmony export */   isPermanentBanError: () => (/* binding */ isPermanentBanError)
 /* harmony export */ });
 /* harmony import */ var _pool_account_health__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool/account-health */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/account-health.ts");
 /* harmony import */ var _pool_account_cap__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../pool/account-cap */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/account-cap.ts");
@@ -16007,6 +16250,44 @@ const READ_SNAPSHOTS_SCRIPT = [
     "if #stale > 0 then redis.call('SREM', participantsKey, unpack(stale)) end",
     "return result",
 ].join('\n');
+/** Suffix on a failed24h member that was a permanent ban (the ban-rate gate counts only these). */
+const PERMANENT_BAN_MEMBER_SUFFIX = ':ban';
+/** Bound on failed24h members scanned for ban-tagged ones (temporary errors can crowd the newest slots). */
+const RECENT_FAILED_SCAN_LIMIT = 2000;
+/**
+ * Permanent ban outcomes only (owner 2026-10-26): USER_BANNED_IN_CHANNEL (parsed reason 'banned') and a bare
+ * banned/forbidden reason. FLOOD_WAIT, SLOWMODE_WAIT, PEER_FLOOD and other temporary or pacing errors are not bans.
+ */
+function isPermanentBanError(errorType) {
+    if (typeof errorType !== 'string' || errorType.trim() === '')
+        return false;
+    const upper = errorType.trim().toUpperCase();
+    if (upper.includes('USER_BANNED_IN_CHANNEL'))
+        return true;
+    return /(^|:)(BANNED|FORBIDDEN)$/.test(upper);
+}
+// The newest `limit` landed events and the newest `limit` ban-tagged failed events of one account inside the
+// window (scores = event time). Untagged failed events (temporary errors, events from before the tag) are skipped.
+const READ_RECENT_SENDS_SCRIPT = [
+    "local cutoff = tonumber(ARGV[1])",
+    "local limit = tonumber(ARGV[2])",
+    "local scanLimit = tonumber(ARGV[3])",
+    "local suffix = ARGV[4]",
+    "local landed = redis.call('ZREVRANGEBYSCORE', KEYS[1], '+inf', cutoff, 'WITHSCORES', 'LIMIT', 0, limit)",
+    "local failed = redis.call('ZREVRANGEBYSCORE', KEYS[2], '+inf', cutoff, 'WITHSCORES', 'LIMIT', 0, scanLimit)",
+    "local bans = {}",
+    "local count = 0",
+    "for i = 1, #failed, 2 do",
+    "  if count >= limit then break end",
+    "  local member = failed[i]",
+    "  if string.sub(member, -string.len(suffix)) == suffix then",
+    "    table.insert(bans, member)",
+    "    table.insert(bans, failed[i + 1])",
+    "    count = count + 1",
+    "  end",
+    "end",
+    "return {landed, bans}",
+].join('\n');
 class RedisAccountHealthStore {
     constructor(redis) {
         this.snapshotCache = new Map();
@@ -16039,8 +16320,9 @@ class RedisAccountHealthStore {
     async recordDeleted(account, nowMs = Date.now()) {
         await this.recordMetric(account, 'deleted', nowMs);
     }
-    async recordFailed(account, nowMs = Date.now()) {
-        await this.recordMetric(account, 'failed', nowMs);
+    /** `errorType` (optional) tags a permanent ban for the ban-rate gate; failed24h counts every call the same. */
+    async recordFailed(account, nowMs = Date.now(), errorType) {
+        await this.recordMetric(account, 'failed', nowMs, isPermanentBanError(errorType) ? PERMANENT_BAN_MEMBER_SUFFIX : '');
     }
     async getAccountHealth(account, nowMs = Date.now()) {
         const snapshot = await this.getSnapshot(account, nowMs);
@@ -16084,11 +16366,41 @@ class RedisAccountHealthStore {
         });
         return snapshot;
     }
-    async recordMetric(account, metric, nowMs) {
+    /**
+     * Read-only, for the ban-rate gate: of this account's newest `limit` sends in the 24 h window that either landed
+     * or hit a permanent ban (ban-tagged failed24h members), how many were bans. Temporary account-class failures
+     * (FLOOD_WAIT, SLOWMODE_WAIT, ...) stay in failed24h for health/cap but are not counted here. Reuses the existing
+     * landed24h/failed24h keys.
+     */
+    async getRecentSendOutcomes(account, limit = 20, nowMs = Date.now()) {
+        const safeAccount = requireAccount(account);
+        const safeLimit = Math.max(1, Math.trunc(limit));
+        const raw = await this.redis.eval?.(READ_RECENT_SENDS_SCRIPT, 2, keyForMetric(safeAccount, 'landed'), keyForMetric(safeAccount, 'failed'), normalizeTimestamp(nowMs) - _pool_account_cap__WEBPACK_IMPORTED_MODULE_1__.ACCOUNT_SEND_WINDOW_MS, safeLimit, RECENT_FAILED_SCAN_LIMIT, PERMANENT_BAN_MEMBER_SUFFIX);
+        const events = [];
+        if (Array.isArray(raw)) {
+            const [landed, failed] = raw;
+            for (const [list, isFailed] of [[landed, false], [failed, true]]) {
+                if (!Array.isArray(list))
+                    continue;
+                for (let index = 0; index + 1 < list.length; index += 2) {
+                    // Only ban-tagged failures count (the script already filters; this keeps the rule in one readable place).
+                    if (isFailed && !String(list[index]).endsWith(PERMANENT_BAN_MEMBER_SUFFIX))
+                        continue;
+                    const at = Number(list[index + 1]);
+                    if (Number.isFinite(at))
+                        events.push({ at, failed: isFailed });
+                }
+            }
+        }
+        events.sort((a, b) => b.at - a.at);
+        const newest = events.slice(0, safeLimit);
+        return { failed: newest.filter((event) => event.failed).length, total: newest.length };
+    }
+    async recordMetric(account, metric, nowMs, memberSuffix = '') {
         const safeAccount = requireAccount(account);
         const safeNowMs = normalizeTimestamp(nowMs);
         const metricKey = keyForMetric(safeAccount, metric);
-        const eventId = `${safeAccount}:${metric}:${safeNowMs}:${Math.random().toString(36).slice(2, 10) || 'event'}`;
+        const eventId = `${safeAccount}:${metric}:${safeNowMs}:${Math.random().toString(36).slice(2, 10) || 'event'}${memberSuffix}`;
         await this.redis.eval?.(RECORD_OUTCOME_SCRIPT, 2, PARTICIPANTS_KEY, metricKey, safeAccount, safeNowMs, _pool_account_cap__WEBPACK_IMPORTED_MODULE_1__.ACCOUNT_SEND_KEY_TTL_MS, _pool_account_cap__WEBPACK_IMPORTED_MODULE_1__.ACCOUNT_SEND_WINDOW_MS, eventId);
         this.snapshotCache.clear();
     }
@@ -16876,7 +17188,8 @@ class PromotionAccountContext {
             // Health + send-cap are keyed PER-MOBILE, not per-clientId: each mobile is a separate Telegram
             // account with its own spam limits, so mobiles under one clientId must not share/contaminate
             // each other's health or send budget.
-            await this.runtime.accountHealth.recordFailed(this.mobile);
+            // errorType tags a permanent ban for the ban-rate gate (failed24h counts it either way).
+            await this.runtime.accountHealth.recordFailed(this.mobile, Date.now(), errorType);
         }
     }
     async recordSurvival(channelId) {
@@ -18350,6 +18663,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_HEALTH_MIN_FLEET_SIZE: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_HEALTH_MIN_FLEET_SIZE),
 /* harmony export */   ACCOUNT_SEND_KEY_TTL_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_KEY_TTL_MS),
 /* harmony export */   ACCOUNT_SEND_WINDOW_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_WINDOW_MS),
+/* harmony export */   BAN_RATE_GATE_PROBE_INTERVAL_MS: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BAN_RATE_GATE_PROBE_INTERVAL_MS),
+/* harmony export */   BAN_RATE_GATE_THRESHOLD: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BAN_RATE_GATE_THRESHOLD),
+/* harmony export */   BAN_RATE_GATE_WINDOW: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BAN_RATE_GATE_WINDOW),
 /* harmony export */   BasePromotionEngine: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.BasePromotionEngine),
 /* harmony export */   CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS),
 /* harmony export */   CHANNEL_INTELLIGENCE_ROOT_FIELDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.CHANNEL_INTELLIGENCE_ROOT_FIELDS),
@@ -18369,6 +18685,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MESSAGE_SOURCES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SOURCES),
 /* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.PARTICIPANTS_COUNT_RECHECK_DAYS),
 /* harmony export */   POOL: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.POOL),
+/* harmony export */   PROMOTE_RESTART_RECENT_MS: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.PROMOTE_RESTART_RECENT_MS),
 /* harmony export */   PROMOTION_LIMITS: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.PROMOTION_LIMITS),
 /* harmony export */   PROMOTION_MESSAGE_CHECK_DELAY_MS: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.PROMOTION_MESSAGE_CHECK_DELAY_MS),
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_MESSAGE_STRATEGIES),
@@ -18392,6 +18709,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.TEMP_BLOCK_TTL_SECONDS),
 /* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.addPoolOutcomeTotals),
+/* harmony export */   banRateGateTrips: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.banRateGateTrips),
 /* harmony export */   buildInsertIfAbsentUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildInsertIfAbsentUpdate),
 /* harmony export */   buildOutcomeUpdate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildOutcomeUpdate),
 /* harmony export */   buildPercentileBuckets: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.buildPercentileBuckets),
@@ -18400,6 +18718,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   calculateHealthBasedPromotionDelay: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.calculateHealthBasedPromotionDelay),
 /* harmony export */   calculatePromotionBatchLimit: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.calculatePromotionBatchLimit),
 /* harmony export */   classifyPoolError: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.classifyPoolError),
+/* harmony export */   classifyPromoteRestart: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.classifyPromoteRestart),
 /* harmony export */   classifyTelegramChannelError: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.classifyTelegramChannelError),
 /* harmony export */   compactMessagePool: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.compactMessagePool),
 /* harmony export */   computeAccountDeletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountDeletionRate),
@@ -18410,6 +18729,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.countPoolSurvivors),
 /* harmony export */   createPoolMessageIndex: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createPoolMessageIndex),
 /* harmony export */   createPromotionRuntime: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.createPromotionRuntime),
+/* harmony export */   decodePromoteStateSnapshot: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.decodePromoteStateSnapshot),
 /* harmony export */   deletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deletionRate),
 /* harmony export */   deriveProvenBySource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deriveProvenBySource),
 /* harmony export */   deriveSharedChannelVerdict: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.deriveSharedChannelVerdict),
@@ -18453,10 +18773,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   persistObservedChannels: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_shared_engine_ops__WEBPACK_IMPORTED_MODULE_2__.persistObservedChannels),
 /* harmony export */   poolEntryKey: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolEntryKey),
 /* harmony export */   poolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.poolOutcomeTotals),
+/* harmony export */   preloadPromoteRestartState: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.preloadPromoteRestartState),
 /* harmony export */   processChannelDialog: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.processChannelDialog),
 /* harmony export */   promotionErrorToken: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.promotionErrorToken),
 /* harmony export */   rawScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.rawScore),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
+/* harmony export */   resetPromoteRestartStateForTests: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.resetPromoteRestartStateForTests),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
 /* harmony export */   resolveChannelHydrationNeed: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.resolveChannelHydrationNeed),
 /* harmony export */   resolvePromotionFailureAction: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.resolvePromotionFailureAction),
@@ -18466,6 +18788,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shouldMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.shouldMatch),
 /* harmony export */   shouldNotMatch: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.shouldNotMatch),
 /* harmony export */   shouldRetainPoolCandidate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.shouldRetainPoolCandidate),
+/* harmony export */   shouldStampPromoteStatsOnBoot: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.shouldStampPromoteStatsOnBoot),
 /* harmony export */   survivalRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.survivalRate),
 /* harmony export */   toLiveChannelObservation: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.toLiveChannelObservation)
 /* harmony export */ });
@@ -20129,16 +20452,36 @@ async function shutdownDurableQueues(timeoutMs = 3000) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   MirroredTimestampMap: () => (/* binding */ MirroredTimestampMap),
+/* harmony export */   PROMOTE_RESTART_RECENT_MS: () => (/* binding */ PROMOTE_RESTART_RECENT_MS),
+/* harmony export */   RESTART_STATE_TTL_MS: () => (/* binding */ RESTART_STATE_TTL_MS),
 /* harmony export */   RedisDeadline: () => (/* binding */ RedisDeadline),
 /* harmony export */   RedisHash: () => (/* binding */ RedisHash),
 /* harmony export */   RedisTimeWindow: () => (/* binding */ RedisTimeWindow),
 /* harmony export */   RedisWrites: () => (/* binding */ RedisWrites),
 /* harmony export */   STATE_REDIS_TIMEOUT_MS: () => (/* binding */ STATE_REDIS_TIMEOUT_MS),
+/* harmony export */   accountStateKey: () => (/* binding */ accountStateKey),
+/* harmony export */   accountStateStore: () => (/* binding */ accountStateStore),
+/* harmony export */   accountStateTtlMs: () => (/* binding */ accountStateTtlMs),
+/* harmony export */   classifyPromoteRestart: () => (/* binding */ classifyPromoteRestart),
 /* harmony export */   currentMobile: () => (/* binding */ currentMobile),
+/* harmony export */   decodeAccountRestartState: () => (/* binding */ decodeAccountRestartState),
+/* harmony export */   decodePromoteStateSnapshot: () => (/* binding */ decodePromoteStateSnapshot),
+/* harmony export */   loadAccountRestartState: () => (/* binding */ loadAccountRestartState),
 /* harmony export */   onStateRedisRecovered: () => (/* binding */ onStateRedisRecovered),
+/* harmony export */   preloadPromoteRestartState: () => (/* binding */ preloadPromoteRestartState),
+/* harmony export */   promoteStateKey: () => (/* binding */ promoteStateKey),
+/* harmony export */   promoteStateStore: () => (/* binding */ promoteStateStore),
+/* harmony export */   reactionStateKey: () => (/* binding */ reactionStateKey),
+/* harmony export */   reactionStateStore: () => (/* binding */ reactionStateStore),
 /* harmony export */   readState: () => (/* binding */ readState),
+/* harmony export */   resetPromoteRestartStateForTests: () => (/* binding */ resetPromoteRestartStateForTests),
+/* harmony export */   restartStateEntries: () => (/* binding */ restartStateEntries),
+/* harmony export */   restartStateNumber: () => (/* binding */ restartStateNumber),
+/* harmony export */   saveAccountRestartState: () => (/* binding */ saveAccountRestartState),
 /* harmony export */   setStateRedisForTests: () => (/* binding */ setStateRedisForTests),
+/* harmony export */   shouldStampPromoteStatsOnBoot: () => (/* binding */ shouldStampPromoteStatsOnBoot),
 /* harmony export */   stateKey: () => (/* binding */ stateKey),
+/* harmony export */   takePreloadedPromoteRestartState: () => (/* binding */ takePreloadedPromoteRestartState),
 /* harmony export */   withDeadline: () => (/* binding */ withDeadline),
 /* harmony export */   writeOnce: () => (/* binding */ writeOnce)
 /* harmony export */ });
@@ -20481,13 +20824,13 @@ class RedisHash extends KeyedBackup {
     clear() {
         return this.write((m, key) => { m.del(key); });
     }
-    /** Rewrites the whole hash as `entries` (none = deleted). */
-    replace(entries) {
+    /** Rewrites the whole hash as `entries` (none = deleted). `ttlMs` overrides the hash's TTL for this write. */
+    replace(entries, ttlMs = this.ttlMs) {
         return this.write((m, key) => {
             m.del(key);
             if (entries.length) {
                 m.hset(key, ...entries.flat());
-                m.pexpire(key, this.ttlMs);
+                m.pexpire(key, ttlMs);
             }
         });
     }
@@ -20611,6 +20954,185 @@ class RedisWrites extends KeyedBackup {
     send(build, slots) {
         return this.write(build, slots);
     }
+}
+// ── Per-mobile restart state (promotion clock, SpamBot verdict, reaction pause ladder) ──────────────────────
+// A restart cache, not a source of truth (Mongo stays that). Each key is one hash per account mobile, rewritten
+// whole on every change (absolute values, last write wins). Read once at boot.
+/** TTL of the per-mobile restart keys: longer than any maintenance restart. */
+const RESTART_STATE_TTL_MS = 48 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+function promoteStateKey(mobile) { return stateKey("promote::state", mobile); }
+function accountStateKey(mobile) { return stateKey("tg::acct", mobile); }
+function reactionStateKey(mobile) { return stateKey("reactions::state", mobile); }
+const MAX_RESTART_STORES = 512;
+function memoStore(cache, mobile, create) {
+    let store = cache.get(mobile);
+    if (!store) {
+        store = create();
+        cache.set(mobile, store);
+        while (cache.size > MAX_RESTART_STORES) {
+            const oldest = cache.keys().next().value;
+            if (oldest === undefined)
+                break;
+            cache.delete(oldest);
+        }
+    }
+    return store;
+}
+const promoteStores = new Map();
+const accountStores = new Map();
+const reactionStores = new Map();
+/** `promote::state::{mobile}` (one backup per mobile, so outage replay stays ordered per key). */
+function promoteStateStore(mobile) {
+    return memoStore(promoteStores, mobile, () => new RedisHash(() => promoteStateKey(mobile), RESTART_STATE_TTL_MS, "promote.state"));
+}
+/** `tg::acct::{mobile}`: the last SpamBot verdict, shared by tg-aut and promote. */
+function accountStateStore(mobile) {
+    return memoStore(accountStores, mobile, () => new RedisHash(() => accountStateKey(mobile), RESTART_STATE_TTL_MS, "tg.acct"));
+}
+/** `reactions::state::{mobile}`: the reaction timeout pause ladder. */
+function reactionStateStore(mobile) {
+    return memoStore(reactionStores, mobile, () => new RedisHash(() => reactionStateKey(mobile), RESTART_STATE_TTL_MS, "reactions.state"));
+}
+/** Writes `fields` as the whole hash (absolute values). Undefined / null / non-finite numbers are left out. */
+function restartStateEntries(fields) {
+    const entries = [];
+    for (const [field, value] of Object.entries(fields)) {
+        if (value === null || value === undefined)
+            continue;
+        if (typeof value === "number" && !Number.isFinite(value))
+            continue;
+        entries.push([field, String(value)]);
+    }
+    return entries;
+}
+/** A finite number from a stored hash field, else null. */
+function restartStateNumber(raw, field) {
+    const text = raw?.[field];
+    if (text === undefined || text === null || text === "")
+        return null;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : null;
+}
+/** A restart whose last promotion attempt is older than this (or absent) is a genuine new run. */
+const PROMOTE_RESTART_RECENT_MS = 60 * 60 * 1000;
+function decodePromoteStateSnapshot(raw) {
+    return {
+        lastMainAt: restartStateNumber(raw, 'lastMainAt'),
+        lastFollowUpAt: restartStateNumber(raw, 'lastFollowUpAt'),
+        lastAttemptAt: restartStateNumber(raw, 'lastAttemptAt'),
+        failStreak: restartStateNumber(raw, 'failStreak'),
+        successCount: restartStateNumber(raw, 'successCount'),
+        totalFailed: restartStateNumber(raw, 'totalFailed'),
+        deletedCount: restartStateNumber(raw, 'deletedCount'),
+        durabilityPausedAt: restartStateNumber(raw, 'durabilityPausedAt'),
+        clientId: raw.clientId || null,
+        updatedAt: restartStateNumber(raw, 'updatedAt'),
+    };
+}
+/** `raw` null = Redis unavailable. */
+function classifyPromoteRestart(raw, clientId, now = Date.now()) {
+    if (raw === null)
+        return { mode: 'unknown', snapshot: null };
+    if (Object.keys(raw).length === 0)
+        return { mode: 'new-run', snapshot: null };
+    const snapshot = decodePromoteStateSnapshot(raw);
+    const lastAttemptAt = snapshot.lastAttemptAt ?? snapshot.updatedAt;
+    const otherClient = !!clientId && !!snapshot.clientId && snapshot.clientId !== clientId;
+    const recent = lastAttemptAt !== null && now - lastAttemptAt <= PROMOTE_RESTART_RECENT_MS;
+    return { mode: recent && !otherClient ? 'restart' : 'new-run', snapshot };
+}
+/** Mongo promoteStats boot stamp (fresh grace window) only for a genuine new run. */
+function shouldStampPromoteStatsOnBoot(state) {
+    return state.mode === 'new-run';
+}
+/** Boot reads, one per mobile per process; the first engine built for the mobile consumes it. */
+const bootRestartStates = new Map();
+/**
+ * Boot (before the Telegram client starts): reads promote::state::{mobile} once (bounded, never throws). Later
+ * calls for the same mobile return the same read.
+ */
+function preloadPromoteRestartState(mobile, clientId) {
+    const key = mobile?.trim();
+    if (!key)
+        return Promise.resolve({ mode: 'unknown', snapshot: null });
+    const existing = bootRestartStates.get(key);
+    if (existing)
+        return existing.promise;
+    const promise = promoteStateStore(key).loadRaw()
+        .then((raw) => classifyPromoteRestart(raw, clientId))
+        .catch(() => ({ mode: 'unknown', snapshot: null }));
+    bootRestartStates.set(key, { promise, consumed: false });
+    return promise;
+}
+/** The first engine built for `mobile` takes the boot read (once); null = none pending. */
+function takePreloadedPromoteRestartState(mobile) {
+    const entry = bootRestartStates.get(mobile);
+    if (!entry || entry.consumed)
+        return null;
+    entry.consumed = true;
+    return entry.promise;
+}
+/** Tests only. */
+function resetPromoteRestartStateForTests() {
+    bootRestartStates.clear();
+}
+/** TTL of `tg::acct`: max(48 h, limitedUntil + 1 day), so a long dated limit outlives the default TTL. */
+function accountStateTtlMs(limitedUntil, now = Date.now()) {
+    if (limitedUntil === null || !Number.isFinite(limitedUntil))
+        return RESTART_STATE_TTL_MS;
+    return Math.max(RESTART_STATE_TTL_MS, limitedUntil + DAY_MS - now);
+}
+/** Saves the verdict for `mobile` (whole hash, TTL from limitedUntil). Never throws; false = memory-only. */
+function saveAccountRestartState(mobile, state, now = Date.now()) {
+    const entries = restartStateEntries({
+        daysLeft: state.daysLeft,
+        spamStatus: state.spamStatus,
+        limitedUntil: state.limitedUntil,
+        spamCheckedAt: state.spamCheckedAt,
+        source: state.source,
+        updatedAt: now,
+    });
+    return accountStateStore(mobile).replace(entries, accountStateTtlMs(state.limitedUntil, now));
+}
+/**
+ * Boot: the stored verdict with daysLeft recomputed from limitedUntil (a dated limit counts down while the process
+ * was down; a passed date stays limited at the smallest limited value until the next SpamBot reply, exactly as a
+ * fresh "limited until <past date>" reply is stored). null = no verdict stored.
+ */
+function decodeAccountRestartState(raw, now = Date.now()) {
+    if (!raw || Object.keys(raw).length === 0)
+        return null;
+    const statusText = raw.spamStatus;
+    const spamStatus = statusText === "free" || statusText === "limited" || statusText === "harsh" ? statusText : null;
+    const storedDaysLeft = restartStateNumber(raw, "daysLeft");
+    const limitedUntil = restartStateNumber(raw, "limitedUntil");
+    let daysLeft = storedDaysLeft ?? -1;
+    let limitDays = null;
+    if (spamStatus === "limited" && limitedUntil !== null) {
+        limitDays = Math.ceil((limitedUntil - now) / DAY_MS);
+        daysLeft = Math.max(Math.floor(limitDays), 0) + 1; // = sanitizeLimitedDaysLeft(limitDays)
+    }
+    else if (spamStatus === "free") {
+        daysLeft = -1;
+    }
+    if (storedDaysLeft === null && spamStatus === null)
+        return null;
+    return {
+        daysLeft,
+        spamStatus,
+        limitedUntil,
+        spamCheckedAt: restartStateNumber(raw, "spamCheckedAt"),
+        source: raw.source || null,
+        limitDays,
+    };
+}
+/** Boot read of `tg::acct::{mobile}`: undefined = Redis unavailable, null = nothing stored. */
+async function loadAccountRestartState(mobile, now = Date.now()) {
+    const raw = await accountStateStore(mobile).loadRaw();
+    if (raw === null)
+        return undefined;
+    return decodeAccountRestartState(raw, now);
 }
 
 
@@ -33085,9 +33607,26 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             },
         }, { upsert: true });
     }
-    /** Boot stamp: a swapped-in mobile gets a fresh grace window. Throws. */
-    async stampPromoteStatsTime(client, now = Date.now()) {
-        await this.promoteStats.updateOne({ client }, { $set: { lastUpdatedTimeStamp: now } });
+    /**
+     * Boot stamp: a swapped-in mobile gets a fresh grace window. `mobile` (optional, additive) records which
+     * account the stamp was for, so a boot that cannot read Redis can tell a swap from a plain restart. Throws.
+     */
+    async stampPromoteStatsTime(client, now = Date.now(), mobile) {
+        const set = { lastUpdatedTimeStamp: now };
+        if (mobile?.trim())
+            set.mobile = mobile.trim();
+        await this.promoteStats.updateOne({ client }, { $set: set });
+    }
+    /**
+     * Boot stamp when the restart state is unreadable (Redis down): stamps only when the stored `mobile` differs
+     * (a genuine swap), so a plain restart keeps the real promotion clock. True = stamped. Throws.
+     */
+    async stampPromoteStatsTimeIfMobileChanged(client, mobile, now = Date.now()) {
+        const current = mobile?.trim();
+        if (!current)
+            return false;
+        const result = await this.promoteStats.updateOne({ client, mobile: { $ne: current } }, { $set: { lastUpdatedTimeStamp: now, mobile: current } });
+        return (result?.modifiedCount ?? 0) > 0;
     }
     /** Count one send to `channelName`. Never throws: logs/alerts and returns undefined. */
     async updatePromoteStats(client, channelName) {
@@ -39832,6 +40371,17 @@ class ReactionRateLimiter {
         await this.persistStats();
     }
     /**
+     * Restart restore (reactions::state::{mobile}): re-apply a pause that was running before the restart.
+     * Keeps the later of the current and the given release time; adds no flood penalty or history.
+     */
+    async restoreFloodRelease(releaseAt) {
+        if (!Number.isFinite(releaseAt) || releaseAt <= Date.now() || releaseAt <= this.floodReleaseTime)
+            return false;
+        this.floodReleaseTime = releaseAt;
+        await this.persistStats();
+        return true;
+    }
+    /**
      * Record a PEER_FLOOD error — halt for 1-6 hours.
      */
     async recordPeerFlood() {
@@ -40146,6 +40696,8 @@ class ReactionService {
         this.reactionInFlightSince = 0;
         this.reactionTimeoutStreak = 0;
         this.reactionTimeoutPauses = 0;
+        this.lastReactionAt = 0;
+        this.lastReactionPersistAt = 0;
         this.unwatchFloodSleep = () => { };
         this.IN_FLIGHT_MAX_MS = 10 * 60 * 1000;
         this.IN_FLIGHT_WAIT_MS = 30 * 1000;
@@ -40256,6 +40808,7 @@ class ReactionService {
                 this.rateLimiter.initialize(),
                 this.runtimeRestrictions.loadBackup()
             ]);
+            await this.restoreReactionState();
             // Generate per-instance emoticon preferences
             this.emoticonPreferences = (0,_ReactionTypes__WEBPACK_IMPORTED_MODULE_16__.generateEmoticonPreferences)(_ReactionCache__WEBPACK_IMPORTED_MODULE_4__.DEFAULT_REACTIONS, 2, // 2 favorites with 3x weight
             this.instanceId);
@@ -40733,6 +41286,7 @@ class ReactionService {
         catch (error) {
             logger.error(`[${this.instanceId}] Failed to record flood: ${error}`);
         }
+        this.persistReactionState();
     }
     /** TIMEOUT_STREAK_PAUSE reactions in a row got no answer: pause reactions, doubling each time until one succeeds. */
     async noteReactionTimeout() {
@@ -40743,7 +41297,60 @@ class ReactionService {
         const seconds = Math.min(this.TIMEOUT_PAUSE_BASE_S * 2 ** this.reactionTimeoutPauses, this.TIMEOUT_PAUSE_MAX_S);
         this.reactionTimeoutPauses += 1;
         logger.warn(`[${this.instanceId}] ${this.TIMEOUT_STREAK_PAUSE} reactions in a row got no answer from Telegram: pausing reactions (pause #${this.reactionTimeoutPauses}, base ${Math.round(seconds / 60)} min)`);
-        await this.rateLimiter.recordFlood(seconds);
+        try {
+            await this.rateLimiter.recordFlood(seconds);
+        }
+        finally {
+            this.persistReactionState();
+        }
+    }
+    /** reactions::state::{mobile}; null for auto-generated instance ids (no stable mobile). */
+    reactionStateMirror() {
+        return /^rs_\d+_\d+$/.test(this.instanceId) ? null : (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.reactionStateStore)(this.instanceId);
+    }
+    /** Absolute values, last write wins; fire-and-forget (RedisHash replays after an outage). */
+    persistReactionState() {
+        const store = this.reactionStateMirror();
+        if (!store)
+            return;
+        const remaining = this.rateLimiter.getFloodWaitRemaining();
+        const now = Date.now();
+        void store.replace((0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.restartStateEntries)({
+            reactionTimeoutStreak: this.reactionTimeoutStreak,
+            reactionTimeoutPauses: this.reactionTimeoutPauses,
+            lastReactionAt: this.lastReactionAt || null,
+            floodReleaseAt: remaining > 0 ? now + remaining : null,
+            updatedAt: now,
+        })).catch(() => undefined);
+    }
+    /**
+     * Boot: bring back the timeout ladder and any running pause, so a restart never looks like a fresh mobile.
+     * Redis down (unknown) = start in a cooldown (TIMEOUT_PAUSE_BASE_S) instead of reacting at once.
+     */
+    async restoreReactionState() {
+        const store = this.reactionStateMirror();
+        if (!store)
+            return;
+        try {
+            const raw = await store.loadRaw();
+            const now = Date.now();
+            if (raw === null) {
+                await this.rateLimiter.restoreFloodRelease(now + this.TIMEOUT_PAUSE_BASE_S * 1000);
+                logger.warn(`[${this.instanceId}] Reaction state unknown (Redis unavailable): starting in a ${Math.round(this.TIMEOUT_PAUSE_BASE_S / 60)} min cooldown`);
+                return;
+            }
+            if (Object.keys(raw).length === 0)
+                return;
+            this.reactionTimeoutStreak = Math.max(0, Math.floor((0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.restartStateNumber)(raw, 'reactionTimeoutStreak') ?? 0));
+            this.reactionTimeoutPauses = Math.max(0, Math.floor((0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.restartStateNumber)(raw, 'reactionTimeoutPauses') ?? 0));
+            this.lastReactionAt = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.restartStateNumber)(raw, 'lastReactionAt') ?? 0;
+            const releaseAt = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_12__.restartStateNumber)(raw, 'floodReleaseAt');
+            const resumed = releaseAt !== null && await this.rateLimiter.restoreFloodRelease(releaseAt);
+            logger.info(`[${this.instanceId}] Reaction state restored: timeoutStreak=${this.reactionTimeoutStreak} pauses=${this.reactionTimeoutPauses}${resumed ? ` pause until ${new Date(releaseAt).toISOString()}` : ''}`);
+        }
+        catch (error) {
+            logger.warn(`[${this.instanceId}] Reaction state restore failed: ${error?.message ?? error}`);
+        }
     }
     getMessageChatLabel(message) {
         const chat = message.chat;
@@ -40764,8 +41371,15 @@ class ReactionService {
     }
     // ==================== Event Handlers ====================
     async onReactionSuccess() {
+        const hadLadder = this.reactionTimeoutStreak > 0 || this.reactionTimeoutPauses > 0;
         this.reactionTimeoutStreak = 0;
         this.reactionTimeoutPauses = 0;
+        this.lastReactionAt = Date.now();
+        // Persist only when the ladder changed or every ~10 min, to keep Redis writes off the hot path.
+        if (hadLadder || this.lastReactionAt - this.lastReactionPersistAt > 10 * 60 * 1000) {
+            this.lastReactionPersistAt = this.lastReactionAt;
+            this.persistReactionState();
+        }
         try {
             await this.rateLimiter.recordSuccess();
         }
@@ -40823,10 +41437,12 @@ class ReactionService {
                     catch (floodError) {
                         logger.error(`[${this.instanceId}] Failed to record flood: ${floodError}`);
                     }
+                    this.persistReactionState();
                     break;
                 case 'PEER_FLOOD':
                     logger.warn(`[${this.instanceId}] PEER_FLOOD detected — halting reactions`);
                     await this.rateLimiter.recordPeerFlood();
+                    this.persistReactionState();
                     break;
                 case 'REACTION_INVALID':
                     await this.rateLimiter.recordFailure();
@@ -47010,41 +47626,43 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../calls/call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
-/* harmony import */ var _jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../jobs/delayed-kinds */ "./src/jobs/delayed-kinds.ts");
-/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../conversation/inbound/picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../jobs/job-manager */ "./src/jobs/job-manager.ts");
-/* harmony import */ var _http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../http/middlewares/rate-limiter */ "./src/http/middlewares/rate-limiter.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
-/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
-/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../http/middlewares/request-id.middleware */ "./src/http/middlewares/request-id.middleware.ts");
-/* harmony import */ var _http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../http/middlewares/timeout.middleware */ "./src/http/middlewares/timeout.middleware.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../http/routes/health.routes */ "./src/http/routes/health.routes.ts");
-/* harmony import */ var _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../routes/telegram.routes */ "./src/routes/telegram.routes.ts");
-/* harmony import */ var _routes_admin_routes__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../routes/admin.routes */ "./src/routes/admin.routes.ts");
-/* harmony import */ var _routes_system_routes__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../routes/system.routes */ "./src/routes/system.routes.ts");
-/* harmony import */ var _routes_actions_routes__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../routes/actions.routes */ "./src/routes/actions.routes.ts");
-/* harmony import */ var _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../routes/diagnostics.routes */ "./src/routes/diagnostics.routes.ts");
-/* harmony import */ var _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../http/routes/details.routes */ "./src/http/routes/details.routes.ts");
-/* harmony import */ var _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../http/routes/api-docs.routes */ "./src/http/routes/api-docs.routes.ts");
-/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! swagger-ui-express */ "swagger-ui-express");
-/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_36___default = /*#__PURE__*/__webpack_require__.n(swagger_ui_express__WEBPACK_IMPORTED_MODULE_36__);
-/* harmony import */ var _http_swagger_config__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../http/swagger-config */ "./src/http/swagger-config.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _app_notifications__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ./app-notifications */ "./src/bootstrap/app-notifications.ts");
-/* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
-/* harmony import */ var _shutdown_signal__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ./shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-/* harmony import */ var _http_express_server_access__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ../http/express-server-access */ "./src/http/express-server-access.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
+/* harmony import */ var _jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../jobs/delayed-kinds */ "./src/jobs/delayed-kinds.ts");
+/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/inbound/picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _jobs_job_manager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../jobs/job-manager */ "./src/jobs/job-manager.ts");
+/* harmony import */ var _http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../http/middlewares/rate-limiter */ "./src/http/middlewares/rate-limiter.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../http/middlewares/request-id.middleware */ "./src/http/middlewares/request-id.middleware.ts");
+/* harmony import */ var _http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../http/middlewares/timeout.middleware */ "./src/http/middlewares/timeout.middleware.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../http/routes/health.routes */ "./src/http/routes/health.routes.ts");
+/* harmony import */ var _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../routes/telegram.routes */ "./src/routes/telegram.routes.ts");
+/* harmony import */ var _routes_admin_routes__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../routes/admin.routes */ "./src/routes/admin.routes.ts");
+/* harmony import */ var _routes_system_routes__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../routes/system.routes */ "./src/routes/system.routes.ts");
+/* harmony import */ var _routes_actions_routes__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../routes/actions.routes */ "./src/routes/actions.routes.ts");
+/* harmony import */ var _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../routes/diagnostics.routes */ "./src/routes/diagnostics.routes.ts");
+/* harmony import */ var _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../http/routes/details.routes */ "./src/http/routes/details.routes.ts");
+/* harmony import */ var _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../http/routes/api-docs.routes */ "./src/http/routes/api-docs.routes.ts");
+/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! swagger-ui-express */ "swagger-ui-express");
+/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default = /*#__PURE__*/__webpack_require__.n(swagger_ui_express__WEBPACK_IMPORTED_MODULE_38__);
+/* harmony import */ var _http_swagger_config__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../http/swagger-config */ "./src/http/swagger-config.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _app_notifications__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ./app-notifications */ "./src/bootstrap/app-notifications.ts");
+/* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _shutdown_signal__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ./shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
+/* harmony import */ var _http_express_server_access__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../http/express-server-access */ "./src/http/express-server-access.ts");
 
 
 
@@ -47088,10 +47706,12 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:app");
-const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__.Logger("tg-aut:app");
+const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
     title,
-    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
     fields: [
         { label: "Client", value: process.env.clientId || "unknown" },
         { label: "Process", value: process.env.name || "unknown" },
@@ -47099,14 +47719,14 @@ const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK
     ],
     tags: ["analytics", tag],
 }, "Failed to send analytics notification");
-const analyticsLossNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.createLossNotifier)((text) => sendAnalyticsNotice("Analytics rows lost", text, "data-loss"));
-const analyticsStallNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.createAlertNotifier)((text) => sendAnalyticsNotice("Analytics sink needs attention", text, "stalled"));
+const analyticsLossNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.createLossNotifier)((text) => sendAnalyticsNotice("Analytics rows lost", text, "data-loss"));
+const analyticsStallNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.createAlertNotifier)((text) => sendAnalyticsNotice("Analytics sink needs attention", text, "stalled"));
 function redactAuthQuery(url) {
     return (url || "").replace(/([?&](?:apiKey|apikey|api_key)=)[^&]*/gi, "$1[redacted]");
 }
 function sendAppHealthFailure(req, res, options) {
     const requestId = req.requestId || "unknown";
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_27__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
         requestId,
         component: "service.health",
         owner: "system",
@@ -47114,11 +47734,11 @@ function sendAppHealthFailure(req, res, options) {
         error: options.cause,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_27__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
         operation: options.operation,
         readOnly: options.readOnly,
         error: options.errorText,
-        message: options.publicMessage ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_27__.routeHealthErrorMessage)(options.cause),
+        message: options.publicMessage ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(options.cause),
         evidence,
         requestId,
         extra: options.extra,
@@ -47140,14 +47760,29 @@ async function seedRestartSafeState() {
         }
     };
     (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__.setGreetingClientResolver)(liveClient);
-    const [flood, callFlood, greetings] = await Promise.all([
+    const [flood, callFlood, greetings, promoteRestart, account] = await Promise.all([
         (0,_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_7__.seedFloodGateFromRedis)(),
         (0,_calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_8__.seedCallFloodCooldownFromRedis)(),
         (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__.restoreGreetingState)(),
+        // promote::state::{mobile}: the PromotionEngine built in startTg seeds its swap-out clock from this read.
+        (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_9__.preloadPromoteRestartState)(process.env.mobile, process.env.clientId),
+        // tg::acct::{mobile}: last SpamBot verdict (daysLeft recomputed from limitedUntil).
+        restoreAccountVerdict(),
     ]);
     logger.log(`[BOOT] restart-safe state: floodPausedUntil=${flood?.pausedUntil ?? "-"} refused=${flood?.refused ?? "-"} ` +
         `callFloodUntil=${callFlood?.until ?? "-"} callRefused=${callFlood?.refused ?? "-"} ` +
-        `greetWindow=${greetings?.windowCount ?? "-"} greetQueued=${greetings?.queued ?? "-"}`);
+        `greetWindow=${greetings?.windowCount ?? "-"} greetQueued=${greetings?.queued ?? "-"} ` +
+        `promote=${promoteRestart.mode} daysLeft=${account?.restored?.daysLeft ?? "-"} spamSwap=${account?.swapRequested ?? false}`);
+}
+/** tg::acct restore (bounded Redis read; never blocks boot on an error). */
+async function restoreAccountVerdict() {
+    try {
+        return await (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_10__.restoreAccountStateAfterRestart)();
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "[BOOT] restoring SpamBot verdict failed", false);
+        return null;
+    }
 }
 /**
  * Boot, after the delayed queue is re-armed: re-queue the calls and rebuild the after-call work the previous process
@@ -47185,7 +47820,7 @@ class ExpressServer {
         this.port = parseInt(process.env.PORT || "3000", 10);
         this.isRunning = false;
         // Initialize Swagger spec on server start - generates and writes swagger.json file
-        const swaggerJsonPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_37__.initializeSwaggerSpec)();
+        const swaggerJsonPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.initializeSwaggerSpec)();
         // Swagger UI configuration - points to the static swagger.json file
         const swaggerUiOptions = {
             customCss: ".swagger-ui .topbar { display: none }",
@@ -47195,14 +47830,14 @@ class ExpressServer {
             },
         };
         // Serve Swagger UI - it will fetch the spec from /swagger.json
-        this.app.use("/apim", (swagger_ui_express__WEBPACK_IMPORTED_MODULE_36___default().serve), swagger_ui_express__WEBPACK_IMPORTED_MODULE_36___default().setup(null, swaggerUiOptions));
+        this.app.use("/apim", (swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default().serve), swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default().setup(null, swaggerUiOptions));
         // Shared handler for serving swagger.json with fallback regeneration
         const serveSwaggerJson = (req, res) => {
             try {
-                let filePath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_37__.getSwaggerJsonPath)();
+                let filePath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.getSwaggerJsonPath)();
                 if (!fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(filePath)) {
                     logger.log("swagger.json not found, regenerating...");
-                    const regeneratedPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_37__.regenerateSwaggerSpec)();
+                    const regeneratedPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.regenerateSwaggerSpec)();
                     if (regeneratedPath) {
                         filePath = regeneratedPath;
                     }
@@ -47258,12 +47893,12 @@ class ExpressServer {
             next();
         });
         // Request ID middleware - must be first for tracking
-        this.app.use(_http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_25__.requestIdMiddleware);
+        this.app.use(_http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_27__.requestIdMiddleware);
         // Body parsing middleware with size limits (before other middleware that need body)
         this.app.use(express__WEBPACK_IMPORTED_MODULE_0___default().json({ limit: "10mb" }));
         this.app.use(express__WEBPACK_IMPORTED_MODULE_0___default().urlencoded({ extended: true, limit: "10mb" }));
         // Request timeout middleware - prevent hanging requests
-        this.app.use((0,_http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_26__.requestTimeoutMiddleware)(30000)); // 30 seconds default timeout
+        this.app.use((0,_http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_28__.requestTimeoutMiddleware)(30000)); // 30 seconds default timeout
         // CORS headers
         this.app.use((req, res, next) => {
             res.header("Access-Control-Allow-Origin", "*"); // fallback
@@ -47280,13 +47915,13 @@ class ExpressServer {
             next();
         });
         // Authentication middleware
-        this.app.use(_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__.authMiddleware);
+        this.app.use(_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.authMiddleware);
         // CORS
         this.app.use(cors__WEBPACK_IMPORTED_MODULE_1___default()());
         // Early flush middleware
         this.app.use(this.earlyFlushMiddleware);
         // Rate limiting
-        this.app.use(_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_15__.apiRateLimit.middleware());
+        this.app.use(_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_17__.apiRateLimit.middleware());
         // Error tracking middleware
         this.app.use((req, res, next) => {
             res.on("finish", () => {
@@ -47294,16 +47929,16 @@ class ExpressServer {
                 if (req.originalUrl === "/favicon.ico")
                     return;
                 if (res.statusCode >= 400) {
-                    const headerApiKey = (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__.getHeaderValue)(req, "x-api-key");
-                    void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.HTTP_FAILURES, {
+                    const headerApiKey = (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.getHeaderValue)(req, "x-api-key");
+                    void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.HTTP_FAILURES, {
                         title: "HTTP failed",
-                        severity: res.statusCode >= 500 ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.ERROR : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+                        severity: res.statusCode >= 500 ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
                         fields: [
                             { label: "Status", value: res.statusCode },
                             { label: "Method", value: req.method },
                             { label: "Path", value: redactAuthQuery(req.originalUrl) },
-                            { label: "Client IP", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__.extractRealClientIP)(req) },
-                            { label: "Origin", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_19__.extractRealOrigin)(req) },
+                            { label: "Client IP", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.extractRealClientIP)(req) },
+                            { label: "Origin", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.extractRealOrigin)(req) },
                             { label: "Header Key", value: headerApiKey ? "[redacted]" : "missing" },
                             { label: "Request ID", value: req.requestId || "unknown" },
                         ],
@@ -47331,7 +47966,7 @@ class ExpressServer {
                 }
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error updating timestamp in database");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "Error updating timestamp in database");
             }
             next();
         });
@@ -47347,7 +47982,7 @@ class ExpressServer {
             if (res.headersSent) {
                 return next(err);
             }
-            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(err, "Express error handler", false);
+            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(err, "Express error handler", false);
             const requestId = req.requestId || "unknown";
             const errorStack = err instanceof Error ? err.stack : undefined;
             // Log error with context
@@ -47358,9 +47993,9 @@ class ExpressServer {
                 stack:  true ? errorStack : 0,
             });
             // Send notification (don't await to avoid blocking response)
-            void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+            void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
                 title: "Request failed",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
                 summary: errorDetails.message,
                 fields: [
                     { label: "Request ID", value: requestId },
@@ -47389,14 +48024,14 @@ class ExpressServer {
      */
     setupRoutes() {
         // Register modular routes with prefixes
-        this.app.use("/", _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_28__["default"]); // Health routes stay at root
-        this.app.use("/", _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_29__["default"]);
-        this.app.use("/", _routes_admin_routes__WEBPACK_IMPORTED_MODULE_30__["default"]);
-        this.app.use("/", _routes_system_routes__WEBPACK_IMPORTED_MODULE_31__["default"]);
-        this.app.use("/", _routes_actions_routes__WEBPACK_IMPORTED_MODULE_32__["default"]);
-        this.app.use("/", _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_33__["default"]);
-        this.app.use("/", _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_34__["default"]);
-        this.app.use("/", _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_35__["default"]);
+        this.app.use("/", _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_30__["default"]); // Health routes stay at root
+        this.app.use("/", _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_31__["default"]);
+        this.app.use("/", _routes_admin_routes__WEBPACK_IMPORTED_MODULE_32__["default"]);
+        this.app.use("/", _routes_system_routes__WEBPACK_IMPORTED_MODULE_33__["default"]);
+        this.app.use("/", _routes_actions_routes__WEBPACK_IMPORTED_MODULE_34__["default"]);
+        this.app.use("/", _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_35__["default"]);
+        this.app.use("/", _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_36__["default"]);
+        this.app.use("/", _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_37__["default"]);
     }
     /**
      * Early flush middleware for streaming responses
@@ -47441,16 +48076,16 @@ class ExpressServer {
         await seedRestartSafeState();
         await _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().startTg();
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(10000);
-        await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__.runJobs)();
-        const delayed = await (0,_jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_9__.startDelayedQueue)();
-        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_10__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.runOutboundRecord)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
-        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_12__.pictureEventQueue.restore(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
+        await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_16__.runJobs)();
+        const delayed = await (0,_jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_11__.startDelayedQueue)();
+        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_13__.runOutboundRecord)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
+        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_14__.pictureEventQueue.restore(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
         if (delayed + outbound + pictures > 0)
             logger.log(`[BOOT] restored: delayed=${delayed} outbound=${outbound} pictures=${pictures}`);
         void restoreCallStateAfterRestart();
-        const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_20__.EventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
+        const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_22__.EventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
         await eventStore.ensureIndexes();
-        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_20__.EventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_21__.executeEvent, {
+        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_22__.EventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__.executeEvent, {
             logger: {
                 log: (m) => logger.log(`[event-scheduler] ${m}`),
                 warn: (m) => logger.warn(`[event-scheduler] ${m}`),
@@ -47487,7 +48122,7 @@ class ExpressServer {
                 // unreachable Supabase, or an absent `pg` driver all resolve to "analytics disabled" and
                 // BOOT continues untouched. Placed after the Mongo connect so a failure here can never be
                 // confused with a real database problem.
-                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_38__.initAnalytics)({
+                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.initAnalytics)({
                     connectionString: process.env.ANALYTICS_DB_URL,
                     logger,
                     // Stamped on promotion_send / conversion_event rows (same value as daily_client.namespace).
@@ -47500,18 +48135,18 @@ class ExpressServer {
                 })
                     .then((enabled) => logger.info(`[analytics] ${enabled ? "enabled" : "disabled"}`))
                     .catch(() => { });
-                await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_23__["default"].getInstance();
-                await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_13__.stateManager.ensureInitialized();
-                await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_24__.setUpiIds)();
+                await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__["default"].getInstance();
+                await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__.stateManager.ensureInitialized();
+                await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_26__.setUpiIds)();
                 await this.connectTelegramRuntime();
                 logger.info(`✅ BOOT ready | ${process.env.clientId || "unknown-client"} | ${source}`);
             }
             catch (error) {
-                if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.isPermanentFailureHandoffActive)()) {
-                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_17__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
+                if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.isPermanentFailureHandoffActive)()) {
+                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
                     throw error;
                 }
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error during Telegram connection bootstrap");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "Error during Telegram connection bootstrap");
                 logger.error(`❌ BOOT failed | ${process.env.clientId || "unknown-client"} | ${source} | ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
@@ -47527,39 +48162,39 @@ class ExpressServer {
     async runServer() {
         logger.log(`🌐 SERVER starting | ${process.env.clientId || "unknown-client"} | port ${this.port}`);
         this.server = this.app.listen(this.port, async () => {
-            logger.log(`✅ SERVER ready | ${process.env.clientId || "unknown-client"} | port ${this.port} | pid ${_process_info__WEBPACK_IMPORTED_MODULE_40__.prcessID}`);
+            logger.log(`✅ SERVER ready | ${process.env.clientId || "unknown-client"} | port ${this.port} | pid ${_process_info__WEBPACK_IMPORTED_MODULE_42__.prcessID}`);
         });
         // Set server timeout to prevent hanging connections
         this.server.timeout = 30000; // 30 seconds
         this.server.keepAliveTimeout = 65000; // 65 seconds (slightly longer than typical load balancer)
         this.server.headersTimeout = 66000; // 66 seconds (must be > keepAliveTimeout)
         this.server.on("error", async (error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error);
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
                 title: "Server error",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
                 summary: error.message,
                 tags: ["server", "lifecycle"],
             }, "Failed to send server error notification");
         });
         this.server.on("uncaughtException", async (err) => {
             logger.error("------------An uncaught exception occurred:", err);
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
                 title: "Uncaught error",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
                 summary: err.message,
                 tags: ["server", "uncaught"],
             }, "Failed to send server uncaught exception notification");
         });
         this.server.on("close", async () => {
             logger.log("Server close event triggered");
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_39__.sendAppOperatorNotification)({
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
                 title: "Server closing",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.WARNING,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
                 tags: ["server", "shutdown"],
             }, "Failed to send server close notification");
             logger.log("SERVER CLOSING");
-            await (0,_shutdown_signal__WEBPACK_IMPORTED_MODULE_41__.shutdown)("Server Close Event");
+            await (0,_shutdown_signal__WEBPACK_IMPORTED_MODULE_43__.shutdown)("Server Close Event");
         });
         this.isRunning = true;
     }
@@ -47576,7 +48211,7 @@ class ExpressServer {
     }
 }
 // Routes reach ExpressServer.getInstance() through http/express-server-access (no import of this module).
-(0,_http_express_server_access__WEBPACK_IMPORTED_MODULE_42__.registerExpressServer)(ExpressServer);
+(0,_http_express_server_access__WEBPACK_IMPORTED_MODULE_44__.registerExpressServer)(ExpressServer);
 
 
 /***/ },
@@ -58297,7 +58932,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isSpamBotMessage: () => (/* binding */ isSpamBotMessage),
 /* harmony export */   isTelegramSystemMessage: () => (/* binding */ isTelegramSystemMessage),
 /* harmony export */   noteOwnExitBroadcast: () => (/* binding */ noteOwnExitBroadcast),
+/* harmony export */   resetAccountVerdictForTests: () => (/* binding */ resetAccountVerdictForTests),
 /* harmony export */   resetOwnExitBroadcast: () => (/* binding */ resetOwnExitBroadcast),
+/* harmony export */   restoreAccountStateAfterRestart: () => (/* binding */ restoreAccountStateAfterRestart),
 /* harmony export */   runDeclinePasswordReset: () => (/* binding */ runDeclinePasswordReset)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -58312,16 +58949,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _reply_switch__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../reply-switch */ "./src/conversation/reply-switch.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../telegram/setup-client */ "./src/telegram/setup-client.ts");
-/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram/spam-state */ "./src/telegram/spam-state.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _reply_switch__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../reply-switch */ "./src/conversation/reply-switch.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../telegram/setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
+/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../telegram/spam-state */ "./src/telegram/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
 /**
  * System Message Handler
  * Handles system messages from Telegram (SpamBot, system notifications, etc.)
  */
+
+
 
 
 
@@ -58350,6 +58991,7 @@ const RESET_COMMAND = "rstll";
  * blocks/throws into the SystemMessageHandler call sites that set daysLeft.
  */
 function persistTgautDaysLeft(daysLeft) {
+    saveAccountVerdict(process.env.mobile, { daysLeft });
     _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()
         .updateTgautClientStat(daysLeft)
         .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist tgaut client stat daysLeft", false));
@@ -58360,7 +59002,13 @@ function persistTgautDaysLeft(daysLeft) {
  * never throws into the handler.
  */
 function persistSpamStatus(mobile, spamStatus, limitedUntil) {
-    (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.setSpamState)(spamStatus, limitedUntil);
+    (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.setSpamState)(spamStatus, limitedUntil);
+    saveAccountVerdict(mobile, {
+        spamStatus,
+        limitedUntil: limitedUntil ? limitedUntil.getTime() : null,
+        spamCheckedAt: Date.now(),
+        ...(spamStatus === "free" ? { daysLeft: -1 } : {}),
+    });
     if (!mobile) {
         logger.warn("Cannot persist spam status: account mobile is unknown");
         return;
@@ -58383,16 +59031,71 @@ function persistSpamStatus(mobile, spamStatus, limitedUntil) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false);
     }
 }
+/** This process's last SpamBot verdict, saved whole to tg::acct::{mobile} (restart restore; Mongo stays the record). */
+let accountVerdict = { daysLeft: -1, spamStatus: null, limitedUntil: null, spamCheckedAt: null, source: "tg-aut" };
+function saveAccountVerdict(mobile, update) {
+    accountVerdict = { ...accountVerdict, ...update, source: "tg-aut" };
+    if (!mobile)
+        return;
+    void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.saveAccountRestartState)(mobile, accountVerdict).catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to save tg::acct restart state", false));
+}
+/** Tests only. */
+function resetAccountVerdictForTests() {
+    accountVerdict = { daysLeft: -1, spamStatus: null, limitedUntil: null, spamCheckedAt: null, source: "tg-aut" };
+}
+/**
+ * Boot (before the Telegram client starts): brings back the last SpamBot verdict from tg::acct::{mobile}, with
+ * daysLeft recomputed from limitedUntil, so a limited account keeps its limited pace and a dated limit of
+ * MIN_LIMIT_DAYS_FOR_SWAP+ days (or a harsh limit) asks CMS for the swap now instead of after the next SpamBot probe.
+ * Nothing stored / Redis unavailable = unchanged (healthy until the next probe). Never throws.
+ */
+async function restoreAccountStateAfterRestart(mobile = process.env.mobile, now = Date.now()) {
+    if (!mobile)
+        return { restored: null, swapRequested: false };
+    try {
+        const restored = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.loadAccountRestartState)(mobile, now);
+        if (!restored)
+            return { restored: null, swapRequested: false };
+        accountVerdict = {
+            daysLeft: restored.daysLeft,
+            spamStatus: restored.spamStatus,
+            limitedUntil: restored.limitedUntil,
+            spamCheckedAt: restored.spamCheckedAt,
+            source: restored.source ?? "tg-aut",
+        };
+        (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(restored.daysLeft);
+        // daysLeft also gates the SpamBot check (>= 0 skips it); a restored verdict must not stop the first real one.
+        if (restored.daysLeft >= 0)
+            (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_15__.markRestoredVerdictUnverified)();
+        if (restored.spamStatus)
+            (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.setSpamState)(restored.spamStatus, restored.limitedUntil !== null ? new Date(restored.limitedUntil) : null);
+        let swapRequested = false;
+        if (restored.spamStatus === "harsh") {
+            swapRequested = true;
+            void requestSpamSwap("SpamBot harsh limit (restored after restart)", _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.HARSH_SWAP_DAYS);
+        }
+        else if (restored.spamStatus === "limited" && restored.limitedUntil !== null && (restored.limitDays ?? 0) >= _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.MIN_LIMIT_DAYS_FOR_SWAP) {
+            swapRequested = true;
+            void requestSpamSwap(`Account limited until ${new Date(restored.limitedUntil).toISOString()} (${restored.limitDays} days, restored after restart)`, (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.swapDaysForLimitedUntil)(new Date(restored.limitedUntil), now));
+        }
+        logger.log(`[BOOT] SpamBot verdict restored: status=${restored.spamStatus ?? "-"} daysLeft=${restored.daysLeft} limitDays=${restored.limitDays ?? "-"} swap=${swapRequested}`);
+        return { restored, swapRequested };
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "restoreAccountStateAfterRestart", false);
+        return { restored: null, swapRequested: false };
+    }
+}
 /** Ask CMS to swap this client's account (archiveOld + formalities). Never throws. */
 async function requestSpamSwap(reason, days) {
     try {
-        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_12__.getRuntimeConfigBaseOrNull)();
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_13__.getRuntimeConfigBaseOrNull)();
         if (!runtimeBase) {
             logger.error(`[SPAM SWAP] Cannot trigger client setup: runtime config base is missing`);
             return;
         }
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.clampSwapRestDays)(days)}&formalities=true&reason=${encodeURIComponent(reason)}`;
-        const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_13__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_15__.fetchWithTimeout, process.env.clientId);
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.clampSwapRestDays)(days)}&formalities=true&reason=${encodeURIComponent(reason)}`;
+        const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_14__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__.fetchWithTimeout, process.env.clientId);
         if (!setupResult.swapped) {
             logger.warn(`[SPAM SWAP] Client setup not performed: ${setupResult.status} — ${setupResult.message}`);
         }
@@ -58407,7 +59110,7 @@ const HARSH_TRIGGER_DAYS = 5;
 /** Delayed record 'declinePasswordReset': the password-reset decline 5 min after a login code (survives a restart). */
 async function runDeclinePasswordReset(client, chatId) {
     try {
-        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(client, chatId);
+        await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_18__.declinePasswordReset)(client, chatId);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `handleTelegramSystemMessage.delayedDeclinePasswordReset.${chatId}`, false);
@@ -58484,13 +59187,13 @@ async function handleSpamBotMessage(event) {
             }
             return;
         case "harsh-warning":
-            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(HARSH_TRIGGER_DAYS);
+            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(HARSH_TRIGGER_DAYS);
             persistTgautDaysLeft(HARSH_TRIGGER_DAYS);
             persistSpamStatus(mobile, "harsh", null);
             if (shouldNotify) {
                 await notifySystemMessage("harsh-warning", "Harsh limit", "SpamBot warned that current behavior can trigger a harsh limit.", [], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "warning"]);
             }
-            await requestSpamSwap("SpamBot harsh limit (indefinite)", _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.HARSH_SWAP_DAYS);
+            await requestSpamSwap("SpamBot harsh limit (indefinite)", _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.HARSH_SWAP_DAYS);
             return;
         default:
             if (shouldNotify)
@@ -58502,6 +59205,17 @@ async function notifyGenericSpamBotMessage(text) {
     await notifySystemMessage("spambot", "SpamBot", "", [{ label: "Status", value: status.label, code: false }, ...(status.limitedUntil ? [{ label: "Limited until", value: status.limitedUntil }] : [])], status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot"], text, status.healthy ? healthyDigest(process.env.mobile) : undefined);
 }
 /**
+ * A "released"/limited SpamBot notice whose date cannot be read: limited with an unknown date. The restart cache
+ * gets spamStatus 'limited' (no date) with the same daysLeft, so a previously saved 'free' cannot make the restore
+ * decode this account as healthy (decode forces 'free' to daysLeft -1).
+ */
+function persistUndatedLimit(mobile) {
+    const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
+    (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(sanitized);
+    persistTgautDaysLeft(sanitized);
+    saveAccountVerdict(mobile, { daysLeft: sanitized, spamStatus: "limited", limitedUntil: null, spamCheckedAt: Date.now() });
+}
+/**
  * Handle automatically released message
  */
 async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
@@ -58509,26 +59223,22 @@ async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
         const date = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.extractSpamBotReleaseDate)(event.message.text || "");
         if (!date) {
             logger.warn("SpamBot release notice did not contain a parseable release date");
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
-            persistTgautDaysLeft(sanitized);
+            persistUndatedLimit(mobile);
             return false;
         }
         const limitedUntil = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__.parseSpamBotReleaseDate)(date, new Date(Date.now()));
         if (!limitedUntil) {
             logger.warn(`SpamBot release date "${date}" could not be parsed`);
-            const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
-            (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(sanitized);
-            persistTgautDaysLeft(sanitized);
+            persistUndatedLimit(mobile);
             return false;
         }
-        const days = (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.daysUntil)(limitedUntil);
+        const days = (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.daysUntil)(limitedUntil);
         // A "limited until <date>" notice ALWAYS means the account is limited. getdaysLeft returns 0 for a
         // today date and -1 for a past date; storing either raw would misclassify — 0 hit the pacing/cap
         // split, and -1 collides with the healthy sentinel (marking a limited account HEALTHY). Sanitize to
         // a value that is unambiguously limited (>= 1). Only an explicit "good news" writes -1.
         const storedDaysLeft = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(days);
-        (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(storedDaysLeft);
+        (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(storedDaysLeft);
         persistTgautDaysLeft(storedDaysLeft);
         persistSpamStatus(mobile, "limited", limitedUntil);
         logger.log(`[SPECIAL CASE] Automatically released message - days left: ${days} (stored: ${storedDaysLeft}), date: ${date}`);
@@ -58538,12 +59248,12 @@ async function handleAutomaticallyReleased(event, shouldNotify, mobile) {
                 { label: "Days left", value: days },
             ], _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity.WARNING, ["system-message", "spambot", "restriction"]);
         }
-        if (days >= _telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP) {
+        if (days >= _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.MIN_LIMIT_DAYS_FOR_SWAP) {
             logger.debug(`[EDGE CASE] Dated limit of ${days} days - requesting client swap`);
-            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.swapDaysForLimitedUntil)(limitedUntil));
+            await requestSpamSwap(`Account limited until ${date} (${days} days)`, (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.swapDaysForLimitedUntil)(limitedUntil));
         }
         else {
-            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_telegram_spam_state__WEBPACK_IMPORTED_MODULE_14__.MIN_LIMIT_DAYS_FOR_SWAP}`);
+            logger.debug(`[EDGE CASE] Limit of ${days} days is below the swap threshold of ${_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.MIN_LIMIT_DAYS_FOR_SWAP}`);
         }
         return true;
     }
@@ -58585,7 +59295,7 @@ async function handleGoodNews() {
             }
         }
     }
-    (0,_reply_switch__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(-1);
+    (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(-1);
     persistTgautDaysLeft(-1);
     logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
 }
@@ -58602,7 +59312,7 @@ async function handleTelegramSystemMessage(event) {
     if (text.includes("request to reset account")) {
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(PASSWORD_RESET_SLEEP_MS);
         try {
-            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_16__.declinePasswordReset)(event.client);
+            await (0,_tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_18__.declinePasswordReset)(event.client);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error declining password reset");
@@ -66460,6 +67170,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   UserDataDtoCrud: () => (/* binding */ UserDataDtoCrud),
 /* harmony export */   runTextedClientLimit: () => (/* binding */ runTextedClientLimit),
+/* harmony export */   stampPromoteStatsOnBoot: () => (/* binding */ stampPromoteStatsOnBoot),
 /* harmony export */   user: () => (/* binding */ user)
 /* harmony export */ });
 /* harmony import */ var mongodb__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! mongodb */ "mongodb");
@@ -66469,10 +67180,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
-/* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../calls/call-pause */ "./src/calls/call-pause.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../calls/call-pause */ "./src/calls/call-pause.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+
 
 
 
@@ -66530,6 +67243,26 @@ async function runTextedClientLimit(chatId) {
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error applying texted-client limit for ${chatId}`, false);
     }
+}
+/**
+ * Boot stamp of promoteStats.lastUpdatedTimeStamp (the fresh grace window a swapped-in mobile needs so it is not
+ * re-swapped on the previous mobile's stale value). Gated on promote::state::{mobile}: a plain restart (attempted
+ * within the last hour) keeps the real clock; a new run stamps. Redis unreadable: stamp only when the stored
+ * mobile differs (a genuine swap). Throws like the stamp itself.
+ */
+async function stampPromoteStatsOnBoot(promote, clientId = process.env.clientId, mobile = process.env.mobile) {
+    const restart = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_6__.preloadPromoteRestartState)(mobile, clientId);
+    if ((0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_6__.shouldStampPromoteStatsOnBoot)(restart)) {
+        await promote.stampPromoteStatsTime(clientId, Date.now(), mobile);
+        return 'stamped';
+    }
+    if (restart.mode === 'unknown') {
+        const stamped = await promote.stampPromoteStatsTimeIfMobileChanged(clientId, mobile);
+        logger.warn(`[BOOT] promote restart state unreadable: promoteStats boot stamp ${stamped ? 'applied (mobile changed)' : 'skipped (same mobile)'}`);
+        return stamped ? 'stamped-mobile-changed' : 'kept-mobile-same';
+    }
+    logger.log(`[BOOT] restart within the last hour for ${mobile}: promoteStats boot stamp skipped (real promotion clock kept)`);
+    return 'kept';
 }
 class UserDataDtoCrud {
     constructor() {
@@ -66623,17 +67356,14 @@ class UserDataDtoCrud {
                     this.isConnected = false;
                     this.client = null;
                     void this.closePromotionRedis();
-                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+                    _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
                 });
                 clients.forEach(clt => {
                     this.clients = Object.assign(this.clients, { [clt.dbcoll]: clt });
                 });
                 const promote = this.repositories.get(connectedClient).promote;
                 await promote.ensurePromoteStatsInitialized(process.env.clientId);
-                // On boot (every account swap triggers a full restart), stamp the promotion
-                // timestamp to now so the swapped-in mobile gets a fresh 30-min grace window
-                // instead of inheriting the previous mobile's stale value and re-swapping immediately.
-                await promote.stampPromoteStatsTime(process.env.clientId);
+                await stampPromoteStatsOnBoot(promote);
                 return true;
             }
             catch (error) {
@@ -66645,6 +67375,9 @@ class UserDataDtoCrud {
         return true;
     }
     /**
+     * @deprecated Restart restore reads tg::acct::{mobile} (Redis) instead; nothing in code reads
+     * tgautClientStats back. Kept as an operator-visible Mongo row (redesign-status F5 keeps it).
+     *
      * Persist the live spam-limit daysLeft signal to a per-client stat row so it is observable
      * outside the in-memory globalState module (previously nowhere-persisted for tg-aut). Upsert
      * keyed by process.env.clientId via ClientsRepository. Never throws; failures are logged and
@@ -66660,7 +67393,7 @@ class UserDataDtoCrud {
         return this.client.db('tgclients').collection('events');
     }
     async initializePromotionRuntime() {
-        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.readPromotionFeatureFlags)(process.env);
+        const promotionFlags = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.readPromotionFeatureFlags)(process.env);
         try {
             logger.log(`Promotion runtime init starting; scoring=${promotionFlags.channelScoring} poolLearning=true locks=${promotionFlags.redisChannelLock} attribution=${promotionFlags.conversionAttribution}`);
             const { default: Redis } = await Promise.resolve(/*! import() */).then(__webpack_require__.t.bind(__webpack_require__, /*! ioredis */ "ioredis", 23));
@@ -66699,7 +67432,7 @@ class UserDataDtoCrud {
             if (!repositories)
                 throw new Error('Mongo client not connected; promotion runtime needs its collections');
             const runtimeCollections = repositories.channels.promotionRuntimeCollections();
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.createPromotionRuntime)({
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.createPromotionRuntime)({
                 channelIntelligenceCollection: runtimeCollections.channelIntelligence,
                 activeChannelCollection: runtimeCollections.activeChannels,
                 redis,
@@ -66734,7 +67467,7 @@ class UserDataDtoCrud {
             return false;
         }
         await this.closePromotionRedis();
-        _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+        _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
         await this.initializePromotionRuntime();
         await this.promoteRepository().ensurePromoteStatsInitialized(process.env.clientId);
         return true;
@@ -67052,7 +67785,7 @@ class UserDataDtoCrud {
                 const textedClientCount = await this.textedClientCount(chatId);
                 if (textedClientCount.lastHour.length > 2) {
                     // Delayed record (survives a restart): the 2 h texted-client limit lands 20 s later.
-                    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_6__.scheduleDelayed)(chatId, 'textedClientLimit', {}, TEXTED_CLIENT_LIMIT_DELAY_MS);
+                    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'textedClientLimit', {}, TEXTED_CLIENT_LIMIT_DELAY_MS);
                 }
                 const userDetail = await this.read(chatId);
                 if (userDetail) {
@@ -67132,7 +67865,7 @@ class UserDataDtoCrud {
             const profile = process.env.dbcoll?.trim();
             if (!normalizedChatId || !profile)
                 return false;
-            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(channelIds);
+            const normalizedChannelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(channelIds);
             // upsert:false — merges into an EXISTING conversation row only.
             return await this.userDataRepository().mergeAttributionChannelIds(normalizedChatId, profile, normalizedChannelIds);
         }
@@ -67189,7 +67922,7 @@ class UserDataDtoCrud {
         if (!result.applied)
             return result.reason ?? 'invalid-amount';
         // Every ledger credit passes here (screenshot, ask-proof resolve): a new payment ends a "don't call" pause.
-        (0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_7__.endCallPause)(chatId);
+        (0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_8__.endCallPause)(chatId);
         return 'applied';
     }
     /**
@@ -67345,7 +68078,7 @@ class UserDataDtoCrud {
             return summary;
         let attribution;
         try {
-            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.getInstance().attribution;
+            const runtimeAttribution = _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.getInstance().attribution;
             if (!runtimeAttribution)
                 throw new Error('conversion attribution is disabled');
             attribution = runtimeAttribution;
@@ -67364,7 +68097,7 @@ class UserDataDtoCrud {
             }
             try {
                 const userData = await this.userDataRepository().findAttributionChannelIds(candidateChatId, { profile });
-                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
+                const channelIds = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.normalizeAttributionChannelIds)(userData?.attributionChannelIds);
                 if (channelIds.length === 0) {
                     summary.awaitingChannels += 1;
                     continue;
@@ -67642,7 +68375,7 @@ class UserDataDtoCrud {
         logger.debug(`[Persona] Loading buffer client doc for ${mobile}`);
         const doc = (await this.getRepositories()?.clients.findBufferClient(mobile)) ?? null;
         if (doc) {
-            logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_8__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
+            logger.debug(`🧍 PERSONA buffer-doc loaded | ${mobile} | status ${doc.status || 'unknown'} | inUse ${doc.inUse ?? 'unknown'} | first ${!!doc.assignedFirstName} | last ${!!doc.assignedLastName} | bio ${!!doc.assignedBio} | pics ${doc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__.formatPersonaTimestampShort)(doc.profilePicsUpdatedAt)}`);
         }
         else {
             logger.warn(`[Persona] Buffer client doc not found for ${mobile}`);
@@ -67766,7 +68499,7 @@ class UserDataDtoCrud {
             this.client = null;
             this.repositories.reset();
             await this.closePromotionRedis();
-            _tg_channel_state__WEBPACK_IMPORTED_MODULE_9__.PromotionRuntime.reset();
+            _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__.PromotionRuntime.reset();
             await closingClient?.close();
         }
         catch (error) {
@@ -69854,6 +70587,14 @@ async function collectPromotionHealth() {
             failStreakOnly = false;
             issues.push("Promotion is paused after a verification durability failure");
         }
+        // Ban-rate gate (BasePromotionEngine): most recent sends were banned, so the engine stopped its round.
+        // Unhealthy + recover = the promotion-health job requests the account swap now instead of after the stale clock.
+        const banRateGate = promotor.getBanRateGateState?.() ?? null;
+        if (banRateGate?.tripped) {
+            status = "unhealthy";
+            failStreakOnly = false;
+            issues.push(`Promotion ban rate is critical: ${banRateGate.failed}/${banRateGate.total} recent sends failed`);
+        }
         if (!quietAllowed && durableStats?.isActive && durableLastUpdatedAgeMs != null && durableLastUpdatedAgeMs > PROMOTION_STOPPED_MS) {
             status = "unhealthy";
             failStreakOnly = false;
@@ -69886,6 +70627,7 @@ async function collectPromotionHealth() {
                 sleeping,
                 durabilityFailures,
                 lastDurabilityFailureAt,
+                banRateGate,
                 durableActive: durableStats?.isActive ?? null,
                 durableLastUpdatedAt,
                 durableLastUpdatedAgeMs,
@@ -101417,7 +102159,9 @@ function parseMediaMetadata(message) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   checktghealth: () => (/* binding */ checktghealth),
-/* harmony export */   getLastHealthCheck: () => (/* binding */ getLastHealthCheck)
+/* harmony export */   getLastHealthCheck: () => (/* binding */ getLastHealthCheck),
+/* harmony export */   markRestoredVerdictUnverified: () => (/* binding */ markRestoredVerdictUnverified),
+/* harmony export */   resetRestoredVerdictForTests: () => (/* binding */ resetRestoredVerdictForTests)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _tg_core_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
@@ -101431,9 +102175,24 @@ const REDIS_TTL_SECONDS = 12 * 60 * 60; // 12 hours
 function getHealthCheckKey(mobile) {
     return `tg:health:${mobile}`;
 }
+/**
+ * Set at boot when daysLeft came from the restart cache (tg::acct), not from a SpamBot reply in this process.
+ * While set, the release-wait guard lets one real SpamBot check through (the normal throttle still applies), so
+ * a stale restored "limited" verdict cannot suppress every check for the life of the process. Cleared once a
+ * check has actually reached SpamBot.
+ */
+let restoredVerdictUnverified = false;
+/** Boot restore: daysLeft was restored from tg::acct; allow one real SpamBot check despite it. */
+function markRestoredVerdictUnverified() {
+    restoredVerdictUnverified = true;
+}
+/** Tests only. */
+function resetRestoredVerdictForTests() {
+    restoredVerdictUnverified = false;
+}
 // tg-aut uses a single global daysLeft value; the per-mobile arg is ignored.
 const daysLeftStore = {
-    getDaysLeft: (_mobile) => (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_2__.daysLeftForRelease)(),
+    getDaysLeft: (_mobile) => (restoredVerdictUnverified ? -1 : (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_2__.daysLeftForRelease)()),
     // Health-check guard only reads daysLeftForRelease(); set/remove/clear are owned by
     // globalState elsewhere, so these are intentional no-ops in this adapter.
     setDaysLeft: () => { },
@@ -101449,6 +102208,8 @@ const redisThrottle = {
         return { run: false, cachedResult: cachedData.result };
     },
     async recordResult(mobile, result, errorMessage) {
+        if (result)
+            restoredVerdictUnverified = false; // /start reached SpamBot: its reply re-sets daysLeft
         const healthData = {
             timestamp: Date.now(),
             result,
