@@ -31366,7 +31366,7 @@ function getExpectedAuthFingerprint(mobile, options) {
 }
 // Auths matching any of these criteria are treated as "ours" and never revoked.
 // Keeps operator-owned sessions (Singapore VPS, OnePlus 11 handsets, CLI/desktop tools,
-// app names like likki/rams/sru/shru/hanslnz) alive through removeOtherAuths.
+// app names like likki/rams/sru/shru/hanslnz) alive through removeExternalLoginSessions.
 // Derive our apiIds directly from the credentials array — always in sync.
 const OUR_API_IDS = new Set(API_CREDENTIALS.map(c => c.apiId));
 const AUTH_ALLOWLIST = {
@@ -59001,7 +59001,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/delete-messages */ "./src/telegram/delete-messages.ts");
-/* harmony import */ var _telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../telegram/session/remove-other-auths */ "./src/telegram/session/remove-other-auths.ts");
+/* harmony import */ var _telegram_session_remove_external_login_sessions__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../telegram/session/remove-external-login-sessions */ "./src/telegram/session/remove-external-login-sessions.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 /* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
@@ -59367,7 +59367,7 @@ async function handleGoodNews() {
 async function handleTelegramSystemMessage(event) {
     const text = event.message.text?.toLowerCase() ?? '';
     if (text.includes("login code")) {
-        await (0,_telegram_session_remove_other_auths__WEBPACK_IMPORTED_MODULE_2__.removeOtherAuths)(event.client);
+        await (0,_telegram_session_remove_external_login_sessions__WEBPACK_IMPORTED_MODULE_2__.removeExternalLoginSessions)(event.client);
         const chatId = event.message.chatId?.toString?.() ?? "unknown";
         (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_9__.scheduleDelayed)(chatId, "declinePasswordReset", {}, PASSWORD_RESET_DECLINE_DELAY_MS, `pwdecline::${chatId}::${event.message.id}`);
     }
@@ -104780,16 +104780,16 @@ async function trySendingMsg({ chatId, username, accessHash, }, client, msgObj, 
 
 /***/ },
 
-/***/ "./src/telegram/session/remove-other-auths.ts"
-/*!****************************************************!*\
-  !*** ./src/telegram/session/remove-other-auths.ts ***!
-  \****************************************************/
+/***/ "./src/telegram/session/remove-external-login-sessions.ts"
+/*!****************************************************************!*\
+  !*** ./src/telegram/session/remove-external-login-sessions.ts ***!
+  \****************************************************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   removeOtherAuths: () => (/* binding */ removeOtherAuths)
+/* harmony export */   removeExternalLoginSessions: () => (/* binding */ removeExternalLoginSessions)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -104808,55 +104808,70 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-aut:core-utils');
+const MAX_ROUNDS = 60;
+const ROUND_DELAY_MS = 3500;
 let checkingAuths = false;
-async function removeOtherAuths(client) {
-    if (!checkingAuths) {
-        checkingAuths = true;
-        let i = 60;
-        while (i > 0) {
-            const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.GetAuthorizations());
-            for (const auth of result.authorizations) {
+/**
+ * Removes external login sessions: authorizations not created by our app
+ * (current session, our api_ids, operator allowlist, matching device/OS are kept).
+ * Polls until the first round that removes at least one session, then stops.
+ * Returns the first removed authorization, or undefined if none was removed.
+ */
+async function removeExternalLoginSessions(client) {
+    if (checkingAuths) {
+        await (0,_shared_core_notification__WEBPACK_IMPORTED_MODULE_6__.sendCoreUtilsNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
+            title: "External login cleanup running",
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.INFO,
+            summary: "Skipped duplicate tg-aut external login cleanup request.",
+            tags: ["tg-aut", "telegram", "auth-cleanup", "duplicate"],
+        }, `TgAutCoreUtils.notification.authCleanupDuplicate.${process.env.mobile || "unknown"}`);
+        return undefined;
+    }
+    checkingAuths = true;
+    try {
+        for (let round = MAX_ROUNDS; round > 0; round--) {
+            let authorizations = [];
+            try {
+                const result = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.GetAuthorizations());
+                authorizations = result.authorizations;
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error);
+            }
+            for (const auth of authorizations) {
                 if (isAuthMine(auth)) {
                     continue;
                 }
-                else {
-                    {
-                        try {
-                            logger.log(auth);
-                            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.ResetAuthorization({ hash: auth.hash }));
-                            await (0,_shared_core_notification__WEBPACK_IMPORTED_MODULE_6__.sendCoreUtilsNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
-                                title: "Auth removed",
-                                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
-                                summary: "Removed a foreign Telegram authorization from tg-aut account.",
-                                fields: [
-                                    { label: "Mobile", value: process.env.mobile || "unknown" },
-                                    { label: "App", value: auth.appName || "unknown" },
-                                    { label: "Country", value: auth.country || "unknown" },
-                                    { label: "Device", value: auth.deviceModel || "unknown" },
-                                ],
-                                tags: ["tg-aut", "telegram", "auth-cleanup"],
-                            }, `TgAutCoreUtils.notification.authRemoved.${process.env.mobile || "unknown"}`);
-                            checkingAuths = false;
-                            continue;
-                        }
-                        catch (error) {
-                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error);
-                        }
-                    }
+                try {
+                    // Log only non-identifying fields. The raw auth carries the session hash and IP
+                    // (a session identifier); never log the whole object in the session-survival path.
+                    logger.log(`Removing external login: app=${auth.appName || "unknown"} country=${auth.country || "unknown"} device=${auth.deviceModel || "unknown"}`);
+                    await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.ResetAuthorization({ hash: auth.hash }));
                 }
+                catch (error) {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error);
+                    continue;
+                }
+                await (0,_shared_core_notification__WEBPACK_IMPORTED_MODULE_6__.sendCoreUtilsNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
+                    title: "External login removed",
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.WARNING,
+                    summary: "Removed an external login session from tg-aut account.",
+                    fields: [
+                        { label: "Mobile", value: process.env.mobile || "unknown" },
+                        { label: "App", value: auth.appName || "unknown" },
+                        { label: "Country", value: auth.country || "unknown" },
+                        { label: "Device", value: auth.deviceModel || "unknown" },
+                    ],
+                    tags: ["tg-aut", "telegram", "auth-cleanup"],
+                }, `TgAutCoreUtils.notification.authRemoved.${process.env.mobile || "unknown"}`);
+                return auth;
             }
-            i--;
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(3500);
+            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(ROUND_DELAY_MS);
         }
-        checkingAuths = false;
+        return undefined;
     }
-    else {
-        await (0,_shared_core_notification__WEBPACK_IMPORTED_MODULE_6__.sendCoreUtilsNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.ACCOUNT_LOGINS, {
-            title: "Cleanup running",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.NotificationSeverity.INFO,
-            summary: "Skipped duplicate tg-aut authorization cleanup request.",
-            tags: ["tg-aut", "telegram", "auth-cleanup", "duplicate"],
-        }, `TgAutCoreUtils.notification.authCleanupDuplicate.${process.env.mobile || "unknown"}`);
+    finally {
+        checkingAuths = false;
     }
 }
 function isAuthMine(auth) {
