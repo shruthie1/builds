@@ -13737,7 +13737,7 @@ const BAN_RATE_GATE_RECHECK_MS = 60000;
  * it the window would never refresh and the gate would stay latched until the bans age out of the 24 h window.
  * Each probe adds one landed (window refreshes, gate clears once below the threshold) or one ban (stays tripped).
  */
-const BAN_RATE_GATE_PROBE_INTERVAL_MS = 30 * 60000;
+const BAN_RATE_GATE_PROBE_INTERVAL_MS = 5 * 60000;
 /** True when `failed` (permanent bans) of the last `total` sends is at or above the gate (needs a full window). */
 function banRateGateTrips(outcomes) {
     if (!outcomes || outcomes.total < BAN_RATE_GATE_WINDOW)
