@@ -331,7 +331,8 @@ class AnalyticsSink {
             counterFlushIntervalMs: options.counterFlushIntervalMs ?? DEFAULTS.counterFlushIntervalMs,
         };
         this.spoolDir = options.spoolDir ?? defaultSpoolDir();
-        this.instanceKey = sanitizeInstanceKey(options.instanceKey ?? process.env.name ?? process.env.clientId ?? "default");
+        this.instanceKey = sanitizeInstanceKey(options.instanceKey || process.env.clientId || process.env.name || "default");
+        this.ownClientId = options.clientId || process.env.clientId || null;
         // <key>-<13-digit epoch ms>-<rand>.jsonl[.claimed-<pid>-<key>] — the strict shape stops
         // "tg-aut" from claiming "tg-aut-1"'s files.
         this.spoolPattern = new RegExp(`^${this.instanceKey}-(\\d{13})-[a-z0-9]+\\.jsonl(?:\\.claimed-(\\d+)(?:-${this.instanceKey})?)?$`);
@@ -1165,6 +1166,59 @@ class AnalyticsSink {
             }
             catch { /* another process claimed it first */ }
         }
+        this.adoptLegacySpoolFiles();
+    }
+    /**
+     * START ONLY. Adopts spool files written under an earlier key of THIS client (the key used to
+     * follow process.env.name, which the apps overwrite with the persona's working name): a file of
+     * another key whose rows all carry this process's client_id (null allowed, at least one match).
+     * Within one spool dir clientId is unique per process (DEPLOYMENT-TOPOLOGY: clientId + PORT make
+     * each process unique), so no other live process can own such a file. Skipped: temps (settled by
+     * their own key), and `.claimed-<pid>` files whose pid is alive. The claim is one atomic rename
+     * to `<ourKey>-<epoch>-<rand>.jsonl.claimed-<ourPid>-<ourKey>`, so if anything else renames the
+     * file first ours fails with ENOENT and is skipped; a replay of an already committed batch
+     * dedupes by its id anyway.
+     */
+    adoptLegacySpoolFiles() {
+        const own = this.ownClientId;
+        if (!own)
+            return;
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir).sort();
+        }
+        catch {
+            return;
+        }
+        for (const name of names) {
+            const m = /^(.+)-(\d{13})-([a-z0-9]+)\.jsonl(?:\.claimed-(\d+)(?:-.*)?)?$/.exec(name);
+            if (!m || m[1] === this.instanceKey || this.spoolPattern.test(name))
+                continue;
+            if (m[4] && Number(m[4]) !== process.pid && isPidAlive(Number(m[4])))
+                continue;
+            const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+            let text;
+            try {
+                text = fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(from, "utf8");
+            }
+            catch {
+                continue;
+            }
+            const rows = spoolRowsOfClient(text, own);
+            if (rows === null)
+                continue;
+            const to = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${this.instanceKey}-${m[2]}-${m[3]}.jsonl.claimed-${process.pid}-${this.instanceKey}`);
+            if (fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(to))
+                continue;
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(from, to);
+            }
+            catch {
+                continue; /* claimed by someone else first */
+            }
+            this.claimedFiles.push(to);
+            this.log("info", `[analytics] adopted spool file ${name} of earlier key ${m[1]} (${rows} rows, client_id ${own})`);
+        }
     }
     /**
      * ASYNC claim for the periodic rescan inside flush(). Stops renaming as soon as an overflow
@@ -1831,6 +1885,41 @@ function coalesceOnConflictKey(rows, keyLen) {
         }
     }
     return [...merged.values()];
+}
+/**
+ * Record rows in a spool file text if every record carries client_id === clientId or null and at
+ * least one carries clientId; null otherwise (a foreign or unidentifiable row → not ours). End
+ * markers and unparseable (torn) lines are ignored: the replay skips/reports them itself.
+ */
+function spoolRowsOfClient(text, clientId) {
+    let matched = 0;
+    let rows = 0;
+    for (const line of text.split("\n")) {
+        if (!line.trim())
+            continue;
+        let rec;
+        try {
+            rec = JSON.parse(line);
+        }
+        catch {
+            continue;
+        }
+        if (!rec || typeof rec !== "object" || rec.end !== undefined)
+            continue;
+        if (!Array.isArray(rec.c) || !Array.isArray(rec.v))
+            return null;
+        const i = rec.c.indexOf("client_id");
+        if (i < 0)
+            return null;
+        const value = rec.v[i];
+        rows += 1;
+        if (value === null || value === undefined || value === "")
+            continue;
+        if (value !== clientId)
+            return null;
+        matched += 1;
+    }
+    return matched > 0 ? rows : null;
 }
 function countLines(file) {
     let n = 0;
@@ -43639,6 +43728,10 @@ class ConnectionService {
                 logger,
                 // Stamped on promotion_send / conversion_event rows (same value as daily_client.namespace).
                 service: "promote-clients",
+                // Spool key + legacy-file adoption: the stable clientId, never process.env.name (the persona
+                // working name overwrites it and changes on a swap/spelling fix, stranding spool files).
+                instanceKey: process.env.clientId,
+                clientId: process.env.clientId,
                 // Rows the sink definitively dropped (spool full/unwritable, a permanently bad row).
                 // One operator message per 30 min per process at most; never throws.
                 onLoss: analyticsLossNotifier,
