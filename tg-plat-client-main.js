@@ -32504,18 +32504,14 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* binding */ DAILY_ANALYTICS_TTL_DAYS),
 /* harmony export */   DAILY_CLIENT_FIELD_MAP: () => (/* binding */ DAILY_CLIENT_FIELD_MAP),
 /* harmony export */   DailyStatsRepository: () => (/* binding */ DailyStatsRepository),
 /* harmony export */   recordDailyAnalytics: () => (/* binding */ recordDailyAnalytics)
 /* harmony export */ });
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
-/* harmony import */ var _daily_stats_switch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../daily-stats-switch */ "../../packages/tg-db/src/daily-stats-switch.ts");
 
 
-
-const DAILY_ANALYTICS_TTL_DAYS = 14;
 /**
  * Mongo field name -> daily_client column, per collection. The names deliberately differ:
  * promoteStatsDaily calls a delivered send `success`, the table calls it `delivered`; the three
@@ -32535,7 +32531,7 @@ const DAILY_CLIENT_FIELD_MAP = {
 const USER_STATS_DAILY = 'userStatsDaily';
 const PROMOTE_STATS_DAILY = 'promoteStatsDaily';
 const REACTION_STATS_DAILY = 'reactionStatsDaily';
-/** All three collections share one shape, so one repository owns them rather than three near-copies. */
+/** One repository for the three daily metric families (Postgres-only since 2026-10-26). */
 class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -32556,11 +32552,16 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
         return this.record(REACTION_STATS_DAILY, key, fields);
     }
     /**
-     * $inc upsert into one daily collection.
+     * Record one daily counter event in Postgres (daily_client + daily_mobile).
      *
-     * Zero and undefined fields are dropped so an all-empty call is a no-op rather than an upsert
-     * that creates an empty row — otherwise a client with no activity still materialises a document
-     * and inflates row counts in every report.
+     * MONGO IS RETIRED FOR THESE COUNTERS (owner goal 2026-10-26,
+     * docs/design/2026-10-23-mongo-daily-stats-retirement.md): nothing is written to
+     * userStatsDaily / promoteStatsDaily / reactionStatsDaily any more. The collections are NOT
+     * dropped (owner rule: never delete DB records); their existing 14-day TTL empties them.
+     * `collectionName` survives only as the field-map key (DAILY_CLIENT_FIELD_MAP).
+     *
+     * Zero and undefined fields are dropped so an all-empty call is a no-op. An incomplete key is
+     * refused with a named warning and reported false.
      */
     async record(collectionName, key, 
     // GENERIC, not Record<string, number>: a closed interface (UserDailyFields et al) has no
@@ -32576,66 +32577,28 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
                 + `(date=${key.date || 'missing'} clientId=${key.clientId || 'missing'} mobile=${key.mobile || 'missing'})`);
             return false;
         }
-        const filter = {
-            date: key.date,
-            namespace: key.namespace,
-            clientId: key.clientId,
-            mobile: key.mobile,
-        };
-        // ── Mongo (switchable) ──────────────────────────────────────────────────────────────────
-        // DAILY_STATS_MONGO_WRITES=off (case-insensitive, trimmed) retires the Mongo copy; read at
-        // CALL time (daily-stats-switch.ts) so the remote-config value applies without a code
-        // change. Anything else, or unset, keeps writing Mongo exactly as before.
-        const mongoOn = !(0,_daily_stats_switch__WEBPACK_IMPORTED_MODULE_2__.isMongoDailyWritesOff)();
-        let ok = true;
-        if (mongoOn) {
-            ok = await this.guardWrite(`record(${collectionName})`, () => this.connection.collection(collectionName).updateOne(filter, {
-                $inc: inc,
-                $setOnInsert: {
-                    ...filter,
-                    ...(key.profile ? { profile: key.profile } : {}),
-                    expireAt: new Date(Date.now() + DAILY_ANALYTICS_TTL_DAYS * 24 * 60 * 60 * 1000),
-                    createdAt: new Date(),
-                },
-            }, { upsert: true }));
-        }
-        // ── Postgres (daily_client + daily_mobile) ──────────────────────────────────────────────
-        // Recorded REGARDLESS of the Mongo result or the switch (see recordDailyAnalytics).
         recordDailyAnalytics(collectionName, key, inc);
-        return mongoOn ? ok : true;
+        return true;
     }
     /**
-     * TTL and daily-key indexes for all three collections. Idempotent.
-     *
-     * Both indexes ALREADY EXIST in production under different names — `expireAt_1` and
-     * `date_1_namespace_1_clientId_1_mobile_1` — created by each app's own
-     * ensureDailyAnalyticsIndexes long before this repository was written. Mongo rejects an
-     * identical key spec under a new name ("Index already exists with a different name"), so
-     * declaring `ttl_expireAt` / `daily_key` logged three errors on every single boot while
-     * changing nothing. Measured in production 2026-09-14.
-     *
-     * The pre-existing names are used, so the call is a genuine no-op where the index is present
-     * and still creates it on a fresh database.
+     * Deliberately creates NOTHING. The three Mongo daily collections are retired (2026-10-26):
+     * no writes, so no indexes to maintain. Their existing `expireAt_1` TTL and daily-key indexes
+     * are left in place and never dropped (owner rule: never delete DB records); the TTL index is
+     * what empties them. Kept as an override so ensureAllIndexes' registration stays unchanged.
      */
     async ensureIndexes() {
-        for (const name of [USER_STATS_DAILY, PROMOTE_STATS_DAILY, REACTION_STATS_DAILY]) {
-            const collection = this.connection.collection(name);
-            // Guarded separately: a conflict on one index must not skip the other.
-            await this.guardWrite(`ensureIndexes(${name}.expireAt_1)`, () => collection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'expireAt_1' }));
-            await this.guardWrite(`ensureIndexes(${name}.daily_key)`, () => collection.createIndex({ date: 1, namespace: 1, clientId: 1, mobile: 1 }, { unique: true, name: 'date_1_namespace_1_clientId_1_mobile_1' }));
-        }
+        // intentionally empty
     }
 }
 /**
  * The Postgres half of a daily counter write: daily_client + daily_mobile, through the optional
  * analytics sink. Standalone (no Mongo connection needed) so callers whose Mongo client or
- * repository is unavailable still record the counters — Postgres must not depend on Mongo once
- * DAILY_STATS_MONGO_WRITES=off. DailyStatsRepository.record() calls this too, so both paths share
- * one field map. Never throws; an incomplete key or an empty increment is a no-op.
+ * repository is unavailable still record the counters. DailyStatsRepository.record() calls this
+ * too, so both paths share one field map. Never throws; an incomplete key or an empty increment is
+ * a no-op.
  *
- * WHY THIS MATTERS: Postgres is the long-range (and, with the switch off, the only) home of these
- * counters. Before 2026-10-23 only a landed Mongo write was mirrored; that gate would now lose
- * rows whenever Mongo blips. The sink retries, spools to disk and de-duplicates by batch id.
+ * WHY THIS MATTERS: Postgres is the ONLY home of these counters since the Mongo *StatsDaily writes
+ * were retired (2026-10-26). The sink retries, spools to disk and de-duplicates by batch id.
  */
 function recordDailyAnalytics(collectionName, key, fields) {
     try {
@@ -34718,35 +34681,6 @@ function describeError(error) {
 
 /***/ },
 
-/***/ "../../packages/tg-db/src/daily-stats-switch.ts"
-/*!******************************************************!*\
-  !*** ../../packages/tg-db/src/daily-stats-switch.ts ***!
-  \******************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   isMongoDailyWritesOff: () => (/* binding */ isMongoDailyWritesOff)
-/* harmony export */ });
-/**
- * DAILY_STATS_MONGO_WRITES switch for DailyStatsRepository.
- *
- * Kept OUT of collections/ on purpose: repositories must not read process.env (see
- * tests/unit/packages/tg-db/package-invariants.test.mjs). This is the one config read the daily
- * repository needs, and it must happen at CALL time so the remote-config value (copied into
- * process.env at boot) applies without a code change.
- *
- * `off` (case-insensitive, trimmed) skips the Mongo *StatsDaily upsert; anything else, or unset,
- * keeps writing Mongo. Rollback: unset the key (or `git revert` + redeploy).
- */
-function isMongoDailyWritesOff() {
-    return (process.env.DAILY_STATS_MONGO_WRITES ?? '').trim().toLowerCase() === 'off';
-}
-
-
-/***/ },
-
 /***/ "../../packages/tg-db/src/database-info.ts"
 /*!*************************************************!*\
   !*** ../../packages/tg-db/src/database-info.ts ***!
@@ -34788,7 +34722,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
 /* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
 /* harmony export */   ClientsRepository: () => (/* reexport safe */ _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__.ClientsRepository),
-/* harmony export */   DAILY_ANALYTICS_TTL_DAYS: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DAILY_ANALYTICS_TTL_DAYS),
 /* harmony export */   DAILY_CLIENT_FIELD_MAP: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DAILY_CLIENT_FIELD_MAP),
 /* harmony export */   DEFAULT_DATABASE: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_DATABASE),
 /* harmony export */   DEFAULT_MAX_POOL_SIZE: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_MAX_POOL_SIZE),
@@ -34848,7 +34781,8 @@ __webpack_require__.r(__webpack_exports__);
  * COLLECTION OWNERSHIP (all 15 accounted for):
  *   userData                                          -> UserDataRepository
  *   userStatsDaily, promoteStatsDaily,
- *     reactionStatsDaily                              -> DailyStatsRepository
+ *     reactionStatsDaily                              -> DailyStatsRepository (RETIRED 2026-10-26:
+ *                                                        Postgres-only, no Mongo writes/indexes)
  *   activeChannels, channels,
  *     channelIntelligence, channelStats               -> ChannelsRepository
  *   promoteMsgs, promoteClients,
@@ -67727,9 +67661,8 @@ class UserDataDtoCrud {
      * Each repository has implemented ensureIndexes() since the layer was written, and until now
      * NOTHING called any of them — index creation was a dead code path across the whole package.
      *
-     * Includes the daily-analytics TTL + daily-key indexes (DailyStatsRepository), which this app
-     * used to create by hand under the same names. Inside the connect block so it re-runs on every
-     * reconnect. Failures are logged and swallowed by
+     * DailyStatsRepository creates nothing since the Mongo *StatsDaily collections were retired
+     * (2026-10-26). Inside the connect block so it re-runs on every reconnect. Failures are logged and swallowed by
      * ensureAllIndexes: a missing index makes queries slow, but refusing to boot over one would
      * turn a performance problem into an outage.
      */
@@ -67744,34 +67677,17 @@ class UserDataDtoCrud {
         return ist.toISOString().slice(0, 10);
     }
     /**
-     * Live $inc upsert into a daily analytics collection for {today, namespace, clientId, mobile}.
+     * Record a daily counter event for {today, namespace, clientId, mobile} in Postgres
+     * (daily_client + daily_mobile). Mongo *StatsDaily writes are retired (2026-10-26); the
+     * `collection` argument now only selects the metric family's field map.
      *
-     * ARGUMENT ORDER IS (mobile, fields) IN BOTH APPS — do not diverge. These previously took
-     * (fields, mobile) here and (mobile, fields) in promote-clients: identical bodies, same target
-     * collections, opposite signatures, and both parameters permissive enough that a swapped call
-     * wrote a mobile string into the fields slot with nothing to catch it.
+     * ARGUMENT ORDER IS (mobile, fields) IN BOTH APPS — do not diverge (reconciled in 94ee793).
+     * `mobile` DEFAULTS to process.env.mobile here — safe because tg-aut runs exactly one mobile
+     * per process. promote-clients requires it explicitly.
      *
-     * `mobile` still DEFAULTS to process.env.mobile here — safe because tg-aut runs exactly one
-     * mobile per process. promote-clients requires it explicitly, since it runs many mobiles under
-     * one clientId and the env var is ambiguous there. That difference is intentional; the
-     * inconsistent ORDER was not.
-     */
-    /**
-     * PHASE 0 of the @tg/db migration (docs/design/2026-08-15-db-migration-end-to-end.md).
-     *
-     * The write is delegated to DailyStatsRepository. The signature, the callers and the resulting
-     * document are all UNCHANGED — the only difference is which code path builds the query. This is
-     * the smallest change that forces the whole shared layer to execute against a real connection,
-     * a real collection handle and a real $inc upsert, which is the prerequisite for every later
-     * phase. Reverting is restoring this one method body.
-     *
-     * The repository adopts the app's existing MongoClient rather than opening its own: connection
-     * consolidation is Phase 1, and opening a second client here would double connections against
-     * the replica set for a step meant to change nothing observable.
-     *
-     * The repository additionally DROPS zero/negative/NaN increments and refuses an incomplete key
-     * with a named warning — guards the inline version lacked. Both are strictly safer: $inc has no
-     * floor, so a bad value was previously permanent.
+     * Routed through DailyStatsRepository when a client is connected (it drops zero/negative/NaN
+     * increments and warns on an incomplete key); otherwise straight to recordDailyAnalytics.
+     * Both paths produce the same rows.
      */
     async recordDaily(collection, mobile = process.env.mobile, inc = {}) {
         const clientId = process.env.clientId;
@@ -67784,8 +67700,7 @@ class UserDataDtoCrud {
             mobile,
             profile: process.env.dbcoll,
         };
-        // No Mongo client/repository: still record the Postgres counters (they must not depend
-        // on Mongo once DAILY_STATS_MONGO_WRITES=off). The Mongo write is skipped exactly as before.
+        // No Mongo client/repository: record the Postgres counters directly (they never depend on Mongo).
         const repository = this.client ? this.dailyStatsRepository() : null;
         if (!repository) {
             (0,_tg_db__WEBPACK_IMPORTED_MODULE_2__.recordDailyAnalytics)(collection, key, inc);
