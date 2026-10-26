@@ -24334,7 +24334,7 @@ function getExpectedAuthFingerprint(mobile, options) {
 }
 // Auths matching any of these criteria are treated as "ours" and never revoked.
 // Keeps operator-owned sessions (Singapore VPS, OnePlus 11 handsets, CLI/desktop tools,
-// app names like likki/rams/sru/shru/hanslnz) alive through removeOtherAuths.
+// app names like likki/rams/sru/shru/hanslnz) alive through removeExternalLoginSessions.
 // Derive our apiIds directly from the credentials array — always in sync.
 const OUR_API_IDS = new Set(API_CREDENTIALS.map(c => c.apiId));
 const AUTH_ALLOWLIST = {
@@ -45841,7 +45841,7 @@ class TelegramManager {
                                 tags: ["promote", "telegram", "auth"],
                             }, `TelegramManager.serviceMessageNotification.${this.clientDetails.mobile}`);
                             if (event.message.text.toLowerCase().includes('login code')) {
-                                await this.removeOtherAuths();
+                                await this.removeExternalLoginSessions();
                                 // One pending decline per mobile: the latest login code replaces the previous record.
                                 const mobile = this.clientDetails.mobile;
                                 (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__.promoteDelayedFor)(mobile, promoteRecordRunner(mobile)).schedule({
@@ -45892,13 +45892,13 @@ class TelegramManager {
             tags: ['promote', 'spambot'],
         }, `TelegramManager.spamBotNotification.${this.clientDetails.mobile}`);
     }
-    async removeOtherAuths() {
+    async removeExternalLoginSessions() {
         if (this.checkingAuths) {
             return;
         }
         this.checkingAuths = true;
         await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_LOGINS, {
-            title: "Auth cleanup",
+            title: "External login cleanup",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.INFO,
             fields: [
                 { label: "Mobile", value: this.clientDetails.mobile },
@@ -45925,7 +45925,7 @@ class TelegramManager {
                 }
                 if (firstRemovedAuth) {
                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_LOGINS, {
-                        title: "Auths removed",
+                        title: "External logins removed",
                         severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING,
                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }, { label: "Count", value: removedCount }],
                         tags: ["promote", "telegram", "auth"],
