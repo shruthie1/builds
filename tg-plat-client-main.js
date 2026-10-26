@@ -5076,7 +5076,8 @@ class AnalyticsSink {
             counterFlushIntervalMs: options.counterFlushIntervalMs ?? DEFAULTS.counterFlushIntervalMs,
         };
         this.spoolDir = options.spoolDir ?? defaultSpoolDir();
-        this.instanceKey = sanitizeInstanceKey(options.instanceKey ?? process.env.name ?? process.env.clientId ?? "default");
+        this.instanceKey = sanitizeInstanceKey(options.instanceKey || process.env.clientId || process.env.name || "default");
+        this.ownClientId = options.clientId || process.env.clientId || null;
         // <key>-<13-digit epoch ms>-<rand>.jsonl[.claimed-<pid>-<key>] — the strict shape stops
         // "tg-aut" from claiming "tg-aut-1"'s files.
         this.spoolPattern = new RegExp(`^${this.instanceKey}-(\\d{13})-[a-z0-9]+\\.jsonl(?:\\.claimed-(\\d+)(?:-${this.instanceKey})?)?$`);
@@ -5910,6 +5911,59 @@ class AnalyticsSink {
             }
             catch { /* another process claimed it first */ }
         }
+        this.adoptLegacySpoolFiles();
+    }
+    /**
+     * START ONLY. Adopts spool files written under an earlier key of THIS client (the key used to
+     * follow process.env.name, which the apps overwrite with the persona's working name): a file of
+     * another key whose rows all carry this process's client_id (null allowed, at least one match).
+     * Within one spool dir clientId is unique per process (DEPLOYMENT-TOPOLOGY: clientId + PORT make
+     * each process unique), so no other live process can own such a file. Skipped: temps (settled by
+     * their own key), and `.claimed-<pid>` files whose pid is alive. The claim is one atomic rename
+     * to `<ourKey>-<epoch>-<rand>.jsonl.claimed-<ourPid>-<ourKey>`, so if anything else renames the
+     * file first ours fails with ENOENT and is skipped; a replay of an already committed batch
+     * dedupes by its id anyway.
+     */
+    adoptLegacySpoolFiles() {
+        const own = this.ownClientId;
+        if (!own)
+            return;
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(this.spoolDir).sort();
+        }
+        catch {
+            return;
+        }
+        for (const name of names) {
+            const m = /^(.+)-(\d{13})-([a-z0-9]+)\.jsonl(?:\.claimed-(\d+)(?:-.*)?)?$/.exec(name);
+            if (!m || m[1] === this.instanceKey || this.spoolPattern.test(name))
+                continue;
+            if (m[4] && Number(m[4]) !== process.pid && isPidAlive(Number(m[4])))
+                continue;
+            const from = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, name);
+            let text;
+            try {
+                text = fs__WEBPACK_IMPORTED_MODULE_1__.readFileSync(from, "utf8");
+            }
+            catch {
+                continue;
+            }
+            const rows = spoolRowsOfClient(text, own);
+            if (rows === null)
+                continue;
+            const to = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${this.instanceKey}-${m[2]}-${m[3]}.jsonl.claimed-${process.pid}-${this.instanceKey}`);
+            if (fs__WEBPACK_IMPORTED_MODULE_1__.existsSync(to))
+                continue;
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(from, to);
+            }
+            catch {
+                continue; /* claimed by someone else first */
+            }
+            this.claimedFiles.push(to);
+            this.log("info", `[analytics] adopted spool file ${name} of earlier key ${m[1]} (${rows} rows, client_id ${own})`);
+        }
     }
     /**
      * ASYNC claim for the periodic rescan inside flush(). Stops renaming as soon as an overflow
@@ -6576,6 +6630,41 @@ function coalesceOnConflictKey(rows, keyLen) {
         }
     }
     return [...merged.values()];
+}
+/**
+ * Record rows in a spool file text if every record carries client_id === clientId or null and at
+ * least one carries clientId; null otherwise (a foreign or unidentifiable row → not ours). End
+ * markers and unparseable (torn) lines are ignored: the replay skips/reports them itself.
+ */
+function spoolRowsOfClient(text, clientId) {
+    let matched = 0;
+    let rows = 0;
+    for (const line of text.split("\n")) {
+        if (!line.trim())
+            continue;
+        let rec;
+        try {
+            rec = JSON.parse(line);
+        }
+        catch {
+            continue;
+        }
+        if (!rec || typeof rec !== "object" || rec.end !== undefined)
+            continue;
+        if (!Array.isArray(rec.c) || !Array.isArray(rec.v))
+            return null;
+        const i = rec.c.indexOf("client_id");
+        if (i < 0)
+            return null;
+        const value = rec.v[i];
+        rows += 1;
+        if (value === null || value === undefined || value === "")
+            continue;
+        if (value !== clientId)
+            return null;
+        matched += 1;
+    }
+    return matched > 0 ? rows : null;
 }
 function countLines(file) {
     let n = 0;
@@ -48127,6 +48216,10 @@ class ExpressServer {
                     logger,
                     // Stamped on promotion_send / conversion_event rows (same value as daily_client.namespace).
                     service: "tg-aut",
+                    // Spool key + legacy-file adoption: the stable clientId, never process.env.name (the persona
+                    // working name overwrites it and changes on a swap/spelling fix, stranding spool files).
+                    instanceKey: process.env.clientId,
+                    clientId: process.env.clientId,
                     // Rows the sink definitively dropped (spool full/unwritable, a permanently bad row).
                     // One operator message per 30 min per process at most; never throws.
                     onLoss: analyticsLossNotifier,
@@ -86533,6 +86626,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
+/* harmony export */   differentFormatSamePayment: () => (/* binding */ differentFormatSamePayment),
 /* harmony export */   findConfirmedAsk: () => (/* binding */ findConfirmedAsk),
 /* harmony export */   fraudAskAnswerable: () => (/* binding */ fraudAskAnswerable),
 /* harmony export */   fraudGraceOpen: () => (/* binding */ fraudGraceOpen),
@@ -86545,8 +86639,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizePayeeUpi: () => (/* binding */ normalizePayeeUpi),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
+/* harmony export */   referenceFormat: () => (/* binding */ referenceFormat),
 /* harmony export */   sameAmount: () => (/* binding */ sameAmount),
-/* harmony export */   samePayee: () => (/* binding */ samePayee)
+/* harmony export */   samePayee: () => (/* binding */ samePayee),
+/* harmony export */   utrOneDigitOff: () => (/* binding */ utrOneDigitOff)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /**
@@ -86594,12 +86690,50 @@ function isRealReference(utr) {
     return /^[A-Z0-9]{12,35}$/.test(utr) && /[A-Z]/.test(utr) && /\d/.test(utr) && !/^T\d+$/.test(utr);
 }
 /**
+ * The reference FORMAT, for real references only (null otherwise). One payment prints different references on its
+ * different screens — the success page the bank RRN (12 digits), the details page the app's own transaction id
+ * (Paytm 18 digits, PhonePe T + 20-22). So two real references of DIFFERENT formats, same amount and same printed
+ * minute, are one payment captured twice (live: divya2 ₹25 credited on RRN 518683992893 then on T2610…844, both
+ * "real", so the gate read them as two payments). Two real references of the SAME format are two payments (journeys
+ * N / N2). A one-digit misread is isImpossibleReference, not real, and is unaffected.
+ */
+function referenceFormat(utr) {
+    if (!isRealReference(utr) || typeof utr !== 'string')
+        return null;
+    if (/^\d{12}$/.test(utr))
+        return 'rrn12';
+    if (/^\d{18}$/.test(utr))
+        return 'num18';
+    if (/^T?\d{20,22}$/.test(utr))
+        return 'phonepeT';
+    return 'mixed';
+}
+/** Two real references that are the same payment read off two different screens (different formats). */
+function differentFormatSamePayment(a, b) {
+    const fa = referenceFormat(a);
+    const fb = referenceFormat(b);
+    return fa !== null && fb !== null && fa !== fb;
+}
+/**
  * A 12-digit UPI reference with one digit too many or too few: every such "UTR" this week was an edited number
  * (7/7: 13-digit 7128500808964 made from the real 628500808964, the 1118222077 fakes). A misread is possible, so it
  * is not called fake: the payer is asked (politely) for the details page, and only a real reference answers.
  */
 function isImpossibleReference(utr) {
     return typeof utr === 'string' && /^(?:\d{11}|\d{13})$/.test(utr);
+}
+/**
+ * Two real references of the same length that differ in exactly one character: one reference misread (live L6 k shape,
+ * …9008 read as …9003). An 11/13-digit misread is not real (isImpossibleReference) and is handled elsewhere.
+ */
+function utrOneDigitOff(a, b) {
+    if (!isRealReference(a) || !isRealReference(b) || typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length)
+        return false;
+    let diff = 0;
+    for (let i = 0; i < a.length && diff < 2; i++)
+        if (a[i] !== b[i])
+            diff++;
+    return diff === 1;
 }
 /** Not the same file and not the same picture: a different screenshot. */
 function isDifferentPicture(facts, row) {
@@ -86716,7 +86850,10 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
             continue;
         const rowUtr = normalizeUtr(row.utr);
         const theirTime = rowTimeMs(row);
-        const twoRealReferences = isRealReference(facts.utr) && isRealReference(rowUtr) && facts.utr !== rowUtr;
+        // Two real references suppress the picture-repeat check only when they are the SAME format: two genuine
+        // payments from one app. Different formats (RRN vs app txn-id) are one payment's two screens, so they must
+        // NOT suppress it (differentFormatSamePayment; handled as a repeat in rule 4 below when the minute agrees).
+        const twoRealReferences = isRealReference(facts.utr) && isRealReference(rowUtr) && facts.utr !== rowUtr && !differentFormatSamePayment(facts.utr, rowUtr);
         if (!twoRealReferences && sameAmount(row.amount, facts.amount) && theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS) {
             return { kind: 'repeat', by: 'picture', sameChat: sameChat(facts, row), matched: row };
         }
@@ -86762,8 +86899,9 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
     //    the details page of a no-UTR credit prints the success screen's minute and shows a UTR never stored; it used
     //    to skip this rule and then G1, a fresh UTR skipping the last-call time check, and was credited and rung
     //    again). Another minute = a new payment (owner rule 7: a genuine new payment prints another minute);
-    //  - both show one: the UTR rule above decides (same = repeat); different real references = two payments (journeys
-    //    N / N2: two genuine ₹50s seconds apart). A one-digit misread looks the same and is NOT stopped here (L6 k);
+    //  - both show one: the UTR rule above decides (same = repeat); different references at the same printed minute
+    //    are a repeat when of different formats, or (owner 2026-10-26) same payee + banking name, credited today, and a
+    //    near picture or a one-digit misread (L6 k); otherwise two payments (journeys N / N2);
     //  - only the credited row shows one: the SAME printed minute = a re-send at once (final review 2026-10-23: an album
     //    with the details page first and the success screen second was credited twice); else a re-send when this
     //    payment is older than RESEND_WINDOW_MS, within 2 min, and the row was credited today and before this picture
@@ -86793,8 +86931,30 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
                 return repeat;
             continue;
         }
-        if (facts.utr)
+        if (facts.utr) {
+            // Both show a real reference but of DIFFERENT formats (RRN vs app txn-id): one payment's two screens, not
+            // two payments. Same amount + same payee (already checked) + same printed minute = a repeat (live: divya2
+            // ₹25, RRN then T-id). The same-format case is decided by the owner rule just below.
+            if (sameMinute && differentFormatSamePayment(facts.utr, rowUtr))
+                return repeat;
+            // Owner 2026-10-26 (narrowed after 7 days of live data; layered on top, UTR / file / picture checks
+            // unchanged): this user (any persona) already credited TODAY the same amount (checked above), to the same
+            // payee (samePayee; and the banking name too when both were read, since samePayee decides on the UPI ids
+            // alone when both have one), at the same printed minute, is the same payment only with evidence beyond
+            // that: a near picture (the picture loop above skips two real same-format references) or a one-digit
+            // misread of the credited reference (L6 k). Two clearly different same-format references on a far picture
+            // stay two payments (journeys N / N2; at-risk bucket ₹0 over 7 days, never refused).
+            if (!sameMinute || !samePayee(facts, row))
+                continue;
+            const na = normalizePayeeName(facts.payeeName);
+            const nb = normalizePayeeName(row.payeeName);
+            const servedMs = row.servedAt ? new Date(row.servedAt).getTime() : NaN;
+            if ((na && nb && na !== nb) || !Number.isFinite(servedMs) || (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(servedMs, arrivalMs) !== 'today')
+                continue;
+            if (pictureDistance(facts.dHash, row.imageHash) <= NEAR_PICTURE_BITS || utrOneDigitOff(facts.utr, rowUtr))
+                return repeat;
             continue;
+        }
         // The credited row shows a UTR, this capture none: the same printed minute is the same payment at once (an
         // album with the details page first, the success screen second, both checked in turn).
         if (sameMinute)
