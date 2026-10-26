@@ -25491,12 +25491,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   recordDailyAnalytics: () => (/* binding */ recordDailyAnalytics)
 /* harmony export */ });
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
-
 
 /**
- * Mongo field name -> daily_client column, per collection. The names deliberately differ:
- * promoteStatsDaily calls a delivered send `success`, the table calls it `delivered`; the three
+ * Metric-family label -> (input field name -> daily_client column). The labels are the retired Mongo
+ * collection names, kept verbatim because callers pass them to recordDailyAnalytics. The field names
+ * deliberately differ: the promo family calls a delivered send `success`, the table calls it `delivered`; the three
  * reaction counters all collide with the promo ones, so they are prefixed.
  *
  * `revenue` is absent on purpose. userStatsDaily.revenue $inc's on every credit event and is
@@ -25510,14 +25509,18 @@ const DAILY_CLIENT_FIELD_MAP = {
         reactionsFailed: i.failed, reactionsFloods: i.floods,
     }),
 };
+// Metric-family labels (DAILY_CLIENT_FIELD_MAP keys). Not Mongo collections any more.
 const USER_STATS_DAILY = 'userStatsDaily';
 const PROMOTE_STATS_DAILY = 'promoteStatsDaily';
 const REACTION_STATS_DAILY = 'reactionStatsDaily';
-/** One repository for the three daily metric families (Postgres-only since 2026-10-26). */
-class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
-    constructor() {
-        super(...arguments);
-        this.collectionName = USER_STATS_DAILY;
+/**
+ * Entry point for the three daily metric families (Postgres-only since 2026-10-26). Not a
+ * BaseRepository: it owns no Mongo collection, only the key check and its warning.
+ */
+class DailyStatsRepository {
+    // Explicit field assignment: the test runner strips types only, so no parameter properties.
+    constructor(logger) {
+        this.logger = logger;
     }
     /** IST day key. Server clocks are UTC; the business day is IST, so this must not use toISOString directly. */
     static todayKey(now = Date.now()) {
@@ -25540,7 +25543,7 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
      * docs/design/2026-10-23-mongo-daily-stats-retirement.md): nothing is written to
      * userStatsDaily / promoteStatsDaily / reactionStatsDaily any more. The collections are NOT
      * dropped (owner rule: never delete DB records); their existing 14-day TTL empties them.
-     * `collectionName` survives only as the field-map key (DAILY_CLIENT_FIELD_MAP).
+     * `collectionName` is only the metric-family label (DAILY_CLIENT_FIELD_MAP key, log prefix).
      *
      * Zero and undefined fields are dropped so an all-empty call is a no-op. An incomplete key is
      * refused with a named warning and reported false.
@@ -25561,15 +25564,6 @@ class DailyStatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__
         }
         recordDailyAnalytics(collectionName, key, inc);
         return true;
-    }
-    /**
-     * Deliberately creates NOTHING. The three Mongo daily collections are retired (2026-10-26):
-     * no writes, so no indexes to maintain. Their existing `expireAt_1` TTL and daily-key indexes
-     * are left in place and never dropped (owner rule: never delete DB records); the TTL index is
-     * what empties them. Kept as an override so ensureAllIndexes' registration stays unchanged.
-     */
-    async ensureIndexes() {
-        // intentionally empty
     }
 }
 /**
@@ -25609,7 +25603,7 @@ function recordDailyAnalytics(collectionName, key, fields) {
 /**
  * Keep only positive, finite numbers.
  *
- * A NaN or negative would corrupt a counter irreversibly — `$inc` has no floor — so they are
+ * A NaN or negative would corrupt an accumulate-only counter irreversibly, so they are
  * dropped rather than written. Returns null when nothing survives, so callers can skip the write.
  */
 function toIncrement(fields) {
@@ -27753,8 +27747,9 @@ __webpack_require__.r(__webpack_exports__);
  * COLLECTION OWNERSHIP (all 15 accounted for):
  *   userData                                          -> UserDataRepository
  *   userStatsDaily, promoteStatsDaily,
- *     reactionStatsDaily                              -> DailyStatsRepository (RETIRED 2026-10-26:
- *                                                        Postgres-only, no Mongo writes/indexes)
+ *     reactionStatsDaily                              -> RETIRED 2026-10-26: no reader or writer.
+ *                                                        DailyStatsRepository is Postgres-only and
+ *                                                        uses these names only as metric labels
  *   activeChannels, channels,
  *     channelIntelligence, channelStats               -> ChannelsRepository
  *   promoteMsgs, promoteClients,
@@ -27833,7 +27828,7 @@ function createRepositories(connection, logger) {
     return {
         userData: new _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_1__.UserDataRepository(connection, logger),
         userIdentity: new _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_2__.UserIdentityRepository(connection, logger),
-        dailyStats: new _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_3__.DailyStatsRepository(connection, logger),
+        dailyStats: new _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_3__.DailyStatsRepository(logger),
         channels: new _collections_channels_repository__WEBPACK_IMPORTED_MODULE_4__.ChannelsRepository(connection, logger),
         promote: new _collections_promote_repository__WEBPACK_IMPORTED_MODULE_5__.PromoteRepository(connection, logger),
         clients: new _collections_clients_repository__WEBPACK_IMPORTED_MODULE_6__.ClientsRepository(connection, logger),
@@ -27862,7 +27857,7 @@ async function ensureAllIndexes(repositories, logger) {
         // unique index at all, and duplicate chatId rows would have been accepted silently — the
         // exact per-person duplication userIdentity exists to eliminate.
         ['userIdentity', repositories.userIdentity],
-        ['dailyStats', repositories.dailyStats],
+        // dailyStats is absent: it owns no Mongo collection (Postgres-only since 2026-10-26).
         ['channels', repositories.channels],
         ['promote', repositories.promote],
         ['clients', repositories.clients],
@@ -34671,7 +34666,7 @@ __webpack_require__.r(__webpack_exports__);
  * were WRONG — both read a periodic refresh peak rather than the trend.
  *
  * Consequence for anyone debugging a shrinking reaction pool: check the account's spam-limit state
- * FIRST (promoteStatsDaily delivery rate, or daysLeft on the pool record). If delivery is in the
+ * FIRST (promote delivery rate in Postgres daily_mobile, or daysLeft on the pool record). If delivery is in the
  * dead band, the reaction pool is a downstream symptom and no TTL value will restore it.
  *
  * NOTE: this package has NO spam-limit awareness at all — no daysLeft, no isSpamLimited. Reactions
