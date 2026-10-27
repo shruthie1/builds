@@ -15707,6 +15707,7 @@ function isPermanentError(input) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isSendOutcomeUnknown: () => (/* binding */ isSendOutcomeUnknown),
 /* harmony export */   isTelegramRetryExhausted: () => (/* binding */ isTelegramRetryExhausted),
 /* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure),
 /* harmony export */   isTelegramTransportUnavailable: () => (/* binding */ isTelegramTransportUnavailable)
@@ -15739,6 +15740,14 @@ function isTelegramTransportUnavailable(error) {
 /** True only for Telegram transport failures that require client runtime recreation. */
 function isTelegramRuntimeFailure(error) {
     return errorText(error).toUpperCase().includes("NO WORKERS RUNNING");
+}
+/**
+ * A send that TIMED OUT has an unknown outcome: our own "X Timeout after Nms" fires while GramJS may still be sleeping
+ * through a FLOOD_WAIT inside invoke() (floodSleepWatch.ts) or waiting on a slow answer, and that call can still land.
+ * Re-sending it can reach the user twice, so such a send is never retried. (Telegram's -503 "Timeout" is the same.)
+ */
+function isSendOutcomeUnknown(error) {
+    return /timeout/i.test(errorText(error));
 }
 
 
@@ -15898,10 +15907,32 @@ function requestPhoneCall(params) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   sendMessageWithTimeout: () => (/* binding */ sendMessageWithTimeout),
-/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* binding */ sendMessageWithTimeoutOrThrow)
+/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* binding */ sendMessageWithTimeoutOrThrow),
+/* harmony export */   shouldRetrySend: () => (/* binding */ shouldRetrySend)
 /* harmony export */ });
 /* harmony import */ var _utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 
+/**
+ * Retry a send only when the error proves Telegram never got it (socket / connection failure before the request went
+ * out). A TIMEOUT is an unknown outcome, never retried: our own "SendMessage Timeout after Nms" fires while GramJS may
+ * still be sleeping through a FLOOD_WAIT inside invoke() (up to floodSleepThreshold, 60 s, see floodSleepWatch.ts) or
+ * waiting on a slow answer, and that original call then lands, so a re-send reaches the user twice. Telegram's own -503
+ * "Timeout" means the same (the request may or may not have run).
+ */
+function shouldRetrySend(error, attempt) {
+    if (attempt >= 3)
+        return false;
+    const e = error;
+    const message = (typeof e?.message === 'string' ? e.message : '').toLowerCase();
+    const errorMessage = (typeof e?.errorMessage === 'string' ? e.errorMessage : '').toLowerCase();
+    if (message.includes('timeout') || errorMessage.includes('timeout'))
+        return false;
+    if (message.includes('cancelled'))
+        return false;
+    const code = typeof e?.code === 'string' ? e.code : '';
+    return message.includes('network') || message.includes('connection')
+        || code === 'ECONNRESET' || code === 'ENOTFOUND' || code === 'ETIMEDOUT';
+}
 /**
  * Send a message with timeout and retry. Returns undefined on failure (non-throwing).
  * Use sendMessageWithTimeoutOrThrow() if you need exceptions to propagate.
@@ -15919,6 +15950,7 @@ async function sendMessageWithTimeout(client, entityLike, sendMessageParams, opt
         maxRetries,
         baseDelay: 1000,
         maxDelay: 5000,
+        shouldRetry: shouldRetrySend,
     });
 }
 /**
@@ -15936,6 +15968,7 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
         maxRetries,
         baseDelay: 1000,
         maxDelay: 5000,
+        shouldRetry: shouldRetrySend,
     });
 }
 
@@ -27183,6 +27216,33 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         // Ownership after the conflict strip, so a caller-supplied key can never remove it.
         Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
         return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
+    }
+    /**
+     * updateFields plus `$max` raises in the SAME atomic write: each `raise` key only ever goes up (never lowered by a
+     * stale read). For entitlement bookkeeping that is not a payment credit (demo pictures' payAmount) — a read-compare-
+     * write there lowered a balance another credit had raised in between.
+     */
+    async updateFieldsRaising(chatId, identity, updates, raise, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        const maxFields = {};
+        for (const [key, value] of Object.entries(raise)) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                maxFields[key] = value;
+                delete safeUpdates[key]; // one operator per path: a raised key is never also $set
+            }
+        }
+        const setFields = { lastMsgTimeStamp: now, ...safeUpdates };
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile };
+        for (const key of [...Object.keys(setFields), ...Object.keys(maxFields)])
+            delete setOnInsert[key];
+        Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
+        const update = { $set: setFields, $setOnInsert: setOnInsert };
+        if (Object.keys(maxFields).length > 0)
+            update.$max = maxFields;
+        return this.upsert(chatId, identity, update);
     }
     /** $set one key (+ lastMsgTimeStamp); seed defaults minus that key on insert. */
     async setField(chatId, identity, key, value, now = Date.now()) {
@@ -41528,8 +41588,9 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("sendMessageQueue");
 /** Backup of the waiting sends (tasks expire after 10 min; the hash outlives that). */
 const SEND_BACKUP_TTL_MS = 60 * 60000;
-// Retryable error types
-const RETRYABLE_ERRORS = ["FLOOD_WAIT_", "TIMEOUT", "NETWORK_ERROR"];
+// Retryable error types: only failures where Telegram did not take the message. A TIMEOUT is not one: the original
+// send may still land (GramJS sleeps through a FLOOD_WAIT inside invoke), so re-sending it posts the message twice.
+const RETRYABLE_ERRORS = ["FLOOD_WAIT_", "NETWORK_ERROR"];
 /** Plain params (strings, numbers, booleans) or null: anything else stays memory-only. */
 function plainParams(params) {
     const plain = {};
@@ -41638,7 +41699,7 @@ class MessageQueue {
                 const errMsg = error?.errorMessage || error?.message || "";
                 // A real GramJS FloodWaitError has errorMessage "FLOOD" (not "FLOOD_WAIT_n"),
                 // so flood detection goes through the canonical parser; the string list
-                // still covers the raw-code form and TIMEOUT/NETWORK_ERROR.
+                // still covers the raw-code form and NETWORK_ERROR (never a timeout: outcome unknown).
                 const parsed = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_3__.parseTelegramError)(error);
                 const isFlood = parsed.type === 'FLOOD_WAIT';
                 const isRetryable = isFlood || RETRYABLE_ERRORS.some(e => errMsg.includes(e));
@@ -41654,8 +41715,8 @@ class MessageQueue {
                         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(waitTime);
                     }
                     else {
-                        // Random delay before retry
-                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(1000 + Math.random() * 2000);
+                        // Exponential backoff (1 s, 2 s, 4 s) + jitter; maxRetries is the hard cap.
+                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(1000 * 2 ** (task.retryCount - 1) + Math.random() * 1000);
                     }
                     // Requeue task
                     if (priority)
