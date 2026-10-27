@@ -23239,7 +23239,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     async withPoolClaimOrRefuse(canonicalMobile, fn) {
         const claim = await (0, pool_claim_1.withPoolClaim)(this.model, canonicalMobile, 'bufferClients', fn);
         if ('heldBy' in claim) {
-            throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool BufferClient`);
+            throw new common_1.BadRequestException(claim.concurrent
+                ? `Mobile ${canonicalMobile} is being enrolled by ${(0, pool_claim_1.describeClaimHolder)(claim)} right now; refusing to create a duplicate BufferClient`
+                : `Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool BufferClient`);
         }
         return claim.value;
     }
@@ -37235,7 +37237,9 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     async withPoolClaimOrRefuse(canonicalMobile, fn) {
         const claim = await (0, pool_claim_1.withPoolClaim)(this.model, canonicalMobile, 'promoteClients', fn);
         if ('heldBy' in claim) {
-            throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool PromoteClient`);
+            throw new common_1.BadRequestException(claim.concurrent
+                ? `Mobile ${canonicalMobile} is being enrolled by ${(0, pool_claim_1.describeClaimHolder)(claim)} right now; refusing to create a duplicate PromoteClient`
+                : `Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool PromoteClient`);
         }
         return claim.value;
     }
@@ -40714,6 +40718,7 @@ const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ./client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+const pool_claim_1 = __webpack_require__(/*! ./onboarding/pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
 const pool_profile_1 = __webpack_require__(/*! ./onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
 const candidate_source_1 = __webpack_require__(/*! ./onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const organic_activity_1 = __webpack_require__(/*! ./organic-activity */ "./src/components/shared/organic-activity.ts");
@@ -40918,6 +40923,7 @@ class BaseClientService {
         this.dailyLeaveDate = '';
         this.PERIODIC_HEALTH_CHECK_LIMIT = pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN;
         this.PERIODIC_HEALTH_CHECK_SPARE = 10;
+        this.HEALTH_CHECK_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
         this.KNOWN_2FA_PASSWORD = 'Ajtdmwajt1@';
         this.logger = new logger_1.Logger(loggerName);
     }
@@ -41222,7 +41228,10 @@ class BaseClientService {
         const healthCheckCap = Math.min(pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN, profile.warmupRun.healthCheckShare);
         let healthCheckConnects = 0;
         let healthChecksDeferred = 0;
-        const effectiveCap = this.getEffectiveUpdatesCap(toProcess.length);
+        const capBacklog = profile.warmupRun.capCountsSessionRotated
+            ? toProcess.length
+            : toProcess.filter((entry) => entry.doc.warmupPhase !== warmup_phases_1.WarmupPhase.SESSION_ROTATED).length;
+        const effectiveCap = this.getEffectiveUpdatesCap(capBacklog);
         let sensitiveUpdates = 0;
         let organicUpdates = 0;
         this.logger.log(`${profile.label} warmup run: ${toProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
@@ -41231,6 +41240,12 @@ class BaseClientService {
                 break;
             const warmupPhase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
             if (warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
+                if (this.getHealthCheckBusyMobiles().has(doc.mobile)) {
+                    this.logger.debug(`Skipping ${pool} warmup health check for ${doc.mobile}: busy in join/leave queue or client setup`);
+                    continue;
+                }
+                if (this.healthCheckFailedRecently(doc, now))
+                    continue;
                 if (healthCheckConnects >= healthCheckCap) {
                     healthChecksDeferred++;
                     continue;
@@ -41272,12 +41287,17 @@ class BaseClientService {
         if (slots.length < 2)
             return;
         const ts = (v) => client_helper_utils_1.ClientHelperUtils.getTimestamp(v) || 0;
+        const touched = (doc) => Math.max(ts(doc.lastChecked), ts(doc.lastHealthCheckAttemptAt));
         const ordered = slots
             .map((i, rank) => ({ entry: list[i], rank }))
-            .sort((a, b) => (ts(a.entry.doc.lastChecked) - ts(b.entry.doc.lastChecked))
-            || (ts(a.entry.doc.lastHealthCheckAttemptAt) - ts(b.entry.doc.lastHealthCheckAttemptAt))
-            || (a.rank - b.rank));
+            .sort((a, b) => (touched(a.entry.doc) - touched(b.entry.doc)) || (a.rank - b.rank));
         slots.forEach((slot, k) => { list[slot] = ordered[k].entry; });
+    }
+    healthCheckFailedRecently(doc, now) {
+        const attempt = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastHealthCheckAttemptAt) || 0;
+        if (!attempt || now - attempt >= this.HEALTH_CHECK_RETRY_AFTER_MS)
+            return false;
+        return attempt > (client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.lastChecked) || 0);
     }
     get poolProfile() {
         return this.clientType === 'buffer' ? pool_profile_1.BUFFER_PROFILE : pool_profile_1.PROMOTE_PROFILE;
@@ -41533,6 +41553,14 @@ class BaseClientService {
             this.createTimeout(() => this.leaveChannelQueue(), this.drawPacing(pacing.leaveQueueStart));
         }
         return cfg.resultTemplate.replace('{join}', String(joinSet.size)).replace('{leave}', String(leaveSet.size));
+    }
+    async onModuleInit() {
+        try {
+            await (0, pool_claim_1.ensurePoolClaimIndex)(this.model);
+        }
+        catch (error) {
+            this.logger.error(`${pool_claim_1.POOL_CLAIM_COLLECTION} index could not be created; ${this.clientType} enrolments are skipped until it exists: ${error?.message ?? String(error)}`);
+        }
     }
     async onModuleDestroy() {
         await this.cleanup();
@@ -41841,20 +41869,23 @@ class BaseClientService {
             ...(excluded.length > 0 ? { mobile: { $nin: excluded } } : {}),
         };
         const now = Date.now();
+        const notAttemptedRecently = {
+            $or: [{ lastHealthCheckAttemptAt: null }, { lastHealthCheckAttemptAt: { $lt: new Date(now - this.HEALTH_CHECK_RETRY_AFTER_MS) } }],
+        };
         const neverChecked = await this.model
             .find({
             ...base,
             $and: [
                 { $or: [{ lastChecked: null }, { lastChecked: { $exists: false } }] },
-                { $or: [{ lastHealthCheckAttemptAt: null }, { lastHealthCheckAttemptAt: { $lt: new Date(now - this.ONE_DAY_MS) } }] },
+                notAttemptedRecently,
             ],
         })
             .sort({ lastHealthCheckAttemptAt: 1, channels: 1 })
             .limit(fetchLimit);
         const stale = neverChecked.length < fetchLimit
             ? await this.model
-                .find({ ...base, lastChecked: { $lt: new Date(now - 5 * this.ONE_DAY_MS) } })
-                .sort({ lastChecked: 1, channels: 1 })
+                .find({ ...base, $and: [{ lastChecked: { $lt: new Date(now - 5 * this.ONE_DAY_MS) } }, notAttemptedRecently] })
+                .sort({ lastHealthCheckAttemptAt: 1, lastChecked: 1, channels: 1 })
                 .limit(fetchLimit - neverChecked.length)
             : [];
         return [...neverChecked, ...stale];
@@ -44232,6 +44263,13 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
         logger.debug(`Skipping ${document.mobile}: already enrolled in ${enrolledIn}`);
         return false;
     }
+    try {
+        await (0, pool_claim_1.ensurePoolClaimIndex)(port.model);
+    }
+    catch (error) {
+        logger.error(`Skipping ${pool} enrollment for ${document.mobile}: pool claim index not ready: ${error?.message ?? String(error)}`);
+        return false;
+    }
     const telegramClient = await connection_manager_1.connectionManager.getClient(document.mobile, { autoDisconnect: false });
     try {
         const hasPassword = await telegramClient.hasPassword();
@@ -44265,7 +44303,7 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
         const enrolled = await (0, enrollment_lock_1.withEnrollmentLock)(canonical, async () => {
             const claim = await (0, pool_claim_1.withPoolClaim)(port.model, canonical, profile.collection, () => writeIfStillFree());
             if ('heldBy' in claim) {
-                logger.warn(`Skipping ${pool} enrollment for ${document.mobile}: ${claim.heldBy} is enrolling it right now`);
+                logger.warn(`Skipping ${pool} enrollment for ${document.mobile}: ${(0, pool_claim_1.describeClaimHolder)(claim)} is enrolling it right now`);
                 return false;
             }
             return claim.value;
@@ -44332,28 +44370,48 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.POOL_CLAIM_LEASE_MS = exports.POOL_CLAIM_COLLECTION = void 0;
+exports.ensurePoolClaimIndex = ensurePoolClaimIndex;
+exports.describeClaimHolder = describeClaimHolder;
 exports.withPoolClaim = withPoolClaim;
 exports.POOL_CLAIM_COLLECTION = 'poolEnrolmentClaims';
 exports.POOL_CLAIM_LEASE_MS = 60_000;
 const indexReady = new WeakMap();
-function claimCollection(model) {
+function claimDb(model) {
     const db = model.db;
     if (!db || typeof db.collection !== 'function')
         return null;
-    const col = db.collection(exports.POOL_CLAIM_COLLECTION);
-    if (!indexReady.has(db)) {
-        indexReady.set(db, col.createIndex({ mobile: 1 }, { unique: true, name: 'mobile_unique' }));
+    return db;
+}
+function ensurePoolClaimIndex(model) {
+    const db = claimDb(model);
+    if (!db)
+        return Promise.resolve();
+    let ready = indexReady.get(db);
+    if (!ready) {
+        const attempt = Promise.resolve()
+            .then(() => db.collection(exports.POOL_CLAIM_COLLECTION).createIndex({ mobile: 1 }, { unique: true, name: 'mobile_unique' }))
+            .then(() => undefined);
+        ready = attempt;
+        indexReady.set(db, attempt);
+        attempt.catch(() => {
+            if (indexReady.get(db) === attempt)
+                indexReady.delete(db);
+        });
     }
-    return col;
+    return ready;
 }
 function isDuplicateKey(error) {
     return error?.code === 11000;
 }
+function describeClaimHolder(result) {
+    return result.concurrent ? `a concurrent ${result.heldBy} enrolment` : result.heldBy;
+}
 async function withPoolClaim(model, mobile, pool, fn, now = Date.now) {
-    const col = claimCollection(model);
-    if (!col)
+    const db = claimDb(model);
+    if (!db)
         return { claimed: true, value: await fn() };
-    await indexReady.get(model.db);
+    await ensurePoolClaimIndex(model);
+    const col = db.collection(exports.POOL_CLAIM_COLLECTION);
     const at = new Date(now());
     try {
         await col.findOneAndUpdate({ mobile, $or: [{ pool }, { at: { $lt: new Date(at.getTime() - exports.POOL_CLAIM_LEASE_MS) } }] }, { $set: { mobile, pool, at } }, { upsert: true });
@@ -44362,7 +44420,12 @@ async function withPoolClaim(model, mobile, pool, fn, now = Date.now) {
         if (!isDuplicateKey(error))
             throw error;
         const other = pool === 'bufferClients' ? 'promoteClients' : 'bufferClients';
-        return { claimed: false, heldBy: other };
+        const holder = col.findOne
+            ? (await col.findOne({ mobile }).catch(() => null))?.pool
+            : undefined;
+        if (holder === pool)
+            return { claimed: false, heldBy: pool, concurrent: true };
+        return { claimed: false, heldBy: other, concurrent: false };
     }
     try {
         return { claimed: true, value: await fn() };
@@ -44433,7 +44496,7 @@ exports.BUFFER_PROFILE = Object.freeze({
         resultTemplate: 'Buffer Join queued for: {join}, Leave queued for: {leave}',
         wrapError: null,
     }),
-    warmupRun: Object.freeze({ logGoodIdsCount: true, healthCheckShare: exports.HEALTH_CHECK_CONNECTIONS_PER_RUN }),
+    warmupRun: Object.freeze({ logGoodIdsCount: true, healthCheckShare: exports.HEALTH_CHECK_CONNECTIONS_PER_RUN, capCountsSessionRotated: true }),
     consumerMinAgeDays: 15,
 });
 exports.PROMOTE_PROFILE = Object.freeze({
@@ -44466,7 +44529,7 @@ exports.PROMOTE_PROFILE = Object.freeze({
         resultTemplate: 'Initiated Joining channels for {join} | Queued for leave: {leave}',
         wrapError: Object.freeze({ log: 'Unexpected error during joinchannelForPromoteClients:', message: 'Failed to initiate channel joining process' }),
     }),
-    warmupRun: Object.freeze({ logGoodIdsCount: false, healthCheckShare: 4 }),
+    warmupRun: Object.freeze({ logGoodIdsCount: false, healthCheckShare: 4, capCountsSessionRotated: false }),
     consumerMinAgeDays: 15,
 });
 function isHealthyForLegacyCap(doc, operationalFloor, maxFailedAttempts) {
