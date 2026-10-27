@@ -2505,6 +2505,16 @@ const CHANNEL_INTELLIGENCE_INDEX_DEFINITIONS = [
         spec: { channelId: 1 },
         options: { unique: true },
     },
+    {
+        // recoverStaleBlockedChannels() runs {safety.status:'blocked', safety.statusUpdatedAtMs:{$lt}} every 5 min in
+        // every tg-aut process; without this it scanned the whole collection (21,100 docs, 379 blocked on 2026-10-28).
+        // The partial filter keeps only blocked rows in the index; the sweep's equality on 'blocked' lets the planner use it.
+        spec: { 'safety.statusUpdatedAtMs': 1 },
+        options: {
+            name: 'safety.statusUpdatedAtMs_1',
+            partialFilterExpression: { 'safety.status': 'blocked' },
+        },
+    },
 ];
 
 
