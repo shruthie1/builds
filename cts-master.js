@@ -37840,11 +37840,6 @@ __decorate([
     __metadata("design:type", Date)
 ], PromoteClient.prototype, "sessionRotatedAt", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'SpamBot snapshot written by promote-clients setDaysLeft: -1 healthy, 0 released today, >0 limited for N days (as of the write, not a live countdown).' }),
-    (0, mongoose_1.Prop)({ required: false, type: Number }),
-    __metadata("design:type", Number)
-], PromoteClient.prototype, "daysLeft", void 0);
-__decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp of the last inactive-mobile scrape by promote-clients.' }),
     (0, mongoose_1.Prop)({ required: false, type: Date }),
     __metadata("design:type", Date)
