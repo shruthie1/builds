@@ -38627,121 +38627,6 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
-/***/ "../../packages/tg-llm/src/cerebras.ts"
-/*!*********************************************!*\
-  !*** ../../packages/tg-llm/src/cerebras.ts ***!
-  \*********************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CerebrasProvider: () => (/* binding */ CerebrasProvider)
-/* harmony export */ });
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-// src/LLMProviders/cerebras.ts
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('CerebrasProvider');
-const BASE_URL = 'https://api.cerebras.ai/v1/chat/completions';
-const MODEL = 'gpt-oss-120b';
-const DEFAULT_TIMEOUT = 10000;
-const DEFAULT_MAX_TOKENS = 200;
-const DEFAULT_TEMPERATURE = 1;
-let currentKeyIndex = 0;
-function loadCerebrasKeys() {
-    const keys = [];
-    // Multi-key: CEREBRAS_KEY_* env vars
-    for (const [envName, value] of Object.entries(process.env)) {
-        if (envName.startsWith('CEREBRAS_KEY_') && value) {
-            keys.push(...value.split(',').map(k => k.trim()).filter(Boolean));
-        }
-    }
-    // Single key fallback: CEREBRAS_API_KEY (also supports comma-separated)
-    if (keys.length === 0) {
-        const single = process.env.CEREBRAS_API_KEY || '';
-        keys.push(...single.split(',').map(k => k.trim()).filter(Boolean));
-    }
-    return keys;
-}
-class CerebrasProvider {
-    constructor() {
-        this.name = 'Cerebras';
-    }
-    isAvailable() {
-        return loadCerebrasKeys().length > 0;
-    }
-    async generate(prompt, options = {}) {
-        const { maxTokens = DEFAULT_MAX_TOKENS, temperature = DEFAULT_TEMPERATURE, timeout = DEFAULT_TIMEOUT, } = options;
-        const apiKeys = loadCerebrasKeys();
-        if (apiKeys.length === 0) {
-            throw new Error('Cerebras API key not configured');
-        }
-        let lastError = null;
-        for (let attempt = 0; attempt < apiKeys.length; attempt++) {
-            const apiKey = apiKeys[currentKeyIndex % apiKeys.length];
-            currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
-            try {
-                const start = Date.now();
-                const res = await fetch(BASE_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`,
-                    },
-                    body: JSON.stringify({
-                        model: MODEL,
-                        messages: [{ role: 'user', content: prompt }],
-                        max_completion_tokens: maxTokens,
-                        temperature,
-                    }),
-                    signal: AbortSignal.timeout(timeout),
-                });
-                const latencyMs = Date.now() - start;
-                if (!res.ok) {
-                    const body = await res.text().catch(() => '');
-                    const status = res.status;
-                    const err = Object.assign(new Error(`Cerebras API error: ${status} ${res.statusText} - ${body}`), { status });
-                    if ((status === 429 || status === 401 || status === 403) && attempt < apiKeys.length - 1) {
-                        logger.warn(`[Cerebras] Key ${attempt + 1}/${apiKeys.length} failed (${status}), rotating...`);
-                        lastError = err;
-                        continue;
-                    }
-                    throw err;
-                }
-                const data = await res.json();
-                const text = data.choices?.[0]?.message?.content?.trim();
-                if (!text) {
-                    throw new Error('Cerebras returned empty response');
-                }
-                logger.debug(`[Cerebras] Generated in ${latencyMs}ms: ${text.substring(0, 80)}...`);
-                return {
-                    text,
-                    provider: this.name,
-                    model: MODEL,
-                    latencyMs,
-                    tokens: data.usage ? {
-                        prompt: data.usage.prompt_tokens,
-                        completion: data.usage.completion_tokens,
-                    } : undefined,
-                };
-            }
-            catch (error) {
-                lastError = error;
-                const status = error?.status;
-                if ((status === 429 || status === 401 || status === 403) && attempt < apiKeys.length - 1) {
-                    logger.warn(`[Cerebras] Key ${attempt + 1}/${apiKeys.length} failed, rotating...`);
-                    continue;
-                }
-                throw error;
-            }
-        }
-        throw lastError || new Error('All Cerebras keys failed');
-    }
-}
-
-
-/***/ },
-
 /***/ "../../packages/tg-llm/src/fallback-chain.ts"
 /*!***************************************************!*\
   !*** ../../packages/tg-llm/src/fallback-chain.ts ***!
@@ -38964,6 +38849,7 @@ class GemmaProvider {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   GROQ_REASONING_ALLOWANCE: () => (/* binding */ GROQ_REASONING_ALLOWANCE),
 /* harmony export */   GroqProvider: () => (/* binding */ GroqProvider)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -38976,6 +38862,11 @@ const MODEL = 'openai/gpt-oss-120b';
 const DEFAULT_TIMEOUT = 10000;
 const DEFAULT_MAX_TOKENS = 200;
 const DEFAULT_TEMPERATURE = 1;
+// gpt-oss-120b counts its reasoning against max_tokens. With maxTokens=200 alone it ran out before
+// the reply (VM1 logs, 24 h to 2026-10-27: every Groq call ended "truncated at max_tokens"). Low-effort reasoning
+// is typically a few hundred tokens, so +600 leaves room for it plus the caller's reply budget
+// (800 tokens ≈ 1-2 s at Groq's gpt-oss speed, well inside the 10 s timeout).
+const GROQ_REASONING_ALLOWANCE = 600;
 let currentKeyIndex = 0;
 function loadGroqKeys() {
     const keys = [];
@@ -39020,7 +38911,7 @@ class GroqProvider {
                     body: JSON.stringify({
                         model: MODEL,
                         messages: [{ role: 'user', content: prompt }],
-                        max_tokens: maxTokens,
+                        max_tokens: maxTokens + GROQ_REASONING_ALLOWANCE,
                         temperature,
                         // gpt-oss reasons before answering; keep that short so max_tokens goes to the reply.
                         reasoning_effort: 'low',
@@ -39041,7 +38932,7 @@ class GroqProvider {
                 }
                 const data = await res.json();
                 const text = data.choices?.[0]?.message?.content?.trim();
-                // gpt-oss spends part of max_tokens on reasoning: a reply cut at the limit is not usable, let the chain fall through.
+                // Even with the reasoning allowance, a reply cut at the limit is not usable: let the chain fall through.
                 if (data.choices?.[0]?.finish_reason === 'length') {
                     throw new Error('Groq reply truncated at max_tokens');
                 }
@@ -39086,19 +38977,17 @@ class GroqProvider {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CerebrasProvider: () => (/* reexport safe */ _cerebras__WEBPACK_IMPORTED_MODULE_0__.CerebrasProvider),
-/* harmony export */   FallbackChain: () => (/* reexport safe */ _fallback_chain__WEBPACK_IMPORTED_MODULE_3__.FallbackChain),
-/* harmony export */   GemmaProvider: () => (/* reexport safe */ _gemma__WEBPACK_IMPORTED_MODULE_1__.GemmaProvider),
-/* harmony export */   GroqProvider: () => (/* reexport safe */ _groq__WEBPACK_IMPORTED_MODULE_2__.GroqProvider),
-/* harmony export */   applyMathBold: () => (/* reexport safe */ _math_bold__WEBPACK_IMPORTED_MODULE_4__.applyMathBold),
+/* harmony export */   FallbackChain: () => (/* reexport safe */ _fallback_chain__WEBPACK_IMPORTED_MODULE_2__.FallbackChain),
+/* harmony export */   GemmaProvider: () => (/* reexport safe */ _gemma__WEBPACK_IMPORTED_MODULE_0__.GemmaProvider),
+/* harmony export */   GroqProvider: () => (/* reexport safe */ _groq__WEBPACK_IMPORTED_MODULE_1__.GroqProvider),
+/* harmony export */   applyMathBold: () => (/* reexport safe */ _math_bold__WEBPACK_IMPORTED_MODULE_3__.applyMathBold),
 /* harmony export */   createDefaultChain: () => (/* binding */ createDefaultChain),
-/* harmony export */   toMathBold: () => (/* reexport safe */ _math_bold__WEBPACK_IMPORTED_MODULE_4__.toMathBold)
+/* harmony export */   toMathBold: () => (/* reexport safe */ _math_bold__WEBPACK_IMPORTED_MODULE_3__.toMathBold)
 /* harmony export */ });
-/* harmony import */ var _cerebras__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./cerebras */ "../../packages/tg-llm/src/cerebras.ts");
-/* harmony import */ var _gemma__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./gemma */ "../../packages/tg-llm/src/gemma.ts");
-/* harmony import */ var _groq__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./groq */ "../../packages/tg-llm/src/groq.ts");
-/* harmony import */ var _fallback_chain__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./fallback-chain */ "../../packages/tg-llm/src/fallback-chain.ts");
-/* harmony import */ var _math_bold__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./math-bold */ "../../packages/tg-llm/src/math-bold.ts");
+/* harmony import */ var _gemma__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./gemma */ "../../packages/tg-llm/src/gemma.ts");
+/* harmony import */ var _groq__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./groq */ "../../packages/tg-llm/src/groq.ts");
+/* harmony import */ var _fallback_chain__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./fallback-chain */ "../../packages/tg-llm/src/fallback-chain.ts");
+/* harmony import */ var _math_bold__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./math-bold */ "../../packages/tg-llm/src/math-bold.ts");
 // src/LLMProviders/index.ts
 
 
@@ -39107,17 +38996,15 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-
 /**
- * Creates the default fallback chain: Gemma -> Groq -> Cerebras
+ * Creates the default fallback chain: Gemma -> Groq.
+ * Cerebras was removed 2026-10-27 (its credit ran out: every call returned 402 Payment Required).
  * Providers without API keys are automatically skipped.
  */
 function createDefaultChain() {
-    return new _fallback_chain__WEBPACK_IMPORTED_MODULE_3__.FallbackChain([
-        new _gemma__WEBPACK_IMPORTED_MODULE_1__.GemmaProvider(),
-        new _groq__WEBPACK_IMPORTED_MODULE_2__.GroqProvider(),
-        new _cerebras__WEBPACK_IMPORTED_MODULE_0__.CerebrasProvider(),
+    return new _fallback_chain__WEBPACK_IMPORTED_MODULE_2__.FallbackChain([
+        new _gemma__WEBPACK_IMPORTED_MODULE_0__.GemmaProvider(),
+        new _groq__WEBPACK_IMPORTED_MODULE_1__.GroqProvider(),
     ]);
 }
 
@@ -58038,8 +57925,9 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
         }
         return true;
     }
-    // Handle blank screen issues
-    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["blank", "black", "dark", "white"]) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["pussy"]) && userDetails.payAmount > 15 && (userDetails.callTime == 0 || userDetails.callTime > Date.now() - 15 * 60 * 1000)) {
+    // Handle blank screen issues: only a payer who had a show/call in the last 10 min (owner 2026-10-27). Never-called
+    // users and older calls fall through to normal handling ("wear white bra" after a show is not a screen problem).
+    if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["blank", "black", "dark", "white"]) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["pussy"]) && userDetails.payAmount > 15 && userDetails.callTime > 0 && Date.now() - userDetails.callTime <= 10 * 60 * 1000) {
         logger.warn(`[EDGE CASE] Blank screen issue reported - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, callTime: ${userDetails.callTime}`);
         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, chatId, {
             message: `Please open in another mobile or **Chrome** browser!!\n\nCopy paste the link!!`,
@@ -64689,6 +64577,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:respond-to-msgs");
+// Service-period reset window after the second / full shows (owner 2026-10-27: 48 h, 72 h at ₹250+; was 20 h / 30 h).
+const SERVICE_RESET_MS = 48 * 60 * 60 * 1000;
+const HIGH_PAY_SERVICE_RESET_MS = 72 * 60 * 60 * 1000;
 // Initialize patterns once at module load
 (0,_patterns__WEBPACK_IMPORTED_MODULE_22__.initializePatterns)();
 // Migrated to UserState - using centralized state management with Redis persistence
@@ -64755,7 +64646,7 @@ async function respondToMsgs(event, allMsg) {
     if (userDetails.canReply && userDetails.totalCount < 100 && userDetails.limitTime < Date.now()) {
         // Used-up reset: an exhausted paid user (10 cycle videos / 8 full shows) restarts the ladder at the ₹50 demo
         // 6-10 h after the last show (deterministic per chat, service-eligibility usedUpResetDelayMs). Its own window,
-        // separate from the 20/30 h reset below, which stays as it was for everyone else. `videos` and callTime are
+        // separate from the 48/72 h reset below, which stays as it was for everyone else. `videos` and callTime are
         // kept (old-receipt time checks read them); the cycle counts videos from cycleVideoBase.
         if ((userDetails.payAmount >= 25 || userDetails.paidCount > 2) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.usedUpResetDue)(userDetails)) {
             logger.log(`[used-up-reset] ${chatId}`);
@@ -64766,8 +64657,8 @@ async function respondToMsgs(event, allMsg) {
             logger.debug(`[${broadcastName}] flow entered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, totalCount: ${userDetails.totalCount}`);
             // Reset user if they've had service and time has passed
             if ((userDetails.secondShow || userDetails.fullShow > 1) &&
-                ((userDetails.payAmount < 250 && userDetails.callTime < Date.now() - 20 * 60 * 60 * 1000) ||
-                    (userDetails.payAmount >= 250 && userDetails.callTime < Date.now() - 30 * 60 * 60 * 1000))) {
+                ((userDetails.payAmount < 250 && userDetails.callTime < Date.now() - SERVICE_RESET_MS) ||
+                    (userDetails.payAmount >= 250 && userDetails.callTime < Date.now() - HIGH_PAY_SERVICE_RESET_MS))) {
                 logger.debug(`[CallInitiation] Resetting user ${chatId} after service period`);
                 // A new service cycle (startServiceCycle: fullShow 0, secondShow false, fresh cycleVideoBase). A plain
                 // update kept the old video base, so every lifetime video counted against the new cycle (live sowmya2
