@@ -27386,10 +27386,17 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      *
      * chatId_Profile is created by the application that owns the schema, not here — dropping or
      * recreating a UNIQUE index from a shared library would be dangerous. Only the additive
-     * client-scoped read index is ensured.
+     * client-scoped read index and the per-persona bulk index are ensured.
+     *
+     * profile_lastMsgTimeStamp serves every MINE-scope query: listTopPayers / listPaidChatIds
+     * (profile + sort lastMsgTimeStamp desc), resetStalePaidCount / deleteInactiveBefore (profile +
+     * lastMsgTimeStamp range), enablePaidReplyForAll (profile prefix). Without it each one
+     * COLLSCANned all 58,135 docs (explain, 2026-10-28). Estimated ~1.5-2.5 MB (avg key 24.8 B vs
+     * chatId_Profile's 31.8 B, which is 3.2 MB). Built by the first process that restarts.
      */
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(clientId_chatId)', () => this.collection.createIndex({ clientId: 1, chatId: 1 }, { name: 'clientId_chatId' }));
+        await this.guardWrite('ensureIndexes(profile_lastMsgTimeStamp)', () => this.collection.createIndex({ profile: 1, lastMsgTimeStamp: -1 }, { name: 'profile_lastMsgTimeStamp' }));
     }
 }
 
