@@ -15306,7 +15306,10 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:ai-generate-msgs");
 const fallbackChain = (0,_tg_llm__WEBPACK_IMPORTED_MODULE_4__.createDefaultChain)();
-const GENERATE_TIMEOUT = 15000;
+// Each provider attempt (Gemma model 1, Gemma model 2, Groq) gets its own 10 s; the chain as a whole
+// gets 35 s, so a slow Gemma can no longer use up the budget before Groq is tried (owner 2026-10-27).
+const PROVIDER_ATTEMPT_TIMEOUT = 10000;
+const GENERATE_TIMEOUT = 35000;
 function cleanText(text) {
     return text
         .replace(/\\n/g, '\n')
@@ -15353,7 +15356,7 @@ async function generateGreeting(messages) {
         - Output ONLY the final greeting in plain text. No quotes, no intro.
         `;
     try {
-        const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_1__.withTimeout)(() => fallbackChain.generate(prompt, { maxTokens: 200, temperature: 1 }), { timeout: GENERATE_TIMEOUT, errorMessage: 'LLM FallbackChain Timeout' });
+        const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_1__.withTimeout)(() => fallbackChain.generate(prompt, { maxTokens: 200, temperature: 1, timeout: PROVIDER_ATTEMPT_TIMEOUT }), { timeout: GENERATE_TIMEOUT, errorMessage: 'LLM FallbackChain Timeout' });
         if (!result) {
             logger.warn('AI greeting: all providers failed');
             return null;
@@ -56585,6 +56588,8 @@ async function handleContextualEngagementFallback(event, text, userDetails, cont
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isFailedReplyEcho: () => (/* reexport safe */ _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.isFailedReplyEcho),
+/* harmony export */   isPaymentFailureMessage: () => (/* reexport safe */ _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.isPaymentFailureMessage),
 /* harmony export */   respToFailedMSg: () => (/* binding */ respToFailedMSg),
 /* harmony export */   runFailedMsgFollowup: () => (/* binding */ runFailedMsgFollowup)
 /* harmony export */ });
@@ -56599,10 +56604,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./failed-payment-text */ "./src/conversation/failed-payment-text.ts");
 /**
  * Message Response Service
  * Handles responses to failed payment messages
  */
+
+
 
 
 
@@ -56639,7 +56647,10 @@ async function respToFailedMSg(event, text, broadcastName) {
         linkPreview: false,
     });
     if (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(text, ["your money will be refund"]) &&
-        (failedCount == 1 || Date.now() > failedTimestamp + FAILED_MSG_COOLDOWN_MS)) {
+        // The first report (count 0) always gets the first reply; later ones step up only after the cooldown. This read
+        // `failedCount == 1` (the second report), so a second report seconds after the first jumped a step inside the
+        // cooldown (owner 2026-10-27).
+        (failedCount === 0 || Date.now() > failedTimestamp + FAILED_MSG_COOLDOWN_MS)) {
         logger.debug(`[EDGE CASE] Handling failed message case ${failedCount} - chatId: ${chatId}`);
         switch (failedCount) {
             case 1:
@@ -56656,9 +56667,15 @@ async function respToFailedMSg(event, text, broadcastName) {
                 break;
         }
     }
-    else {
+    else if (Date.now() > (userChatState.paymentFailedFallbackTimestamp || 0) + FAILED_MSG_COOLDOWN_MS) {
+        // At most one fallback per cooldown window (live 2026-10-26: 4 fallbacks + QR in 15 s to one chat).
         logger.debug(`[EDGE CASE] Using fallback for failed message - chatId: ${chatId}, refundMentioned: ${(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(text, ["your money will be refund"])}, withinCooldown: ${Date.now() <= failedTimestamp + FAILED_MSG_COOLDOWN_MS}`);
+        userChatState.paymentFailedFallbackTimestamp = Date.now();
+        _state_user_state__WEBPACK_IMPORTED_MODULE_0__.stateManager.markUserDirty(chatId);
         await handleFailedMessageFallback(event, chatId);
+    }
+    else {
+        logger.debug(`[EDGE CASE] Failed message inside the cooldown, fallback already sent - chatId: ${chatId}`);
     }
 }
 /**
@@ -56667,7 +56684,7 @@ async function respToFailedMSg(event, text, broadcastName) {
 async function handleFailedMessageCase1(event, chatId, text) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `What is coming...?\n\n**Google Pay is Not Working!!**\nUse another App.`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case1Intro,
     });
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(text, ["link", "webs"])) {
@@ -56678,10 +56695,10 @@ async function handleFailedMessageCase1(event, chatId, text) {
     }
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**PhonePe** se karo dear, Work karta he!!`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case1PhonePe,
     });
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**Which App do u use??**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case1WhichApp,
     });
 }
 /** Delayed record 'failedMsg'. */
@@ -56689,10 +56706,10 @@ async function runFailedMsgFollowup(client, chatId, params) {
     if (params.kind === "f1") {
         try {
             await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(client, chatId, {
-                message: `Send me screenshot of Failed Payment dear!! What is coming for you??`,
+                message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.f1Screenshot,
             });
             await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(client, chatId, {
-                message: `**Do PhonePe or PayTm na???**`,
+                message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.f1App,
             });
         }
         catch (e) {
@@ -56742,11 +56759,11 @@ async function handleFailedMessageCase2(event, chatId) {
     });
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**PayTm** se karo dear, it is Working!!`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case2PayTm,
     });
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**Scan the QR Code from Other Mobile** instead of selecting QR screenshot from images, Then It will work!!\n\n\n**Use PhonePe!!**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case2ScanOther,
     });
     scheduleFailedMsgFollowup(chatId, "f1", FAILED_MSG_TIMEOUT_1_MS);
 }
@@ -56755,11 +56772,11 @@ async function handleFailedMessageCase2(event, chatId) {
  */
 async function handleFailedMessageCase3(event, chatId) {
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**send mee screenshot of Failed Payment!! Man**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.case3Screenshot,
     });
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `Pay with **PhonePe** or **PayTm**, I will give you **10Rs Discount!!**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.discount,
     });
     scheduleFailedMsgFollowup(chatId, "f2", FAILED_MSG_TIMEOUT_2_MS);
 }
@@ -56769,12 +56786,12 @@ async function handleFailedMessageCase3(event, chatId) {
 async function handleFailedMessageDefault(event, chatId) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_VERY_LONG_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `Send me the <b>Screenshot</b> of <b>Failed</b> Payment first!!\n<b>What is coming...??</b>\n\nUse <b>"PhonePe / PayTm"  ONLY!!✅✅</b>`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.defaultScreenshot,
         parseMode: "html",
     });
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(PAYMENT_RESPONSE_DELAY_EXTRA_MS);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `Pay with **PhonePe** or **PayTm**, I will give you **10Rs Discount!!**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.discount,
     });
     const index = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_3__.selectRandomElements)(QR_CODE_FILES, 1)[0];
     scheduleFailedMsgFollowup(chatId, "f3", FAILED_MSG_TIMEOUT_3_MS, index);
@@ -56784,13 +56801,78 @@ async function handleFailedMessageDefault(event, chatId) {
  */
 async function handleFailedMessageFallback(event, chatId) {
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
-        message: `**Google Pay is Not Working!!**\nUse another App.\n\nTry with **PhonePe/PayTm Babyyy!!😚😚**`,
+        message: _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__.FAILED_REPLY_TEXT.fallback,
     });
     const index = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_3__.selectRandomElements)(QR_CODE_FILES, 1)[0];
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, chatId, {
         message: `NEW QR CODE - ${index}👆👆\n\nPay to this!!`,
         file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_2__.fileSender.getFileHandle(`./QR${index}.jpg`),
     });
+}
+
+
+/***/ },
+
+/***/ "./src/conversation/failed-payment-text.ts"
+/*!*************************************************!*\
+  !*** ./src/conversation/failed-payment-text.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FAILED_REPLY_TEXT: () => (/* binding */ FAILED_REPLY_TEXT),
+/* harmony export */   isFailedReplyEcho: () => (/* binding */ isFailedReplyEcho),
+/* harmony export */   isPaymentFailureMessage: () => (/* binding */ isPaymentFailureMessage)
+/* harmony export */ });
+/**
+ * Failed-payment texts: the fixed reply texts (sent by failed-message-followup.ts) and the matcher that decides whether
+ * an inbound text reports a payment failure. Pure (no I/O), so every caller and test uses the real matcher.
+ */
+// The fixed failed-payment reply texts (the sends below use these). A user who pastes one back is echoing us, not
+// reporting a failure (live 2026-10-26: the echoed "Google Pay is Not Working" re-triggered the replies).
+const FAILED_REPLY_TEXT = {
+    case1Intro: `What is coming...?\n\n**Google Pay is Not Working!!**\nUse another App.`,
+    case1PhonePe: `**PhonePe** se karo dear, Work karta he!!`,
+    case1WhichApp: `**Which App do u use??**`,
+    f1Screenshot: `Send me screenshot of Failed Payment dear!! What is coming for you??`,
+    f1App: `**Do PhonePe or PayTm na???**`,
+    case2PayTm: `**PayTm** se karo dear, it is Working!!`,
+    case2ScanOther: `**Scan the QR Code from Other Mobile** instead of selecting QR screenshot from images, Then It will work!!\n\n\n**Use PhonePe!!**`,
+    case3Screenshot: `**send mee screenshot of Failed Payment!! Man**`,
+    discount: `Pay with **PhonePe** or **PayTm**, I will give you **10Rs Discount!!**`,
+    defaultScreenshot: `Send me the <b>Screenshot</b> of <b>Failed</b> Payment first!!\n<b>What is coming...??</b>\n\nUse <b>"PhonePe / PayTm"  ONLY!!✅✅</b>`,
+    fallback: `**Google Pay is Not Working!!**\nUse another App.\n\nTry with **PhonePe/PayTm Babyyy!!😚😚**`,
+};
+/** Lower-case words only: markup, emoji and punctuation dropped (so a pasted copy of a reply compares equal). */
+function normalizeForEcho(text) {
+    return text.replace(/<[^>]+>/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+const ECHO_TEXTS = Object.values(FAILED_REPLY_TEXT).map(normalizeForEcho);
+/** Is this inbound text one of our failed-payment replies pasted back (alone or inside a longer message)? */
+function isFailedReplyEcho(text) {
+    const normalized = normalizeForEcho(text || "");
+    return normalized !== "" && ECHO_TEXTS.some((reply) => normalized.includes(reply));
+}
+// Payment-failure report = a payment word AND a failure word (owner 2026-10-27). Live 2026-10-26/27: bare "nhi ja",
+// "issue", "process", "server" and "can't pay" sent "screenshot of failed payment" to chats that never reported a
+// failure ("muja se reha nhi jaa reha", "no issues thanks", "next process", "i can't pay" = won't pay, not a failure).
+const PAYMENT_WORD = /\b(?:pay\w*|paid|links?|qr|upi|phone ?pe|g ?pay|google pay|scan\w*|transactions?|txn)\b/;
+const FAILURE_WORD = /fail|not ?work|(?:does|did)n'?t work|(?:does|did) not work|not ?open|declin|reject|blocked|\b(?:nhi|nahi|nai) ho|error|server (?:is )?down|pending|stuck|unable|\b(?:can'?t|cannot) (?:scan|open)/;
+// Money words count as a payment word only with a hard failure word ("paise nahi hote" = no money, not a failure).
+const MONEY_WORD = /\b(?:money|paisa|paise|pese)\b/;
+const HARD_FAILURE_WORD = /fail|declin|error|server (?:is )?down|pending|stuck|not ?work/;
+// Not a payment failure: the payment went through, or the complaint is about the call/show (handled elsewhere).
+const NOT_A_PAYMENT_FAILURE = /(?<!un)success|\bcall|video|connect|demo/;
+/** Does this text report that a payment / pay link / QR / UPI app failed? */
+function isPaymentFailureMessage(text) {
+    const t = (text || "").toLowerCase();
+    if (!t.trim() || isFailedReplyEcho(t) || NOT_A_PAYMENT_FAILURE.test(t))
+        return false;
+    if (PAYMENT_WORD.test(t) && FAILURE_WORD.test(t))
+        return true;
+    return MONEY_WORD.test(t) && HARD_FAILURE_WORD.test(t);
 }
 
 
@@ -57336,15 +57418,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _calls_call_initiation__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../../calls/call-initiation */ "./src/calls/call-initiation.ts");
 /* harmony import */ var _failed_message_followup__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../failed-message-followup */ "./src/conversation/failed-message-followup.ts");
-/* harmony import */ var _event_aggregation__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ./event-aggregation */ "./src/conversation/inbound/event-aggregation.ts");
-/* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
-/* harmony import */ var _picture_event_queue__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
-/* harmony import */ var _abuse_detection__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../abuse-detection */ "./src/conversation/abuse-detection.ts");
-/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../../calls/call-pause */ "./src/calls/call-pause.ts");
-/* harmony import */ var _pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../../pattern-handlers/regex/callRequestRegex */ "./src/pattern-handlers/regex/callRequestRegex.ts");
-/* harmony import */ var _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../../calls/inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _payments_open_ask__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../../payments/open-ask */ "./src/payments/open-ask.ts");
+/* harmony import */ var _failed_payment_text__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../failed-payment-text */ "./src/conversation/failed-payment-text.ts");
+/* harmony import */ var _event_aggregation__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ./event-aggregation */ "./src/conversation/inbound/event-aggregation.ts");
+/* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
+/* harmony import */ var _picture_event_queue__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ./picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
+/* harmony import */ var _abuse_detection__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../abuse-detection */ "./src/conversation/abuse-detection.ts");
+/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../../calls/call-pause */ "./src/calls/call-pause.ts");
+/* harmony import */ var _pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../../pattern-handlers/regex/callRequestRegex */ "./src/pattern-handlers/regex/callRequestRegex.ts");
+/* harmony import */ var _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../../calls/inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _payments_open_ask__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ../../payments/open-ask */ "./src/payments/open-ask.ts");
 /**
  * Existing User Handler
  * Handles messages from existing users
@@ -57390,9 +57473,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 /** Is a payment request (fake warning / details-page ask) open for this chat? Fails to false (payments/open-ask). */
 function hasOpenPaymentRequest(chatId, kind) {
-    return (0,_payments_open_ask__WEBPACK_IMPORTED_MODULE_40__.hasOpenPaymentAsk)(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), chatId, kind);
+    return (0,_payments_open_ask__WEBPACK_IMPORTED_MODULE_41__.hasOpenPaymentAsk)(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), chatId, kind);
 }
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_29__.Logger("tg-aut:existing-user-handler");
 /**
@@ -57425,14 +57509,11 @@ async function sendUserWarningLine(html, context) {
 function userLink(chatId, name) {
     return `<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__.escapeTelegramHtml)((0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_18__.chatUrl)(chatId))}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__.escapeTelegramHtml)(name || chatId)}</a>`;
 }
+/** A payment-failure report naming the payment target (QR / scanner / UPI app / payment); the failure words are the
+ * shared matcher's (owner 2026-10-27: bare "issue" / "problem" / "can't" no longer count). */
 function isPaymentAccessIssue(text) {
     const hasPaymentTarget = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["scan", "scanner", "qr", "bar", "gpay", "google pay", "phonepe", "paytm", "upi", "payment"]);
-    const hasFailureSignal = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, [
-        "block", "blocked", "not work", "not working", "work no", "failed", "fail",
-        "error", "issue", "problem", "cant", "can't", "cannot", "unable",
-        "not goes", "not going", "not open", "declined", "rejected"
-    ]);
-    return hasPaymentTarget && hasFailureSignal;
+    return hasPaymentTarget && (0,_failed_payment_text__WEBPACK_IMPORTED_MODULE_32__.isPaymentFailureMessage)(text);
 }
 // Constants for better maintainability
 const CONSTANTS = {
@@ -57461,22 +57542,22 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         // Handle special commands
         if (await handleSpecialCommands.call(this, event, text, chatId)) {
             logger.debug(`[SPECIAL CASE] Special command handled for chatId: ${chatId}, command: ${text.substring(0, 20)}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "special-command");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "special-command");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         await this.client.connect();
         logger.debug(`[NewMessage] ${broadcastName}_${userDetails?.payAmount}: `, `${text} | paidReply: ${userDetails?.paidReply} | demoGiven: ${userDetails?.demoGiven}`);
         // Check if user should be banned using centralized abuse detection
-        const abuseResult = await (0,_abuse_detection__WEBPACK_IMPORTED_MODULE_35__.checkAndHandleAbuse)(chatId, userDetails);
+        const abuseResult = await (0,_abuse_detection__WEBPACK_IMPORTED_MODULE_36__.checkAndHandleAbuse)(chatId, userDetails);
         userDetails = abuseResult.userDetails;
         if (abuseResult.banned) {
             logger.warn(`[EDGE CASE] User banned via abuse detection - chatId: ${chatId}, cheatCount: ${userDetails.cheatCount}, reason: ${abuseResult.reason}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `abuse-ban (${abuseResult.reason})`);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `abuse-ban (${abuseResult.reason})`);
             return; // User banned, stop processing
         }
         // "Don't call / wait / call back in 5 min" pauses automatic calls; "call me" ends the pause (calls/call-pause).
-        (0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_37__.noteCallPauseFromText)(chatId, text);
+        (0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_38__.noteCallPauseFromText)(chatId, text);
         // Handle media messages
         if (event.message.media && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(event.message.text || "", ["t.me"])) {
             const handled = await handleMediaMessage.call(this, event, userDetails, broadcastName, chatId);
@@ -57498,7 +57579,7 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.fraudWarningOpen)(chatId)) {
             if ((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.claimFraudReminder)(chatId))
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_7__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_24__.pickOneMsg)([...((0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.fraudBlockSoon)(chatId) ? _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_11__.FRAUD_BLOCK_SOON_MESSAGES : _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_11__.FRAUD_REMINDER_MESSAGES)]), undefined, 'system');
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "fake-warning-open");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "fake-warning-open");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
@@ -57506,25 +57587,25 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         const detectionResult = await handleCheatDetection.call(this, event, userDetails, text, broadcastName, chatId);
         if (detectionResult.detected) {
             logger.warn(`[EDGE CASE] Cheat detection triggered for chatId: ${chatId}, payAmount: ${userDetails.payAmount}, cheatCount: ${userDetails.cheatCount}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "cheat-detection");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "cheat-detection");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // "Paid" / "already paid" while a details-page ask is open: answer the claim (the page is still missing).
         if (await handlePaymentClaimWhileAsked.call(this, event, text, chatId)) {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "payment-claim-ask-open");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "payment-claim-ask-open");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // Handle please/response requests
         if (await handlePleaseRequests.call(this, event, userDetails, text, chatId)) {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "please-request");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "please-request");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
         // Handle payment-related messages
         if (await handlePaymentMessages.call(this, event, userDetails, text, broadcastName, chatId)) {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "payment-message");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "payment-message");
             await updateUserStats(db, chatId, senderJson.firstName, userDetails);
             return;
         }
@@ -57539,9 +57620,18 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
             if (await handleMediaMessage.call(this, event, userDetails, broadcastName, chatId))
                 return;
         }
+        // Past the 100-message cap text stays ignored, but media (a payment screenshot) still reaches the media handler:
+        // a payer at totalCount >= 100 got no reply, credit or call (owner 2026-10-27).
+        if (userDetails.canReply !== 0 && event.message.media && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(event.message.text || "", ["t.me"])) {
+            logger.log(`[MEDIA] ${chatId} past the message cap (totalCount=${userDetails.totalCount}): checking the media`);
+            if (await handleMediaMessage.call(this, event, userDetails, broadcastName, chatId)) {
+                await updateUserStats(db, chatId, senderJson.firstName, userDetails);
+                return;
+            }
+        }
         if (userDetails.canReply === 0) {
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "canReply=0");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "canReply=0");
             if (userDetails.lastMsgTimeStamp < Date.now() - 5 * 24 * 60 * 60 * 1000) {
                 logger.debug(`[EDGE CASE] User inactive for 5 days - chatId: ${chatId}`);
                 // D3: totalCount: 10 here is the "treat as established" flag, not a message count.
@@ -57550,7 +57640,7 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
         }
         if (userDetails.totalCount >= 100) {
             logger.debug(`[EDGE CASE] User reached max message count - chatId: ${chatId}, totalCount: ${userDetails.totalCount}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `max-messages (totalCount=${userDetails.totalCount})`);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `max-messages (totalCount=${userDetails.totalCount})`);
         }
     }
     await updateUserStats(db, chatId, senderJson.firstName, userDetails);
@@ -57656,7 +57746,7 @@ async function handleCheatResponse(event, userDetails, chatId) {
 async function sendCheatResponseMessage(event, userDetails) {
     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_15__.sleep)(2000);
     const msgElement = (0,_tg_core_utils_random__WEBPACK_IMPORTED_MODULE_6__.selectRandomElements)(["No Dear", "Not at All", "No Baby, Please Wait!!", "Network issue baby", "I Love you Babyyy😚", "I Want to kiss you😚", "Its me only baby😚😚", "No Dear, Please understand"], 1)[0];
-    await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_36__.offerCallOrLink)(userDetails.chatId.toString(), () => {
+    await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_37__.offerCallOrLink)(userDetails.chatId.toString(), () => {
         const params = { message: `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` };
         return (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.floodSafe)(() => event.message.respond(params), { chatId: userDetails.chatId.toString(), label: 'existingUser.callLink', kind: 'link', record: eventRecord(event, userDetails, params) });
     }, (text) => {
@@ -57690,7 +57780,7 @@ async function applyCheatBlock(chatId) {
  */
 async function handleCheatWithDemo(userDetails, chatId, event) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    if ((userDetails.highestPayAmount < _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__.HIGH_TIER_PAY && userDetails.cheatCount > 3 && userDetails.videos.length > 2) || (userDetails.highestPayAmount >= _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__.HIGH_TIER_PAY && userDetails.cheatCount > 4 && userDetails.videos.length > 4)) {
+    if ((userDetails.highestPayAmount < _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_40__.HIGH_TIER_PAY && userDetails.cheatCount > 3 && userDetails.videos.length > 2) || (userDetails.highestPayAmount >= _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_40__.HIGH_TIER_PAY && userDetails.cheatCount > 4 && userDetails.videos.length > 4)) {
         logger.warn(`[EDGE CASE] Blocking user due to cheat - chatId: ${chatId}, cheatCount: ${userDetails.cheatCount}, highestPayAmount: ${userDetails.highestPayAmount}, videos: ${userDetails.videos.length}`);
         userDetails = await applyCheatBlock(chatId);
     }
@@ -57750,7 +57840,7 @@ async function handleCheatWithoutDemo(userDetails, chatId, event) {
     if (userDetails.payAmount >= 15) {
         if (userDetails.payAmount >= 30) {
             logger.debug(`[EDGE CASE] Cheat without demo - sending call message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}`);
-            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_36__.offerCallOrLink)(userDetails.chatId.toString(), () => {
+            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_37__.offerCallOrLink)(userDetails.chatId.toString(), () => {
                 const params = { message: `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!` };
                 return (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.floodSafe)(() => event.message.respond(params), { chatId: userDetails.chatId.toString(), label: 'existingUser.cheatCallLink', kind: 'link', record: eventRecord(event, userDetails, params) });
             }, (text) => {
@@ -57804,7 +57894,7 @@ async function handlePaymentClaimWhileAsked(event, text, chatId) {
 async function handlePleaseRequests(event, userDetails, text, chatId) {
     // A call ask with a plea in it ("call plz") inside the post-call wait from a payer owed a show is not counted here in
     // silence: respond-to-msgs answers it (the owed-call answer, same condition; shruthi1 587721161, 2026-10-24).
-    const owedCallAsk = (0,_pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_38__.isCallRequest)(text) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(userDetails) && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails);
+    const owedCallAsk = (0,_pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_39__.isCallRequest)(text) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(userDetails) && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails);
     if (userDetails.payAmount < 10 || !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, ["respond", "plz", "reply", "please", "pls", "paid", "already", "answer"]) || owedCallAsk) {
         return false;
     }
@@ -57956,7 +58046,7 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
         return true;
     }
     // Handle payment failure messages
-    if (!broadcastName.endsWith("bot") && chatId !== CONSTANTS.SPECIAL_USER_ID && !event.message.media?.className?.includes("Media") && isPaymentFailureMessage(text)) {
+    if (!broadcastName.endsWith("bot") && chatId !== CONSTANTS.SPECIAL_USER_ID && !event.message.media?.className?.includes("Media") && (0,_failed_payment_text__WEBPACK_IMPORTED_MODULE_32__.isPaymentFailureMessage)(text)) {
         if (userDetails && userDetails.paidReply && !((userDetails.payAmount > 25 && userDetails.demoGiven) || (userDetails.payAmount > 80 && userDetails.secondShow))) {
             logger.warn(`[EDGE CASE] Payment failure message - chatId: ${chatId}, payAmount: ${userDetails.payAmount}, demoGiven: ${userDetails.demoGiven}, secondShow: ${userDetails.secondShow}`);
             await (0,_failed_message_followup__WEBPACK_IMPORTED_MODULE_31__.respToFailedMSg)(event, text, broadcastName);
@@ -57967,47 +58057,6 @@ async function handlePaymentMessages(event, userDetails, text, broadcastName, ch
         }
     }
     return false;
-}
-/**
- * Check if message indicates payment failure
- */
-function isPaymentFailureMessage(text) {
-    // Payment inability indicators
-    const paymentInabilityKeywords = ["cant", "can't", "avvatledhu", "cannot", "prob", "nahi", "nai", "nhi"];
-    const paymentActionKeywords = ["pay", "send mon", "send pay", "pais", "sending mon", "sending pay", "going", "sent mon", "sent pay"];
-    const excludeFromInabilityCheck = ["demo", "trust", "call", "free"];
-    // Technical failure indicators
-    const technicalFailureKeywords = ["decli", "avvatledhu", "fail", "not able", "issue", "not hap", "unable",
-        " nai hor", "nai ja", "nhi hor", "nhi ja", "nahi hor", "nahi ja", "process", "no phon", "no payt",
-        "server", "not open", "error", "work nh", "work nah", "not work", "doesnot wor", "doesn't wo", "work no"];
-    // Success indicators (exclude these)
-    const successIndicators = ["paid ", "trust", "confirm", "demo", "successful", "connect", "call",
-        "paise nahi h", "paise nhi h", "paisa nahi h", "paisa nhi h", "transaction successful",
-        "switch", "on paytm", "share transaction", "completed", "pay again"];
-    // Normalize text for matching
-    const normalizedText = text.toLowerCase().trim();
-    // Early exclusion: If text is a simple question without payment-related keywords, exclude
-    // This prevents false positives like "unlimited show ... how?" or "how to pay?"
-    const questionPatterns = ["how", "what", "when", "where", "why"];
-    const nonPaymentQuestionWords = ["show", "unlimited", "get", "use", "do", "see"];
-    // Check if text is a simple question without payment context
-    const isSimpleQuestion = questionPatterns.some(q => normalizedText.includes(q)) &&
-        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, paymentInabilityKeywords) &&
-        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, paymentActionKeywords) &&
-        (nonPaymentQuestionWords.some(word => normalizedText.includes(word)) ||
-            normalizedText.split(/\s+/).length <= 4);
-    if (isSimpleQuestion) {
-        return false;
-    }
-    // Check for payment inability pattern
-    const hasPaymentInability = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, paymentInabilityKeywords) &&
-        (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, paymentActionKeywords) &&
-        !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, excludeFromInabilityCheck);
-    // Check for technical failure pattern
-    const hasTechnicalFailure = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, technicalFailureKeywords);
-    // Exclude success indicators
-    const hasSuccessIndicators = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(text, successIndicators);
-    return (hasPaymentInability || hasTechnicalFailure) && !hasSuccessIndicators;
 }
 /**
  * Handle GPay requests
@@ -58082,14 +58131,14 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
     if (Date.now() <= lastPhotoAt + CONSTANTS.PHOTO_COOLDOWN_MS && !(await answering())) {
         const timeSinceLastPhoto = Date.now() - lastPhotoAt;
         logger.debug(`[EDGE CASE] Recent photo detected - skipping - chatId: ${chatId}, timeSinceLastPhoto: ${timeSinceLastPhoto}ms, cooldown: ${CONSTANTS.PHOTO_COOLDOWN_MS}ms`);
-        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "photo-cooldown");
+        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "photo-cooldown");
         return true;
     }
     // Handle non-photo media
     if (event.message.media?.className !== "MessageMediaPhoto") {
         logger.debug(`[EDGE CASE] Invalid media type detected - chatId: ${chatId}, className: ${event.message.media?.className}`);
         await (0,_outbound_forward_unwanted__WEBPACK_IMPORTED_MODULE_19__.forwardtoUnwanted)(event, broadcastName);
-        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `non-photo media (${event.message.media?.className})`);
+        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `non-photo media (${event.message.media?.className})`);
         return true;
     }
     // Check photo processing eligibility
@@ -58101,9 +58150,9 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
     if (canProcessPhoto) {
         logger.debug(`[MEDIA] Enqueuing photo for processing - chatId: ${chatId}, photoCount: ${photoCount}, max: ${CONSTANTS.MAX_PHOTOS_ANALYSED}`);
         try {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "photo-queued-for-analysis");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "photo-queued-for-analysis");
             (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.notePaymentPhoto)(chatId);
-            await _picture_event_queue__WEBPACK_IMPORTED_MODULE_34__.pictureEventQueue.enqueue(event);
+            await _picture_event_queue__WEBPACK_IMPORTED_MODULE_35__.pictureEventQueue.enqueue(event);
             return true;
         }
         catch (error) {
@@ -58112,7 +58161,7 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
             try {
                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_2__.deleteMessage)(event);
                 logger.warn(`[MEDIA] Deleted image due to processing error - chatId: ${chatId}`);
-                (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "error", "photo-processing-failed; image deleted");
+                (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "error", "photo-processing-failed; image deleted");
             }
             catch (deleteError) {
                 logger.error(`[ERROR] Failed to delete image after processing error - chatId: ${chatId}:`, deleteError);
@@ -58126,7 +58175,7 @@ async function handleMediaMessage(event, userDetails, broadcastName, chatId) {
                 event.message.forward ? "forwarded message" :
                     "photo cap reached";
         logger.warn(`[EDGE CASE] Photo not processed - chatId: ${chatId}, reason: ${reason}, photoCount: ${photoCount}`);
-        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `photo not processed (${reason})`);
+        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `photo not processed (${reason})`);
         await (0,_outbound_forward_unwanted__WEBPACK_IMPORTED_MODULE_19__.forwardtoUnwanted)(event, broadcastName);
         return true;
     }
@@ -58142,44 +58191,44 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
             userDetails.canReply !== 0);
     if (shouldHandleEvent) {
         if (event.message.text && event.message.text !== "") {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "deferred", "aggregating");
-            await (0,_event_aggregation__WEBPACK_IMPORTED_MODULE_32__.createOrUpdateEventsMap)(event);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "deferred", "aggregating");
+            await (0,_event_aggregation__WEBPACK_IMPORTED_MODULE_33__.createOrUpdateEventsMap)(event);
         }
         else {
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "empty-text");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "empty-text");
         }
     }
     else {
         if (!userDetails) {
             logger.debug(`[EDGE CASE] No user details found - chatId: ${chatId}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "no-user-details");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "no-user-details");
         }
         else if (broadcastName.toLowerCase().endsWith("bot")) {
             logger.debug(`[EDGE CASE] Bot message skipped - chatId: ${chatId}, broadcastName: ${broadcastName}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "sender-is-bot");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "sender-is-bot");
         }
         else if (Date.now() <= userDetails.limitTime) {
             logger.debug(`[EDGE CASE] User is limited- chatId: ${chatId}, limitTime: ${userDetails.limitTime}, now: ${Date.now()}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `limited (${Math.ceil((userDetails.limitTime - Date.now()) / 60000)} min left)`);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `limited (${Math.ceil((userDetails.limitTime - Date.now()) / 60000)} min left)`);
         }
         else if (userDetails.canReply === 0) {
             logger.debug(`[EDGE CASE] User cannot reply - chatId: ${chatId}, canReply: ${userDetails.canReply}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "canReply=0");
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "canReply=0");
         }
         // Service used up (showStillServable): a ladder / ring would be refused at dial, so none is requested.
         if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.showStillServable)(userDetails)) {
             // Paid after their last call: an unserved upgrade skips the 2-hour wait (kavya2 2026-10-21).
-            if (userDetails.highestPayAmount < _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__.HIGH_TIER_PAY || (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__.paidSinceLastShow)(userDetails) || userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000) {
+            if (userDetails.highestPayAmount < _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_40__.HIGH_TIER_PAY || (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_40__.paidSinceLastShow)(userDetails) || userDetails.callTime <= Date.now() - 2 * 60 * 60 * 1000) {
                 // The chat's 'callRequestBlockedUntil' moment: one re-request per throttle window (persisted, so a restart
                 // does not let a spammer ring again at once).
                 const now = Date.now();
-                if ((0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_37__.callPauseLeftMs)(chatId, now) > 0) {
-                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", `limited; calls paused (${Math.ceil((0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_37__.callPauseLeftMs)(chatId, now) / 60000)} min left)`);
+                if ((0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_38__.callPauseLeftMs)(chatId, now) > 0) {
+                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", `limited; calls paused (${Math.ceil((0,_calls_call_pause__WEBPACK_IMPORTED_MODULE_38__.callPauseLeftMs)(chatId, now) / 60000)} min left)`);
                     return;
                 }
                 const blockedUntil = (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_10__.momentAt)(chatId, 'callRequestBlockedUntil');
                 if (blockedUntil !== undefined && now < blockedUntil) {
-                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "ignored", "limited; call re-request throttled");
+                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "limited; call re-request throttled");
                     return;
                 }
                 (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_10__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_FAILURE_RETRY_MS);
@@ -58187,11 +58236,11 @@ async function handleRegularMessage(event, userDetails, text, broadcastName, cha
                 try {
                     // In-house: their pending ladder/follow-up already exists, so scheduleLadder would no-op
                     // and "call me now" would wait for the timer. Ring now instead (once per throttle window).
-                    if (!(await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_36__.recallNowInHouse)(chatId)))
+                    if (!(await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_37__.recallNowInHouse)(chatId)))
                         await (0,_calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_28__.scheduleLadder)(chatId, '1');
                     (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_10__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_THROTTLE_MS);
                     logger.log("Another call schedule requested via in-process scheduler");
-                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_33__.markInbound)(event, "handled", "limited; call re-requested");
+                    (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "handled", "limited; call re-requested");
                 }
                 catch (error) {
                     (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_10__.noteMoment)(chatId, 'callRequestBlockedUntil', now + CONSTANTS.LIMITED_CALL_REQUEST_FAILURE_RETRY_MS);
@@ -74324,7 +74373,7 @@ async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, inva
     });
 }
 /** Failed-payment screenshot: delete, tell the user, schedule the reminder. */
-async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer) {
+async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer, broadcastName) {
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_5__.deleteMessage)(event);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_31__.sendMessageWithTimeout)(event.client, chatId, {
         message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg)([
@@ -74334,7 +74383,7 @@ async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoB
         ]),
     });
     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_28__.notifyChat)(chatId, { title: 'Sent pay number' });
-    await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_27__.respToFailedMSg)(event, imageDetails.text, chatId);
+    await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_27__.respToFailedMSg)(event, imageDetails.text, broadcastName);
     await scheduleImageFollowup(event, chatId, 'failedPaymentReminder', 10000);
     await (0,_media_channel_upload__WEBPACK_IMPORTED_MODULE_8__.sendImageToChannel)(photoBuffer);
 }
@@ -74875,7 +74924,7 @@ async function processImage(event) {
                     (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_29__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
-                        await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer);
+                        await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer, broadcastName);
                     }
                     else {
                         // Who it was paid to is decided in one place (paid-to-us.ts payeeVerdict); this is its context.
