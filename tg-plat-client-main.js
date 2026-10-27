@@ -47618,44 +47618,45 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../calls/call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
-/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
-/* harmony import */ var _jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../jobs/delayed-kinds */ "./src/jobs/delayed-kinds.ts");
-/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/inbound/picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _jobs_job_manager__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../jobs/job-manager */ "./src/jobs/job-manager.ts");
-/* harmony import */ var _http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../http/middlewares/rate-limiter */ "./src/http/middlewares/rate-limiter.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
-/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
-/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../http/middlewares/request-id.middleware */ "./src/http/middlewares/request-id.middleware.ts");
-/* harmony import */ var _http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../http/middlewares/timeout.middleware */ "./src/http/middlewares/timeout.middleware.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../http/routes/health.routes */ "./src/http/routes/health.routes.ts");
-/* harmony import */ var _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../routes/telegram.routes */ "./src/routes/telegram.routes.ts");
-/* harmony import */ var _routes_admin_routes__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../routes/admin.routes */ "./src/routes/admin.routes.ts");
-/* harmony import */ var _routes_system_routes__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../routes/system.routes */ "./src/routes/system.routes.ts");
-/* harmony import */ var _routes_actions_routes__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../routes/actions.routes */ "./src/routes/actions.routes.ts");
-/* harmony import */ var _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../routes/diagnostics.routes */ "./src/routes/diagnostics.routes.ts");
-/* harmony import */ var _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../http/routes/details.routes */ "./src/http/routes/details.routes.ts");
-/* harmony import */ var _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../http/routes/api-docs.routes */ "./src/http/routes/api-docs.routes.ts");
-/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! swagger-ui-express */ "swagger-ui-express");
-/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default = /*#__PURE__*/__webpack_require__.n(swagger_ui_express__WEBPACK_IMPORTED_MODULE_38__);
-/* harmony import */ var _http_swagger_config__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../http/swagger-config */ "./src/http/swagger-config.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _app_notifications__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ./app-notifications */ "./src/bootstrap/app-notifications.ts");
-/* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
-/* harmony import */ var _shutdown_signal__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ./shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
-/* harmony import */ var _http_express_server_access__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../http/express-server-access */ "./src/http/express-server-access.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../calls/call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
+/* harmony import */ var _jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../jobs/delayed-kinds */ "./src/jobs/delayed-kinds.ts");
+/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/inbound/picture-event-queue */ "./src/conversation/inbound/picture-event-queue.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _jobs_job_manager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../jobs/job-manager */ "./src/jobs/job-manager.ts");
+/* harmony import */ var _http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../http/middlewares/rate-limiter */ "./src/http/middlewares/rate-limiter.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../http/middlewares/request-id.middleware */ "./src/http/middlewares/request-id.middleware.ts");
+/* harmony import */ var _http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../http/middlewares/timeout.middleware */ "./src/http/middlewares/timeout.middleware.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../http/routes/health.routes */ "./src/http/routes/health.routes.ts");
+/* harmony import */ var _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../routes/telegram.routes */ "./src/routes/telegram.routes.ts");
+/* harmony import */ var _routes_admin_routes__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../routes/admin.routes */ "./src/routes/admin.routes.ts");
+/* harmony import */ var _routes_system_routes__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../routes/system.routes */ "./src/routes/system.routes.ts");
+/* harmony import */ var _routes_actions_routes__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../routes/actions.routes */ "./src/routes/actions.routes.ts");
+/* harmony import */ var _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../routes/diagnostics.routes */ "./src/routes/diagnostics.routes.ts");
+/* harmony import */ var _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../http/routes/details.routes */ "./src/http/routes/details.routes.ts");
+/* harmony import */ var _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../http/routes/api-docs.routes */ "./src/http/routes/api-docs.routes.ts");
+/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! swagger-ui-express */ "swagger-ui-express");
+/* harmony import */ var swagger_ui_express__WEBPACK_IMPORTED_MODULE_39___default = /*#__PURE__*/__webpack_require__.n(swagger_ui_express__WEBPACK_IMPORTED_MODULE_39__);
+/* harmony import */ var _http_swagger_config__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../http/swagger-config */ "./src/http/swagger-config.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _app_notifications__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ./app-notifications */ "./src/bootstrap/app-notifications.ts");
+/* harmony import */ var _process_info__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ./process-info */ "./src/bootstrap/process-info.ts");
+/* harmony import */ var _shutdown_signal__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ./shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
+/* harmony import */ var _http_express_server_access__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! ../http/express-server-access */ "./src/http/express-server-access.ts");
 
 
 
@@ -47701,10 +47702,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__.Logger("tg-aut:app");
-const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__.Logger("tg-aut:app");
+const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppOperatorNotification)({
     title,
-    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
+    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
     fields: [
         { label: "Client", value: process.env.clientId || "unknown" },
         { label: "Process", value: process.env.name || "unknown" },
@@ -47712,14 +47714,14 @@ const sendAnalyticsNotice = (title, text, tag) => (0,_app_notifications__WEBPACK
     ],
     tags: ["analytics", tag],
 }, "Failed to send analytics notification");
-const analyticsLossNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.createLossNotifier)((text) => sendAnalyticsNotice("Analytics rows lost", text, "data-loss"));
-const analyticsStallNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.createAlertNotifier)((text) => sendAnalyticsNotice("Analytics sink needs attention", text, "stalled"));
+const analyticsLossNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_41__.createLossNotifier)((text) => sendAnalyticsNotice("Analytics rows lost", text, "data-loss"));
+const analyticsStallNotifier = (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_41__.createAlertNotifier)((text) => sendAnalyticsNotice("Analytics sink needs attention", text, "stalled"));
 function redactAuthQuery(url) {
     return (url || "").replace(/([?&](?:apiKey|apikey|api_key)=)[^&]*/gi, "$1[redacted]");
 }
 function sendAppHealthFailure(req, res, options) {
     const requestId = req.requestId || "unknown";
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.createRouteComponentFailureEvidence)({
         requestId,
         component: "service.health",
         owner: "system",
@@ -47727,11 +47729,11 @@ function sendAppHealthFailure(req, res, options) {
         error: options.cause,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.sendRouteHealthFailureResponse)(res, {
         operation: options.operation,
         readOnly: options.readOnly,
         error: options.errorText,
-        message: options.publicMessage ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_29__.routeHealthErrorMessage)(options.cause),
+        message: options.publicMessage ?? (0,_health_route_health__WEBPACK_IMPORTED_MODULE_30__.routeHealthErrorMessage)(options.cause),
         evidence,
         requestId,
         extra: options.extra,
@@ -47753,27 +47755,30 @@ async function seedRestartSafeState() {
         }
     };
     (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__.setGreetingClientResolver)(liveClient);
-    const [flood, callFlood, greetings, promoteRestart, account] = await Promise.all([
+    const [flood, callFlood, greetings, promoteRestart, account, hot] = await Promise.all([
         (0,_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_7__.seedFloodGateFromRedis)(),
-        (0,_calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_8__.seedCallFloodCooldownFromRedis)(),
+        (0,_calls_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_9__.seedCallFloodCooldownFromRedis)(),
         (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_6__.restoreGreetingState)(),
         // promote::state::{mobile}: the PromotionEngine built in startTg seeds its swap-out clock from this read.
-        (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_9__.preloadPromoteRestartState)(process.env.mobile, process.env.clientId),
+        (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_10__.preloadPromoteRestartState)(process.env.mobile, process.env.clientId),
         // tg::acct::{mobile}: last SpamBot verdict (daysLeft recomputed from limitedUntil).
         restoreAccountVerdict(),
+        // tgaut::hotaccount::{mobile}: the last PEER_FLOOD (the 6 h hot window of the send policy survives a restart).
+        (0,_outbound_hot_account__WEBPACK_IMPORTED_MODULE_8__.seedHotAccountFromRedis)(),
     ]);
     logger.log(`[BOOT] restart-safe state: floodPausedUntil=${flood?.pausedUntil ?? "-"} refused=${flood?.refused ?? "-"} ` +
         `callFloodUntil=${callFlood?.until ?? "-"} callRefused=${callFlood?.refused ?? "-"} ` +
         `greetWindow=${greetings?.windowCount ?? "-"} greetQueued=${greetings?.queued ?? "-"} ` +
-        `promote=${promoteRestart.mode} daysLeft=${account?.restored?.daysLeft ?? "-"} spamSwap=${account?.swapRequested ?? false}`);
+        `promote=${promoteRestart.mode} daysLeft=${account?.restored?.daysLeft ?? "-"} spamSwap=${account?.swapRequested ?? false} ` +
+        `hotPeerFloodAt=${hot?.lastAt ?? "-"}`);
 }
 /** tg::acct restore (bounded Redis read; never blocks boot on an error). */
 async function restoreAccountVerdict() {
     try {
-        return await (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_10__.restoreAccountStateAfterRestart)();
+        return await (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_11__.restoreAccountStateAfterRestart)();
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "[BOOT] restoring SpamBot verdict failed", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "[BOOT] restoring SpamBot verdict failed", false);
         return null;
     }
 }
@@ -47813,7 +47818,7 @@ class ExpressServer {
         this.port = parseInt(process.env.PORT || "3000", 10);
         this.isRunning = false;
         // Initialize Swagger spec on server start - generates and writes swagger.json file
-        const swaggerJsonPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.initializeSwaggerSpec)();
+        const swaggerJsonPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_40__.initializeSwaggerSpec)();
         // Swagger UI configuration - points to the static swagger.json file
         const swaggerUiOptions = {
             customCss: ".swagger-ui .topbar { display: none }",
@@ -47823,14 +47828,14 @@ class ExpressServer {
             },
         };
         // Serve Swagger UI - it will fetch the spec from /swagger.json
-        this.app.use("/apim", (swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default().serve), swagger_ui_express__WEBPACK_IMPORTED_MODULE_38___default().setup(null, swaggerUiOptions));
+        this.app.use("/apim", (swagger_ui_express__WEBPACK_IMPORTED_MODULE_39___default().serve), swagger_ui_express__WEBPACK_IMPORTED_MODULE_39___default().setup(null, swaggerUiOptions));
         // Shared handler for serving swagger.json with fallback regeneration
         const serveSwaggerJson = (req, res) => {
             try {
-                let filePath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.getSwaggerJsonPath)();
+                let filePath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_40__.getSwaggerJsonPath)();
                 if (!fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(filePath)) {
                     logger.log("swagger.json not found, regenerating...");
-                    const regeneratedPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_39__.regenerateSwaggerSpec)();
+                    const regeneratedPath = (0,_http_swagger_config__WEBPACK_IMPORTED_MODULE_40__.regenerateSwaggerSpec)();
                     if (regeneratedPath) {
                         filePath = regeneratedPath;
                     }
@@ -47886,12 +47891,12 @@ class ExpressServer {
             next();
         });
         // Request ID middleware - must be first for tracking
-        this.app.use(_http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_27__.requestIdMiddleware);
+        this.app.use(_http_middlewares_request_id_middleware__WEBPACK_IMPORTED_MODULE_28__.requestIdMiddleware);
         // Body parsing middleware with size limits (before other middleware that need body)
         this.app.use(express__WEBPACK_IMPORTED_MODULE_0___default().json({ limit: "10mb" }));
         this.app.use(express__WEBPACK_IMPORTED_MODULE_0___default().urlencoded({ extended: true, limit: "10mb" }));
         // Request timeout middleware - prevent hanging requests
-        this.app.use((0,_http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_28__.requestTimeoutMiddleware)(30000)); // 30 seconds default timeout
+        this.app.use((0,_http_middlewares_timeout_middleware__WEBPACK_IMPORTED_MODULE_29__.requestTimeoutMiddleware)(30000)); // 30 seconds default timeout
         // CORS headers
         this.app.use((req, res, next) => {
             res.header("Access-Control-Allow-Origin", "*"); // fallback
@@ -47908,13 +47913,13 @@ class ExpressServer {
             next();
         });
         // Authentication middleware
-        this.app.use(_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.authMiddleware);
+        this.app.use(_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__.authMiddleware);
         // CORS
         this.app.use(cors__WEBPACK_IMPORTED_MODULE_1___default()());
         // Early flush middleware
         this.app.use(this.earlyFlushMiddleware);
         // Rate limiting
-        this.app.use(_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_17__.apiRateLimit.middleware());
+        this.app.use(_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_18__.apiRateLimit.middleware());
         // Error tracking middleware
         this.app.use((req, res, next) => {
             res.on("finish", () => {
@@ -47922,16 +47927,16 @@ class ExpressServer {
                 if (req.originalUrl === "/favicon.ico")
                     return;
                 if (res.statusCode >= 400) {
-                    const headerApiKey = (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.getHeaderValue)(req, "x-api-key");
-                    void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.HTTP_FAILURES, {
+                    const headerApiKey = (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__.getHeaderValue)(req, "x-api-key");
+                    void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppNotification)(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.ChannelCategory.HTTP_FAILURES, {
                         title: "HTTP failed",
-                        severity: res.statusCode >= 500 ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
+                        severity: res.statusCode >= 500 ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.ERROR : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
                         fields: [
                             { label: "Status", value: res.statusCode },
                             { label: "Method", value: req.method },
                             { label: "Path", value: redactAuthQuery(req.originalUrl) },
-                            { label: "Client IP", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.extractRealClientIP)(req) },
-                            { label: "Origin", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_21__.extractRealOrigin)(req) },
+                            { label: "Client IP", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__.extractRealClientIP)(req) },
+                            { label: "Origin", value: (0,_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__.extractRealOrigin)(req) },
                             { label: "Header Key", value: headerApiKey ? "[redacted]" : "missing" },
                             { label: "Request ID", value: req.requestId || "unknown" },
                         ],
@@ -47959,7 +47964,7 @@ class ExpressServer {
                 }
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "Error updating timestamp in database");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error updating timestamp in database");
             }
             next();
         });
@@ -47975,7 +47980,7 @@ class ExpressServer {
             if (res.headersSent) {
                 return next(err);
             }
-            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(err, "Express error handler", false);
+            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(err, "Express error handler", false);
             const requestId = req.requestId || "unknown";
             const errorStack = err instanceof Error ? err.stack : undefined;
             // Log error with context
@@ -47986,9 +47991,9 @@ class ExpressServer {
                 stack:  true ? errorStack : 0,
             });
             // Send notification (don't await to avoid blocking response)
-            void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
+            void (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppOperatorNotification)({
                 title: "Request failed",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.ERROR,
                 summary: errorDetails.message,
                 fields: [
                     { label: "Request ID", value: requestId },
@@ -48017,14 +48022,14 @@ class ExpressServer {
      */
     setupRoutes() {
         // Register modular routes with prefixes
-        this.app.use("/", _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_30__["default"]); // Health routes stay at root
-        this.app.use("/", _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_31__["default"]);
-        this.app.use("/", _routes_admin_routes__WEBPACK_IMPORTED_MODULE_32__["default"]);
-        this.app.use("/", _routes_system_routes__WEBPACK_IMPORTED_MODULE_33__["default"]);
-        this.app.use("/", _routes_actions_routes__WEBPACK_IMPORTED_MODULE_34__["default"]);
-        this.app.use("/", _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_35__["default"]);
-        this.app.use("/", _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_36__["default"]);
-        this.app.use("/", _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_37__["default"]);
+        this.app.use("/", _http_routes_health_routes__WEBPACK_IMPORTED_MODULE_31__["default"]); // Health routes stay at root
+        this.app.use("/", _routes_telegram_routes__WEBPACK_IMPORTED_MODULE_32__["default"]);
+        this.app.use("/", _routes_admin_routes__WEBPACK_IMPORTED_MODULE_33__["default"]);
+        this.app.use("/", _routes_system_routes__WEBPACK_IMPORTED_MODULE_34__["default"]);
+        this.app.use("/", _routes_actions_routes__WEBPACK_IMPORTED_MODULE_35__["default"]);
+        this.app.use("/", _routes_diagnostics_routes__WEBPACK_IMPORTED_MODULE_36__["default"]);
+        this.app.use("/", _http_routes_details_routes__WEBPACK_IMPORTED_MODULE_37__["default"]);
+        this.app.use("/", _http_routes_api_docs_routes__WEBPACK_IMPORTED_MODULE_38__["default"]);
     }
     /**
      * Early flush middleware for streaming responses
@@ -48069,16 +48074,16 @@ class ExpressServer {
         await seedRestartSafeState();
         await _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().startTg();
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sleep)(10000);
-        await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_16__.runJobs)();
-        const delayed = await (0,_jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_11__.startDelayedQueue)();
-        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_13__.runOutboundRecord)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
-        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_14__.pictureEventQueue.restore(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
+        await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_17__.runJobs)();
+        const delayed = await (0,_jobs_delayed_kinds__WEBPACK_IMPORTED_MODULE_12__.startDelayedQueue)();
+        const outbound = await _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_13__.outboundQueue.restore((record, chatId) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_14__.runOutboundRecord)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient(), record, chatId));
+        const pictures = await _conversation_inbound_picture_event_queue__WEBPACK_IMPORTED_MODULE_15__.pictureEventQueue.restore(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getClient());
         if (delayed + outbound + pictures > 0)
             logger.log(`[BOOT] restored: delayed=${delayed} outbound=${outbound} pictures=${pictures}`);
         void restoreCallStateAfterRestart();
-        const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_22__.EventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
+        const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_23__.EventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
         await eventStore.ensureIndexes();
-        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_22__.EventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__.executeEvent, {
+        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_23__.EventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_24__.executeEvent, {
             logger: {
                 log: (m) => logger.log(`[event-scheduler] ${m}`),
                 warn: (m) => logger.warn(`[event-scheduler] ${m}`),
@@ -48115,7 +48120,7 @@ class ExpressServer {
                 // unreachable Supabase, or an absent `pg` driver all resolve to "analytics disabled" and
                 // BOOT continues untouched. Placed after the Mongo connect so a failure here can never be
                 // confused with a real database problem.
-                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_40__.initAnalytics)({
+                void (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_41__.initAnalytics)({
                     connectionString: process.env.ANALYTICS_DB_URL,
                     logger,
                     // Stamped on promotion_send / conversion_event rows (same value as daily_client.namespace).
@@ -48132,18 +48137,18 @@ class ExpressServer {
                 })
                     .then((enabled) => logger.info(`[analytics] ${enabled ? "enabled" : "disabled"}`))
                     .catch(() => { });
-                await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__["default"].getInstance();
-                await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__.stateManager.ensureInitialized();
-                await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_26__.setUpiIds)();
+                await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_26__["default"].getInstance();
+                await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_16__.stateManager.ensureInitialized();
+                await (0,_payments_upi__WEBPACK_IMPORTED_MODULE_27__.setUpiIds)();
                 await this.connectTelegramRuntime();
                 logger.info(`✅ BOOT ready | ${process.env.clientId || "unknown-client"} | ${source}`);
             }
             catch (error) {
-                if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.isPermanentFailureHandoffActive)()) {
-                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_19__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
+                if ((0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_20__.isPermanentFailureHandoffActive)()) {
+                    logger.warn(`⚠️ BOOT handoff-active | ${process.env.clientId || "unknown-client"} | ${source} | ${(0,_telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_20__.getPermanentFailureHandoffContext)() || "unknown"} | ${error instanceof Error ? error.message : String(error)}`);
                     throw error;
                 }
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error, "Error during Telegram connection bootstrap");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error during Telegram connection bootstrap");
                 logger.error(`❌ BOOT failed | ${process.env.clientId || "unknown-client"} | ${source} | ${error instanceof Error ? error.message : String(error)}`);
                 throw error;
             }
@@ -48159,39 +48164,39 @@ class ExpressServer {
     async runServer() {
         logger.log(`🌐 SERVER starting | ${process.env.clientId || "unknown-client"} | port ${this.port}`);
         this.server = this.app.listen(this.port, async () => {
-            logger.log(`✅ SERVER ready | ${process.env.clientId || "unknown-client"} | port ${this.port} | pid ${_process_info__WEBPACK_IMPORTED_MODULE_42__.prcessID}`);
+            logger.log(`✅ SERVER ready | ${process.env.clientId || "unknown-client"} | port ${this.port} | pid ${_process_info__WEBPACK_IMPORTED_MODULE_43__.prcessID}`);
         });
         // Set server timeout to prevent hanging connections
         this.server.timeout = 30000; // 30 seconds
         this.server.keepAliveTimeout = 65000; // 65 seconds (slightly longer than typical load balancer)
         this.server.headersTimeout = 66000; // 66 seconds (must be > keepAliveTimeout)
         this.server.on("error", async (error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_18__.parseError)(error);
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error);
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppOperatorNotification)({
                 title: "Server error",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.ERROR,
                 summary: error.message,
                 tags: ["server", "lifecycle"],
             }, "Failed to send server error notification");
         });
         this.server.on("uncaughtException", async (err) => {
             logger.error("------------An uncaught exception occurred:", err);
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppOperatorNotification)({
                 title: "Uncaught error",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.ERROR,
                 summary: err.message,
                 tags: ["server", "uncaught"],
             }, "Failed to send server uncaught exception notification");
         });
         this.server.on("close", async () => {
             logger.log("Server close event triggered");
-            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_41__.sendAppOperatorNotification)({
+            await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_42__.sendAppOperatorNotification)({
                 title: "Server closing",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__.NotificationSeverity.WARNING,
                 tags: ["server", "shutdown"],
             }, "Failed to send server close notification");
             logger.log("SERVER CLOSING");
-            await (0,_shutdown_signal__WEBPACK_IMPORTED_MODULE_43__.shutdown)("Server Close Event");
+            await (0,_shutdown_signal__WEBPACK_IMPORTED_MODULE_44__.shutdown)("Server Close Event");
         });
         this.isRunning = true;
     }
@@ -48208,7 +48213,7 @@ class ExpressServer {
     }
 }
 // Routes reach ExpressServer.getInstance() through http/express-server-access (no import of this module).
-(0,_http_express_server_access__WEBPACK_IMPORTED_MODULE_44__.registerExpressServer)(ExpressServer);
+(0,_http_express_server_access__WEBPACK_IMPORTED_MODULE_45__.registerExpressServer)(ExpressServer);
 
 
 /***/ },
@@ -57192,7 +57197,7 @@ async function handleEarlyReping(chatId, userDetails, event) {
     if ((0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.cancelDelayed)((0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.repingRecordId)(safeChatId))) {
         logger.debug(`[EarlyReping] Cleared existing reping timeout for user ${safeChatId}`);
     }
-    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.scheduleDelayed)(safeChatId, 'reping', { messageId: event.message?.id }, delayMs, (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.repingRecordId)(safeChatId));
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.scheduleDelayed)(safeChatId, 'reping', { messageId: event.message?.id, at: Date.now() }, delayMs, (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_11__.repingRecordId)(safeChatId));
 }
 /** Shutdown hook (kept for app.ts): greetings live in the chat moments record now. */
 function cleanupGreetingInterval() {
@@ -64424,6 +64429,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+
+
 
 
 
@@ -64434,6 +64443,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:inhandler-updated"); // 20 minutes
+/** Most repings per user, every account (policies/send-policy.ts SEND_POLICY.repingCap; the "/4" was only log text before). */
+const REPING_CAP = _policies_send_policy__WEBPACK_IMPORTED_MODULE_10__.SEND_POLICY.repingCap;
 /** Delayed record 'reping': the re-engagement nudge if the user went quiet. */
 async function runReping(chatId, args) {
     logger.debug(`[EarlyReping] Reping timeout executing for user ${chatId}`);
@@ -64447,21 +64458,19 @@ async function runReping(chatId, args) {
         const timeSinceLastMessage = Date.now() - userDetails.lastMsgTimeStamp;
         const shouldReping = timeSinceLastMessage > 260000; // 4.33 minutes
         if (shouldReping) {
-            const currentReping = (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.getRepingMap)(chatId) || 0;
-            (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.setRepingMap)(chatId, currentReping + 1);
-            // Progressive re-engagement based on reping count
-            const msg = currentReping === 0 ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.uthereMsgs) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.offerMsgs);
-            // Enhanced promotional content for reping
-            if (currentReping < 3 && userDetails?.payAmount < 30) {
-                // Second reping: Send promotional picture with retry logic
-                await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_3__.sendPromoPic)(args.messageId, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`);
-                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg }, 15000, `repingfollow::${chatId}`);
-            }
-            else {
-                (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.initMsgs), 'nudge', args.messageId).catch(e => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(e, "Reping initial respond"));
-                (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg }, 20000, `repingfollow::${chatId}`);
-            }
-            logger.debug(`[EarlyReping] Sent reping message ${currentReping + 1}/4 for user ${chatId}`);
+            // Send policy (outbound/send-executor): the cap (every account), the refused mark, and on a hot account the
+            // staleness re-check against when the reping was planned.
+            const { outcome, reason } = await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__.sendWithPolicy)({
+                kind: 'reping',
+                chatId,
+                label: 'reping',
+                scheduledAt: args.at,
+                repingCount: (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.getRepingMap)(chatId) || 0,
+                queued: true,
+                send: () => sendReping(chatId, args, userDetails.payAmount),
+            });
+            if (outcome === 'skipped')
+                logger.log(`[EarlyReping] ${chatId}: ${reason}, not sent`);
         }
         else {
             logger.debug(`[EarlyReping] User not inactive long enough for reping: ${chatId} (${Math.round(timeSinceLastMessage / 1000)}s ago)`);
@@ -64471,10 +64480,35 @@ async function runReping(chatId, args) {
         logger.error(`[EarlyReping] Failed to send reping message for ${chatId}:`, error);
     }
 }
-/** Delayed record 'repingFollowup'. */
+/** The reping itself (count + message + follow-up), at its send time. */
+async function sendReping(chatId, args, payAmount) {
+    const currentReping = (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.getRepingMap)(chatId) || 0;
+    (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.setRepingMap)(chatId, currentReping + 1);
+    // Progressive re-engagement based on reping count
+    const msg = currentReping === 0 ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.uthereMsgs) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.offerMsgs);
+    // Enhanced promotional content for reping
+    if (currentReping < 3 && payAmount < 30) {
+        // Second reping: Send promotional picture with retry logic
+        await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_3__.sendPromoPic)(args.messageId, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`);
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now() }, 15000, `repingfollow::${chatId}`);
+    }
+    else {
+        (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.initMsgs), 'nudge', args.messageId).catch(e => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(e, "Reping initial respond"));
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now() }, 20000, `repingfollow::${chatId}`);
+    }
+    logger.debug(`[EarlyReping] Sent reping message ${currentReping + 1}/${REPING_CAP} for user ${chatId}`);
+}
+/** Delayed record 'repingFollowup' (send policy: on a hot account skipped when the user wrote or paid since the reping). */
 async function runRepingFollowup(chatId, args) {
     try {
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, args.msg, 'nudge', args.messageId);
+        await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__.sendWithPolicy)({
+            kind: 'repingFollowup',
+            chatId,
+            label: 'reping-followup',
+            scheduledAt: args.at,
+            queued: true,
+            send: () => (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, args.msg, 'nudge', args.messageId),
+        });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Reping follow-up respond");
@@ -64509,10 +64543,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   setReply: () => (/* binding */ setReply)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
 /**
  * Global State Management
  * Manages global application state that needs to be shared across modules
  */
+
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger( true ? __webpack_filename__ : 0);
 let days = -1;
@@ -64535,6 +64571,8 @@ function daysLeftForRelease() {
 function setDaysLeft(value) {
     logger.debug(`Setting days left to:`, value);
     days = value;
+    // SpamBot-limited (daysLeft > 0) makes the account hot for the send policy (outbound/hot-account, policies/send-policy).
+    _outbound_hot_account__WEBPACK_IMPORTED_MODULE_1__.hotAccount.noteSpamBot(value);
 }
 
 
@@ -66702,10 +66740,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
 /**
  * Message Helper Functions
  * Shared utilities for message handling
  */
+
 
 
 
@@ -66728,13 +66768,18 @@ function hasTpMap(chatId) {
 }
 const TP_MSG_INITIAL_DELAY_MS = 15000;
 const TP_MSG_FOLLOWUP_DELAY_MS = 30000;
-/** Delayed record 'tpmsg': the timepass warning at +15 s, then its follow-up 30 s later. */
+/** Delayed record 'tpmsg': the timepass warning at +15 s, then its follow-up 30 s later (send policy kind 'timepass'). */
 async function runTpMsg(chatId, args) {
     if (args.step === "initial") {
         try {
             setTpMap(chatId, true);
-            await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respondInChat)(chatId, `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(['**Are you Timepasser??**', '**I Think you are TimePasser!!**'])}\n\nPay Minimum **20₹** to Believe that you are **Not Timpasser**!!\n\nI will Give service Immediately if you Prove yourself as Not Timpasser!!\n\n**If Not, Just STOP Msging!! U will NOT Get Anything Free Here!!**😏😏`, undefined, args.messageId);
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_8__.scheduleDelayed)(chatId, "tpmsg", { ...args, step: "followup" }, TP_MSG_FOLLOWUP_DELAY_MS);
+            await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__.sendWithPolicy)({
+                kind: "timepass", chatId, label: "tp-initial", scheduledAt: args.at, queued: true,
+                send: async () => {
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respondInChat)(chatId, `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)(['**Are you Timepasser??**', '**I Think you are TimePasser!!**'])}\n\nPay Minimum **20₹** to Believe that you are **Not Timpasser**!!\n\nI will Give service Immediately if you Prove yourself as Not Timpasser!!\n\n**If Not, Just STOP Msging!! U will NOT Get Anything Free Here!!**😏😏`, undefined, args.messageId);
+                    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_8__.scheduleDelayed)(chatId, "tpmsg", { ...args, step: "followup", at: Date.now() }, TP_MSG_FOLLOWUP_DELAY_MS);
+                },
+            });
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `sendTpMsg.initial.${chatId}`, false);
@@ -66742,11 +66787,11 @@ async function runTpMsg(chatId, args) {
         return;
     }
     try {
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respondInChat)(chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)([
-            'I have already sent you my pic and voice!!\n\n**Now its ur time Dear!!**\n\nDont TimePass **just try Demo!!**\nI will make your Dick Hardest, Just try Once😘😘',
-            "I have already given you confirmation!!\n\nNow If you need anything MORE... **PAY AND MSG ME!!\n\nDont do Timepass!!**",
-            "Already I gave you Samples baby! 💯\n\nWant more? **Pay & msg me!**\nNo timepass! 😏"
-        ]), undefined, args.messageId);
+        await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__.sendWithPolicy)({ kind: "timepass", chatId, label: "tp-followup", scheduledAt: args.at, queued: true, send: () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respondInChat)(chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_1__.pickOneMsg)([
+                'I have already sent you my pic and voice!!\n\n**Now its ur time Dear!!**\n\nDont TimePass **just try Demo!!**\nI will make your Dick Hardest, Just try Once😘😘',
+                "I have already given you confirmation!!\n\nNow If you need anything MORE... **PAY AND MSG ME!!\n\nDont do Timepass!!**",
+                "Already I gave you Samples baby! 💯\n\nWant more? **Pay & msg me!**\nNo timepass! 😏"
+            ]), undefined, args.messageId) });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `sendTpMsg.followup.${chatId}`, false);
@@ -66760,7 +66805,7 @@ async function sendTpMsg(event) {
 }
 function scheduleTpMsg(chatId, messageId) {
     if (!hasTpMap(chatId)) {
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_8__.scheduleDelayed)(chatId, "tpmsg", { messageId, step: "initial" }, TP_MSG_INITIAL_DELAY_MS);
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_8__.scheduleDelayed)(chatId, "tpmsg", { messageId, step: "initial", at: Date.now() }, TP_MSG_INITIAL_DELAY_MS);
     }
 }
 /**
@@ -69192,7 +69237,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /* harmony import */ var _generate_greeting__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./generate-greeting */ "./src/greetings/generate-greeting.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
-/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../replier/human-typing */ "./src/replier/human-typing.ts");
+/* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../replier/human-typing */ "./src/replier/human-typing.ts");
+
+
+
+
 
 
 
@@ -69210,7 +69263,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg
 const DELAYS = {
     CHANNEL_LINKS: 5000,
     DEMO_PRICES: 10000,
-    VOICE_NOTE: 200000,
+    // The intro voice note: SEND_POLICY.greetingVoiceDelayMs (policies/send-policy.ts), 200 s on a free account.
 };
 const RATE_LIMITS = {
     MAX_PER_TEN_MINUTES: 10,
@@ -69258,6 +69311,14 @@ function releaseGreeting(chatId) {
         return;
     void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.writeOnce)("tgaut.greeted release", (m) => { m.del(key); });
 }
+/**
+ * One greeting text: send-policy kind 'greetingText', protected (never skipped or delayed by the policy, on any account).
+ * A refused chat is still not tried: the OutboundQueue rejects it and the send resolves with nothing (false here).
+ */
+async function sendGreetingText(client, chatId, params, label) {
+    const { result } = await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendWithPolicy)({ kind: 'greetingText', chatId, label, send: () => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, params) });
+    return Boolean(result);
+}
 // MEMORY OPTIMIZATION: Greetings now accepts pre-extracted data instead of Full event/msgs objects
 async function GreetingsFromQueue(queueItem) {
     const { chatId, firstName, client, msgsTotal, hasMyMsg, doesUserExists } = queueItem;
@@ -69265,30 +69326,45 @@ async function GreetingsFromQueue(queueItem) {
         logger.info(`Processing greeting for: ${firstName} (Chat ID: ${chatId})`);
         if (hasMyMsg || msgsTotal === 0) {
             logger.log(`${firstName}: Skipped - MESSAGES DELETE OBSERVED!! | Chat ID: ${chatId}`);
-            return;
+            return 'skipped';
         }
+        let delivered;
         if (doesUserExists) {
             logger.log(`${firstName}: User exists, sending greetings...`);
-            await handleExistingUserDirect(client, chatId, firstName);
+            delivered = await handleExistingUserDirect(client, chatId, firstName);
         }
         else {
             logger.log(`${firstName}: New user detected, sending welcome message...`);
-            await handleNewUserDirect(client, chatId, firstName, msgsTotal);
+            delivered = await handleNewUserDirect(client, chatId, firstName, msgsTotal);
         }
-        // Mark greeting as sent
-        // Send voice note with proper error handling
-        // Delayed record (survives a restart): the intro voice note DELAYS.VOICE_NOTE after the greeting.
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.scheduleDelayed)(chatId, 'greetingVoice', {}, DELAYS.VOICE_NOTE);
+        if (delivered === 0 && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__.floodGate.isRefused(chatId)) {
+            // Nothing reached the user: not a greeting. The caller forgets the greeted marks, so the user's next message
+            // (which lifts the refusal, inbound-event-router) gets a fresh greeting instead of `greeting-already-sent`.
+            logger.warn(`${chatId}: greeting refused by Telegram (PEER_FLOOD), nothing delivered; not counted as greeted`);
+            return 'refused';
+        }
+        // Delayed record (survives a restart): the intro voice note, timed by the send policy (A/B on a hot account).
+        const plan = (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.planSend)('greetingVoice', chatId, 'greeting-voice');
+        if (plan) {
+            const args = { at: plan.plannedAt, delayMs: plan.delayMs };
+            if (plan.arm)
+                args.arm = plan.arm;
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.scheduleDelayed)(chatId, 'greetingVoice', args, plan.delayMs);
+        }
+        return 'sent';
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error processing greetings");
         throw error;
     }
 }
-/** Delayed record 'greetingVoice'. */
-async function runGreetingVoice(client, chatId) {
+/** Delayed record 'greetingVoice' (send-policy kind 'greetingVoice': on a hot account skipped when paid since it was planned). */
+async function runGreetingVoice(client, chatId, args = {}) {
     try {
-        await sendVoiceNoteDirect(client, chatId);
+        await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendWithPolicy)({
+            kind: 'greetingVoice', chatId, label: 'greeting-voice', scheduledAt: args.at, plannedArm: args.arm, plannedDelayMs: args.delayMs, queued: true,
+            send: () => sendVoiceNoteDirect(client, chatId),
+        });
     }
     catch (error) {
         logger.error(`Voice note failed for ${chatId}:`, error);
@@ -69314,18 +69390,19 @@ async function handleExistingUserDirect(client, chatId, firstName) {
     const demoPrices = `<b>DEMO</b> Nude pics: <b>25₹</b>\n<b>DEMO</b> Video Call: <b>50₹</b>\n<b>DEMO</b> Voice Call: <b>40₹</b>`;
     const payLink = `<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>`;
     const message = `Hii ${firstName}...!!\n\n${payLink}`;
-    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_11__.showHumanTyping)(client, chatId, 5000);
-    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, {
+    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 5000);
+    let delivered = Number(await sendGreetingText(client, chatId, {
         message,
         parseMode: 'html'
-    });
+    }, 'greeting-existing'));
     await new Promise(resolve => setTimeout(resolve, DELAYS.DEMO_PRICES));
     const secondMessage = `${demoPrices}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_0__.getPynw()}`;
-    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_11__.showHumanTyping)(client, chatId, 6);
-    await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, {
+    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 6);
+    delivered += Number(await sendGreetingText(client, chatId, {
         message: secondMessage,
         parseMode: 'html'
-    });
+    }, 'greeting-existing-prices'));
+    return delivered;
 }
 // MEMORY OPTIMIZATION: Direct client version without event object
 async function handleNewUserDirect(client, chatId, firstName, totalMsgs) {
@@ -69333,22 +69410,23 @@ async function handleNewUserDirect(client, chatId, firstName, totalMsgs) {
         // Previous sales-first composition retained for quick rollback/reference:
         // const greeting = `Hii  **${firstName}${standardMessages.getNameGreet()}${generateRandomGreeting()}`;
         const greeting = (0,_generate_greeting__WEBPACK_IMPORTED_MODULE_9__.generateRandomGreeting)();
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_11__.showHumanTyping)(client, chatId, 10000);
-        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, { message: greeting, linkPreview: true });
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 10000);
+        let delivered = Number(await sendGreetingText(client, chatId, { message: greeting, linkPreview: true }, 'greeting'));
         await new Promise(resolve => setTimeout(resolve, DELAYS.CHANNEL_LINKS));
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_11__.showHumanTyping)(client, chatId, 5000);
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 5000);
         const channelLinks = `<b>My Links👇🏻:</b>\n\n<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`; //\n<b>JOIN 👉🏻 @${process.env.channelLink}</b>`;
-        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, { message: channelLinks, linkPreview: true, parseMode: 'html' });
+        delivered += Number(await sendGreetingText(client, chatId, { message: channelLinks, linkPreview: true, parseMode: 'html' }, 'greeting-links'));
+        return delivered;
     }
     else {
         const demoPrices = `• <b>DEMO</b> Nude pics: <b>25₹</b>\n• <b>DEMO</b> Video Call: <b>50₹</b>\n• <b>DEMO</b> Voice Call: <b>40₹</b>`;
         const payLink = `<b>Pay on My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`;
         const message = `${demoPrices}\n\n\n${payLink}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_0__.getPynw()}`;
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_11__.showHumanTyping)(client, chatId, 3000);
-        await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, {
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 3000);
+        return Number(await sendGreetingText(client, chatId, {
             message,
             parseMode: 'html'
-        });
+        }, 'greeting-prices'));
     }
 }
 class NewUserRateLimiter {
@@ -69456,10 +69534,23 @@ class NewUserRateLimiter {
         logger.info(`Processing queued event (Chat ID: ${chatId})`);
         try {
             // MEMORY OPTIMIZATION: Use the new queue-optimized function
-            await GreetingsFromQueue({ ...queueItem, client });
-            // Mark chatId as processed with timestamp
-            this.processedChatIds.set(chatId, Date.now());
+            const outcome = await GreetingsFromQueue({ ...queueItem, client });
             const now = Date.now();
+            if (outcome === 'refused') {
+                // Not greeted: forget the 20-min 'greeting' moment (event-print) and the 12 h claims, so the user's next
+                // message is answered with a fresh greeting. It still counts against the greeting rate window below.
+                (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_14__.clearMoments)(chatId, 'greeting');
+                if (claim === "claimed")
+                    releaseGreeting(chatId);
+                (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.logSendPolicy)({
+                    kind: 'greetingText', chatId, decision: 'sendNow', reason: 'greeting refused, not counted as greeted', outcome: 'refused',
+                    hotReason: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__.hotAccount.view(now).reason, arm: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__.hotAccount.arm(now), now,
+                });
+            }
+            else {
+                // Mark chatId as processed with timestamp
+                this.processedChatIds.set(chatId, now);
+            }
             this.state.tenMinuteWindow.push(now);
             this.state.hourWindow.push(now);
             void greetingRateMirror.add(now);
@@ -75254,7 +75345,7 @@ async function runDelayedRecord(record) {
         case "holdRecheck": return (0,_imageUtils_processImage__WEBPACK_IMPORTED_MODULE_9__.runHoldRecheck)(liveClient(), chatId, args);
         case "fraudBlock": return (0,_imageUtils_processImage__WEBPACK_IMPORTED_MODULE_9__.runFraudBlock)(liveClient(), chatId, args);
         case "failedMsg": return (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_10__.runFailedMsgFollowup)(liveClient(), chatId, args);
-        case "greetingVoice": return (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_11__.runGreetingVoice)(liveClient(), chatId);
+        case "greetingVoice": return (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_11__.runGreetingVoice)(liveClient(), chatId, args);
         case "vcLink": return (0,_routes_telegram_routes__WEBPACK_IMPORTED_MODULE_12__.runVcLinkFollowup)(liveClient(), chatId);
         case "declinePasswordReset": return (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_13__.runDeclinePasswordReset)(liveClient(), chatId);
         case "textedClientLimit": return (0,_data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.runTextedClientLimit)(chatId);
@@ -77038,6 +77129,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _shared_schedule_task__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../shared/schedule-task */ "./src/shared/schedule-task.ts");
 /* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
 /* harmony import */ var _shared_core_notification__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../shared/core-notification */ "./src/shared/core-notification.ts");
+/* harmony import */ var _send_executor__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../send-executor */ "./src/outbound/send-executor.ts");
+
 
 
 
@@ -77134,6 +77227,7 @@ async function asktoPay(client, time) {
             const chatId = user.chatId.toString();
             // Constant per-send pacing (was i * pacing, i.e. quadratic total runtime).
             const staggerMs = sends === 0 ? 0 : time + Math.floor(Math.random() * 3000);
+            const plannedAt = Date.now();
             sends++;
             try {
                 await new Promise((resolve) => {
@@ -77153,8 +77247,13 @@ async function asktoPay(client, time) {
                         }
                         else {
                             logger.log(`Restarting paid-user engagement for ${user.chatId}`);
-                            const sent = await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_3__.trySendingMsg)(user, client, { message: (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.initMsg)({ tempters: true }) }, 'reminder', report);
-                            logger.log(`Paid-user engagement init ${sent ? "sent" : "failed"} for ${user.chatId}`);
+                            // Send policy kind 'campaign' (outbound/send-executor): refused chats skipped; on a hot account
+                            // also skipped when a payment was credited since the run planned it.
+                            const { outcome, result: sent, reason } = await (0,_send_executor__WEBPACK_IMPORTED_MODULE_12__.sendWithPolicy)({
+                                kind: 'campaign', chatId, label: 'ask-to-pay', scheduledAt: plannedAt,
+                                send: () => (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_3__.trySendingMsg)(user, client, { message: (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.initMsg)({ tempters: true }) }, 'reminder', report),
+                            });
+                            logger.log(`Paid-user engagement init ${outcome === 'skipped' ? `not sent (${reason})` : sent ? "sent" : "failed"} for ${user.chatId}`);
                         }
                     }, staggerMs, `asktoPay.${chatId}`, resolve);
                 });
@@ -77841,7 +77940,12 @@ const FLOOD_GATE = {
     /** Most refused chats remembered (oldest forgotten first). */
     maxRefusedChats: 5000,
 };
-/** Refused chats are forgotten after a day without the user writing (Redis hash TTL, refreshed on write). */
+/**
+ * TTL of the Redis copy of the refused chats only. In memory a refused chat has NO expiry: it stays refused until the
+ * user writes again (clearRefused, inbound-event-router), the operator sends to it (/sendmessage), it is evicted
+ * (maxRefusedChats, oldest first) or the process restarts. At boot only entries refused within the last 24 h are
+ * reloaded (RedisHash.load filters by age), and the whole hash expires 24 h after its last write (TTL refreshed on write).
+ */
 const FLOOD_REFUSED_TTL_MS = 24 * 60 * 60000;
 function createPauseRefusedStore(pauseNamespace, refusedNamespace, refusedTtlMs, mobile = _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.currentMobile) {
     return {
@@ -77856,6 +77960,7 @@ class FloodGate {
     constructor(deps = {}, store = null) {
         this.until = 0;
         this.hitLog = [];
+        this.peerFloodListeners = [];
         this.deps = deps;
         this.store = store;
         this.refused = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.MirroredTimestampMap(FLOOD_GATE.maxRefusedChats, store?.refused ?? null);
@@ -77876,7 +77981,18 @@ class FloodGate {
         const key = chatId == null ? '' : String(chatId);
         if (key)
             this.refused.note(key, now);
+        for (const listener of this.peerFloodListeners) {
+            try {
+                listener(now, key || null);
+            }
+            catch { /* a listener never breaks the send path */ }
+        }
         return { hits: this.hitLog.length };
+    }
+    /** Registers a PEER_FLOOD listener (module-load wiring only, so the list stays tiny). */
+    onPeerFlood(listener) {
+        if (!this.peerFloodListeners.includes(listener))
+            this.peerFloodListeners.push(listener);
     }
     /** True when Telegram refused this chat with PEER_FLOOD and the user has not written since. */
     isRefused(chatId) {
@@ -78270,6 +78386,108 @@ function detectMedia(event) {
 
 /***/ },
 
+/***/ "./src/outbound/hot-account.ts"
+/*!*************************************!*\
+  !*** ./src/outbound/hot-account.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HotAccount: () => (/* binding */ HotAccount),
+/* harmony export */   hotAccount: () => (/* binding */ hotAccount),
+/* harmony export */   seedHotAccountFromRedis: () => (/* binding */ seedHotAccountFromRedis)
+/* harmony export */ });
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _flood_gate__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:send-policy');
+function createHotAccountStore(mobile = _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.currentMobile) {
+    return new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisDeadline(() => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)('tgaut::hotaccount', mobile()), 'tgaut.hotaccount');
+}
+class HotAccount {
+    constructor(deps = {}, store = null) {
+        this.lastPeerFloodAt = 0;
+        this.spamBotDays = -1;
+        /** Last state written to the log (transitions only). */
+        this.reported = '';
+        this.deps = deps;
+        this.store = store;
+    }
+    configure(deps) { this.deps = deps; }
+    now() { return (this.deps.now ?? Date.now)(); }
+    mobile() { return (this.deps.mobile ?? _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.currentMobile)(); }
+    arm(now = this.now()) { return this.deps.arm ?? (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_3__.armFor)(this.mobile(), now); }
+    /** The account as decideSend() sees it. Logs a transition line when hot/free (or the reason) changed. */
+    view(now = this.now()) {
+        const reason = this.observe(now, 'check');
+        return { hot: reason !== '', reason, arm: this.arm(now) };
+    }
+    /** A PEER_FLOOD (any chat, any sender): the account is hot for the next 6 h. */
+    notePeerFlood(now = this.now()) {
+        this.lastPeerFloodAt = Math.max(this.lastPeerFloodAt, now);
+        void this.store?.save(this.lastPeerFloodAt + _policies_send_policy__WEBPACK_IMPORTED_MODULE_3__.SEND_POLICY.hotWindowMs, now, { lastAt: this.lastPeerFloodAt });
+        this.observe(now, 'peer_flood');
+    }
+    /** SpamBot verdict (reply-switch setDaysLeft): daysLeft > 0 = limited. */
+    noteSpamBot(daysLeft, now = this.now()) {
+        this.spamBotDays = Number.isFinite(daysLeft) ? daysLeft : -1;
+        this.observe(now, this.spamBotDays > 0 ? 'spambot_limited' : 'spambot_free');
+    }
+    /** Boot: restores the PEER_FLOOD stamp from Redis (never replaces a newer in-memory one). Redis down = null. */
+    async seedFromStore(now = this.now()) {
+        if (!this.store)
+            return null;
+        const saved = await this.store.load(now);
+        const lastAt = Number(saved?.meta.lastAt);
+        if (!saved || !Number.isFinite(lastAt) || lastAt <= this.lastPeerFloodAt || now - lastAt >= _policies_send_policy__WEBPACK_IMPORTED_MODULE_3__.SEND_POLICY.hotWindowMs)
+            return null;
+        this.lastPeerFloodAt = lastAt;
+        this.observe(now, 'restored');
+        return { lastAt };
+    }
+    observe(now, cause) {
+        const reason = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_3__.accountHotReason)(this.spamBotDays, this.lastPeerFloodAt, now);
+        const was = this.reported;
+        if (reason !== was) {
+            this.reported = reason;
+            const why = cause === 'check' ? (reason ? 'window' : 'peer_flood_window_over') : cause;
+            logger.log(`[SEND-POLICY] state from=${was ? 'hot' : 'free'} to=${reason ? 'hot' : 'free'} hotReason=${reason || '-'} ` +
+                `prevReason=${was || '-'} cause=${why} arm=${this.arm(now)} spamBotDays=${this.spamBotDays} ` +
+                `lastPeerFloodAgoMs=${this.lastPeerFloodAt ? now - this.lastPeerFloodAt : -1}`);
+        }
+        return reason;
+    }
+    /** Tests: forget everything (memory and the Redis copy). */
+    reset() {
+        this.lastPeerFloodAt = 0;
+        this.spamBotDays = -1;
+        this.reported = '';
+        void this.store?.clear();
+    }
+}
+/** The process-wide account state (mirrored to Redis under this process's mobile), fed by every PEER_FLOOD the gate sees. */
+const hotAccount = new HotAccount({}, createHotAccountStore());
+_flood_gate__WEBPACK_IMPORTED_MODULE_2__.floodGate.onPeerFlood((now) => hotAccount.notePeerFlood(now));
+/** Boot: restore the PEER_FLOOD stamp from Redis. Never throws. */
+async function seedHotAccountFromRedis() {
+    try {
+        return await hotAccount.seedFromStore();
+    }
+    catch {
+        return null;
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/outbound/outbound-queue.ts"
 /*!****************************************!*\
   !*** ./src/outbound/outbound-queue.ts ***!
@@ -78283,6 +78501,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   OUTBOUND_KINDS: () => (/* binding */ OUTBOUND_KINDS),
 /* harmony export */   OutboundDroppedError: () => (/* binding */ OutboundDroppedError),
 /* harmony export */   OutboundQueue: () => (/* binding */ OutboundQueue),
+/* harmony export */   isChatRefusedError: () => (/* binding */ isChatRefusedError),
 /* harmony export */   outboundBackup: () => (/* binding */ outboundBackup),
 /* harmony export */   outboundQueue: () => (/* binding */ outboundQueue),
 /* harmony export */   outboundQueueEnabled: () => (/* binding */ outboundQueueEnabled)
@@ -78334,6 +78553,20 @@ class OutboundDroppedError extends Error {
         this.reason = reason;
     }
 }
+/**
+ * The send was not made because Telegram refused this CHAT (PEER_FLOOD) and the user has not written since. Not an
+ * account flood (the send-policy log counts it as `refused`). The event ladder still DEFERs it like any flood (its
+ * message names PEER_FLOOD): the user writing lifts the refusal and the retry delivers. Duck-typed so it holds across
+ * module copies.
+ */
+function isChatRefusedError(error) {
+    const e = error;
+    return e?.name === 'OutboundDroppedError' && e.reason === 'refused';
+}
+function refusedDropped(label, chatId) {
+    logger.warn(`[${label}] ${chatId}: not sent, Telegram refused this chat (PEER_FLOOD); waiting for the user to write again`);
+    return new OutboundDroppedError('refused', 'chat refused by Telegram (PEER_FLOOD) until the user writes again');
+}
 function quietDropped(label, chatId) {
     logger.log(`[voice] ${chatId}: pay ask dropped (upsell quiet after the show) [${label}]`);
     return new OutboundDroppedError('quiet', 'pay ask dropped: upsell quiet after the show');
@@ -78363,14 +78596,26 @@ function gapRange() {
 function outboundQueueEnabled() {
     return String(process.env.OUTBOUND_QUEUE_ENABLED ?? 'true').toLowerCase() !== 'false';
 }
-/** Rollback path (OUTBOUND_QUEUE_ENABLED=false): the send runs at once; only the pitch window still applies. */
-function sendUnqueued(spec) {
+/**
+ * Rollback path (OUTBOUND_QUEUE_ENABLED=false): the send runs at once; only the pitch window and the per-chat
+ * PEER_FLOOD refusal still apply (a refused chat is not tried, a PEER_FLOOD marks the chat as the queue does).
+ */
+function sendUnqueued(spec, gate) {
     const chat = spec.chatId == null ? '' : String(spec.chatId);
+    const label = spec.label ?? spec.kind ?? 'general';
+    if (chat && gate.isRefused(chat))
+        return Promise.reject(refusedDropped(label, chat));
     if (spec.upsell && chat && (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.holdUpsell)(chat))
-        return Promise.reject(quietDropped(spec.label ?? spec.kind ?? 'general', chat));
+        return Promise.reject(quietDropped(label, chat));
     if (spec.pitch && chat && !(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(chat))
-        return Promise.reject(pitchDropped(spec.label ?? spec.kind ?? 'general', chat));
-    return spec.send();
+        return Promise.reject(pitchDropped(label, chat));
+    return spec.send().catch((error) => {
+        if ((0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error)?.kind === 'peer') {
+            gate.notePeerFlood(undefined, chat || null);
+            logger.warn(`[${label}] ${chat || 'chat'}: PEER_FLOOD, Telegram refused this chat; not retried until the user writes again: ${(0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.floodErrorText)(error)}`);
+        }
+        throw error;
+    });
 }
 class OutboundQueue {
     constructor(deps = {}, store = null) {
@@ -78431,7 +78676,7 @@ class OutboundQueue {
     }
     enqueue(spec) {
         if (!outboundQueueEnabled())
-            return sendUnqueued(spec);
+            return sendUnqueued(spec, this.gate);
         const kind = spec.kind ?? 'general';
         const cfg = OUTBOUND_KINDS[kind];
         const now = this.now();
@@ -78442,8 +78687,7 @@ class OutboundQueue {
         }
         if (spec.chatId != null && this.gate.isRefused(spec.chatId)) {
             this.stats.dropped += 1;
-            logger.warn(`[${spec.label ?? kind}] ${spec.chatId}: not sent, Telegram refused this chat (PEER_FLOOD); waiting for the user to write again`);
-            return Promise.reject(new OutboundDroppedError('refused', 'chat refused by Telegram (PEER_FLOOD) until the user writes again'));
+            return Promise.reject(refusedDropped(spec.label ?? kind, spec.chatId));
         }
         const priority = spec.priority ?? cfg.priority;
         if (!this.makeRoom(priority, kind)) {
@@ -78754,6 +78998,161 @@ class OutboundQueue {
     }
 }
 const outboundQueue = new OutboundQueue({}, outboundBackup());
+
+
+/***/ },
+
+/***/ "./src/outbound/send-executor.ts"
+/*!***************************************!*\
+  !*** ./src/outbound/send-executor.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   configureSendExecutor: () => (/* binding */ configureSendExecutor),
+/* harmony export */   logReplierOutcome: () => (/* binding */ logReplierOutcome),
+/* harmony export */   logSendPolicy: () => (/* binding */ logSendPolicy),
+/* harmony export */   planSend: () => (/* binding */ planSend),
+/* harmony export */   replyBudget: () => (/* binding */ replyBudget),
+/* harmony export */   sendWithPolicy: () => (/* binding */ sendWithPolicy)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+/* harmony import */ var _flood_gate__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _flood_error__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./flood-error */ "./src/outbound/flood-error.ts");
+/* harmony import */ var _hot_account__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _outbound_queue__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./outbound-queue */ "./src/outbound/outbound-queue.ts");
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:send-policy');
+let deps = {};
+/** Tests: swap the account state, the flood gate or the clock. */
+function configureSendExecutor(next) { deps = next; }
+const hot = () => deps.hot ?? _hot_account__WEBPACK_IMPORTED_MODULE_5__.hotAccount;
+const gate = () => deps.gate ?? _flood_gate__WEBPACK_IMPORTED_MODULE_3__.floodGate;
+const nowMs = () => (deps.now ?? Date.now)();
+function chatView(chatId, repingCount) {
+    return {
+        refused: gate().isRefused(chatId),
+        userAt: (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'user'),
+        creditedAt: (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'paymentCredited'),
+        repingCount,
+    };
+}
+/** Last 4 characters of the chat id: enough to join with other log lines, not the whole id. */
+function shortChat(chatId) {
+    return chatId.length > 4 ? `..${chatId.slice(-4)}` : chatId;
+}
+function isRefusal(error) {
+    return (0,_outbound_queue__WEBPACK_IMPORTED_MODULE_6__.isChatRefusedError)(error) || (0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error)?.kind === 'peer';
+}
+/** The one log point. Only on a hot account (`hotReason` non-empty). */
+function logSendPolicy(fields) {
+    if (!fields.hotReason)
+        return;
+    const userAt = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(fields.chatId, 'user');
+    const parts = [
+        `kind=${fields.kind}`, `decision=${fields.decision}`, `reason=${fields.reason.replace(/\s+/g, '_')}`,
+        `outcome=${fields.outcome}`, ...(fields.arm ? [`arm=${fields.arm}`] : []), `hot=${fields.hotReason}`,
+        `sinceUserMs=${userAt === undefined ? -1 : fields.now - userAt}`, `chat=${shortChat(fields.chatId)}`,
+    ];
+    if (fields.label)
+        parts.push(`label=${fields.label}`);
+    for (const [k, v] of Object.entries(fields.extra ?? {}))
+        parts.push(`${k}=${v}`);
+    logger.log(`[SEND-POLICY] ${parts.join(' ')}`);
+}
+/**
+ * Plans a send (greeting voice note): the delay to schedule it with, or null when it must not be scheduled.
+ * Free account: SEND_POLICY.greetingVoiceDelayMs.control, as before, and no arm (`arm` undefined: the A/B did not apply).
+ */
+function planSend(kind, chatId, label) {
+    const now = nowMs();
+    const account = hot().view(now);
+    const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, chatView(chatId), { kind, stage: 'plan' }, now);
+    const delayMs = d.type === 'sendAt' ? Math.max(0, d.at - now) : d.type === 'sendNow' ? 0 : -1;
+    logSendPolicy({
+        kind, chatId, decision: d.type, reason: d.reason, outcome: d.type === 'skip' ? 'skipped' : 'held', hotReason: account.reason,
+        arm: account.arm, now, label, extra: delayMs >= 0 ? { delayMs } : undefined,
+    });
+    return d.type === 'skip' ? null : { delayMs, arm: account.hot ? account.arm : undefined, plannedAt: now };
+}
+/**
+ * Runs a policy-governed send: decide, then send or skip. Resolves `{ outcome, result }`; a failed send is logged and
+ * rethrown (callers keep their own error handling). Free account: decideSend() only skips a reping at the cap;
+ * anything else runs exactly as the send closure did before.
+ */
+async function sendWithPolicy(spec) {
+    const now = nowMs();
+    const account = hot().view(now);
+    const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, chatView(spec.chatId, spec.repingCount), { kind: spec.kind, stage: 'fire', scheduledAt: spec.scheduledAt }, now);
+    // A planned greeting voice note carries the arm only when it was planned hot; otherwise it logs none (today's arm
+    // did not choose its delay). Other kinds log today's arm.
+    const arm = spec.kind === 'greetingVoice' && spec.scheduledAt !== undefined ? spec.plannedArm : spec.plannedArm ?? account.arm;
+    const planned = {};
+    if (spec.scheduledAt !== undefined)
+        planned.plannedAgoMs = now - spec.scheduledAt;
+    if (spec.plannedDelayMs !== undefined)
+        planned.delayMs = spec.plannedDelayMs;
+    const log = (outcome) => logSendPolicy({
+        kind: spec.kind, chatId: spec.chatId, decision: d.type, reason: d.reason, outcome, hotReason: account.reason, arm,
+        now: nowMs(), label: spec.label, extra: Object.keys(planned).length ? planned : undefined,
+    });
+    if (d.type === 'skip') {
+        log('skipped');
+        return { outcome: 'skipped', reason: d.reason };
+    }
+    const refusedBefore = gate().isRefused(spec.chatId);
+    try {
+        const result = await spec.send();
+        // A direct send reports what it did: nothing back (sendMessageWithTimeout swallows the OutboundQueue's
+        // refused-chat rejection and other errors) = refused when the chat is refused, else failed. A queued send only
+        // tells us it was handed over; a refusal it caused while sending shows up as a new mark.
+        const refusedNow = gate().isRefused(spec.chatId);
+        const outcome = spec.queued
+            ? (!refusedBefore && refusedNow ? 'refused' : 'queued')
+            : result === undefined || result === null || result === false ? (refusedNow ? 'refused' : 'failed') : 'sent';
+        log(outcome);
+        return { outcome, result, reason: d.reason };
+    }
+    catch (error) {
+        log(isRefusal(error) ? 'refused' : 'failed');
+        throw error;
+    }
+}
+/**
+ * The replier's question: the typing + pre-send budget of a queued reply (ms), or undefined for no cap (free account,
+ * not a reply to the user, or no known user message). Replier 'answer' / 'system' items are replies; 'pitch' and
+ * 'nudge' items are proactive and keep their full typing pause.
+ */
+function replyBudget(chatId, voiceKind) {
+    const now = nowMs();
+    const account = hot().view(now);
+    if (!account.hot || voiceKind === 'pitch' || voiceKind === 'nudge')
+        return { hotReason: account.reason, arm: account.arm, reason: 'no cap' };
+    const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, { refused: false, userAt: (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'user') }, { kind: 'reply' }, now);
+    return { budgetMs: d.type === 'sendNow' ? d.budgetMs : undefined, hotReason: account.reason, arm: account.arm, reason: d.reason };
+}
+/** The replier's outcome line for one item (hot accounts only). */
+function logReplierOutcome(chatId, voiceKind, outcome, extra) {
+    const now = nowMs();
+    const account = hot().view(now);
+    if (!account.hot)
+        return;
+    const kind = voiceKind === 'pitch' || voiceKind === 'nudge' ? `replier-${voiceKind}` : 'reply';
+    logSendPolicy({
+        kind, chatId, decision: outcome === 'skipped' ? 'skip' : 'sendNow', reason: outcome === 'skipped' ? 'chat refused' : 'replier',
+        outcome, hotReason: account.reason, arm: account.arm, now, extra,
+    });
+}
 
 
 /***/ },
@@ -89423,6 +89822,157 @@ function recordLocalMode(image, ctx, attempt, finalDecision) {
 
 /***/ },
 
+/***/ "./src/policies/send-policy.ts"
+/*!*************************************!*\
+  !*** ./src/policies/send-policy.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROTECTED_KINDS: () => (/* binding */ PROTECTED_KINDS),
+/* harmony export */   SEND_POLICY: () => (/* binding */ SEND_POLICY),
+/* harmony export */   accountHotReason: () => (/* binding */ accountHotReason),
+/* harmony export */   armFor: () => (/* binding */ armFor),
+/* harmony export */   decideSend: () => (/* binding */ decideSend),
+/* harmony export */   replyBudgetMs: () => (/* binding */ replyBudgetMs)
+/* harmony export */ });
+/**
+ * Outbound send policy for tg-aut (docs/design/2026-10-27-send-policy.md). Pure: no I/O, no clock reads, no env, no copy
+ * text (engine redesign `policies/` rules). The I/O side, the account state and the one log point live in
+ * outbound/send-executor.ts and outbound/hot-account.ts.
+ *
+ * Every outbound send that the policy governs declares its intent (SendKind) at its call site; decideSend() answers
+ * sendNow | sendAt(time) | skip(reason) from one account view, one chat view and the send, at `now`. Payment, call,
+ * paid-user and operator sends do not go through it: they are always sent (the refused-chat mark still applies in the
+ * OutboundQueue / replier).
+ *
+ * Every account: the reping cap (4). Hot accounts only: the reply deadline, the greeting voice A/B timing, skipping
+ * proactive sends to a refused chat and the staleness re-check of scheduled proactive sends. The other free-account
+ * changes that ship with this policy (not decided here) are listed in the design doc, "Free accounts".
+ */
+// ─── Config: every constant, with the evidence that chose it (pm2 logs, 3 VMs, 2026-10-20..27) ───────────────────────
+const SEND_POLICY = {
+    /**
+     * An account is hot this long after its last PEER_FLOOD. Cold-send refusal after a refusal: 6.5 % in the first hour,
+     * 1.9 % at 3-6 h, 0.27 % after 6 h (the old 3 h window ended while the account was still refusing).
+     */
+    hotWindowMs: 6 * 60 * 60000,
+    /**
+     * Hot accounts: the user's latest message -> our reply is capped here (typing is shortened, never removed).
+     * Refusal by time since the user's last message: < 30 s 0.22 %, 30-60 s 1.6 %, 1-3 min 11.3 %. Measured reply
+     * latency on hot accounts (n=43,356): p50 20.3 s, p90 27.9 s, 8.24 % over 30 s; 4.99 % sit at 30-41.5 s, the band a
+     * shorter typing pause can bring under 30 s. Over 60 s (1.79 %) is queue / retry wait that no cap removes.
+     */
+    replyDeadlineMs: 30000,
+    /** The typing indicator never drops below this under the deadline (keeps the human-like pattern). */
+    minTypingMs: 1000,
+    /**
+     * Most repings per user, every account (UserState repingCount, reset after 24 h without one and on a payment).
+     * Of 7,010 reping fires, 300 were the 5th or later and none of those 102 users paid; a delivered nudge about doubles
+     * 2-min returns, so the first four stay.
+     */
+    repingCap: 4,
+    /**
+     * Greeting voice note (intro.mp3 + "Take the Demo"), sent ~221 s after the greeting starts: 58 % of hot-account cold
+     * refusals, 11.3 % refused, while the greeting texts at +5 / +21 s to the same users are refused 0.23 %. A/B on hot
+     * accounts: 'control' keeps today's delay after the greeting texts; 'early' sends it 20 s after them.
+     */
+    greetingVoiceDelayMs: { control: 200000, early: 20000 },
+    /** IST offset: the A/B arm rotates at IST midnight. */
+    istOffsetMs: 330 * 60000,
+};
+const PROTECTED_KINDS = new Set(['reply', 'greetingText']);
+/** Which re-checks a scheduled proactive send gets when it fires on a hot account. */
+const STALE_CHECKS = {
+    reping: { userWrote: true, paid: true },
+    repingFollowup: { userWrote: true, paid: true },
+    timepass: { userWrote: false, paid: true },
+    campaign: { userWrote: false, paid: true },
+    // The voice note follows the greeting; the user writing back is the point of the 'early' arm, so only a payment
+    // makes it stale (same check on both arms, so the A/B compares timing only).
+    greetingVoice: { userWrote: false, paid: true },
+};
+/**
+ * The A/B arm of an account on the IST day of `now`: FNV-1a 32-bit of `mobile:istDay`, mixed by the murmur3 fmix32
+ * finaliser, top bit 0 = 'early'. (FNV-1a's own low bit is the parity of the input's character codes, so `h % 2` flipped
+ * every account's arm every day; the finaliser makes consecutive days independent.)
+ */
+function armFor(mobile, now) {
+    const day = Math.floor((now + SEND_POLICY.istOffsetMs) / 86400000);
+    const s = `${String(mobile ?? '')}:${day}`;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    h ^= h >>> 16;
+    h = Math.imul(h, 0x85ebca6b);
+    h ^= h >>> 13;
+    h = Math.imul(h, 0xc2b2ae35);
+    h ^= h >>> 16;
+    return (h >>> 31) === 0 ? 'early' : 'control';
+}
+/** Hot = SpamBot limited (daysLeft > 0) or a PEER_FLOOD within hotWindowMs of `now` (a future stamp = clock skew: hot). */
+function accountHotReason(spamBotDays, lastPeerFloodAt, now) {
+    const spam = Number.isFinite(spamBotDays) && spamBotDays > 0;
+    const peer = lastPeerFloodAt > 0 && now - lastPeerFloodAt < SEND_POLICY.hotWindowMs;
+    return spam && peer ? 'both' : spam ? 'spambot' : peer ? 'peer_flood' : '';
+}
+/** Hot replies: ms left for typing + the pre-send pause so the reply lands by the deadline; never below minTypingMs. */
+function replyBudgetMs(userAt, now) {
+    if (userAt === undefined || !Number.isFinite(userAt))
+        return undefined;
+    const left = userAt + SEND_POLICY.replyDeadlineMs - now;
+    return Math.max(SEND_POLICY.minTypingMs, Math.min(left, SEND_POLICY.replyDeadlineMs));
+}
+/**
+ * The policy. Order matters (first match wins):
+ *  1. protected kinds   -> sendNow, ALWAYS (never skipped or delayed by the policy: a reply that can be sent is sent).
+ *     On a hot account a reply also gets the deadline budget (shorter typing, never dropped). A refused chat is
+ *     handled where it always was (OutboundQueue / replier), unchanged.
+ *  2. refused chat, hot account -> skip a proactive send (logged). On a free account the refusal stays where it
+ *     always was (the OutboundQueue drops the send), so free behaviour, side effects included, is unchanged.
+ *  3. reping at the cap -> skip (every account)
+ *  4. greeting voice, plan stage -> sendAt(now + delay of the arm on a hot account, else the control delay)
+ *  5. hot account, fire stage, scheduled -> skip when stale (user wrote / paid since it was planned, per kind)
+ *  6. otherwise         -> sendNow
+ */
+function decideSend(account, chat, send, now) {
+    const { kind } = send;
+    if (PROTECTED_KINDS.has(kind)) {
+        if (account.hot && kind === 'reply') {
+            const budgetMs = replyBudgetMs(chat.userAt, now);
+            if (budgetMs !== undefined)
+                return { type: 'sendNow', reason: 'reply deadline', budgetMs };
+        }
+        return { type: 'sendNow', reason: 'protected' };
+    }
+    if (chat.refused && account.hot)
+        return { type: 'skip', reason: 'chat refused (PEER_FLOOD) until the user writes' };
+    if (kind === 'reping' && (chat.repingCount ?? 0) >= SEND_POLICY.repingCap) {
+        return { type: 'skip', reason: `reping cap reached (${chat.repingCount}/${SEND_POLICY.repingCap})` };
+    }
+    if (kind === 'greetingVoice' && send.stage === 'plan') {
+        const arm = account.hot ? account.arm : 'control';
+        return { type: 'sendAt', at: now + SEND_POLICY.greetingVoiceDelayMs[arm], reason: account.hot ? `arm ${arm}` : 'free' };
+    }
+    if (account.hot && send.scheduledAt !== undefined) {
+        const checks = STALE_CHECKS[kind];
+        if (checks?.userWrote && chat.userAt !== undefined && chat.userAt > send.scheduledAt) {
+            return { type: 'skip', reason: 'the user wrote since it was planned' };
+        }
+        if (checks?.paid && chat.creditedAt !== undefined && chat.creditedAt > send.scheduledAt) {
+            return { type: 'skip', reason: 'a payment was credited since it was planned' };
+        }
+    }
+    return { type: 'sendNow', reason: account.hot ? 'fresh' : 'free' };
+}
+
+
+/***/ },
+
 /***/ "./src/promotion/default-messages.ts"
 /*!*******************************************!*\
   !*** ./src/promotion/default-messages.ts ***!
@@ -92058,10 +92608,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls_on_call_guard__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../calls/on-call-guard */ "./src/calls/on-call-guard.ts");
 /* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
+
 
 
 
@@ -92177,6 +92731,8 @@ async function getEntity(chatId, client) {
 // minutes. At 5 min, replies that arrived during a pause were dropped unsent (prod 2026-10-09:
 // 94 drops by midday, all first attempts aged 5.5–17 min). 20 min covers a pause plus the backlog.
 const RECENT_MAX_AGE_MS = 20 * 60 * 1000;
+/** The pause between the typing indicator and the send (part of the hot-account reply deadline budget). */
+const PRE_SEND_PAUSE_MS = 1500;
 // In-memory retried items are not covered by state-persistence's STALE_CUTOFF_MS (load-time only).
 const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
 const ON_CALL_RECHECK_MS = 30000;
@@ -92215,6 +92771,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         // Telegram refused this chat (PEER_FLOOD) and the user has not written since: never retry it.
         if (_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.isRefused(replyObj.chatId)) {
             logger.warn(`[replier] reply dropped: Telegram refused chatId=${replyObj.chatId} (PEER_FLOOD) until the user writes again kind=${classifyReply(replyObj)}`);
+            (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'skipped');
             return;
         }
         // Never message a user mid-call: park the item (not a flood retry, not dropped) and look again shortly.
@@ -92330,6 +92887,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             // The user's next message clears the mark (one fresh attempt per message they send).
             _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
             logger.warn(`[replier] PEER_FLOOD: Telegram refused chatId=${replyObj.chatId}; reply dropped, not retried until the user writes again kind=${classifyReply(replyObj)}`);
+            (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'refused');
             return;
         }
         if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_16__.isVoiceForbiddenError)(error) && replyObj.file) {
@@ -92387,9 +92945,12 @@ async function handleReply(client, replyObj, userDetail, entity, isMsgLimitReach
         if (userDetail.limitTime < now && userDetail.canReply && sleepTime < now) {
             const dialogManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance().dialogManager;
             await dialogManager.markAsRead(entity.id.toString());
+            // Send policy (outbound/send-executor): on a hot account a reply's typing + pre-send pause fit the 30 s
+            // user-message -> reply deadline; free accounts and proactive items get no budget (unchanged).
+            const { budgetMs } = (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.replyBudget)(replyObj.chatId, replyObj.kind);
             // Pass the message text to calculate human-like typing duration
-            await setTypingWithWaitTime(client, entity, replyObj.waitTime, isMsgLimitReached, replyObj.msg // Pass message for length-based typing calculation
-            );
+            await setTypingWithWaitTime(client, entity, replyObj.waitTime, isMsgLimitReached, replyObj.msg, // Pass message for length-based typing calculation
+            budgetMs);
             await sendReply(client, replyObj, userDetail, entity, onSuccess, onRequeue);
         }
         else {
@@ -92406,7 +92967,7 @@ async function handleReply(client, replyObj, userDetail, entity, isMsgLimitReach
 /**
  * Set typing with wait time (human-like behavior)
  */
-async function setTypingWithWaitTime(client, entity, waitTime, isMsgLimitReached, message) {
+async function setTypingWithWaitTime(client, entity, waitTime, isMsgLimitReached, message, budgetMs) {
     try {
         // Maximum total time to prevent timeout (processSingleReply has 60s timeout)
         const MAX_TOTAL_TIME = 50000; // 50 seconds to leave buffer for other operations
@@ -92429,7 +92990,15 @@ async function setTypingWithWaitTime(client, entity, waitTime, isMsgLimitReached
         }
         // Calculate pre-typing delay, ensuring it's never negative
         const effectiveWaitTime = waitTime ?? 0;
-        const preTypingDelay = Math.max(0, Math.min(effectiveWaitTime - typingDuration, 20000));
+        let preTypingDelay = Math.max(0, Math.min(effectiveWaitTime - typingDuration, 20000));
+        // Hot account, reply: shorten (never remove) the pause so the reply lands by the deadline.
+        if (budgetMs !== undefined) {
+            const allowed = Math.max(_policies_send_policy__WEBPACK_IMPORTED_MODULE_21__.SEND_POLICY.minTypingMs, budgetMs - PRE_SEND_PAUSE_MS);
+            if (preTypingDelay + typingDuration > allowed) {
+                typingDuration = Math.max(_policies_send_policy__WEBPACK_IMPORTED_MODULE_21__.SEND_POLICY.minTypingMs, Math.min(typingDuration, allowed));
+                preTypingDelay = Math.max(0, allowed - typingDuration);
+            }
+        }
         // Ensure total time (preTypingDelay + typingDuration) doesn't exceed MAX_TOTAL_TIME
         const totalTime = preTypingDelay + typingDuration;
         if (totalTime > MAX_TOTAL_TIME) {
@@ -92460,7 +93029,7 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
     let claimedAt;
     try {
         // Add 1 second delay before sending response
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(1500);
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(PRE_SEND_PAUSE_MS);
         // ToS safety: mask sensitive keywords in the outgoing text right before it
         // leaves for Telegram. Catalogs stay clean plaintext; this single seam handles
         // every outgoing message (text + file caption read replyObj.msg in sendFile).
@@ -92510,6 +93079,7 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
             // revenue-critical close (payment prompt / paid-content pic) so the funnel is grep-able:
             //   grep '\[PITCH SENT\]' → who got pitched | grep '\[REPLY SEND FAILED\]' → silent losses
             (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.noteSent)(replyObj.chatId, replyObj.msg, replyObj.file);
+            (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'sent');
             logger.info(`[${kind === 'pitch' ? 'PITCH SENT' : 'REPLY SENT'}] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind}${replyObj.file ? ' file=' + replyObj.file.split('/').pop() : ''}`);
         }
     }
