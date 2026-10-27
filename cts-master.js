@@ -18463,6 +18463,10 @@ exports.ActiveChannel = ActiveChannel = __decorate([
     })
 ], ActiveChannel);
 exports.ActiveChannelSchema = mongoose_1.SchemaFactory.createForClass(ActiveChannel);
+exports.ActiveChannelSchema.index({ participantsCount: -1 }, {
+    name: 'join_candidates_participants',
+    partialFilterExpression: { canSendMsgs: true, participantsCount: { $gt: 600 } },
+});
 
 
 /***/ },
