@@ -20184,6 +20184,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isPromoObfuscationEnabled: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.isPromoObfuscationEnabled),
 /* harmony export */   isReactionInvalid: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isReactionInvalid),
 /* harmony export */   isRetryable: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isRetryable),
+/* harmony export */   isSendOutcomeUnknown: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_39__.isSendOutcomeUnknown),
 /* harmony export */   isSocksError: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.isSocksError),
 /* harmony export */   isSpamLimited: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_34__.isSpamLimited),
 /* harmony export */   isTelegramRetryExhausted: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_39__.isTelegramRetryExhausted),
@@ -20235,6 +20236,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   setAllFailedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setAllFailedCallback),
 /* harmony export */   setBeforeProxyRestartCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setBeforeProxyRestartCallback),
 /* harmony export */   setProxyRotatedCallback: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.setProxyRotatedCallback),
+/* harmony export */   shouldRetrySend: () => (/* reexport safe */ _telegram_utils_sendMessageWithTimout__WEBPACK_IMPORTED_MODULE_37__.shouldRetrySend),
 /* harmony export */   specialCharMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.specialCharMap),
 /* harmony export */   stableHash: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.stableHash),
 /* harmony export */   stopHealthMonitor: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.stopHealthMonitor),
@@ -22448,6 +22450,7 @@ function isPermanentError(input) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isSendOutcomeUnknown: () => (/* binding */ isSendOutcomeUnknown),
 /* harmony export */   isTelegramRetryExhausted: () => (/* binding */ isTelegramRetryExhausted),
 /* harmony export */   isTelegramRuntimeFailure: () => (/* binding */ isTelegramRuntimeFailure),
 /* harmony export */   isTelegramTransportUnavailable: () => (/* binding */ isTelegramTransportUnavailable)
@@ -22480,6 +22483,14 @@ function isTelegramTransportUnavailable(error) {
 /** True only for Telegram transport failures that require client runtime recreation. */
 function isTelegramRuntimeFailure(error) {
     return errorText(error).toUpperCase().includes("NO WORKERS RUNNING");
+}
+/**
+ * A send that TIMED OUT has an unknown outcome: our own "X Timeout after Nms" fires while GramJS may still be sleeping
+ * through a FLOOD_WAIT inside invoke() (floodSleepWatch.ts) or waiting on a slow answer, and that call can still land.
+ * Re-sending it can reach the user twice, so such a send is never retried. (Telegram's -503 "Timeout" is the same.)
+ */
+function isSendOutcomeUnknown(error) {
+    return /timeout/i.test(errorText(error));
 }
 
 
@@ -22769,10 +22780,32 @@ async function resolveUserPeer(client, dialogManager, chatId, hints = {}) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   sendMessageWithTimeout: () => (/* binding */ sendMessageWithTimeout),
-/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* binding */ sendMessageWithTimeoutOrThrow)
+/* harmony export */   sendMessageWithTimeoutOrThrow: () => (/* binding */ sendMessageWithTimeoutOrThrow),
+/* harmony export */   shouldRetrySend: () => (/* binding */ shouldRetrySend)
 /* harmony export */ });
 /* harmony import */ var _utils_withTimeout__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 
+/**
+ * Retry a send only when the error proves Telegram never got it (socket / connection failure before the request went
+ * out). A TIMEOUT is an unknown outcome, never retried: our own "SendMessage Timeout after Nms" fires while GramJS may
+ * still be sleeping through a FLOOD_WAIT inside invoke() (up to floodSleepThreshold, 60 s, see floodSleepWatch.ts) or
+ * waiting on a slow answer, and that original call then lands, so a re-send reaches the user twice. Telegram's own -503
+ * "Timeout" means the same (the request may or may not have run).
+ */
+function shouldRetrySend(error, attempt) {
+    if (attempt >= 3)
+        return false;
+    const e = error;
+    const message = (typeof e?.message === 'string' ? e.message : '').toLowerCase();
+    const errorMessage = (typeof e?.errorMessage === 'string' ? e.errorMessage : '').toLowerCase();
+    if (message.includes('timeout') || errorMessage.includes('timeout'))
+        return false;
+    if (message.includes('cancelled'))
+        return false;
+    const code = typeof e?.code === 'string' ? e.code : '';
+    return message.includes('network') || message.includes('connection')
+        || code === 'ECONNRESET' || code === 'ENOTFOUND' || code === 'ETIMEDOUT';
+}
 /**
  * Send a message with timeout and retry. Returns undefined on failure (non-throwing).
  * Use sendMessageWithTimeoutOrThrow() if you need exceptions to propagate.
@@ -22790,6 +22823,7 @@ async function sendMessageWithTimeout(client, entityLike, sendMessageParams, opt
         maxRetries,
         baseDelay: 1000,
         maxDelay: 5000,
+        shouldRetry: shouldRetrySend,
     });
 }
 /**
@@ -22807,6 +22841,7 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
         maxRetries,
         baseDelay: 1000,
         maxDelay: 5000,
+        shouldRetry: shouldRetrySend,
     });
 }
 
@@ -34229,6 +34264,33 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         // Ownership after the conflict strip, so a caller-supplied key can never remove it.
         Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
         return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
+    }
+    /**
+     * updateFields plus `$max` raises in the SAME atomic write: each `raise` key only ever goes up (never lowered by a
+     * stale read). For entitlement bookkeeping that is not a payment credit (demo pictures' payAmount) — a read-compare-
+     * write there lowered a balance another credit had raised in between.
+     */
+    async updateFieldsRaising(chatId, identity, updates, raise, now = Date.now()) {
+        const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        const maxFields = {};
+        for (const [key, value] of Object.entries(raise)) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                maxFields[key] = value;
+                delete safeUpdates[key]; // one operator per path: a raised key is never also $set
+            }
+        }
+        const setFields = { lastMsgTimeStamp: now, ...safeUpdates };
+        const setOnInsert = { ...USER_DATA_DEFAULTS, chatId, profile };
+        for (const key of [...Object.keys(setFields), ...Object.keys(maxFields)])
+            delete setOnInsert[key];
+        Object.assign(setOnInsert, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity));
+        const update = { $set: setFields, $setOnInsert: setOnInsert };
+        if (Object.keys(maxFields).length > 0)
+            update.$max = maxFields;
+        return this.upsert(chatId, identity, update);
     }
     /** $set one key (+ lastMsgTimeStamp); seed defaults minus that key on insert. */
     async setField(chatId, identity, key, value, now = Date.now()) {
@@ -57395,7 +57457,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../../calls/call-pause */ "./src/calls/call-pause.ts");
 /* harmony import */ var _pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../../pattern-handlers/regex/callRequestRegex */ "./src/pattern-handlers/regex/callRequestRegex.ts");
 /* harmony import */ var _calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../../calls/inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _payments_open_ask__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../../payments/open-ask */ "./src/payments/open-ask.ts");
 /**
  * Existing User Handler
  * Handles messages from existing users
@@ -57441,11 +57503,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-/** Is a payment request (fake warning / details-page ask) open for this chat? Fails to false. */
+/** Is a payment request (fake warning / details-page ask) open for this chat? Fails to false (payments/open-ask). */
 function hasOpenPaymentRequest(chatId, kind) {
-    const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_40__.proofGateFrom)(() => db.getRepositories?.() ?? null);
-    return gate.hasAnswerableAsk(chatId, (process.env.dbcoll || "").toLowerCase(), kind).catch(() => false);
+    return (0,_payments_open_ask__WEBPACK_IMPORTED_MODULE_40__.hasOpenPaymentAsk)(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), chatId, kind);
 }
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_29__.Logger("tg-aut:existing-user-handler");
 /**
@@ -68251,6 +68311,24 @@ class UserDataDtoCrud {
         }
     }
     /**
+     * update() plus atomic `$max` raises (UserDataRepository.updateFieldsRaising): a raised key is never lowered, even
+     * when another write raised it after the caller last read the row. Rethrows a failed write like update().
+     */
+    async updateRaising(chatId, updates, raise) {
+        if (!chatId || !updates) {
+            throw new Error("ChatId or updates are undefined");
+        }
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
+        try {
+            const viaRepo = await this.userDataRepository().updateFieldsRaising(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), updates, raise);
+            return viaRepo ?? await this.read(chatId);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error updating UserDataDto (raising)", true);
+            throw error;
+        }
+    }
+    /**
      * Mirrors a LANDED userData.cheatCount write (increment, reset to 0, the -2 grace sentinel) into
      * the optional analytics store as an append-only `cheat_flag` row (2026-10-25). The owner's
      * revenue rule is "credited minus ALL credits of a chat with cheatCount > 0 on any persona doc";
@@ -73688,10 +73766,9 @@ async function runImageFollowupStep(client, chatId, params) {
                 ]),
             });
             const amount = Number(params.amount) || 0;
-            const updatedData = { picsSent: (Number(params.picsSentBefore) || 0) + 1 };
-            if (amount > (Number(params.payAmountBefore) || 0))
-                updatedData['payAmount'] = amount;
-            await db.update(chatId, updatedData);
+            // payAmount is RAISED atomically ($max), never set from the snapshot taken when this was scheduled: a credit that
+            // landed in between (a bigger payment) must not be lowered back to this amount.
+            await db.updateRaising(chatId, { picsSent: (Number(params.picsSentBefore) || 0) + 1 }, amount > 0 ? { payAmount: amount } : {});
             _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.setDemoPicsSent(chatId, true);
             return;
         }
@@ -73707,12 +73784,9 @@ async function runImageFollowupStep(client, chatId, params) {
             // The row as it is now (the old timer read the handler's own copy, refreshed by the credit write below).
             const fresh = await db.read(chatId).catch(() => null);
             const amount = Number(params.amount) || 0;
-            const updatedData = { picsSent: (Number(fresh?.picsSent ?? params.picsSentBefore) || 0) + 1 };
-            if (amount > (Number(fresh?.payAmount ?? params.payAmountBefore) || 0))
-                updatedData['payAmount'] = amount;
-            if (amount > (Number(fresh?.highestPayAmount ?? params.highestBefore) || 0))
-                updatedData['highestPayAmount'] = amount;
-            await db.update(chatId, updatedData);
+            // Money fields are RAISED atomically ($max): a failed read (snapshot fallback) or a credit between the read and
+            // this write can no longer lower them.
+            await db.updateRaising(chatId, { picsSent: (Number(fresh?.picsSent ?? params.picsSentBefore) || 0) + 1 }, amount > 0 ? { payAmount: amount, highestPayAmount: amount } : {});
             _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_22__.stateManager.setDemoPicsSent(chatId, true);
             return;
         }
@@ -79531,16 +79605,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
 /* harmony import */ var _conversation_messages_objection_handling__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/messages/objection-handling */ "./src/conversation/messages/objection-handling.ts");
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
-/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
-/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
-/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
-/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/messages/payment-messages */ "./src/conversation/messages/payment-messages.ts");
+/* harmony import */ var _greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../greetings/generate-init-msg */ "./src/greetings/generate-init-msg.ts");
+/* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
+/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Refund, greetings, ready-to-pay, yes / off-domain / generic-question fallbacks, trust reassurance. */
-
-
 
 
 
@@ -79565,7 +79635,7 @@ const openingAndFallbackPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEGATED_REFUND))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['refund', 'not satisfied', 'wapas', 'return', 'money back'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.refundReplyPool)(text)));
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.refundReplyPool)(text)));
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🥺');
                 return true;
             }
@@ -79600,14 +79670,14 @@ const openingAndFallbackPatterns = [
             const NEGATION_WORDS = ['not', 'nahi', 'nhi', 'no', 'dont', "don't", 'never', 'mat', "can't", 'cant', 'cannot'];
             // Guard: "what if you dont call after i pay" is a TRUST/FEAR objection, not readiness — prevents conditional/fear phrases stealing the ready route
             const fearCondtionalPhrases = ['what if', 'what happens if', 'kya hoga', 'agar', 'suppose', 'if i', 'after i', 'before i', 'dont call', 'wont call', 'not call', 'nahi call', 'nhi call'];
-            const hasStandalonePay = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, ['pay']);
+            const hasStandalonePay = (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.containsPadded)(text, ['pay']);
             const hasPayAction = hasStandalonePay || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION);
             const isReady = (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, COMMIT) && hasPayAction) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, PAY_ACTION) || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.isEqual)(text, ['ok pay', 'okay pay']))
-                && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsPadded)(text, NEGATION_WORDS)
+                && !(0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.containsPadded)(text, NEGATION_WORDS)
                 && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, fearCondtionalPhrases);
             if (isReady) {
-                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_9__.finishPaymentMsgs)}`;
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_8__.pushToReplies)(event, userDetails.chatId, reply);
+                const reply = `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_payment_messages__WEBPACK_IMPORTED_MODULE_7__.finishPaymentMsgs)}`;
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, userDetails.chatId, reply);
                 return true;
             }
             return false;
@@ -79620,7 +79690,7 @@ const openingAndFallbackPatterns = [
         description: 'User says "yes" to a prompt',
         handler: async (event, text, allMsg, userDetails, context) => {
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['yes', 'yep', 'yeah', 'yup', 'haan', 'haa', 'sure', 'okk', 'theek', 'sari'])) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getCoreInitMsg)()}`);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.yesMsgs)}\n\n${Math.random() < 0.5 ? (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.getRandomTempterMessages)() : (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.getCoreInitMsg)()}`);
                 return true;
             }
             return false;
@@ -79638,10 +79708,10 @@ const openingAndFallbackPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             const trimmed = (text ?? '').trim();
             // Only fire on a real stray message — not 1-char noise, not a bare number.
-            if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.isOnlyDigits)(trimmed)) {
+            if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.isOnlyDigits)(trimmed)) {
                 return false;
             }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_10__.getCoreInitMsg)(), true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.getCoreInitMsg)(), true);
             return true;
         }
     },
@@ -79656,7 +79726,7 @@ const openingAndFallbackPatterns = [
         handler: async (event, text, allMsg, userDetails, context) => {
             // Word starts only: "show mee" is not a question ("s-how"), "for us" is not "r u" (meghana1 2026-10-21).
             const isQuestion = text.includes('?') ||
-                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_11__.containsAtWordStart)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
+                (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.containsAtWordStart)(text, ['kya', 'kaisa', 'kyu', 'kyun', 'why', 'what', 'whats', 'where', 'when', 'who', 'how', 'are you', 'r u', 'do you', 'can you', 'will you', 'are u', 'do u', 'can u', 'will u']);
             if (!isQuestion) {
                 return false;
             }
@@ -79666,9 +79736,9 @@ const openingAndFallbackPatterns = [
             if (isNegativeFramed) {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.botArray), true);
             }
-            else if ((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_12__.upsellQuietAnswer)(context.chatId) === 'soft') {
+            else if ((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.upsellQuietAnswer)(context.chatId) === 'soft') {
                 // Upsell quiet after a ₹200+ show (conversation/state/upsell-quiet): no "yes, pay" here.
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_12__.UPSELL_QUIET_REPLIES]), true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_10__.UPSELL_QUIET_REPLIES]), true);
             }
             else if (context.isPaidUser) {
                 // A paid user's plain question ("What happened??") is not a yes to sell: no "Yes baby, pay" (journey G3,
@@ -79677,7 +79747,9 @@ const openingAndFallbackPatterns = [
             }
             else {
                 await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
-                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)((0,_conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_7__.resellOr)(userDetails, (0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage)(userDetails.payAmount)))}`,
+                    // No ₹ price here: a price makes this a pay ask, and right after the promo picture the pitch window
+                    // dropped it, leaving "free?" unanswered (journey J, 2026-10-27).
+                    `Yes baby!! 😘\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}`,
                     `Haan baby, of course! 🙈\n\n**Pay** na and let's enjoy! 💋`,
                     `Yess reyy!! 🔥\n\nJust **pay** baby, I'll do it all for you! 😈`,
                     `Ofcourse baby 😚\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}`,
@@ -91273,6 +91345,7 @@ class ReplierQueueManager {
             waitTime: item.waitTime,
             pushedAt: item.pushedAt,
             retryCount: item.retryCount,
+            ...(item.transportRetryCount !== undefined ? { transportRetryCount: item.transportRetryCount } : {}),
             ...(item.notBefore !== undefined ? { notBefore: item.notBefore } : {}),
             ...(item.kind !== undefined ? { kind: item.kind } : {}),
         }));
@@ -91493,8 +91566,8 @@ function isPermanentRecipientError(error) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   Replier: () => (/* binding */ Replier),
-/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isPermanentRecipientError),
-/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isRecipientDeactivatedError)
+/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isPermanentRecipientError),
+/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isRecipientDeactivatedError)
 /* harmony export */ });
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/errors */ "telegram/errors");
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_errors__WEBPACK_IMPORTED_MODULE_0__);
@@ -91518,7 +91591,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
 /* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
 /* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
-/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
+/* harmony import */ var _retry_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./retry-policy */ "./src/replier/retry-policy.ts");
+/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
 /**
  * Main Replier Orchestrator
  * Coordinates all replier components
@@ -91543,6 +91617,9 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
+/** errorMessage of the 60 s cap around processSingleReply (the outer catch recognises it). */
+const PROCESS_TIMEOUT_PREFIX = "ProcessSingleReply Timeout";
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-aut:replier");
 
 
@@ -91754,7 +91831,7 @@ class Replier {
                     const isMsgLimitReached = (msgStats.totalCount > 3200 || msgStats.userCount > 300);
                     const canSend = this.rateLimiter.canSendMessage();
                     if (canSend) {
-                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_19__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `ProcessSingleReply Timeout: ${replyObj.chatId}` });
+                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_19__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `${PROCESS_TIMEOUT_PREFIX}: ${replyObj.chatId}` });
                     }
                     else {
                         this.queueManager.unshift(replyObj);
@@ -91764,12 +91841,19 @@ class Replier {
                 }
                 catch (error) {
                     const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_11__.parseError)(error, undefined, false);
+                    if (error instanceof Error && error.message.startsWith(PROCESS_TIMEOUT_PREFIX)) {
+                        // Our 60 s cap fired, but processSingleReply is still running and still owns this item: it sends,
+                        // requeues or drops it itself. Requeuing here too sent the same reply twice.
+                        logger.warn(`[replier] ${replyObj.chatId} reply still processing after 60s; left to it (not requeued)`);
+                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_4__.sleep)(5000);
+                        continue;
+                    }
                     // DROP (don't requeue) any recipient we can NEVER deliver to: deactivated, blocked,
                     // invalid-peer, write-forbidden. Requeuing these unshifts to the FRONT with a 5s
                     // sleep and no retryCount bump, so one such recipient would hot-loop the whole reply
                     // queue forever and Slack-spam every 5s. (The account-permanent case is handled
                     // separately by startNewUserProcess below.)
-                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_20__.isPermanentRecipientError)(error)) {
+                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isPermanentRecipientError)(error)) {
                         logger.warn(`Dropping reply for permanently-unreachable recipient ${replyObj.chatId}: ${errorDetails.message}`);
                         this.scheduleStateSave("recipient permanent", 0);
                         continue;
@@ -91797,31 +91881,26 @@ class Replier {
                         errMsg.includes('ECONNRESET') ||
                         errMsg.includes('disconnected');
                     if (isNetworkError) {
-                        try {
-                            await _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.TelegramManager.getClient().connect();
-                        }
-                        catch (connectError) {
-                            logger.error(`Failed to reconnect client:`, connectError);
-                        }
+                        // Through the manager (the path ConnectionRetryService uses): only reconnects a client that is
+                        // actually disconnected, and never one that was destroyed / handed off.
+                        const reconnected = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.TelegramManager.ensureConnected();
+                        if (!reconnected)
+                            logger.error(`Failed to reconnect client`);
                     }
                     // Backstop: even for an error we DIDN'T classify as permanently-fatal above (e.g.
                     // an unmapped block variant → UNKNOWN), cap the requeues so a single stuck reply
-                    // can't hot-loop the queue unbounded. Mirrors reply-processor's MAX_RETRIES=5.
-                    if (replyObj && (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_2__.isTelegramTransportUnavailable)(error)) {
-                        // Link down, not this reply: keep it without spending the budget. processSingleReply
-                        // drops it once it outlives its age bound.
-                        this.queueManager.unshift({ ...replyObj, notBefore: Date.now() + 30000 });
-                        this.scheduleStateSave("transport requeue", 500);
-                    }
-                    else if (replyObj) {
-                        const REQUEUE_MAX_RETRIES = 5;
-                        const nextRetry = (replyObj.retryCount ?? 0) + 1;
-                        if (nextRetry <= REQUEUE_MAX_RETRIES) {
-                            this.queueManager.unshift({ ...replyObj, retryCount: nextRetry });
-                            this.scheduleStateSave("error requeue", 500);
+                    // can't hot-loop the queue unbounded. Same policy as processSingleReply (retry-policy.ts).
+                    // Exponential backoff + hard cap per reply (retry-policy.ts nextReplyRetry); transport failures spend
+                    // their own budget, not the error one.
+                    if (replyObj) {
+                        const transport = (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_2__.isTelegramTransportUnavailable)(error);
+                        const next = (0,_retry_policy__WEBPACK_IMPORTED_MODULE_20__.nextReplyRetry)(replyObj, transport ? 'transport' : 'error');
+                        if (next) {
+                            this.queueManager.unshift(next);
+                            this.scheduleStateSave(transport ? "transport requeue" : "error requeue", 500);
                         }
                         else {
-                            logger.warn(`Dropping reply for ${replyObj.chatId} after ${REQUEUE_MAX_RETRIES} error-requeue retries: ${errorDetails.message}`);
+                            logger.warn(`Dropping reply for ${replyObj.chatId} after ${transport ? `${_retry_policy__WEBPACK_IMPORTED_MODULE_20__.REPLY_TRANSPORT_MAX_RETRIES} transport` : `${_retry_policy__WEBPACK_IMPORTED_MODULE_20__.REPLY_ERROR_MAX_RETRIES} error-requeue`} retries: ${errorDetails.message}`);
                             this.scheduleStateSave("error requeue exhausted", 0);
                         }
                     }
@@ -92013,6 +92092,7 @@ class Replier {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ReplySendOutcomeUnknownError: () => (/* binding */ ReplySendOutcomeUnknownError),
 /* harmony export */   processSingleReply: () => (/* binding */ processSingleReply)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -92033,14 +92113,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
-/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
-/* harmony import */ var _calls_on_call_guard__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../calls/on-call-guard */ "./src/calls/on-call-guard.ts");
-/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _retry_policy__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./retry-policy */ "./src/replier/retry-policy.ts");
+/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
+/* harmony import */ var _calls_on_call_guard__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../calls/on-call-guard */ "./src/calls/on-call-guard.ts");
+/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
 
 
 
@@ -92158,17 +92240,27 @@ const RECENT_MAX_AGE_MS = 20 * 60 * 1000;
 // In-memory retried items are not covered by state-persistence's STALE_CUTOFF_MS (load-time only).
 const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
 const ON_CALL_RECHECK_MS = 30000;
-// Telegram link down (prod 2026-10-14 21:20-21:29 UTC): back off and keep the reply, bounded by its age.
-const TRANSPORT_RETRY_MS = 30000;
+// Telegram link down (prod 2026-10-14 21:20-21:29 UTC): backed off by retry-policy.ts nextReplyRetry, bounded by age.
 /** A reply held back (user lookup failed, or the chat history check) is retried this much later. */
 const REPLY_RETRY_DELAY_MS = 10000;
+/**
+ * The send call itself timed out: Telegram may still deliver it (GramJS keeps the request alive through a FLOOD_WAIT
+ * sleep), so the reply is NOT sent again. Thrown by sendReply, handled (dropped) by processSingleReply.
+ */
+class ReplySendOutcomeUnknownError extends Error {
+    constructor(original) {
+        super(`reply send outcome unknown: ${original instanceof Error ? original.message : String(original)}`);
+        this.name = 'ReplySendOutcomeUnknownError';
+        this.original = original;
+    }
+}
 /**
  * A pay ask asked for during a screenshot check waits for the check (chat-voice holdPayAsk: one per chat, re-queued when
  * the check ends without answering it) instead of being dropped.
  */
 function holdForPaymentCheck(replyObj, onRequeue, where) {
-    logger.log(`[replier] ${replyObj.chatId} pay ask held${where}: ${_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.PAYMENT_CHECK_REASON} kind=${classifyReply(replyObj)}`);
-    (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.holdPayAsk)(replyObj.chatId, () => onRequeue({ ...replyObj, notBefore: undefined }));
+    logger.log(`[replier] ${replyObj.chatId} pay ask held${where}: ${_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.PAYMENT_CHECK_REASON} kind=${classifyReply(replyObj)}`);
+    (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.holdPayAsk)(replyObj.chatId, () => onRequeue({ ...replyObj, notBefore: undefined }));
 }
 function maxAgeFor(item) {
     return (item.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
@@ -92181,12 +92273,12 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
         onProcessed(); // Update lastProcessed timestamp
         // Telegram refused this chat (PEER_FLOOD) and the user has not written since: never retry it.
-        if (_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__.floodGate.isRefused(replyObj.chatId)) {
+        if (_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.isRefused(replyObj.chatId)) {
             logger.warn(`[replier] reply dropped: Telegram refused chatId=${replyObj.chatId} (PEER_FLOOD) until the user writes again kind=${classifyReply(replyObj)}`);
             return;
         }
         // Never message a user mid-call: park the item (not a flood retry, not dropped) and look again shortly.
-        if ((0,_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_16__.isChatOnCall)(replyObj.chatId)) {
+        if ((0,_calls_on_call_guard__WEBPACK_IMPORTED_MODULE_17__.isChatOnCall)(replyObj.chatId)) {
             logger.log(`[replier] ${replyObj.chatId} is on a call; reply deferred 30s`);
             onRequeue({ ...replyObj, notBefore: Date.now() + ON_CALL_RECHECK_MS });
             return;
@@ -92194,9 +92286,9 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         // One voice per chat (outbound/chat-voice): newer chat state (a call connected, the payment gate answered), a
         // fake-payment warning, a call in progress, or (nudges) the user writing since can make this item wrong now.
         // The pace rules ran when the item was queued (replier/index pushToReplies).
-        const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt, Date.now(), replyObj.msg, replyObj.file);
+        const voice = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt, Date.now(), replyObj.msg, replyObj.file);
         if (!voice.send) {
-            if (voice.reason === _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.PAYMENT_CHECK_REASON)
+            if (voice.reason === _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.PAYMENT_CHECK_REASON)
                 return holdForPaymentCheck(replyObj, onRequeue, '');
             logger.log(`[replier] ${replyObj.chatId} reply dropped: ${voice.reason} kind=${classifyReply(replyObj)}`);
             return;
@@ -92288,14 +92380,19 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         }
     }
     catch (error) {
+        if (error instanceof ReplySendOutcomeUnknownError) {
+            // Not retried: the timed-out send may still land, and a second copy would reach the user twice.
+            logger.warn(`[replier] ${replyObj.chatId} reply not retried: the send timed out and may still be delivered (${error.message}) kind=${classifyReply(replyObj)}`);
+            return;
+        }
         if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error).type === 'PEER_FLOOD') {
             // Telegram refuses this chat, not the account: mark it, drop the reply, never retry it.
             // The user's next message clears the mark (one fresh attempt per message they send).
-            _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_18__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
+            _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
             logger.warn(`[replier] PEER_FLOOD: Telegram refused chatId=${replyObj.chatId}; reply dropped, not retried until the user writes again kind=${classifyReply(replyObj)}`);
             return;
         }
-        if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_15__.isVoiceForbiddenError)(error) && replyObj.file) {
+        if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_16__.isVoiceForbiddenError)(error) && replyObj.file) {
             // They refuse voice messages: never retry the voice note. The text (if any) still goes, as plain text.
             if (replyObj.msg) {
                 logger.warn(`[replier] ${replyObj.chatId} refuses voice messages: sending the reply as text only kind=${classifyReply(replyObj)}`);
@@ -92306,20 +92403,25 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             }
             return;
         }
-        if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_15__.isPermanentRecipientError)(error)) {
+        if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_16__.isPermanentRecipientError)(error)) {
             // Deleted account, blocked us, invalid peer: no retry can deliver it (sneha2 2026-10-15 retried
             // INPUT_USER_DEACTIVATED 5 times).
             logger.warn(`[replier] ${replyObj.chatId} reply dropped: recipient permanently unreachable (${error instanceof Error ? error.message : String(error)}) kind=${classifyReply(replyObj)}`);
             return;
         }
         if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_14__.isTelegramTransportUnavailable)(error)) {
-            // The connection is down, not this reply: an outage must not burn the 5-try budget (it went in
-            // under a minute, 10s per timed-out attempt). Retry later; the item's age bounds how long.
+            // The connection is down, not this reply: an outage must not burn the 5-try error budget (it went in
+            // under a minute, 10s per timed-out attempt). Its own budget: 30s, 60s, 120s, 240s... then dropped, and the
+            // item's age bounds it too. Only pre-send failures reach here: a timed-out SEND is never retried (above).
             const ageMs = Date.now() - replyObj.pushedAt;
             const message = error instanceof Error ? error.message : String(error);
-            if (ageMs < maxAgeFor(replyObj)) {
-                logger.warn(`[replier] ${replyObj.chatId} reply deferred ${TRANSPORT_RETRY_MS / 1000}s: Telegram unreachable (${message}) ageMs=${ageMs}`);
-                onRequeue({ ...replyObj, notBefore: Date.now() + TRANSPORT_RETRY_MS });
+            const next = ageMs < maxAgeFor(replyObj) ? (0,_retry_policy__WEBPACK_IMPORTED_MODULE_15__.nextReplyRetry)(replyObj, 'transport') : null;
+            if (next) {
+                logger.warn(`[replier] ${replyObj.chatId} reply deferred ${Math.round((next.notBefore - Date.now()) / 1000)}s: Telegram unreachable (${message}) ageMs=${ageMs} try=${next.transportRetryCount}/${_retry_policy__WEBPACK_IMPORTED_MODULE_15__.REPLY_TRANSPORT_MAX_RETRIES}`);
+                onRequeue(next);
+            }
+            else if (ageMs < maxAgeFor(replyObj)) {
+                logger.warn(`[replier] ${replyObj.chatId} reply dropped: Telegram unreachable after ${_retry_policy__WEBPACK_IMPORTED_MODULE_15__.REPLY_TRANSPORT_MAX_RETRIES} tries (${message}) ageMs=${ageMs} kind=${classifyReply(replyObj)}`);
             }
             else {
                 logger.warn(`[replier] ${replyObj.chatId} reply dropped: Telegram unreachable past the age bound (${message}) ageMs=${ageMs} kind=${classifyReply(replyObj)}`);
@@ -92327,9 +92429,9 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             return;
         }
         logger.warn(`Error processing single reply (requeue handled):`, error);
-        const currentRetries = (replyObj.retryCount ?? 0) + 1;
-        if (currentRetries <= 5) {
-            onRequeue({ ...replyObj, retryCount: currentRetries });
+        const next = (0,_retry_policy__WEBPACK_IMPORTED_MODULE_15__.nextReplyRetry)(replyObj, 'error');
+        if (next) {
+            onRequeue(next);
         }
         else {
             logger.warn(`Dropping reply for ${replyObj.chatId} after max retries`);
@@ -92428,19 +92530,19 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
         if (replyObj.file !== undefined || (replyObj.msg && replyObj.msg !== '')) {
             // One pitch window on every send path: the pay ask takes the chat's slot right before it goes out (nothing
             // awaits between this claim and the send call), or is dropped like any voice-check drop.
-            if ((0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.needsPitchSlot)(replyObj.kind, replyObj.msg, replyObj.file)) {
+            if ((0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.needsPitchSlot)(replyObj.kind, replyObj.msg, replyObj.file)) {
                 // The voice check ran before the typing pause (up to ~20 s): a payment credited or a call started
                 // meanwhile makes this pay ask stale (journey A2, 2026-10-22: the promo picture reached a ₹150 payer
                 // 8 s after the credit, at the ring). Check again right before the send.
-                const late = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt, Date.now(), replyObj.msg, replyObj.file);
+                const late = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.stillFits)(replyObj.chatId, replyObj.kind ?? 'answer', replyObj.pushedAt, Date.now(), replyObj.msg, replyObj.file);
                 if (!late.send) {
-                    if (late.reason === _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.PAYMENT_CHECK_REASON)
+                    if (late.reason === _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.PAYMENT_CHECK_REASON)
                         return holdForPaymentCheck(replyObj, onRequeue, ' at send');
                     logger.log(`[replier] ${replyObj.chatId} reply dropped at send: ${late.reason} kind=${classifyReply(replyObj)}`);
                     return;
                 }
                 claimedAt = Date.now();
-                if (!(0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.claimPitchSlot)(replyObj.chatId, claimedAt)) {
+                if (!(0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.claimPitchSlot)(replyObj.chatId, claimedAt)) {
                     logger.log(`[voice] ${replyObj.chatId}: pitch dropped (pitch window)`);
                     return;
                 }
@@ -92467,17 +92569,21 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
             // [REPLY SENT] — one positive line per delivered reply. [PITCH SENT] highlights the
             // revenue-critical close (payment prompt / paid-content pic) so the funnel is grep-able:
             //   grep '\[PITCH SENT\]' → who got pitched | grep '\[REPLY SEND FAILED\]' → silent losses
-            (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.noteSent)(replyObj.chatId, replyObj.msg, replyObj.file);
+            (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.noteSent)(replyObj.chatId, replyObj.msg, replyObj.file);
             logger.info(`[${kind === 'pitch' ? 'PITCH SENT' : 'REPLY SENT'}] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind}${replyObj.file ? ' file=' + replyObj.file.split('/').pop() : ''}`);
         }
     }
     catch (error) {
         // [REPLY SEND FAILED] — the close silently not landing IS lost revenue; make it a distinct,
         // greppable, alerting line (parseError default surfaces it) rather than a generic error.
-        if (claimedAt !== undefined)
-            (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_17__.releasePitchSlot)(replyObj.chatId, claimedAt);
+        // A timed-out send may still land: keep its pitch slot (no second pay ask behind it) and never re-send it.
+        const outcomeUnknown = (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_14__.isSendOutcomeUnknown)(error);
+        if (claimedAt !== undefined && !outcomeUnknown)
+            (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.releasePitchSlot)(replyObj.chatId, claimedAt);
         const kind = classifyReply(replyObj);
-        logger.error(`[REPLY SEND FAILED] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind} retry=${replyObj.retryCount ?? 0}:`, error);
+        logger.error(`[REPLY SEND FAILED] chatId=${userDetail.chatId} client=${process.env.clientId} profile=${process.env.dbcoll} kind=${kind} retry=${replyObj.retryCount ?? 0}${outcomeUnknown ? ' outcome=unknown' : ''}:`, error);
+        if (outcomeUnknown)
+            throw new ReplySendOutcomeUnknownError(error);
         throw error; // Propagate to processSingleReply for requeue
     }
 }
@@ -92565,6 +92671,50 @@ async function updateUserDetail(replyObj, entity, msgs) {
     catch (error) {
         logger.error(`Error updating user detail:`, error);
     }
+}
+
+
+/***/ },
+
+/***/ "./src/replier/retry-policy.ts"
+/*!*************************************!*\
+  !*** ./src/replier/retry-policy.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REPLY_ERROR_MAX_RETRIES: () => (/* binding */ REPLY_ERROR_MAX_RETRIES),
+/* harmony export */   REPLY_TRANSPORT_MAX_RETRIES: () => (/* binding */ REPLY_TRANSPORT_MAX_RETRIES),
+/* harmony export */   nextReplyRetry: () => (/* binding */ nextReplyRetry)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/exponential-backoff */ "../../packages/tg-core/src/utils/exponential-backoff.ts");
+// Retry policy for a queued reply whose attempt failed. Its own module so the replier loop and processSingleReply share
+// one policy (and tests that stub reply-processor still run the real one).
+
+/** First transport retry delay (Telegram link down, prod 2026-10-14 21:20-21:29 UTC). */
+const TRANSPORT_RETRY_MS = 30000;
+/**
+ * Retry policy for a reply whose attempt failed (owner rule: exponential backoff, hard stop after a few tries, never a
+ * time-based re-arm). 'error' = any other failure, spends `retryCount`; 'transport' = Telegram unreachable, spends its
+ * own `transportRetryCount` so an outage does not eat the error budget. Returns the item to requeue, or null to drop.
+ */
+const REPLY_ERROR_MAX_RETRIES = 5;
+const REPLY_TRANSPORT_MAX_RETRIES = 6;
+const REPLY_ERROR_BACKOFF = { baseMs: 5000, maxMs: 80000, jitterFraction: 0 };
+const REPLY_TRANSPORT_BACKOFF = { baseMs: TRANSPORT_RETRY_MS, maxMs: 240000, jitterFraction: 0 };
+function nextReplyRetry(item, kind, now = Date.now()) {
+    if (kind === 'transport') {
+        const n = (item.transportRetryCount ?? 0) + 1;
+        if (n > REPLY_TRANSPORT_MAX_RETRIES)
+            return null;
+        return { ...item, transportRetryCount: n, notBefore: now + (0,_tg_core_utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_0__.getBackoffDelay)(n - 1, REPLY_TRANSPORT_BACKOFF) };
+    }
+    const n = (item.retryCount ?? 0) + 1;
+    if (n > REPLY_ERROR_MAX_RETRIES)
+        return null;
+    return { ...item, retryCount: n, notBefore: now + (0,_tg_core_utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_0__.getBackoffDelay)(n - 1, REPLY_ERROR_BACKOFF) };
 }
 
 
