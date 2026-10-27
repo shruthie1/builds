@@ -9853,15 +9853,15 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //    opposite of stale — it is maximally busy and uniformly refused — so it satisfies neither gate
 //    and is never recovered. Observed 2026-08-15: arpitha2 failStreak=64 and sowmya1 failStreak=77,
 //    both sending all day, both invisible to recovery.
-// 2. daysLeft IS UNKNOWN FOR ~85% OF THE FLEET (999/1171 promoteClients have daysLeft=null). The
-//    per-mobile daysLeftMap is IN-MEMORY (checkTgHealth.ts) and starts empty on every process
-//    restart; setMobileStats() restores the engine's own `this.daysLeft` from the DB but never
-//    repopulates that Map, so the two diverge immediately after boot. Unknown then coalesces to -1
-//    (the healthy sentinel) via `stats.daysLeft ?? -1`, so an unprobed account is treated as
-//    healthy. NOTE this is the CONSERVATIVE direction under the current policy (healthy = slower,
-//    smaller cap) — see normalizeDaysLeft in account-cap.ts, which documents the same choice.
-//    Rehydrating the Map from the DB at boot is the correctness fix; it is safe precisely BECAUSE
-//    the policy above is intentional.
+// 2. daysLeft CAN BE UNKNOWN AFTER A RESTART. The engine's `this.daysLeft` is in memory; at boot it is
+//    restored only from Redis `tg::acct::{mobile}` (PromotionEngine.restoreAccountState; TTL
+//    max(48 h, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
+//    2026-10-28). With no Redis entry it stays -1 until the next SpamBot reply. check-tg-health's
+//    per-mobile daysLeftMap is also in memory and starts empty on every restart, and restore
+//    deliberately does not refill it (see restoreAccountState). Unknown coalesces to -1 (the
+//    healthy sentinel), so an unprobed account is treated as healthy. NOTE this is the
+//    CONSERVATIVE direction under the current policy (healthy = slower, smaller cap); see
+//    normalizeDaysLeft in account-cap.ts, which documents the same choice.
 // Windows come from the same env vars as the main-send delay (see delay-policy.ts) so main-send and
 // main->follow-up cadence stay consistent.
 const DEFAULT_DELAY_CONFIG = {
@@ -26374,7 +26374,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         return this.guard('getPromoteClientStat', null, () => this.clientStats.findOne({ clientId }));
     }
     async getPromoteClientStats() {
-        return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1, daysLeft: 1 }).toArray());
+        return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1 }).toArray());
     }
     async increaseMsgCount(clientId) {
         return this.guard('increaseMsgCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { messageCount: 1 } }));
@@ -37495,6 +37495,7 @@ class AppService {
             delete totalStat['_id'];
             delete totalStat["clientId"];
             delete totalStat["service"];
+            // No longer written (owner 2026-10-28), but existing rows keep it until the one-off $unset; keeps the shape.
             delete totalStat["daysLeft"];
             for (const key of Object.keys(totalStat)) {
                 if (key.includes('Count')) {
@@ -41315,7 +41316,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         return `[${this.mobile}]:\nRecent Success Messages:\n${msgLinks}\nTotal: ${this.previousSuccessfulMessages.length}\n\n`;
     }
     /**
-     * Boot: the last SpamBot verdict from tg::acct::{mobile} (memory only; Mongo already holds it). Sets only the
+     * Boot: the last SpamBot verdict from tg::acct::{mobile}, its only store across restarts (memory only). Sets only the
      * engine's daysLeft (pace + the health monitor's "limited 3+ days -> swap" clock). It deliberately does NOT
      * fill check-tg-health's daysLeftMap: presence there skips every later SpamBot check (forced ones included)
      * for the life of the process, so a stale restored verdict would hide a fresh limit. The first live SpamBot
@@ -41347,17 +41348,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         const availableDate = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) && daysLeft > 0
             ? new Date(now + daysLeft * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
             : new Date(now).toISOString().split('T')[0];
+        // promoteClients gets availableDate only (CMS supply planning reads it). daysLeft is not stored in Mongo
+        // (promoteClients or promoteClientStats): nothing read it; restarts restore it from tg::acct::{mobile} above (owner 2026-10-28).
         const promote = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote;
-        Promise.resolve(promote?.updatePromoteClient({ mobile: this.mobile }, { availableDate, daysLeft }))
+        Promise.resolve(promote?.updatePromoteClient({ mobile: this.mobile }, { availableDate }))
             .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to update promote client availability`, false));
-        // Per-CLIENT view (promoteClientStats, keyed by clientId): this is the only LIVE write site
-        // for the client-level daysLeft — it fires on every @spambot release/health event, exactly
-        // when the signal changes. (AppService.updatePromoteClient(clientId, clientData) is a dead
-        // path with no caller; do not rely on it.) A clientId can run multiple mobiles that each
-        // call setDaysLeft independently, so this is intentionally last-writer-wins across mobiles —
-        // acceptable for a v1 "is this client limited" status field.
-        Promise.resolve(promote?.updatePromoteClientStat({ clientId: this.clientId }, { daysLeft }))
-            .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to update promote client stat daysLeft`, false));
     }
 }
 
