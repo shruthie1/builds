@@ -15741,15 +15741,15 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //    opposite of stale — it is maximally busy and uniformly refused — so it satisfies neither gate
 //    and is never recovered. Observed 2026-08-15: arpitha2 failStreak=64 and sowmya1 failStreak=77,
 //    both sending all day, both invisible to recovery.
-// 2. daysLeft IS UNKNOWN FOR ~85% OF THE FLEET (999/1171 promoteClients have daysLeft=null). The
-//    per-mobile daysLeftMap is IN-MEMORY (checkTgHealth.ts) and starts empty on every process
-//    restart; setMobileStats() restores the engine's own `this.daysLeft` from the DB but never
-//    repopulates that Map, so the two diverge immediately after boot. Unknown then coalesces to -1
-//    (the healthy sentinel) via `stats.daysLeft ?? -1`, so an unprobed account is treated as
-//    healthy. NOTE this is the CONSERVATIVE direction under the current policy (healthy = slower,
-//    smaller cap) — see normalizeDaysLeft in account-cap.ts, which documents the same choice.
-//    Rehydrating the Map from the DB at boot is the correctness fix; it is safe precisely BECAUSE
-//    the policy above is intentional.
+// 2. daysLeft CAN BE UNKNOWN AFTER A RESTART. The engine's `this.daysLeft` is in memory; at boot it is
+//    restored only from Redis `tg::acct::{mobile}` (PromotionEngine.restoreAccountState; TTL
+//    max(48 h, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
+//    2026-10-28). With no Redis entry it stays -1 until the next SpamBot reply. check-tg-health's
+//    per-mobile daysLeftMap is also in memory and starts empty on every restart, and restore
+//    deliberately does not refill it (see restoreAccountState). Unknown coalesces to -1 (the
+//    healthy sentinel), so an unprobed account is treated as healthy. NOTE this is the
+//    CONSERVATIVE direction under the current policy (healthy = slower, smaller cap); see
+//    normalizeDaysLeft in account-cap.ts, which documents the same choice.
 // Windows come from the same env vars as the main-send delay (see delay-policy.ts) so main-send and
 // main->follow-up cadence stay consistent.
 const DEFAULT_DELAY_CONFIG = {
@@ -33420,7 +33420,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         return this.guard('getPromoteClientStat', null, () => this.clientStats.findOne({ clientId }));
     }
     async getPromoteClientStats() {
-        return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1, daysLeft: 1 }).toArray());
+        return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1 }).toArray());
     }
     async increaseMsgCount(clientId) {
         return this.guard('increaseMsgCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { messageCount: 1 } }));
