@@ -47637,8 +47637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
-/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
-/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
+/* harmony import */ var _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../calls/event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts");
+/* harmony import */ var _calls_event_ladder_watched_scheduler__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../calls/event-ladder/watched-scheduler */ "./src/calls/event-ladder/watched-scheduler.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
 /* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
@@ -48085,9 +48085,10 @@ class ExpressServer {
         if (delayed + outbound + pictures > 0)
             logger.log(`[BOOT] restored: delayed=${delayed} outbound=${outbound} pictures=${pictures}`);
         void restoreCallStateAfterRestart();
-        const eventStore = new _tg_events__WEBPACK_IMPORTED_MODULE_23__.EventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
+        // Bounded store calls + executor steps + a tick watchdog: one hung step must not freeze every ladder.
+        const eventStore = new _calls_event_ladder_watched_scheduler__WEBPACK_IMPORTED_MODULE_24__.BoundedEventStore(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().getEventsCollection());
         await eventStore.ensureIndexes();
-        const eventScheduler = new _tg_events__WEBPACK_IMPORTED_MODULE_23__.EventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_24__.executeEvent, {
+        const eventScheduler = new _calls_event_ladder_watched_scheduler__WEBPACK_IMPORTED_MODULE_24__.WatchedEventScheduler(eventStore, process.env.clientId, _calls_event_ladder_event_executor__WEBPACK_IMPORTED_MODULE_23__.executeEvent, {
             logger: {
                 log: (m) => logger.log(`[event-scheduler] ${m}`),
                 warn: (m) => logger.warn(`[event-scheduler] ${m}`),
@@ -51573,6 +51574,139 @@ async function deferEventsForChat(chatId, ms) {
 }
 async function hasPendingEventsForChat(chatId) {
     return store().existsForChat(chatId, process.env.clientId);
+}
+
+
+/***/ },
+
+/***/ "./src/calls/event-ladder/watched-scheduler.ts"
+/*!*****************************************************!*\
+  !*** ./src/calls/event-ladder/watched-scheduler.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   BoundedEventStore: () => (/* binding */ BoundedEventStore),
+/* harmony export */   EVENT_STEP_DEADLINE_MS: () => (/* binding */ EVENT_STEP_DEADLINE_MS),
+/* harmony export */   EVENT_STORE_DEADLINE_MS: () => (/* binding */ EVENT_STORE_DEADLINE_MS),
+/* harmony export */   EVENT_TICK_WATCHDOG_MS: () => (/* binding */ EVENT_TICK_WATCHDOG_MS),
+/* harmony export */   WatchedEventScheduler: () => (/* binding */ WatchedEventScheduler)
+/* harmony export */ });
+/* harmony import */ var node_async_hooks__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:async_hooks */ "node:async_hooks");
+/* harmony import */ var node_async_hooks__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_async_hooks__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/events */ "../../packages/tg-events/src/index.ts");
+/* harmony import */ var _shared_deadline__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../shared/deadline */ "./src/shared/deadline.ts");
+/**
+ * Event-ladder scheduler with bounded steps and a tick watchdog (docs/design/2026-10-27-scheduler-watchdog.md).
+ *
+ * The @tg/events EventScheduler skips every tick while one is in flight and clears that guard only when the tick
+ * settles. One await that never settles (a call whose ffprobe child turned zombie, 2026-10-12; a send stuck behind a
+ * dead socket) therefore freezes every call/payment/pause ladder of the account until the process restarts.
+ *
+ * Here every await of a tick is bounded:
+ *   - executor step: EVENT_STEP_DEADLINE_MS, then the event is dropped (PERMANENT) and logged at ERROR;
+ *   - store reads/writes: EVENT_STORE_DEADLINE_MS (a timed-out findDue is logged by the scheduler and the tick ends);
+ *   - the whole tick: EVENT_TICK_WATCHDOG_MS, then the tick is abandoned at ERROR with its current step and the next
+ *     tick runs.
+ * Nothing is retried here: a dropped step is not re-armed (owner rule: bounded retries, no re-arm).
+ *
+ * No double fire: an event whose executor has not settled yet is never started again (it is dropped instead), and a
+ * loop the watchdog abandoned is parked at its next executor call, so its stale event list is never executed.
+ */
+
+
+
+const EVENT_STEP_DEADLINE_MS = 6 * 60000; // above the outbound queue's 300 s FLOOD_WAIT retry ceiling
+const EVENT_STORE_DEADLINE_MS = 60000;
+const EVENT_TICK_WATCHDOG_MS = 20 * 60000;
+/** Bound on remembered still-running event ids (each one is an executor call that has not settled). */
+const RUNNING_CAP = 500;
+const tagOf = (event) => `${event.type} chat=${event.chatId} id=${String(event._id)}`;
+/** EventStore whose scheduler-facing calls reject after `deadlineMs` instead of hanging a tick. */
+class BoundedEventStore extends _tg_events__WEBPACK_IMPORTED_MODULE_1__.EventStore {
+    constructor(collection, deadlineMs = EVENT_STORE_DEADLINE_MS) {
+        super(collection);
+        this.deadlineMs = deadlineMs;
+    }
+    findDue(clientId, now, limit) {
+        return (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.settleWithin)(super.findDue(clientId, now, limit), this.deadlineMs, 'event store findDue');
+    }
+    deleteById(id) {
+        return (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.settleWithin)(super.deleteById(id), this.deadlineMs, `event store deleteById ${String(id)}`);
+    }
+    reschedule(id, time, attempts) {
+        return (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.settleWithin)(super.reschedule(id, time, attempts), this.deadlineMs, `event store reschedule ${String(id)}`);
+    }
+}
+function boundedExecutor(executor, watch, deadlineMs, logger) {
+    return async (event) => {
+        const tag = tagOf(event);
+        const tickGen = watch.tick.getStore();
+        if (tickGen !== undefined && tickGen !== watch.gen) {
+            // This loop was abandoned by the watchdog: its event list is stale and the current tick owns these events.
+            logger.warn(`abandoned tick stopped before ${tag}: not executed by the stale tick`);
+            return new Promise(() => { });
+        }
+        const id = String(event._id);
+        if (watch.running.has(id)) {
+            logger.error(`${tag} is still running from an abandoned attempt: dropped, NOT executed again`);
+            return 'PERMANENT';
+        }
+        if (watch.running.size >= RUNNING_CAP) {
+            const oldest = watch.running.values().next().value;
+            if (oldest !== undefined)
+                watch.running.delete(oldest);
+        }
+        watch.running.add(id);
+        watch.step = tag;
+        const work = executor(event);
+        let abandoned = false;
+        void work
+            .then((outcome) => { if (abandoned)
+            logger.warn(`abandoned ${tag} finished late with ${outcome}; it was already dropped`); }, (error) => { if (abandoned)
+            logger.error(`abandoned ${tag} failed late; it was already dropped`, error); })
+            .finally(() => { watch.running.delete(id); });
+        try {
+            return await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.settleWithin)(work, deadlineMs, `event ${tag}`);
+        }
+        catch (error) {
+            if (!(0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.isDeadlineError)(error))
+                throw error;
+            abandoned = true;
+            logger.error(`event step abandoned: ${tag} did not settle within ${Math.round(deadlineMs / 1000)}s; dropped (PERMANENT), not retried`);
+            return 'PERMANENT';
+        }
+    };
+}
+class WatchedEventScheduler extends _tg_events__WEBPACK_IMPORTED_MODULE_1__.EventScheduler {
+    constructor(store, clientId, executor, opts) {
+        const watch = { gen: 0, step: 'idle', running: new Set(), tick: new node_async_hooks__WEBPACK_IMPORTED_MODULE_0__.AsyncLocalStorage() };
+        super(store, clientId, boundedExecutor(executor, watch, opts.stepDeadlineMs ?? EVENT_STEP_DEADLINE_MS, opts.logger), opts);
+        this.watch = watch;
+        this.tickWatchdogMs = opts.tickWatchdogMs ?? EVENT_TICK_WATCHDOG_MS;
+        this.watchLogger = opts.logger;
+    }
+    async processDueOnce(now) {
+        const gen = ++this.watch.gen;
+        this.watch.step = 'findDue';
+        const run = this.watch.tick.run(gen, () => super.processDueOnce(now));
+        try {
+            await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.settleWithin)(run, this.tickWatchdogMs, 'event tick');
+        }
+        catch (error) {
+            if (!(0,_shared_deadline__WEBPACK_IMPORTED_MODULE_2__.isDeadlineError)(error))
+                throw error;
+            if (gen === this.watch.gen)
+                this.watch.gen++;
+            this.watchLogger.error(`watchdog: tick abandoned after ${Math.round(this.tickWatchdogMs / 60000)} min in step=${this.watch.step}; later ticks run again`);
+        }
+        finally {
+            if (gen === this.watch.gen)
+                this.watch.step = 'idle';
+        }
+    }
 }
 
 
@@ -62027,6 +62161,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   firstNumberFromText: () => (/* binding */ firstNumberFromText),
 /* harmony export */   hasDurationMention: () => (/* binding */ hasDurationMention),
 /* harmony export */   hasMinuteUnit: () => (/* binding */ hasMinuteUnit),
+/* harmony export */   isPayAmountMessage: () => (/* binding */ isPayAmountMessage),
 /* harmony export */   numberMentions: () => (/* binding */ numberMentions),
 /* harmony export */   serviceOfferAmountFromText: () => (/* binding */ serviceOfferAmountFromText)
 /* harmony export */ });
@@ -62096,6 +62231,19 @@ function firstNumberFromText(text) {
 function firstAmountFromText(text) {
     const first = numberMentions(text).find((mention) => mention.kind !== 'duration');
     return first ? Math.trunc(first.value) : -1;
+}
+/** Smallest / largest rupee amount a user types when asking what to pay ("10", "150", "1000 ok"). */
+const PAY_AMOUNT_MIN = 10;
+const PAY_AMOUNT_MAX = 9999;
+/**
+ * The message names a rupee amount the user means to pay: its first number is money or a plain number of 2-4 digits
+ * (₹10-9999), not a duration ("1 min"), a count ("30 pics") or a phone number / id ("9876543210").
+ */
+function isPayAmountMessage(text) {
+    const first = numberMentions(text)[0];
+    if (!first || (first.kind !== 'money' && first.kind !== 'plain'))
+        return false;
+    return Number.isInteger(first.value) && first.value >= PAY_AMOUNT_MIN && first.value <= PAY_AMOUNT_MAX;
 }
 /** Minutes of the first duration in `text` ("10 min" → 10, "1 hr" → 60), or -1. */
 function extractDurationMinutes(text) {
@@ -63388,8 +63536,18 @@ async function runPatternFollowup(client, chatId, params) {
         await runAction(client, chatId, params);
     }
     catch (error) {
+        // A send the outbound queue chose not to make (pitch window, refused chat, quiet, expired) is a decision, not a
+        // failure: INFO. Anything else is a real failure: ERROR.
+        if (isOutboundDrop(error)) {
+            logger.info(`[pattern-followup] ${chatId}: ${params.label} not sent: ${error.message}`);
+            return;
+        }
         logger.error(`[pattern-followup] ${chatId}: ${params.label} failed`, error);
     }
+}
+/** outbound-queue OutboundDroppedError, duck-typed (no import of the queue here). */
+function isOutboundDrop(error) {
+    return error instanceof Error && error.name === "OutboundDroppedError";
 }
 async function runAction(client, chatId, params) {
     const { action, msgId } = params;
@@ -63398,7 +63556,9 @@ async function runAction(client, chatId, params) {
             await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respondInChat)(chatId, action.text, undefined, msgId);
             return;
         case "reply":
-            await (0,_replier__WEBPACK_IMPORTED_MODULE_1__.queueReply)(chatId, action.text, { file: action.file, sourceMsgId: msgId });
+            await (0,_replier__WEBPACK_IMPORTED_MODULE_1__.queueReply)(chatId, action.text, {
+                file: action.file, sourceMsgId: msgId, ...(action.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
+            });
             return;
         case "send": {
             const payload = {};
@@ -63420,6 +63580,7 @@ async function runAction(client, chatId, params) {
         case "direct":
             await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_2__.floodSafe)(() => client.sendMessage(chatId, { message: action.text }), {
                 chatId, label: action.label, text: action.text, record: { op: "text", payload: { message: action.text } },
+                ...(action.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
             });
             return;
         case "tpMsg":
@@ -64336,22 +64497,29 @@ const unpaidPatterns = [
         description: 'Number-only messages from unpaid users',
         handler: async (event, text, allMsg, userDetails, context) => {
             if (startsWithDigit(text) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['hr ', 'hour', 'cm', 'inch', 'lakh'])) {
+                // The user sent an amount ("150", "100 ok", "20"): the pay asks below (price, price list, QR) answer it,
+                // so the pitch window must not drop them (chat-voice claimPitchSlot `solicited`). Only these sends carry
+                // the flag; a promo pic or other pitch for the same message keeps the window. A phone number or "1 min"
+                // is not an amount and keeps the plain pitch-window rule (journey NQ).
+                const solicited = (0,_number_intent__WEBPACK_IMPORTED_MODULE_16__.isPayAmountMessage)(text);
                 const toldAmount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_16__.firstNumberFromText)(text);
                 if (toldAmount !== -1) {
                     if (toldAmount > 25) {
-                        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.number, true);
+                        await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.number, true, undefined, solicited);
                     }
                     else {
                         if (toldAmount > 14) {
-                            await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${toldAmount}₹** Only Pics ok!!`, true);
+                            await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${toldAmount}₹** Only Pics ok!!`, true, undefined, solicited);
                         }
                         (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 10000, {
                             kind: 'direct', label: 'unpaid.priceList', text: userDetails.payAmount < 50 ? _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.demo : _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelist,
+                            solicitedPayAsk: solicited,
                         }, { label: 'unpaid.number.priceList' });
                     }
                 }
                 (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 15000, {
                     kind: 'reply', text: _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.qr + `\n\n${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.link}`, file: './QR.jpg',
+                    solicitedPayAsk: solicited,
                 }, { label: 'unpaid.number.qr' });
                 return true;
             }
@@ -65183,8 +65351,11 @@ async function respondInChat(chatId, message, kind, sourceMsgId) {
         await logger.log(`${chatId}: `, error);
     }
 }
-/** `kind`: what the message is for the per-chat voice check (default answer). */
-async function respond(event, message, isReply, kind) {
+/**
+ * `kind`: what the message is for the per-chat voice check (default answer).
+ * `solicitedPayAsk`: a pay ask the user asked for (they sent an amount); it passes the pitch window (chat-voice).
+ */
+async function respond(event, message, isReply, kind, solicitedPayAsk) {
     const chatId = event.message.chatId.toString();
     const messageId = event.message.id;
     const messageText = event.message.text;
@@ -65198,10 +65369,10 @@ async function respond(event, message, isReply, kind) {
         try {
             if (message) {
                 if (isReply === true) {
-                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, messageId, waitTime, kind);
+                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, messageId, waitTime, kind, solicitedPayAsk);
                 }
                 else {
-                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, undefined, waitTime, kind);
+                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, undefined, waitTime, kind, solicitedPayAsk);
                 }
             }
             else {
@@ -77798,12 +77969,17 @@ function needsPitchSlot(kind, text, file) {
  * The single pitch window: true (and recorded) when no pay ask was sent in the last PITCH_WINDOW_MS, or the user wrote
  * after the last one. Check and record are one synchronous step, called right before the actual send, so two queued
  * pay asks cannot both pass (prod 2026-10-18: 271 of 682 pitched chats got 2+ [PITCH SENT] within 60 s).
+ *
+ * `solicited`: a pay ask the user asked for (they sent an amount: "150", "100 ok", "20"; the number-only pattern's reply,
+ * price list and QR). It is an answer, never limited (header above), so it passes and still takes the slot. Before this,
+ * the pattern's own first pay ask, or a pitch that answered the user's previous message, took the slot and the QR the
+ * user asked for was dropped (prod 2026-10-27: 13 `unpaid.priceList` drops logged at ERROR in 12 h; journey NQ).
  */
-function claimPitchSlot(chatId, now = Date.now()) {
+function claimPitchSlot(chatId, now = Date.now(), solicited = false) {
     if (!chatId)
         return true;
     const last = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'pitchSent');
-    if (last !== undefined && now - last < PITCH_WINDOW_MS) {
+    if (!solicited && last !== undefined && now - last < PITCH_WINDOW_MS) {
         const userAt = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'user');
         if (userAt === undefined || userAt <= last)
             return false;
@@ -78611,7 +78787,7 @@ function sendUnqueued(spec, gate) {
         return Promise.reject(refusedDropped(label, chat));
     if (spec.upsell && chat && (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.holdUpsell)(chat))
         return Promise.reject(quietDropped(label, chat));
-    if (spec.pitch && chat && !(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(chat))
+    if (spec.pitch && chat && !(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(chat, Date.now(), spec.solicitedPayAsk === true))
         return Promise.reject(pitchDropped(label, chat));
     return spec.send().catch((error) => {
         if ((0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error)?.kind === 'peer') {
@@ -78724,6 +78900,7 @@ class OutboundQueue {
             notBefore: spec.notBefore ?? 0,
             dedupeKey: spec.dedupeKey,
             pitch: spec.pitch === true,
+            ...(spec.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
             upsell: spec.upsell === true,
             send: spec.send,
             resolve,
@@ -78755,7 +78932,7 @@ class OutboundQueue {
             id: `${at.now.toString(36)}.${at.seq}`,
             chatId: at.chatId,
             kind: spec.record.op,
-            args: { payload: spec.record.payload, kind: at.kind, label: at.label, priority: at.priority, expiresAt: at.expiresAt, pitch: spec.pitch === true, ...(spec.upsell ? { upsell: true } : {}), ...(spec.dedupeKey ? { dedupeKey: spec.dedupeKey } : {}), ...(spec.record.target ? { target: spec.record.target } : {}) },
+            args: { payload: spec.record.payload, kind: at.kind, label: at.label, priority: at.priority, expiresAt: at.expiresAt, pitch: spec.pitch === true, ...(spec.solicitedPayAsk ? { solicitedPayAsk: true } : {}), ...(spec.upsell ? { upsell: true } : {}), ...(spec.dedupeKey ? { dedupeKey: spec.dedupeKey } : {}), ...(spec.record.target ? { target: spec.record.target } : {}) },
             dueAt: at.now,
         };
         void this.store.add(record);
@@ -78785,7 +78962,7 @@ class OutboundQueue {
             const record = { op: op, payload: args.payload, ...(args.target ? { target: args.target } : {}) };
             void this.enqueue({
                 chatId: chatId || null, kind: args.kind, label: args.label, priority: args.priority, maxAgeMs: args.expiresAt - now,
-                dedupeKey: args.dedupeKey, pitch: args.pitch, upsell: args.upsell === true, record, send: () => run(record, chatId),
+                dedupeKey: args.dedupeKey, pitch: args.pitch, ...(args.solicitedPayAsk ? { solicitedPayAsk: true } : {}), upsell: args.upsell === true, record, send: () => run(record, chatId),
             }).catch((error) => logger.debug(`[${args.label}] ${chatId || 'chat'}: restored send not delivered: ${(0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.floodErrorText)(error)}`));
             queued += 1;
         }
@@ -78906,7 +79083,7 @@ class OutboundQueue {
             return;
         }
         if (item.pitch && item.chatId) {
-            if (!(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(item.chatId, claimedAt)) {
+            if (!(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(item.chatId, claimedAt, item.solicitedPayAsk === true)) {
                 this.stats.dropped += 1;
                 item.reject(pitchDropped(item.label, item.chatId));
                 return;
@@ -91482,12 +91659,12 @@ function getReplierInstance() {
  * When a clip is suppressed, any accompanying TEXT is still delivered — dropping the whole reply
  * would leave the user with silence, which reads as a dead bot.
  */
-async function pushToReplies(event, chatId, msg, file, msgId, waitTime, kind) {
-    await queueReply(chatId, msg, { file, msgId, waitTime, kind, sourceMsgId: event.message.id });
+async function pushToReplies(event, chatId, msg, file, msgId, waitTime, kind, solicitedPayAsk) {
+    await queueReply(chatId, msg, { file, msgId, waitTime, kind, sourceMsgId: event.message.id, ...(solicitedPayAsk ? { solicitedPayAsk } : {}) });
 }
 /** pushToReplies by chat id, for delayed work (no event after a restart). */
 async function queueReply(chatId, msg, options = {}) {
-    const { file, msgId, waitTime, kind, sourceMsgId } = options;
+    const { file, msgId, waitTime, kind, sourceMsgId, solicitedPayAsk } = options;
     const replier = getReplierInstance();
     let effectiveFile = file;
     if (file && !(await (0,_media_throttle__WEBPACK_IMPORTED_MODULE_3__.claimMediaSend)(chatId, file))) {
@@ -91506,7 +91683,7 @@ async function queueReply(chatId, msg, options = {}) {
         }
     }
     (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.noteQueued)(chatId, msg, effectiveFile);
-    await replier.queueReply(chatId, msg, effectiveFile, msgId, waitTime, sourceMsgId, kind);
+    await replier.queueReply(chatId, msg, effectiveFile, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk);
 }
 /**
  * Main replier function (backward compatible)
@@ -91718,7 +91895,7 @@ class ReplierQueueManager {
     /**
      * Add reply item to queue with deduplication logic
      */
-    async push(chatId, msg, file, msgId, waitTime, eventMessageId, kind) {
+    async push(chatId, msg, file, msgId, waitTime, eventMessageId, kind, solicitedPayAsk) {
         try {
             if (!msg && !file) {
                 return; // Nothing to queue
@@ -91732,6 +91909,7 @@ class ReplierQueueManager {
                 waitTime,
                 pushedAt: Date.now(),
                 ...(kind && kind !== 'answer' ? { kind } : {}),
+                ...(solicitedPayAsk ? { solicitedPayAsk: true } : {}),
             };
             // Deduplication: If no file, merge with existing text-only item
             if (!file) {
@@ -91752,6 +91930,9 @@ class ReplierQueueManager {
                             this.queue[existingIndex].msg = combined.slice(0, 500);
                         }
                     }
+                    // The merged item carries this pay ask the user asked for: it must still pass the pitch window.
+                    if (solicitedPayAsk)
+                        this.queue[existingIndex].solicitedPayAsk = true;
                     const merged = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.strongerKind)(this.queue[existingIndex].kind, kind);
                     if (merged === 'answer')
                         delete this.queue[existingIndex].kind;
@@ -91842,6 +92023,7 @@ class ReplierQueueManager {
             ...(item.transportRetryCount !== undefined ? { transportRetryCount: item.transportRetryCount } : {}),
             ...(item.notBefore !== undefined ? { notBefore: item.notBefore } : {}),
             ...(item.kind !== undefined ? { kind: item.kind } : {}),
+            ...(item.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
         }));
     }
     /**
@@ -92230,9 +92412,9 @@ class Replier {
         await this.queueReply(chatId, msg, file, msgId, waitTime, event.message.id, kind);
     }
     /** pushToReplies by chat id: `sourceMsgId` is the message being answered (delayed work has no event). */
-    async queueReply(chatId, msg, file, msgId, waitTime, sourceMsgId, kind) {
+    async queueReply(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk) {
         await this.checkHealth();
-        await this.queueManager.push(chatId, msg, file, msgId, waitTime, sourceMsgId, kind);
+        await this.queueManager.push(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk);
         await this.saveState().catch(error => {
             logger.warn(`Error saving state after queue push:`, error);
         });
@@ -93055,7 +93237,8 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
                     return;
                 }
                 claimedAt = Date.now();
-                if (!(0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.claimPitchSlot)(replyObj.chatId, claimedAt)) {
+                // A pay ask the user asked for (solicitedPayAsk) passes the window and still takes the slot.
+                if (!(0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.claimPitchSlot)(replyObj.chatId, claimedAt, replyObj.solicitedPayAsk === true)) {
                     logger.log(`[voice] ${replyObj.chatId}: pitch dropped (pitch window)`);
                     return;
                 }
@@ -101993,6 +102176,51 @@ async function sendCoreUtilsNotification(category, notification, context) {
 
 /***/ },
 
+/***/ "./src/shared/deadline.ts"
+/*!********************************!*\
+  !*** ./src/shared/deadline.ts ***!
+  \********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DeadlineError: () => (/* binding */ DeadlineError),
+/* harmony export */   isDeadlineError: () => (/* binding */ isDeadlineError),
+/* harmony export */   settleWithin: () => (/* binding */ settleWithin)
+/* harmony export */ });
+/**
+ * Bound an await that may never settle (a GramJS connect() racing its own reconnect, a Mongo call on a dead socket,
+ * a child process whose exit is never reported). The work itself cannot be cancelled: the caller stops waiting and
+ * must make sure a late finish has no effect (generation token, dropped event).
+ */
+class DeadlineError extends Error {
+    constructor(label, ms) {
+        super(`${label} did not settle within ${ms} ms`);
+        this.name = "DeadlineError";
+        this.label = label;
+        this.ms = ms;
+    }
+}
+function isDeadlineError(error) {
+    return error instanceof DeadlineError;
+}
+/** Resolve/reject with `work`, or reject with DeadlineError after `ms`. The timer never keeps the process alive. */
+function settleWithin(work, ms, label) {
+    let timer;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new DeadlineError(label, ms)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([work, deadline]).finally(() => {
+        if (timer !== undefined)
+            clearTimeout(timer);
+    });
+}
+
+
+/***/ },
+
 /***/ "./src/shared/format.ts"
 /*!******************************!*\
   !*** ./src/shared/format.ts ***!
@@ -103105,6 +103333,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _bootstrap_leader_election__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../bootstrap/leader-election */ "./src/bootstrap/leader-election.ts");
+/* harmony import */ var _shared_deadline__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../shared/deadline */ "./src/shared/deadline.ts");
 /**
  * Connection Retry Service
  *
@@ -103132,12 +103361,28 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:connection-retry-service");
 // ─── Configuration ──────────────────────────────────────────────────────────
 const TICK_MS = 120000; // 2 minutes between health checks
 const INITIAL_DELAY_MS = 20000; // 20 seconds before first check
 const MAX_FAILURES = 5; // consecutive unhealthy ticks before shutdown
 const PROCESS_ID_TIMEOUT_MS = 15000;
+/** One awaited step of a tick (reconnect, bot notification, uptime ping, leader check). */
+const STEP_DEADLINE_MS = 60000;
+/**
+ * A tick still in flight after this long is abandoned: the next scheduled tick logs ERROR with the stuck step and runs.
+ * Before this, one never-settling await (ramya1 2026-10-27: GramJS connect() after an update-loop TIMEOUT) left
+ * tickInFlight true until the process restarted 4 h later, so every later tick was skipped.
+ */
+const TICK_WATCHDOG_MS = 10 * 60000; // > the longest bounded tick (6 steps x STEP_DEADLINE_MS)
+/** Thrown inside a tick the watchdog abandoned, so a late-settling await cannot act on stale state. */
+class TickAbandoned extends Error {
+    constructor(step) {
+        super(`health tick abandoned by the watchdog (was in step=${step})`);
+        this.name = "TickAbandoned";
+    }
+}
 function readConnectionState() {
     const instanceExists = _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.instanceExist();
     const inst = instanceExists ? _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance() : null;
@@ -103168,6 +103413,10 @@ class ConnectionRetryService {
         this.startupTimeout = null;
         this.schedulerActive = false;
         this.tickInFlight = false;
+        /** Bumped per tick; a tick whose generation is no longer current was abandoned and must not act. */
+        this.tickGeneration = 0;
+        this.tickStartedAt = 0;
+        this.tickStep = "idle";
         this.recentInboundActivity = false;
         this.hasEverObservedInboundActivity = false;
     }
@@ -103225,20 +103474,20 @@ class ConnectionRetryService {
         this.schedulerActive = true;
         this.startupTimeout = setTimeout(() => {
             this.startupTimeout = null;
-            return this.runScheduledTick()
-                .catch((error) => {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.startupTick", false);
-                logger.error(`[HEALTH] Startup tick error:`, error);
-            })
-                .finally(() => {
-                if (!this.schedulerActive || this.tickInterval)
-                    return;
+            // The interval starts before the startup tick runs: a startup tick that never settles must not keep the
+            // interval (and with it the watchdog) from ever starting.
+            if (this.schedulerActive && !this.tickInterval) {
                 this.tickInterval = setInterval(() => {
                     this.runScheduledTick().catch((error) => {
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.intervalTick", false);
                         logger.error(`[HEALTH] Unhandled tick error:`, error);
                     });
                 }, TICK_MS);
+            }
+            return this.runScheduledTick()
+                .catch((error) => {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "ConnectionRetryService.startupTick", false);
+                logger.error(`[HEALTH] Startup tick error:`, error);
             });
         }, INITIAL_DELAY_MS);
     }
@@ -103253,22 +103502,61 @@ class ConnectionRetryService {
             this.tickInterval = null;
         }
         this.tickInFlight = false;
+        this.tickStep = "idle";
+        // A tick still pending from before cleanup() is abandoned: it must not act after a restart of the scheduler.
+        this.tickGeneration++;
     }
     // ── Core tick ─────────────────────────────────────────────────────────────
     async runScheduledTick() {
         if (this.tickInFlight) {
-            logger.warn(`[HEALTH] Scheduled retry tick skipped: previous tick still in progress`);
-            return;
+            const stuckMs = Date.now() - this.tickStartedAt;
+            if (stuckMs < TICK_WATCHDOG_MS) {
+                logger.warn(`[HEALTH] Scheduled retry tick skipped: previous tick still in progress (step=${this.tickStep})`);
+                return;
+            }
+            logger.error(`[HEALTH] Watchdog: abandoning health tick stuck ${Math.round(stuckMs / 1000)}s in step=${this.tickStep}; starting a fresh tick`);
         }
+        const gen = ++this.tickGeneration;
         this.tickInFlight = true;
+        this.tickStartedAt = Date.now();
+        this.tickStep = "start";
         try {
-            await this.tick();
+            await this.tick(gen);
         }
         finally {
-            this.tickInFlight = false;
+            // An abandoned tick that settles late must not clear the flag of the tick that replaced it.
+            if (gen === this.tickGeneration) {
+                this.tickInFlight = false;
+                this.tickStep = "idle";
+            }
         }
     }
-    async tick() {
+    /**
+     * Run one awaited step of tick `gen`, bounded by STEP_DEADLINE_MS. A best-effort step that times out is logged at
+     * ERROR and the tick goes on; any other timeout is thrown to the caller. Once the watchdog has replaced `gen`, the
+     * step throws TickAbandoned so the stale tick stops before it notifies, resets budgets or shuts down.
+     */
+    async step(gen, name, work, bestEffort) {
+        if (gen !== this.tickGeneration)
+            throw new TickAbandoned(name);
+        this.tickStep = name;
+        let result;
+        try {
+            result = await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_9__.settleWithin)(work(), STEP_DEADLINE_MS, `[HEALTH] ${name}`);
+        }
+        catch (error) {
+            if (gen !== this.tickGeneration)
+                throw new TickAbandoned(name);
+            if (!(bestEffort && (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_9__.isDeadlineError)(error)))
+                throw error;
+            logger.error(`[HEALTH] Step ${name} did not settle within ${STEP_DEADLINE_MS} ms; continuing the tick`);
+            return undefined;
+        }
+        if (gen !== this.tickGeneration)
+            throw new TickAbandoned(name);
+        return result;
+    }
+    async tick(gen = this.tickGeneration) {
         try {
             const state = readConnectionState();
             const sawInboundActivity = this.recentInboundActivity;
@@ -103278,18 +103566,22 @@ class ConnectionRetryService {
                 // transport just because no user happened to message during this two-minute window.
                 if (sawInboundActivity && this.consecutiveFailures > 0) {
                     logger.log(`[HEALTH] Recovered after ${this.consecutiveFailures} transport failures`);
-                    await this.notify(`Recovered after ${this.consecutiveFailures} transport failures`);
+                    await this.step(gen, "notify", () => this.notify(`Recovered after ${this.consecutiveFailures} transport failures`), true);
                 }
                 this.resetRetryBudgets(sawInboundActivity ? "inbound activity observed" : "Telegram transport is connected");
-                await this.pingUptime();
+                await this.step(gen, "pingUptime", () => this.pingUptime(), true);
             }
             else {
-                if (await this.onTransportUnavailable(state))
+                if (await this.onTransportUnavailable(state, gen))
                     return;
             }
-            await this.checkLeader();
+            await this.step(gen, "checkLeader", () => this.checkLeader(), true);
         }
         catch (error) {
+            if (error instanceof TickAbandoned) {
+                logger.error(`[HEALTH] ${error.message}: its late result is ignored`);
+                return;
+            }
             const msg = error instanceof Error ? error.message : String(error);
             logger.error(`[HEALTH] Tick crashed: ${msg}`);
             await this.notify(`CRITICAL - Health tick crashed: ${msg}`);
@@ -103298,7 +103590,7 @@ class ConnectionRetryService {
         }
     }
     // ── Unhealthy: Telegram manager/client is absent or disconnected ───────────
-    async onTransportUnavailable(state) {
+    async onTransportUnavailable(state, gen) {
         const startup = !this.hasEverObservedInboundActivity;
         const failures = startup
             ? ++this.startupAttempts
@@ -103308,42 +103600,49 @@ class ConnectionRetryService {
         // disconnect first: a client that reports connected is handled by the healthy branch above.
         if (state.instanceExists) {
             try {
-                const reconnected = await _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.ensureConnected();
+                // A reconnect that does not settle in time counts as a failed one (bounded budget below).
+                const reconnected = await this.step(gen, "ensureConnected", () => _telegram_manager__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.ensureConnected(), false);
                 if (reconnected) {
                     logger.log(`[HEALTH] Telegram transport restored`);
                     this.resetRetryBudgets("Telegram reconnect succeeded");
-                    await this.notify("Telegram transport restored");
-                    await this.pingUptime();
+                    await this.step(gen, "notify", () => this.notify("Telegram transport restored"), true);
+                    await this.step(gen, "pingUptime", () => this.pingUptime(), true);
                     return false;
                 }
                 logger.warn(`[HEALTH] Reconnect failed`);
             }
             catch (error) {
+                if (error instanceof TickAbandoned)
+                    throw error;
                 logger.error(`[HEALTH] Reconnect error:`, error);
             }
         }
         // Check if this process was replaced by a newer one
         if (!state.clientConnected) {
-            const replaced = await this.checkProcessValidity();
+            const replaced = await this.step(gen, "checkProcessValidity", () => this.checkProcessValidity(), true);
             if (replaced)
                 return true; // shutdown already called
         }
         // Notify on every genuine transport failure.
-        await this.notify(`Telegram transport unavailable (${failures}/${MAX_FAILURES})`);
+        await this.step(gen, "notify", () => this.notify(`Telegram transport unavailable (${failures}/${MAX_FAILURES})`), true);
         // Give up after MAX_FAILURES genuine transport failures. A successful reconnect returned
         // above after resetting the budget, so the counter can never exceed its documented bound.
         if (failures >= MAX_FAILURES) {
             logger.error(`[HEALTH] ${MAX_FAILURES} Telegram transport failures — shutting down`);
-            await this.notify(`Shutting down after ${MAX_FAILURES} Telegram transport failures`);
+            await this.step(gen, "notify", () => this.notify(`Shutting down after ${MAX_FAILURES} Telegram transport failures`), true);
             try {
-                await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().closeConnection();
+                await this.step(gen, "closeMongo", () => _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().closeConnection(), true);
             }
-            catch { /* best effort */ }
+            catch (error) {
+                if (error instanceof TickAbandoned)
+                    throw error;
+                /* best effort */
+            }
             this.cleanup();
             await this.requestShutdown("Health check: max Telegram transport failures exceeded");
             return true;
         }
-        await this.pingUptime();
+        await this.step(gen, "pingUptime", () => this.pingUptime(), true);
         return false;
     }
     // ── Coordinator notification ─────────────────────────────────────────────
@@ -105870,6 +106169,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
 /* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _shared_deadline__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../shared/deadline */ "./src/shared/deadline.ts");
 
 
 
@@ -105879,6 +106179,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
  // Added for handling undefined builders
+
 
 
 
@@ -106076,13 +106377,22 @@ class TelegramManager {
         if (!inst?.client || inst.destroyed)
             return false;
         if (!inst.client.connected) {
+            // GramJS connect() can stay pending forever when it races the client's own reconnect after an update-loop
+            // TIMEOUT (ramya1 2026-10-27 14:39 IST: the health tick awaited it for 4 h). Bound the wait and share one
+            // pending connect between callers so a stuck one is never stacked.
+            if (!TelegramManager.pendingConnect) {
+                const client = inst.client;
+                TelegramManager.pendingConnect = client.connect()
+                    .finally(() => { TelegramManager.pendingConnect = null; });
+            }
             try {
-                await inst.client.connect();
+                await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_29__.settleWithin)(TelegramManager.pendingConnect, TelegramManager.CONNECT_DEADLINE_MS, `[${mobile}] Telegram connect`);
             }
             catch (error) {
                 logger.error(`[${mobile}] Failed to reconnect:`, error);
                 return false;
             }
+            return true;
         }
         return true;
     }
@@ -106829,6 +107139,9 @@ TelegramManager.runtimeRecovery = null;
 TelegramManager.lastRuntimeRecoveryAt = null;
 TelegramManager.RUNTIME_RECOVERY_COOLDOWN_MS = 20 * 60 * 1000;
 TelegramManager.RPC_LIVENESS_CACHE_MS = 60 * 1000;
+/** One reconnect wait at most; a later call starts a new connect only after this one settles. */
+TelegramManager.CONNECT_DEADLINE_MS = 30 * 1000;
+TelegramManager.pendingConnect = null;
 
 
 /***/ },
