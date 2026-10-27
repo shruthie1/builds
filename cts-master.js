@@ -22720,7 +22720,6 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const buffer_client_schema_1 = __webpack_require__(/*! ./schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src/components/users/users.service.ts");
 const active_channels_service_1 = __webpack_require__(/*! ../active-channels/active-channels.service */ "./src/components/active-channels/active-channels.service.ts");
 const client_service_1 = __webpack_require__(/*! ../clients/client.service */ "./src/components/clients/client.service.ts");
@@ -22731,14 +22730,16 @@ const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/ut
 const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
-const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
-const persona_assignment_1 = __webpack_require__(/*! ../../utils/persona-assignment */ "./src/utils/persona-assignment.ts");
-const homoglyph_normalizer_1 = __webpack_require__(/*! ../../utils/homoglyph-normalizer */ "./src/utils/homoglyph-normalizer.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const base_client_service_1 = __webpack_require__(/*! ../shared/base-client.service */ "./src/components/shared/base-client.service.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
+const pool_claim_1 = __webpack_require__(/*! ../shared/onboarding/pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
+const pool_profile_1 = __webpack_require__(/*! ../shared/onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
+const enrolment_1 = __webpack_require__(/*! ../shared/onboarding/enrolment */ "./src/components/shared/onboarding/enrolment.ts");
+const set_as_1 = __webpack_require__(/*! ../shared/onboarding/set-as */ "./src/components/shared/onboarding/set-as.ts");
+const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const buffer_supply_1 = __webpack_require__(/*! ./buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
 let BufferClientService = BufferClientService_1 = class BufferClientService extends base_client_service_1.BaseClientService {
     get checkingBufferClientsSince() {
@@ -22750,69 +22751,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     constructor(bufferClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, promoteClientServiceRef, sessionService, botsService, joinRequestModel) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, BufferClientService_1.name);
         this.bufferClientModel = bufferClientModel;
-        this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT = 20;
+        this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT = pool_profile_1.BUFFER_PROFILE.legacyHealthyCap;
         this.readyRotationInProgress = false;
         this.promoteClientService = promoteClientServiceRef;
         this.joinRequestModel = joinRequestModel;
     }
-    async getPrimaryClientMobiles(clientId) {
-        const clients = await this.clientService.findAll();
-        const primaryClientMobiles = new Set(clients
-            .filter((client) => !!client.mobile && (!clientId || client.clientId === clientId))
-            .map((client) => client.mobile));
-        this.logger.debug('Resolved primary client mobiles for buffer guards', {
-            clientId: clientId || 'all',
-            count: primaryClientMobiles.size,
-        });
-        return primaryClientMobiles;
-    }
-    isPrimaryClientMobile(mobile, primaryClientMobiles) {
-        return !!mobile && primaryClientMobiles.has(mobile);
-    }
-    async findPrioritizedJoinCandidates(query) {
-        const limit = this.config.maxMapSize;
-        const operationalFloor = this.config.operationalChannelThreshold ?? 200;
-        const recoveryQuery = {
-            ...query,
-            warmupPhase: { $in: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
-            channels: { $lt: operationalFloor },
-        };
-        const recoveryQueryResult = this.bufferClientModel
-            .find(recoveryQuery)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
-        if (recoveryCandidates.length >= limit)
-            return recoveryCandidates;
-        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
-        const standardQueryResult = this.bufferClientModel
-            .find(query)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
-        return [
-            ...recoveryCandidates,
-            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
-        ].slice(0, limit);
-    }
-    async resolveJoinCandidateQuery(query) {
-        const executable = query;
-        return typeof executable.exec === 'function'
-            ? executable.exec()
-            : Promise.resolve(query);
-    }
     isHealthyBufferClientForCap(doc, _now) {
-        const phase = doc.warmupPhase;
-        if (!phase)
-            return false;
-        if (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-            return (doc.channels || 0) >= (this.config.operationalChannelThreshold ?? 200);
-        }
-        const failedAttempts = doc.failedUpdateAttempts || 0;
-        if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
-            return false;
-        }
-        return true;
+        return (0, pool_profile_1.isHealthyForLegacyCap)(doc, this.operationalFloor, this.MAX_FAILED_ATTEMPTS);
     }
     getBufferSupplyConfig() {
         return (0, buffer_supply_1.readBufferSupplyConfig)(process.env, (0, buffer_supply_1.engineWeeklyCeiling)(this.MAX_SENSITIVE_ACTIONS_PER_CYCLE, this.WARMUP_RUNS_PER_DAY));
@@ -22974,210 +22919,23 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     get config() {
         return {
             joinChannelInterval: 6 * 60 * 1000,
-            leaveChannelInterval: 120 * 1000,
+            leaveChannelInterval: pool_profile_1.ONBOARDING_PACING.leaveChannelIntervalMs,
             leaveChannelBatchSize: 10,
             channelProcessingDelay: 120000,
-            channelTarget: 350,
+            channelTarget: pool_profile_1.BUFFER_PROFILE.channelTarget,
             maxJoinsPerSession: 12,
-            maxNewClientsPerTrigger: 10,
-            minTotalClients: 10,
+            maxNewClientsPerTrigger: pool_profile_1.BUFFER_PROFILE.maxNewClientsPerTrigger,
+            minTotalClients: pool_profile_1.BUFFER_PROFILE.minTotalClients,
             maxMapSize: 100,
             cooldownHours: 2,
-            clientProcessingDelay: 10000,
+            clientProcessingDelay: pool_profile_1.ONBOARDING_PACING.clientProcessingDelayMs,
             maxChannelJoinsPerDay: 25,
             joinsPerMobilePerRound: 4,
-            operationalChannelThreshold: 200,
+            operationalChannelThreshold: pool_profile_1.BUFFER_PROFILE.operationalFloor,
         };
     }
-    async updateNameAndBio(doc, client, failedAttempts) {
-        const telegramClient = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
-        try {
-            await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'medium');
-            const me = await telegramClient.getMe();
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-            let updateCount = 0;
-            const hasNameBioPool = (client.firstNames?.length > 0) || (client.bufferLastNames?.length > 0) || (client.bios?.length > 0);
-            if ((client.firstNames?.length > 0) || (client.bufferLastNames?.length > 0) || (client.bios?.length > 0) || (client.profilePics?.length > 0)) {
-                let assignment = null;
-                let unassignableReason = null;
-                const hasValidAssignment = (doc.assignedFirstName != null ||
-                    doc.assignedLastName != null ||
-                    doc.assignedBio != null);
-                if (hasValidAssignment) {
-                    assignment = {
-                        assignedFirstName: doc.assignedFirstName,
-                        assignedLastName: doc.assignedLastName,
-                        assignedBio: doc.assignedBio,
-                        assignedProfilePics: doc.assignedProfilePics,
-                    };
-                }
-                else {
-                    const pool = {
-                        firstNames: client.firstNames,
-                        lastNames: client.bufferLastNames || [],
-                        bios: client.bios || [],
-                        profilePics: client.profilePics || [],
-                        dbcoll: client.dbcoll,
-                    };
-                    const existingAssignments = await this.model.find({
-                        clientId: doc.clientId, status: 'active',
-                        mobile: { $ne: doc.mobile },
-                        $or: [
-                            { assignedFirstName: { $ne: null } },
-                            { assignedLastName: { $ne: null } },
-                            { assignedBio: { $ne: null } },
-                            { 'assignedProfilePics.0': { $exists: true } },
-                        ],
-                    }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                    try {
-                        const promoteAssignments = await this.promoteClientService.model.find({
-                            clientId: doc.clientId, status: 'active',
-                            mobile: { $ne: doc.mobile },
-                            $or: [
-                                { assignedFirstName: { $ne: null } },
-                                { assignedLastName: { $ne: null } },
-                                { assignedBio: { $ne: null } },
-                                { 'assignedProfilePics.0': { $exists: true } },
-                            ],
-                        }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                        existingAssignments.push(...promoteAssignments);
-                    }
-                    catch { }
-                    const activeClientAssignment = await this.clientService.getActiveClientAssignment(client);
-                    if (activeClientAssignment && activeClientAssignment.mobile !== doc.mobile && !existingAssignments.some(a => a.mobile === activeClientAssignment.mobile)) {
-                        existingAssignments.push(activeClientAssignment);
-                    }
-                    const usedKeys = new Set(existingAssignments.map(a => (0, persona_assignment_1.personaKey)({
-                        firstName: a.assignedFirstName,
-                        lastName: a.assignedLastName || '',
-                        bio: a.assignedBio || '',
-                        profilePics: a.assignedProfilePics || [],
-                    })));
-                    const candidates = (0, persona_assignment_1.generateCandidateCombinations)(pool, doc.mobile);
-                    const chosen = candidates.find(c => !usedKeys.has((0, persona_assignment_1.personaKey)(c)));
-                    if (!chosen) {
-                        this.logger.warn(`No unique persona candidate available for ${doc.mobile}, falling back to first candidate`);
-                    }
-                    const pick = chosen || candidates[0];
-                    if (pick) {
-                        const result = await this.model.findOneAndUpdate({
-                            mobile: doc.mobile,
-                            $or: [
-                                {
-                                    assignedFirstName: null,
-                                    assignedLastName: null,
-                                    assignedBio: null,
-                                    'assignedProfilePics.0': { $exists: false },
-                                },
-                            ],
-                        }, { $set: {
-                                assignedFirstName: pick.firstName,
-                                assignedLastName: pick.lastName || null,
-                                assignedBio: pick.bio || null,
-                                assignedProfilePics: pick.profilePics,
-                            } }, { returnDocument: 'after' });
-                        if (result) {
-                            assignment = {
-                                assignedFirstName: result.assignedFirstName,
-                                assignedLastName: result.assignedLastName,
-                                assignedBio: result.assignedBio,
-                                assignedProfilePics: result.assignedProfilePics,
-                            };
-                            this.logger.log(`Assigned persona "${pick.firstName}" to ${doc.mobile}`);
-                        }
-                        else {
-                            const fresh = await this.model.findOne({ mobile: doc.mobile }, { assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                            if (fresh && (fresh.assignedFirstName != null || fresh.assignedLastName != null || fresh.assignedBio != null)) {
-                                assignment = {
-                                    assignedFirstName: fresh.assignedFirstName,
-                                    assignedLastName: fresh.assignedLastName,
-                                    assignedBio: fresh.assignedBio,
-                                    assignedProfilePics: fresh.assignedProfilePics,
-                                };
-                                this.logger.log(`Using concurrently assigned persona for ${doc.mobile}`);
-                            }
-                            else {
-                                this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
-                                unassignableReason = 'atomic persona assignment guard not met';
-                            }
-                        }
-                    }
-                }
-                const hasAnyAssignment = assignment != null && (assignment.assignedFirstName != null ||
-                    assignment.assignedLastName != null ||
-                    assignment.assignedBio != null);
-                if (!hasNameBioPool) {
-                    this.logger.warn(`Persona pool for ${doc.mobile} has no firstNames/lastNames/bios — marking name/bio step done`);
-                    updateCount = 1;
-                }
-                else if (hasAnyAssignment) {
-                    const fullUser = await telegramClient.client.invoke(new telegram_1.Api.users.GetFullUser({ id: new telegram_1.Api.InputUserSelf() }));
-                    const currentLastName = this.readNestedString(fullUser, ['users', 0, 'lastName']);
-                    const currentBio = this.readNestedString(fullUser, ['fullUser', 'about']);
-                    const firstNameWrong = assignment?.assignedFirstName != null
-                        && !(0, homoglyph_normalizer_1.nameMatchesAssignment)(me.firstName || '', assignment.assignedFirstName);
-                    const lastNameWrong = assignment?.assignedLastName != null
-                        && !(0, homoglyph_normalizer_1.lastNameMatches)(currentLastName, assignment.assignedLastName);
-                    if (firstNameWrong || lastNameWrong) {
-                        const displayFirstName = assignment.assignedFirstName || me.firstName || '';
-                        const displayLastName = assignment.assignedLastName || '';
-                        this.logger.log(`Updating persona name/lastName for ${doc.mobile}`);
-                        await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'medium');
-                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({
-                            firstName: displayFirstName,
-                            lastName: displayLastName,
-                        }));
-                        updateCount++;
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(5000, 1000, 3000, 7000));
-                    }
-                    if (assignment.assignedBio != null && currentBio !== assignment.assignedBio) {
-                        this.logger.log(`Updating persona bio for ${doc.mobile}`);
-                        await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'light');
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 3000, 8000, 18000));
-                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({ about: assignment.assignedBio }));
-                        updateCount++;
-                    }
-                    updateCount = Math.max(updateCount, 1);
-                }
-                else if (unassignableReason) {
-                    return await this.recordNameBioStepFailure(doc.mobile, failedAttempts, unassignableReason);
-                }
-                else {
-                    this.logger.warn(`No persona candidate for ${doc.mobile} — marking name/bio step done`);
-                    updateCount = 1;
-                }
-            }
-            else {
-                this.logger.warn(`No persona pool for ${doc.mobile} (clientId: ${doc.clientId}) — marking name/bio step done to unblock pipeline`);
-                updateCount = 1;
-            }
-            await this.update(doc.mobile, {
-                ...(updateCount > 0 ? { nameBioUpdatedAt: new Date() } : {}),
-                lastUpdateAttempt: new Date(),
-                failedUpdateAttempts: 0,
-                lastUpdateFailure: null,
-                organicActivityAt: new Date(),
-            });
-            this.logger.debug(`Updated name and bio for ${doc.mobile}`);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(40000, 5000, 30000, 50000));
-            return updateCount;
-        }
-        catch (error) {
-            const errorDetails = this.handleError(error, 'Error updating profile', doc.mobile);
-            await this.update(doc.mobile, {
-                lastUpdateAttempt: new Date(),
-                failedUpdateAttempts: failedAttempts + 1,
-                lastUpdateFailure: new Date(),
-            });
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
-                await this.deactivateClient(doc.mobile, reason, { permanent: true });
-            }
-            return 0;
-        }
-        finally {
-            await this.safeUnregisterClient(doc.mobile);
-        }
+    otherPoolModel() {
+        return this.promoteClientService.model;
     }
     async updateUsername(doc, client, failedAttempts) {
         if (doc.username) {
@@ -23247,7 +23005,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         if (status === 'active' && !session) {
             throw new common_1.BadRequestException('Active BufferClient requires a session');
         }
-        const result = await (0, enrollment_lock_1.withEnrollmentLock)(canonicalMobile, async () => {
+        const result = await (0, enrollment_lock_1.withEnrollmentLock)(canonicalMobile, () => this.withPoolClaimOrRefuse(canonicalMobile, async () => {
             const enrolledIn = await this.isMobileEnrolledAnywhere(canonicalMobile);
             if (enrolledIn && enrolledIn !== 'bufferClients') {
                 throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${enrolledIn}; refusing to create a cross-pool BufferClient`);
@@ -23263,7 +23021,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 sessionRotatedAt: null,
             };
             return this.bufferClientModel.create({ ...createData });
-        });
+        }));
         this.logger.log(`Buffer Client Created:\n\nMobile: ${canonicalMobile}`);
         await this.sendAccountNotice({
             severity: 'success',
@@ -23400,42 +23158,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             throw new common_1.InternalServerErrorException(`Query execution failed: ${errorMessage}`);
         }
     }
-    async updateStatus(mobile, status, message) {
-        const updateData = { status };
-        if (message)
-            updateData.message = message;
-        if (status === 'inactive') {
-            updateData.inUse = false;
-        }
-        try {
-            const updated = await this.update(mobile, updateData);
-            this.logger.log(`Buffer client ${mobile} status updated to ${status}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                title: 'Buffer status',
-                fields: [
-                    { label: 'Mobile', value: mobile },
-                    { label: 'New status', value: status, code: false },
-                    { label: 'Reason', value: message || '-', code: false },
-                ],
-            }).catch((error) => this.logger.error(`Failed to send buffer status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
-            return updated;
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.logger.error(`Failed to update buffer client ${mobile} status to ${status}: ${errorMessage}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                severity: 'error',
-                title: 'Status failed',
-                fields: [
-                    { label: 'Mobile', value: mobile },
-                    { label: 'Attempted status', value: status, code: false },
-                    { label: 'Reason', value: message || '-', code: false },
-                    { label: 'Error', value: errorMessage.substring(0, 120), code: false },
-                ],
-            }).catch((notifyError) => this.logger.error(`Failed to send buffer status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
-            throw error;
-        }
-    }
     async reassignClientId(mobile, fromClientId, toClientId, session) {
         const result = await this.bufferClientModel.updateOne({ mobile, clientId: fromClientId, inUse: { $ne: true }, status: 'active' }, { $set: { clientId: toClientId, message: `Reassigned from ${fromClientId} by degraded swap` } }, session ? { session } : undefined).exec();
         if ((result.matchedCount || 0) !== 1) {
@@ -23514,157 +23236,32 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         });
         return updatedBufferClient;
     }
-    async refillJoinQueue(clientId) {
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing)
-            return 0;
-        if (this.telegramService.hasActiveClientSetup())
-            return 0;
-        this.resetDailyJoinCountersIfNeeded();
-        const primaryClientMobiles = await this.getPrimaryClientMobiles(clientId);
-        const excludedMobiles = new Set([
-            ...this.joinChannelMap.keys(),
-            ...primaryClientMobiles,
-        ]);
-        const query = {
-            status: 'active',
-            channels: { $lt: this.config.channelTarget },
-            mobile: { $nin: Array.from(excludedMobiles) },
-            ...this.getJoinCapacityEligibilityFilter(),
-        };
-        if (clientId)
-            query.clientId = clientId;
-        this.logger.debug('Refill join queue query prepared', {
-            clientId: clientId || 'all',
-            excludedCount: excludedMobiles.size,
-        });
-        const eligible = await this.findPrioritizedJoinCandidates(query);
-        let added = 0;
-        let leaveAdded = 0;
-        for (const doc of eligible) {
-            if (this.isPrimaryClientMobile(doc.mobile, primaryClientMobiles)) {
-                this.logger.debug(`Skipping refill candidate ${doc.mobile}: it is the live client mobile`);
-                continue;
-            }
-            if (this.isMobileDailyCapped(doc.mobile))
-                continue;
-            let client = null;
-            try {
-                client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
-                const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
-                await this.update(doc.mobile, { channels: channels.ids.length });
-                if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
-                    continue;
-                if (channels.canSendFalseCount < 10) {
-                    const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinCandidates(doc.mobile, channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
-                    if (channelsToJoin.length === 0)
-                        continue;
-                    if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
-                        added++;
-                    }
-                }
-                else if (!this.leaveChannelMap.has(doc.mobile)) {
-                    if (this.queueLeaveChannelsIfAllowed(doc, channels.canSendFalseChats)) {
-                        leaveAdded++;
-                    }
-                }
-            }
-            catch (error) {
-                const errorDetails = (0, parseError_1.parseError)(error, `RefillJoinQueueErr: ${doc.mobile}`);
-                if ((0, isPermanentError_1.default)(errorDetails)) {
-                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
-                    await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                }
-            }
-            finally {
-                await this.safeUnregisterClient(doc.mobile);
-            }
+    async withPoolClaimOrRefuse(canonicalMobile, fn) {
+        const claim = await (0, pool_claim_1.withPoolClaim)(this.model, canonicalMobile, 'bufferClients', fn);
+        if ('heldBy' in claim) {
+            throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool BufferClient`);
         }
-        if (added > 0) {
-            this.logger.log(`Refilled join queue with ${added} buffer clients`);
-        }
-        if (leaveAdded > 0 && !this.leaveChannelIntervalId) {
-            this.createTimeout(() => this.leaveChannelQueue(), client_helper_utils_1.ClientHelperUtils.gaussianRandom(6500, 1000, 5000, 8000));
-        }
-        return added;
-    }
-    async markAsActive(mobile, message = 'Account is functioning properly') {
-        return this.updateStatus(mobile, 'active', message);
-    }
-    async markAsInactive(mobile, reason) {
-        try {
-            const existing = await this.findOne(mobile, false);
-            if (!existing || existing.status === 'inactive') {
-                return existing;
-            }
-            this.logger.log(`Marking buffer client ${mobile} as inactive: ${reason}`);
-            return await this.updateStatus(mobile, 'inactive', reason);
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            this.logger.error(`Failed to mark buffer client ${mobile} as inactive: ${errorMessage}`);
-            return null;
-        }
+        return claim.value;
     }
     async setAsBufferClient(mobile, clientId, availableDate = client_helper_utils_1.ClientHelperUtils.getTodayDateString()) {
-        const canonicalMobile = this.canonicalMobile(mobile);
-        const user = (await this.usersService.search({ mobile: canonicalMobile, expired: false }))[0];
-        if (!user)
-            throw new common_1.BadRequestException('user not found');
-        const sourceSession = user.session?.trim();
-        if (!sourceSession) {
-            throw new common_1.BadRequestException('User session missing; cannot create BufferClient');
-        }
-        const isExist = await this.findOne(canonicalMobile, false);
-        if (isExist)
-            throw new common_1.ConflictException('BufferClient already exist');
-        const clients = await this.clientService.findAll();
-        const clientMobiles = clients.map((client) => client?.mobile);
-        if (clientMobiles.some((clientMobile) => this.mobilesMatch(clientMobile, canonicalMobile)))
-            throw new common_1.BadRequestException('Number is an Active Client');
-        if (await this.promoteClientService.existsByMobile(canonicalMobile)) {
-            throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in promoteClients; refusing to create a cross-pool BufferClient`);
-        }
-        const telegramClient = await connection_manager_1.connectionManager.getClient(canonicalMobile, { autoDisconnect: false });
-        try {
-            const channels = await this.telegramService.getChannelInfo(canonicalMobile, true);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-            const bufferClient = {
-                tgId: user.tgId,
-                session: sourceSession,
-                mobile: canonicalMobile,
-                availableDate,
-                channels: channels.ids.length,
-                clientId,
-                status: 'active',
-                message: 'Enrolled for warmup',
-                lastUsed: null,
-            };
-            await this.bufferClientModel
-                .findOneAndUpdate({ mobile: canonicalMobile }, {
-                $set: {
-                    ...bufferClient,
-                    warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
-                    warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
-                    enrolledAt: new Date(),
-                }
-            }, { returnDocument: 'after', upsert: true })
-                .exec();
-        }
-        catch (error) {
-            const errorDetails = (0, parseError_1.parseError)(error, `Failed to set as Buffer Client ${canonicalMobile}`);
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                try {
-                    await this.usersService.expireAccount(canonicalMobile, 'Permanent error during buffer enrollment');
-                }
-                catch { }
-            }
-            throw new common_1.HttpException(errorDetails.message, errorDetails.status);
-        }
-        finally {
-            await this.safeUnregisterClient(canonicalMobile);
-        }
-        return 'Client enrolled as buffer successfully';
+        return (0, set_as_1.setAsPoolClient)(this.setAsPort(), mobile, clientId, availableDate);
+    }
+    setAsPort() {
+        return {
+            profile: pool_profile_1.BUFFER_PROFILE,
+            model: this.model,
+            usersService: this.usersService,
+            clientService: this.clientService,
+            telegramService: this.telegramService,
+            canonicalMobile: (m) => this.canonicalMobile(m),
+            mobilesMatch: (a, b) => this.mobilesMatch(a, b),
+            findOne: (m, t) => this.findOne(m, t),
+            otherPoolExistsByMobile: (m) => this.promoteClientService.existsByMobile(m),
+            isMobileEnrolledAnywhere: (m) => this.isMobileEnrolledAnywhere(m),
+            withPoolClaimOrRefuse: (m, fn) => this.withPoolClaimOrRefuse(m, fn),
+            safeUnregisterClient: (m) => this.safeUnregisterClient(m),
+            enrolmentInactiveSince: () => client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+        };
     }
     async diagnoseEnrollmentDecision() {
         const clients = await this.clientService.findAll();
@@ -23966,83 +23563,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
     }
     async _checkBufferClientsInternal() {
-        const clients = await this.clientService.findAll();
-        const promoteClients = await this.promoteClientService.findAll();
-        const clientMap = new Map(clients.map((client) => [client.clientId, client]));
-        const now = Date.now();
-        const clientMainMobiles = clients.map((c) => c.mobile);
-        const assignedBufferClients = await this.bufferClientModel
-            .find({ clientId: { $exists: true, $ne: null }, status: 'active' })
-            .exec();
-        const allBufferClientMobiles = (await this.bufferClientModel.find({}, { mobile: 1 }).lean().exec()).map((doc) => doc.mobile);
-        const goodIds = [
-            ...clientMainMobiles,
-            ...promoteClients.map((c) => c.mobile),
-            ...allBufferClientMobiles,
-        ].filter((id) => typeof id === 'string' && id.length > 0);
-        let totalUpdates = 0;
-        const updatedEntries = [];
-        this.logger.debug(`Checking buffer clients, good IDs count: ${goodIds.length}`);
-        const bufferClientsToProcess = [];
-        for (const bufferClient of assignedBufferClients) {
-            if (!bufferClient.clientId)
-                continue;
-            const client = clientMap.get(bufferClient.clientId);
-            if (!client)
-                continue;
-            if (bufferClient.mobile === client.mobile) {
-                this.logger.debug(`Skipping buffer maintenance for ${bufferClient.mobile}: currently attached as primary client mobile`);
-                continue;
-            }
-            if (bufferClient.inUse === true)
-                continue;
-            const lastUpdateAttempt = bufferClient.lastUpdateAttempt ? new Date(bufferClient.lastUpdateAttempt).getTime() : 0;
-            if (this.isOnCooldown(bufferClient.mobile, bufferClient.lastUpdateAttempt, now))
-                continue;
-            const warmupPhase = bufferClient.warmupPhase;
-            if (!warmupPhase) {
-                this.logger.warn(`Skipping buffer client ${bufferClient.mobile}: incomplete lifecycle metadata`);
-                continue;
-            }
-            if (warmupPhase === base_client_service_1.WarmupPhase.READY)
-                continue;
-            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(bufferClient, now, { operationalFloor: this.operationalFloor });
-            const priority = (0, base_client_service_1.calculateWarmupPriority)(bufferClient, warmupAction, now);
-            bufferClientsToProcess.push({ bufferClient, client, clientId: bufferClient.clientId, priority, warmupAction });
-        }
-        bufferClientsToProcess.sort((a, b) => b.priority - a.priority);
-        const effectiveCap = this.getEffectiveUpdatesCap(bufferClientsToProcess.length);
-        let sensitiveUpdates = 0;
-        let organicUpdates = 0;
-        this.logger.log(`Buffer warmup run: ${bufferClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
-        for (const { bufferClient, client, warmupAction } of bufferClientsToProcess) {
-            if (totalUpdates >= effectiveCap)
-                break;
-            const warmupPhase = bufferClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
-            if (warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-                const lastChecked = bufferClient.lastChecked ? new Date(bufferClient.lastChecked).getTime() : 0;
-                const healthCheck = await this.performHealthCheck(bufferClient.mobile, lastChecked, now);
-                if (!healthCheck.passed)
-                    continue;
-            }
-            const plannedAction = warmupAction.action;
-            if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
-                continue;
-            }
-            const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
-            if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
-                continue;
-            }
-            if (plannedSensitive)
-                sensitiveUpdates++;
-            if (plannedAction === 'organic_only')
-                organicUpdates++;
-            const processResult = await this.processClient(bufferClient, client, warmupAction);
-            if (processResult.updateCount > 0) {
-                totalUpdates += processResult.updateCount;
-                updatedEntries.push({ clientId: client.clientId, mobile: bufferClient.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
-            }
-        }
+        await this.runWarmupMaintenance({
+            otherPoolMobiles: async () => (await this.promoteClientService.findAll()).map((c) => c.mobile),
+            enrolAfterWarmup: (ctx) => this.enrolAfterWarmup(ctx),
+        });
+    }
+    async enrolAfterWarmup({ clients, goodIds, now, totalUpdates, updatedEntries }) {
         const supplyPlan = await this.buildBufferSupplyPlan(clients, now);
         this.logBufferSupplyPlan(supplyPlan);
         const clientNeedingBufferClients = supplyPlan.entries
@@ -24080,100 +23606,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         await this.runPeriodicHealthChecks(primaryClientMobiles);
     }
     async joinchannelForBufferClients(skipExisting = true, clientId) {
-        if (this.telegramService.hasActiveClientSetup()) {
-            return 'Active client setup exists, skipping';
-        }
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
-            this.logger.warn('Join/leave processing still in progress, skipping re-entry');
-            return 'Join/leave still processing, skipped';
-        }
-        if (this.isPrepareJoinChannelsProcessing) {
-            return 'Join-channel prepare already running, skipped';
-        }
-        this.isPrepareJoinChannelsProcessing = true;
-        this.logger.log('Starting join channel process for buffer clients');
-        try {
-            this.joinScopeClientId = clientId || null;
-            const primaryClientMobiles = await this.getPrimaryClientMobiles(clientId);
-            const preservedMobiles = await this.prepareJoinChannelRefresh(skipExisting);
-            const query = {
-                channels: { $lt: this.config.channelTarget },
-                mobile: { $nin: Array.from(new Set([...preservedMobiles, ...primaryClientMobiles])) },
-                status: 'active',
-                ...this.getJoinCapacityEligibilityFilter(),
-            };
-            if (clientId)
-                query.clientId = clientId;
-            this.logger.info('Prepared buffer join-channel sweep', {
-                clientId: clientId || 'all',
-                preservedCount: preservedMobiles.size,
-                primaryClientCount: primaryClientMobiles.size,
-            });
-            const clients = await this.findPrioritizedJoinCandidates(query);
-            const joinSet = new Set();
-            const leaveSet = new Set();
-            let successCount = 0;
-            let failCount = 0;
-            for (let i = 0; i < clients.length; i++) {
-                const document = clients[i];
-                const mobile = document.mobile;
-                if (this.isMobileDailyCapped(mobile))
-                    continue;
-                let client = null;
-                try {
-                    client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
-                    const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
-                    await this.update(mobile, { channels: channels.ids.length });
-                    if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
-                        successCount++;
-                        continue;
-                    }
-                    if (channels.canSendFalseCount < 10) {
-                        const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
-                        const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(mobile);
-                        const result = await this.fetchJoinCandidates(mobile, channels.ids.length, remaining, excludedIds);
-                        if (!this.joinChannelMap.has(mobile)) {
-                            if (this.safeSetJoinChannelMap(mobile, result)) {
-                                joinSet.add(mobile);
-                            }
-                        }
-                    }
-                    else {
-                        if (!this.leaveChannelMap.has(mobile)) {
-                            if (this.queueLeaveChannelsIfAllowed(document, channels.canSendFalseChats)) {
-                                leaveSet.add(mobile);
-                            }
-                        }
-                    }
-                    successCount++;
-                }
-                catch (error) {
-                    failCount++;
-                    const errorDetails = (0, parseError_1.parseError)(error, `JoinChannelErr: ${mobile}`);
-                    if ((0, isPermanentError_1.default)(errorDetails)) {
-                        const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
-                        await this.deactivateClient(mobile, reason, { permanent: true });
-                    }
-                }
-                finally {
-                    await this.safeUnregisterClient(mobile);
-                    if (i < clients.length - 1) {
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(this.config.clientProcessingDelay + 2500, 1500, this.config.clientProcessingDelay, this.config.clientProcessingDelay + 5000));
-                    }
-                }
-            }
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 750, 6000, 9000));
-            if (joinSet.size > 0) {
-                this.createTimeout(() => this.joinChannelQueue(), 4000 + Math.random() * 2000);
-            }
-            if (leaveSet.size > 0) {
-                this.createTimeout(() => this.leaveChannelQueue(), client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
-            }
-            return `Buffer Join queued for: ${joinSet.size}, Leave queued for: ${leaveSet.size}`;
-        }
-        finally {
-            this.isPrepareJoinChannelsProcessing = false;
-        }
+        return this.runJoinSweep(skipExisting, clientId);
     }
     async isMobileEnrolledAnywhere(mobile) {
         const [bufferExists, promoteExists, clientExists] = await Promise.all([
@@ -24190,164 +23623,52 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         return null;
     }
     async createBufferClientFromUser(document, targetClientId, availableDate) {
-        const enrolledIn = await this.isMobileEnrolledAnywhere(document.mobile);
-        if (enrolledIn) {
-            this.logger.debug(`Skipping ${document.mobile}: already enrolled in ${enrolledIn}`);
-            return false;
-        }
-        const telegramClient = await connection_manager_1.connectionManager.getClient(document.mobile, { autoDisconnect: false });
-        try {
-            const hasPassword = await telegramClient.hasPassword();
-            if (hasPassword) {
-                this.logger.debug(`Failed to Update as BufferClient as ${document.mobile} already has Password`);
-                await this.updateUser2FAStatus(document.tgId, document.mobile);
-                return false;
-            }
-            const channels = await (0, channelinfo_1.channelInfo)(telegramClient.client, true);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-            const user = (await this.usersService.search({ mobile: document.mobile }))[0];
-            if (!user?.session?.trim()) {
-                this.logger.warn(`Skipping buffer enrollment for ${document.mobile}: source user/session missing`);
-                return false;
-            }
-            const sourceSession = user.session.trim();
-            const targetAvailableDate = availableDate || client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-            const bufferClient = {
-                tgId: document.tgId,
-                session: sourceSession,
-                mobile: document.mobile,
-                lastUsed: null,
-                availableDate: targetAvailableDate,
-                channels: channels.ids.length,
-                clientId: targetClientId,
-                status: 'active',
-                message: 'Enrolled for warmup',
-            };
-            const enrolled = await (0, enrollment_lock_1.withEnrollmentLock)(this.canonicalMobile(document.mobile), async () => {
-                const already = await this.isMobileEnrolledAnywhere(document.mobile);
-                if (already && already !== 'bufferClients') {
-                    this.logger.warn(`Skipping buffer enrollment for ${document.mobile}: now enrolled in ${already}`);
-                    return false;
-                }
-                await this.bufferClientModel.findOneAndUpdate({ mobile: document.mobile }, {
-                    $set: {
-                        ...bufferClient,
-                        warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
-                        warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
-                        enrolledAt: new Date(),
-                    }
-                }, { returnDocument: 'after', upsert: true }).exec();
-                return true;
-            });
-            if (!enrolled)
-                return false;
-            this.logger.log(`Created BufferClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.sendAccountNotice({
-                severity: 'success',
-                title: 'Buffer enrolled',
-                fields: [
-                    { label: 'Client ID', value: targetClientId },
-                    { label: 'Mobile', value: document.mobile },
-                    { label: 'Available date', value: targetAvailableDate, code: false },
-                    { label: 'Channels', value: channels.ids.length, code: false },
-                    { label: 'Warmup phase', value: base_client_service_1.WarmupPhase.ENROLLED, code: false },
-                    { label: 'Source TG ID', value: document.tgId },
-                ],
-            });
-            return true;
-        }
-        catch (error) {
-            const errorDetails = this.handleError(error, 'Error processing client', document.mobile);
-            this.logger.error(`Error processing buffer client ${document.mobile}: ${errorDetails.message}`);
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                try {
-                    await this.usersService.expireAccount(document.mobile, errorDetails.message);
-                }
-                catch { }
-            }
-            return false;
-        }
-        finally {
-            await this.safeUnregisterClient(document.mobile);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
-        }
+        return (0, enrolment_1.enrolPoolClientFromUser)(this.enrolmentPort(), document, targetClientId, availableDate);
     }
-    async addNewUserstoBufferClients(badIds, goodIds, clientsNeedingBufferClients = [], bufferClientsPerClient) {
-        const clientNeedingDynamic = [];
-        for (const clientId of clientsNeedingBufferClients) {
-            const availabilityNeeds = await this.calculateAvailabilityBasedNeeds(clientId);
-            if (availabilityNeeds.totalNeeded > 0) {
-                clientNeedingDynamic.push({ clientId, ...availabilityNeeds });
-            }
-        }
-        clientNeedingDynamic.sort((a, b) => a.priority - b.priority);
-        await this.addNewUserstoBufferClientsDynamic(badIds, goodIds, clientNeedingDynamic, bufferClientsPerClient);
+    enrolmentPort() {
+        return {
+            profile: pool_profile_1.BUFFER_PROFILE,
+            model: this.model,
+            logger: this.logger,
+            usersService: this.usersService,
+            canonicalMobile: (mobile) => this.canonicalMobile(mobile),
+            isMobileEnrolledAnywhere: (mobile) => this.isMobileEnrolledAnywhere(mobile),
+            updateUser2FAStatus: (tgId, mobile) => this.updateUser2FAStatus(tgId, mobile),
+            sendAccountNotice: (input) => this.sendAccountNotice(input),
+            handleError: (error, context, mobile) => this.handleError(error, context, mobile),
+            safeUnregisterClient: (mobile) => this.safeUnregisterClient(mobile),
+            docExtras: () => ({}),
+        };
+    }
+    async addNewUserstoBufferClients(badIds, goodIds, clientsNeedingBufferClients = [], _bufferClientsPerClient) {
+        const plan = await this.buildBufferSupplyPlan(clientsNeedingBufferClients.map((clientId) => ({ clientId })));
+        this.logBufferSupplyPlan(plan);
+        const needs = plan.entries
+            .filter((entry) => entry.allocated > 0)
+            .map((entry) => ({
+            clientId: entry.clientId,
+            ...entry.availability,
+            totalNeeded: entry.allocated,
+            calculationReason: entry.reason,
+            priority: entry.priority,
+        }));
+        if (needs.length === 0)
+            return;
+        await this.addNewUserstoBufferClientsDynamic(badIds, goodIds, needs, plan.countedPerClient, plan.capPerClient);
     }
     async addNewUserstoBufferClientsDynamic(badIds, goodIds, clientsNeedingBufferClients, bufferClientsPerClient, capPerClient) {
-        const threeMonthsAgo = client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS);
-        let totalNeeded = 0;
-        for (const clientNeed of clientsNeedingBufferClients) {
-            totalNeeded += clientNeed.totalNeeded;
-        }
-        totalNeeded = Math.min(totalNeeded, this.config.maxNewClientsPerTrigger);
-        if (totalNeeded === 0)
-            return { createdCount: 0, attemptedCount: 0, createdEntries: [] };
-        const documents = await this.usersService.executeQuery({
-            mobile: { $nin: goodIds },
-            expired: false,
-            twoFA: false,
-            lastActive: { $lt: threeMonthsAgo },
-            totalChats: { $gt: 150 },
-        }, { tgId: 1 }, totalNeeded + 5);
-        const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-        const assignmentQueue = [];
-        const projectedHealthyCounts = new Map(bufferClientsPerClient || []);
-        for (const clientNeed of clientsNeedingBufferClients) {
-            const currentHealthyCount = projectedHealthyCounts.get(clientNeed.clientId) || 0;
-            const clientCap = capPerClient?.get(clientNeed.clientId) ?? this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT;
-            const remainingCapacity = Math.max(0, clientCap - currentHealthyCount);
-            const cappedNeed = Math.min(clientNeed.totalNeeded, remainingCapacity);
-            for (let i = 0; i < cappedNeed; i++) {
-                assignmentQueue.push({ clientId: clientNeed.clientId, priority: clientNeed.priority });
-            }
-            if (cappedNeed > 0) {
-                projectedHealthyCounts.set(clientNeed.clientId, currentHealthyCount + cappedNeed);
-            }
-        }
-        let attemptedCount = 0;
-        let createdCount = 0;
-        let assignmentIndex = 0;
-        const createdEntries = [];
-        const enrolledThisRun = new Set();
-        while (attemptedCount < totalNeeded && documents.length > 0 && assignmentIndex < assignmentQueue.length) {
-            const document = documents.shift();
-            if (!document || !document.mobile || !document.tgId)
-                continue;
-            if (enrolledThisRun.has(document.mobile)) {
-                this.logger.debug(`Skipping ${document.mobile}: already attempted in this enrollment run`);
-                continue;
-            }
-            enrolledThisRun.add(document.mobile);
-            const assignment = assignmentQueue[assignmentIndex];
-            if (!assignment)
-                break;
-            try {
-                const created = await this.createBufferClientFromUser(document, assignment.clientId, today);
-                if (created) {
-                    assignmentIndex++;
-                    createdCount++;
-                    createdEntries.push({ clientId: assignment.clientId, mobile: document.mobile });
-                }
-                attemptedCount++;
-            }
-            catch (error) {
-                this.logger.error(`Error creating connection for ${document.mobile}`);
-                await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
-                attemptedCount++;
-            }
-        }
-        this.logger.log(`Dynamic batch completed: Created ${createdCount} new buffer clients (${attemptedCount} attempted)`);
-        return { createdCount, attemptedCount, createdEntries };
+        return (0, candidate_source_1.runEnrolmentBatch)({
+            label: 'buffer',
+            logger: this.logger,
+            usersService: this.usersService,
+            goodIds,
+            needs: clientsNeedingBufferClients,
+            countedPerClient: bufferClientsPerClient,
+            capFor: (clientId) => capPerClient?.get(clientId) ?? this.MAX_HEALTHY_BUFFER_CLIENTS_PER_CLIENT,
+            maxNewPerRun: this.config.maxNewClientsPerTrigger,
+            inactiveSince: client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+            enrolOne: (document, clientId, availableDate) => this.createBufferClientFromUser(document, clientId, availableDate),
+        });
     }
     async getBufferClientsByClientId(clientId, status) {
         const filter = { clientId };
@@ -26925,6 +26246,7 @@ var ClientService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ClientService = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const pool_profile_1 = __webpack_require__(/*! ../shared/onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const client_schema_1 = __webpack_require__(/*! ./schemas/client.schema */ "./src/components/clients/schemas/client.schema.ts");
@@ -28222,7 +27544,7 @@ let ClientService = ClientService_1 = class ClientService {
         return {
             clientId,
             mobile: mobileFilter,
-            createdAt: { $lte: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
+            createdAt: { $lte: new Date(Date.now() - pool_profile_1.BUFFER_PROFILE.consumerMinAgeDays * 24 * 60 * 60 * 1000) },
             channels: { $gte: warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
             status: 'active',
             inUse: { $ne: true },
@@ -28560,7 +27882,7 @@ let ClientService = ClientService_1 = class ClientService {
             && buffer.status === 'active'
             && buffer.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED
             && (buffer.channels ?? 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING
-            && (!createdAt || new Date(createdAt).getTime() <= now - 15 * 24 * 60 * 60 * 1000)
+            && (!createdAt || new Date(createdAt).getTime() <= now - pool_profile_1.BUFFER_PROFILE.consumerMinAgeDays * 24 * 60 * 60 * 1000)
             && buffer.spamStatus !== 'harsh'
             && docUntil <= now
             && markerUntil <= now;
@@ -37147,6 +36469,9 @@ let PromoteClientController = PromoteClientController_1 = class PromoteClientCon
     async setAsPromoteClient(mobile, clientId) {
         return this.clientService.setAsPromoteClient(mobile, clientId);
     }
+    async setAsPromoteClientPost(mobile, clientId) {
+        return this.clientService.setAsPromoteClient(mobile, clientId);
+    }
     async findOne(mobile) {
         return this.clientService.findOne(mobile);
     }
@@ -37306,6 +36631,20 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], PromoteClientController.prototype, "setAsPromoteClient", null);
+__decorate([
+    (0, common_1.Post)('SetAsPromoteClient/:mobile'),
+    (0, swagger_1.ApiOperation)({ summary: 'Enroll a user as a promote client (POST)', description: 'Same as GET SetAsPromoteClient/:mobile; a mutating verb for a mutating call.' }),
+    (0, swagger_1.ApiParam)({ name: 'mobile', description: 'User mobile number', type: String }),
+    (0, swagger_1.ApiQuery)({ name: 'clientId', required: false, description: 'Client ID to assign promote client to (auto-assigned if omitted)', type: String }),
+    (0, swagger_1.ApiOkResponse)({ schema: { type: 'string' } }),
+    (0, swagger_1.ApiBadRequestResponse)({ description: 'The user was not found or is already an active main client.' }),
+    (0, swagger_1.ApiConflictResponse)({ description: 'A promote client record already exists for this mobile.' }),
+    __param(0, (0, common_1.Param)('mobile')),
+    __param(1, (0, common_1.Query)('clientId')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", Promise)
+], PromoteClientController.prototype, "setAsPromoteClientPost", null);
 __decorate([
     (0, common_1.Get)('mobile/:mobile'),
     (0, swagger_1.ApiOperation)({ summary: 'Get promote client by mobile' }),
@@ -37621,7 +36960,6 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const promote_client_schema_1 = __webpack_require__(/*! ./schemas/promote-client.schema */ "./src/components/promote-clients/schemas/promote-client.schema.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src/components/users/users.service.ts");
 const active_channels_service_1 = __webpack_require__(/*! ../active-channels/active-channels.service */ "./src/components/active-channels/active-channels.service.ts");
 const client_service_1 = __webpack_require__(/*! ../clients/client.service */ "./src/components/clients/client.service.ts");
@@ -37632,14 +36970,18 @@ const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/ut
 const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const connection_manager_1 = __webpack_require__(/*! ../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const session_manager_1 = __webpack_require__(/*! ../session-manager */ "./src/components/session-manager/index.ts");
-const channelinfo_1 = __webpack_require__(/*! ../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
-const persona_assignment_1 = __webpack_require__(/*! ../../utils/persona-assignment */ "./src/utils/persona-assignment.ts");
-const homoglyph_normalizer_1 = __webpack_require__(/*! ../../utils/homoglyph-normalizer */ "./src/utils/homoglyph-normalizer.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const base_client_service_1 = __webpack_require__(/*! ../shared/base-client.service */ "./src/components/shared/base-client.service.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
+const pool_claim_1 = __webpack_require__(/*! ../shared/onboarding/pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
+const pool_profile_1 = __webpack_require__(/*! ../shared/onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
+const enrolment_1 = __webpack_require__(/*! ../shared/onboarding/enrolment */ "./src/components/shared/onboarding/enrolment.ts");
+const set_as_1 = __webpack_require__(/*! ../shared/onboarding/set-as */ "./src/components/shared/onboarding/set-as.ts");
+const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
+const buffer_supply_1 = __webpack_require__(/*! ../buffer-clients/buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
+const PROMOTE_ENROLMENT_LEAD_TIME_DAYS = 30;
 let PromoteClientService = PromoteClientService_1 = class PromoteClientService extends base_client_service_1.BaseClientService {
     get checkingPromoteClientsSince() {
         return this.isWarmupCheckProcessing ? 1 : 0;
@@ -37650,7 +36992,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     constructor(promoteClientModel, telegramService, usersService, activeChannelsService, clientService, channelsService, bufferClientServiceRef, sessionService, botsService, joinRequestModel) {
         super(telegramService, usersService, activeChannelsService, clientService, channelsService, sessionService, botsService, PromoteClientService_1.name);
         this.promoteClientModel = promoteClientModel;
-        this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT = 30;
+        this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT = pool_profile_1.PROMOTE_PROFILE.legacyHealthyCap;
         this.readyRotationInProgress = false;
         this.bufferClientService = bufferClientServiceRef;
         this.joinRequestModel = joinRequestModel;
@@ -37664,223 +37006,26 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     get config() {
         return {
             joinChannelInterval: 6 * 60 * 1000,
-            leaveChannelInterval: 60 * 1000,
+            leaveChannelInterval: pool_profile_1.ONBOARDING_PACING.leaveChannelIntervalMs,
             leaveChannelBatchSize: 10,
             channelProcessingDelay: 120000,
-            channelTarget: 350,
+            channelTarget: pool_profile_1.PROMOTE_PROFILE.channelTarget,
             maxJoinsPerSession: 12,
-            maxNewClientsPerTrigger: 10,
-            minTotalClients: 12,
+            maxNewClientsPerTrigger: pool_profile_1.PROMOTE_PROFILE.maxNewClientsPerTrigger,
+            minTotalClients: pool_profile_1.PROMOTE_PROFILE.minTotalClients,
             maxMapSize: 100,
             cooldownHours: 2,
-            clientProcessingDelay: 8000,
+            clientProcessingDelay: pool_profile_1.ONBOARDING_PACING.clientProcessingDelayMs,
             maxChannelJoinsPerDay: 25,
             joinsPerMobilePerRound: 4,
-            operationalChannelThreshold: 230,
+            operationalChannelThreshold: pool_profile_1.PROMOTE_PROFILE.operationalFloor,
         };
     }
     isHealthyPromoteClientForCap(doc, _now) {
-        const phase = doc.warmupPhase;
-        if (!phase)
-            return false;
-        if (phase === base_client_service_1.WarmupPhase.READY || phase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-            return (doc.channels || 0) >= (this.config.operationalChannelThreshold ?? 230);
-        }
-        const failedAttempts = doc.failedUpdateAttempts || 0;
-        if (failedAttempts >= this.MAX_FAILED_ATTEMPTS) {
-            return false;
-        }
-        return true;
+        return (0, pool_profile_1.isHealthyForLegacyCap)(doc, this.operationalFloor, this.MAX_FAILED_ATTEMPTS);
     }
-    async updateNameAndBio(doc, client, failedAttempts) {
-        const telegramClient = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
-        try {
-            await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'medium');
-            const me = await telegramClient.getMe();
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-            let updateCount = 0;
-            const hasNameBioPool = (client.firstNames?.length > 0) || (client.promoteLastNames?.length > 0) || (client.bios?.length > 0);
-            if ((client.firstNames?.length > 0) || (client.promoteLastNames?.length > 0) || (client.bios?.length > 0) || (client.profilePics?.length > 0)) {
-                let assignment = null;
-                let unassignableReason = null;
-                const hasValidAssignment = (doc.assignedFirstName != null ||
-                    doc.assignedLastName != null ||
-                    doc.assignedBio != null);
-                if (hasValidAssignment) {
-                    assignment = {
-                        assignedFirstName: doc.assignedFirstName,
-                        assignedLastName: doc.assignedLastName,
-                        assignedBio: doc.assignedBio,
-                        assignedProfilePics: doc.assignedProfilePics,
-                    };
-                }
-                else {
-                    const pool = {
-                        firstNames: client.firstNames,
-                        lastNames: client.promoteLastNames || [],
-                        bios: client.bios || [],
-                        profilePics: client.profilePics || [],
-                        dbcoll: client.dbcoll,
-                    };
-                    const existingAssignments = await this.model.find({
-                        clientId: doc.clientId, status: 'active',
-                        mobile: { $ne: doc.mobile },
-                        $or: [
-                            { assignedFirstName: { $ne: null } },
-                            { assignedLastName: { $ne: null } },
-                            { assignedBio: { $ne: null } },
-                            { 'assignedProfilePics.0': { $exists: true } },
-                        ],
-                    }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                    try {
-                        const bufferAssignments = await this.bufferClientService.model.find({
-                            clientId: doc.clientId, status: 'active',
-                            mobile: { $ne: doc.mobile },
-                            $or: [
-                                { assignedFirstName: { $ne: null } },
-                                { assignedLastName: { $ne: null } },
-                                { assignedBio: { $ne: null } },
-                                { 'assignedProfilePics.0': { $exists: true } },
-                            ],
-                        }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                        existingAssignments.push(...bufferAssignments);
-                    }
-                    catch { }
-                    const activeClientAssignment = await this.clientService.getActiveClientAssignment(client);
-                    if (activeClientAssignment && activeClientAssignment.mobile !== doc.mobile && !existingAssignments.some(a => a.mobile === activeClientAssignment.mobile)) {
-                        existingAssignments.push(activeClientAssignment);
-                    }
-                    const usedKeys = new Set(existingAssignments.map(a => (0, persona_assignment_1.personaKey)({
-                        firstName: a.assignedFirstName,
-                        lastName: a.assignedLastName || '',
-                        bio: a.assignedBio || '',
-                        profilePics: a.assignedProfilePics || [],
-                    })));
-                    const candidates = (0, persona_assignment_1.generateCandidateCombinations)(pool, doc.mobile);
-                    const chosen = candidates.find(c => !usedKeys.has((0, persona_assignment_1.personaKey)(c)));
-                    if (!chosen) {
-                        this.logger.warn(`No unique persona candidate available for ${doc.mobile}, falling back to first candidate`);
-                    }
-                    const pick = chosen || candidates[0];
-                    if (pick) {
-                        const result = await this.model.findOneAndUpdate({
-                            mobile: doc.mobile,
-                            $or: [
-                                {
-                                    assignedFirstName: null,
-                                    assignedLastName: null,
-                                    assignedBio: null,
-                                    'assignedProfilePics.0': { $exists: false },
-                                },
-                            ],
-                        }, { $set: {
-                                assignedFirstName: pick.firstName,
-                                assignedLastName: pick.lastName || null,
-                                assignedBio: pick.bio || null,
-                                assignedProfilePics: pick.profilePics,
-                            } }, { returnDocument: 'after' });
-                        if (result) {
-                            assignment = {
-                                assignedFirstName: result.assignedFirstName,
-                                assignedLastName: result.assignedLastName,
-                                assignedBio: result.assignedBio,
-                                assignedProfilePics: result.assignedProfilePics,
-                            };
-                            this.logger.log(`Assigned persona "${pick.firstName}" to ${doc.mobile}`);
-                        }
-                        else {
-                            const fresh = await this.model.findOne({ mobile: doc.mobile }, { assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
-                            if (fresh && (fresh.assignedFirstName != null || fresh.assignedLastName != null || fresh.assignedBio != null)) {
-                                assignment = {
-                                    assignedFirstName: fresh.assignedFirstName,
-                                    assignedLastName: fresh.assignedLastName,
-                                    assignedBio: fresh.assignedBio,
-                                    assignedProfilePics: fresh.assignedProfilePics,
-                                };
-                                this.logger.log(`Using concurrently assigned persona for ${doc.mobile}`);
-                            }
-                            else {
-                                this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
-                                unassignableReason = 'atomic persona assignment guard not met';
-                            }
-                        }
-                    }
-                }
-                const hasAnyAssignment = assignment != null && (assignment.assignedFirstName != null ||
-                    assignment.assignedLastName != null ||
-                    assignment.assignedBio != null);
-                if (!hasNameBioPool) {
-                    this.logger.warn(`Persona pool for ${doc.mobile} has no firstNames/lastNames/bios — marking name/bio step done`);
-                    updateCount = 1;
-                }
-                else if (hasAnyAssignment) {
-                    const fullUser = await telegramClient.client.invoke(new telegram_1.Api.users.GetFullUser({ id: new telegram_1.Api.InputUserSelf() }));
-                    const currentLastName = this.readNestedString(fullUser, ['users', 0, 'lastName']);
-                    const currentBio = this.readNestedString(fullUser, ['fullUser', 'about']);
-                    const firstNameWrong = assignment?.assignedFirstName != null
-                        && !(0, homoglyph_normalizer_1.nameMatchesAssignment)(me.firstName || '', assignment.assignedFirstName);
-                    const lastNameWrong = assignment?.assignedLastName != null
-                        && !(0, homoglyph_normalizer_1.lastNameMatches)(currentLastName, assignment.assignedLastName);
-                    if (firstNameWrong || lastNameWrong) {
-                        const displayFirstName = assignment.assignedFirstName || me.firstName || '';
-                        const displayLastName = assignment.assignedLastName || '';
-                        this.logger.log(`Updating persona name/lastName for ${doc.mobile}`);
-                        await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'medium');
-                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({
-                            firstName: displayFirstName,
-                            lastName: displayLastName,
-                        }));
-                        updateCount++;
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(5000, 1000, 3000, 7000));
-                    }
-                    if (assignment.assignedBio != null && currentBio !== assignment.assignedBio) {
-                        this.logger.log(`Updating persona bio for ${doc.mobile}`);
-                        await (0, base_client_service_1.performOrganicActivity)(telegramClient, 'light');
-                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 3000, 8000, 18000));
-                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({ about: assignment.assignedBio }));
-                        updateCount++;
-                    }
-                    updateCount = Math.max(updateCount, 1);
-                }
-                else if (unassignableReason) {
-                    return await this.recordNameBioStepFailure(doc.mobile, failedAttempts, unassignableReason);
-                }
-                else {
-                    this.logger.warn(`No persona candidate for ${doc.mobile} — marking name/bio step done`);
-                    updateCount = 1;
-                }
-            }
-            else {
-                this.logger.warn(`No persona assignment for ${doc.mobile} — marking name/bio step done with current profile`);
-                updateCount = 1;
-            }
-            await this.update(doc.mobile, {
-                ...(updateCount > 0 ? { nameBioUpdatedAt: new Date() } : {}),
-                lastUpdateAttempt: new Date(),
-                failedUpdateAttempts: 0,
-                lastUpdateFailure: null,
-                organicActivityAt: new Date(),
-            });
-            this.logger.debug(`Updated name and bio for ${doc.mobile}`);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(40000, 5000, 30000, 50000));
-            return updateCount;
-        }
-        catch (error) {
-            const errorDetails = this.handleError(error, 'Error updating profile', doc.mobile);
-            await this.update(doc.mobile, {
-                lastUpdateAttempt: new Date(),
-                failedUpdateAttempts: failedAttempts + 1,
-                lastUpdateFailure: new Date(),
-            });
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
-                await this.deactivateClient(doc.mobile, reason, { permanent: true });
-            }
-            return 0;
-        }
-        finally {
-            await this.safeUnregisterClient(doc.mobile);
-        }
+    otherPoolModel() {
+        return this.bufferClientService.model;
     }
     async updateUsername(doc, client, failedAttempts) {
         const telegramClient = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
@@ -37937,7 +37082,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         if (status === 'active' && !session) {
             throw new common_1.BadRequestException('Active PromoteClient requires a session');
         }
-        const result = await (0, enrollment_lock_1.withEnrollmentLock)(canonicalMobile, async () => {
+        const result = await (0, enrollment_lock_1.withEnrollmentLock)(canonicalMobile, () => this.withPoolClaimOrRefuse(canonicalMobile, async () => {
             const enrolledIn = await this.isMobileEnrolledAnywhere(canonicalMobile);
             if (enrolledIn && enrolledIn !== 'promoteClients') {
                 throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${enrolledIn}; refusing to create a cross-pool PromoteClient`);
@@ -37955,7 +37100,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             };
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
-        });
+        }));
         await this.sendAccountNotice({
             severity: 'success',
             title: 'Promote created',
@@ -38014,155 +37159,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
         return updatedUser;
     }
-    async updateStatus(mobile, status, message) {
-        const updateData = { status };
-        if (message)
-            updateData.message = message;
-        if (status === 'inactive') {
-            updateData.inUse = false;
-        }
-        try {
-            const updated = await this.update(mobile, updateData);
-            this.logger.log(`Promote client ${mobile} status updated to ${status}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                title: 'Promote status',
-                fields: [
-                    { label: 'Mobile', value: mobile },
-                    { label: 'New status', value: status, code: false },
-                    { label: 'Reason', value: message || '-', code: false },
-                ],
-            }).catch((error) => this.logger.error(`Failed to send promote status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
-            return updated;
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.logger.error(`Failed to update promote client ${mobile} status to ${status}: ${errorMessage}`);
-            this.botsService.sendMessageByCategory(bots_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-                severity: 'error',
-                title: 'Status failed',
-                fields: [
-                    { label: 'Mobile', value: mobile },
-                    { label: 'Attempted status', value: status, code: false },
-                    { label: 'Reason', value: message || '-', code: false },
-                    { label: 'Error', value: errorMessage.substring(0, 120), code: false },
-                ],
-            }).catch((notifyError) => this.logger.error(`Failed to send promote status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
-            throw error;
-        }
-    }
-    async findPrioritizedJoinCandidates(query) {
-        const limit = this.config.maxMapSize;
-        const operationalFloor = this.config.operationalChannelThreshold ?? 230;
-        const recoveryQuery = {
-            ...query,
-            warmupPhase: { $in: [base_client_service_1.WarmupPhase.READY, base_client_service_1.WarmupPhase.SESSION_ROTATED] },
-            channels: { $lt: operationalFloor },
-        };
-        const recoveryQueryResult = this.promoteClientModel
-            .find(recoveryQuery)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
-        if (recoveryCandidates.length >= limit)
-            return recoveryCandidates;
-        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
-        const standardQueryResult = this.promoteClientModel
-            .find(query)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
-        return [
-            ...recoveryCandidates,
-            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
-        ].slice(0, limit);
-    }
-    async resolveJoinCandidateQuery(query) {
-        const executable = query;
-        return typeof executable.exec === 'function'
-            ? executable.exec()
-            : Promise.resolve(query);
-    }
-    async refillJoinQueue(clientId) {
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing)
-            return 0;
-        if (this.telegramService.hasActiveClientSetup())
-            return 0;
-        this.resetDailyJoinCountersIfNeeded();
-        const query = {
-            status: 'active',
-            channels: { $lt: this.config.channelTarget },
-            mobile: { $nin: Array.from(this.joinChannelMap.keys()) },
-            ...this.getJoinCapacityEligibilityFilter(),
-        };
-        if (clientId)
-            query.clientId = clientId;
-        const eligible = await this.findPrioritizedJoinCandidates(query);
-        let added = 0;
-        let leaveAdded = 0;
-        for (const doc of eligible) {
-            if (this.isMobileDailyCapped(doc.mobile))
-                continue;
-            let client = null;
-            try {
-                client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
-                const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
-                await this.update(doc.mobile, { channels: channels.ids.length });
-                if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
-                    continue;
-                if (channels.canSendFalseCount < 10) {
-                    const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
-                    const channelsToJoin = await this.fetchJoinCandidates(doc.mobile, channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
-                    if (channelsToJoin.length === 0)
-                        continue;
-                    if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
-                        added++;
-                    }
-                }
-                else if (!this.leaveChannelMap.has(doc.mobile)) {
-                    if (this.queueLeaveChannelsIfAllowed(doc, channels.canSendFalseChats)) {
-                        leaveAdded++;
-                    }
-                }
-            }
-            catch (error) {
-                const errorDetails = (0, parseError_1.parseError)(error, `RefillJoinQueueErr: ${doc.mobile}`);
-                if ((0, isPermanentError_1.default)(errorDetails)) {
-                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
-                    await this.deactivateClient(doc.mobile, reason, { permanent: true });
-                }
-            }
-            finally {
-                await this.safeUnregisterClient(doc.mobile);
-            }
-        }
-        if (added > 0) {
-            this.logger.log(`Refilled join queue with ${added} promote clients`);
-        }
-        if (leaveAdded > 0 && !this.leaveChannelIntervalId) {
-            this.createTimeout(() => this.leaveChannelQueue(), 5000 + Math.random() * 3000);
-        }
-        return added;
-    }
     async updateLastUsed(mobile) {
         return this.update(mobile, { lastUsed: new Date() });
-    }
-    async markAsInactive(mobile, reason) {
-        try {
-            const existing = await this.findOne(mobile, false);
-            if (!existing || existing.status === 'inactive') {
-                return existing;
-            }
-            this.logger.log(`Marking promote client ${mobile} as inactive: ${reason}`);
-            return await this.updateStatus(mobile, 'inactive', reason);
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            this.logger.error(`Failed to mark promote client ${mobile} as inactive: ${errorMessage}`);
-            return null;
-        }
-    }
-    async markAsActive(mobile, message = 'Account is functioning properly') {
-        return this.updateStatus(mobile, 'active', message);
     }
     async createOrUpdate(mobile, createOrUpdateUserDto) {
         const canonicalMobile = this.canonicalMobile(mobile);
@@ -38178,8 +37176,9 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
     }
     async remove(mobile, message) {
+        const canonicalMobile = this.canonicalMobile(mobile);
         try {
-            const deleteResult = await this.promoteClientModel.deleteOne({ mobile }).exec();
+            const deleteResult = await this.promoteClientModel.deleteOne({ mobile: canonicalMobile }).exec();
             if (deleteResult.deletedCount === 0) {
                 throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
             }
@@ -38188,7 +37187,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 title: 'Deleting promote',
                 fields: [
                     { label: 'Service', value: process.env.serviceName || process.env.clientId || 'unknown' },
-                    { label: 'Mobile', value: mobile },
+                    { label: 'Mobile', value: canonicalMobile },
                     { label: 'Reason', value: message || 'manual removal', code: false },
                 ],
             });
@@ -38233,178 +37232,38 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             throw new common_1.InternalServerErrorException(`Query execution failed: ${errorMessage}`);
         }
     }
+    async withPoolClaimOrRefuse(canonicalMobile, fn) {
+        const claim = await (0, pool_claim_1.withPoolClaim)(this.model, canonicalMobile, 'promoteClients', fn);
+        if ('heldBy' in claim) {
+            throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is being enrolled in ${claim.heldBy} right now; refusing to create a cross-pool PromoteClient`);
+        }
+        return claim.value;
+    }
     async setAsPromoteClient(mobile, clientId, availableDate = client_helper_utils_1.ClientHelperUtils.getTodayDateString()) {
-        const canonicalMobile = this.canonicalMobile(mobile);
-        const user = (await this.usersService.search({ mobile: canonicalMobile, expired: false }))[0];
-        if (!user)
-            throw new common_1.BadRequestException('User not found');
-        const sourceSession = user.session?.trim();
-        if (!sourceSession) {
-            throw new common_1.BadRequestException('User session missing; cannot create PromoteClient');
-        }
-        const isExist = await this.findOne(canonicalMobile, false);
-        if (isExist)
-            throw new common_1.ConflictException('PromoteClient already exists');
-        const clients = await this.clientService.findAll();
-        const clientMobiles = clients.map((client) => client?.mobile);
-        if (clientMobiles.some((clientMobile) => this.mobilesMatch(clientMobile, canonicalMobile)))
-            throw new common_1.BadRequestException('Number is an Active Client');
-        let targetClientId = clientId;
-        if (!targetClientId && clients.length > 0) {
-            const counts = await this.promoteClientModel.aggregate([
-                { $match: { clientId: { $exists: true, $ne: null }, status: 'active' } },
-                { $group: { _id: '$clientId', count: { $sum: 1 } } },
-            ]);
-            const countMap = new Map(counts.map((count) => [count._id, count.count]));
-            let minCount = Infinity;
-            for (const c of clients) {
-                const count = countMap.get(c.clientId) || 0;
-                if (count < minCount) {
-                    minCount = count;
-                    targetClientId = c.clientId;
-                }
-            }
-        }
-        const telegramClient = await connection_manager_1.connectionManager.getClient(canonicalMobile, { autoDisconnect: false });
-        try {
-            const channels = await this.telegramService.getChannelInfo(canonicalMobile, true);
-            const promoteClient = {
-                tgId: user.tgId,
-                lastActive: 'default',
-                mobile: canonicalMobile,
-                session: sourceSession,
-                availableDate,
-                channels: channels.ids.length,
-                clientId: targetClientId,
-                status: 'active',
-                message: 'Enrolled for warmup',
-                lastUsed: null,
-            };
-            await this.promoteClientModel
-                .findOneAndUpdate({ mobile: canonicalMobile }, {
-                $set: {
-                    ...promoteClient,
-                    warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
-                    warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
-                    enrolledAt: new Date(),
-                }
-            }, { returnDocument: 'after', upsert: true })
-                .exec();
-        }
-        catch (error) {
-            const errorDetails = (0, parseError_1.parseError)(error);
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                try {
-                    await this.usersService.expireAccount(canonicalMobile, 'Permanent error during promote enrollment');
-                }
-                catch { }
-            }
-            throw new common_1.HttpException(errorDetails.message, errorDetails.status);
-        }
-        finally {
-            await this.safeUnregisterClient(canonicalMobile);
-        }
-        return 'Client enrolled as promote successfully';
+        return (0, set_as_1.setAsPoolClient)(this.setAsPort(), mobile, clientId, availableDate);
+    }
+    setAsPort() {
+        return {
+            profile: pool_profile_1.PROMOTE_PROFILE,
+            model: this.model,
+            usersService: this.usersService,
+            clientService: this.clientService,
+            telegramService: this.telegramService,
+            canonicalMobile: (m) => this.canonicalMobile(m),
+            mobilesMatch: (a, b) => this.mobilesMatch(a, b),
+            findOne: (m, t) => this.findOne(m, t),
+            otherPoolExistsByMobile: (m) => this.bufferClientService.existsByMobile(m),
+            isMobileEnrolledAnywhere: (m) => this.isMobileEnrolledAnywhere(m),
+            withPoolClaimOrRefuse: (m, fn) => this.withPoolClaimOrRefuse(m, fn),
+            safeUnregisterClient: (m) => this.safeUnregisterClient(m),
+            enrolmentInactiveSince: () => client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+        };
     }
     async updateInfo() {
         await this.runPeriodicHealthChecks();
     }
     async joinchannelForPromoteClients(skipExisting = true) {
-        if (this.telegramService.hasActiveClientSetup()) {
-            return 'Active client setup exists, skipping promotion';
-        }
-        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
-            this.logger.warn('Join/leave processing still in progress, skipping re-entry');
-            return 'Join/leave still processing, skipped';
-        }
-        if (this.isPrepareJoinChannelsProcessing) {
-            return 'Join-channel prepare already running, skipped';
-        }
-        this.isPrepareJoinChannelsProcessing = true;
-        try {
-            this.logger.log('Starting join channel process');
-            const preservedMobiles = await this.prepareJoinChannelRefresh(skipExisting);
-            try {
-                const clients = await this.findPrioritizedJoinCandidates({
-                    channels: { $lt: this.config.channelTarget },
-                    mobile: { $nin: Array.from(preservedMobiles) },
-                    status: 'active',
-                    ...this.getJoinCapacityEligibilityFilter(),
-                });
-                const joinSet = new Set();
-                const leaveSet = new Set();
-                let successCount = 0;
-                let failCount = 0;
-                for (const document of clients) {
-                    const mobile = document.mobile;
-                    if (this.isMobileDailyCapped(mobile))
-                        continue;
-                    let client = null;
-                    try {
-                        client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
-                        await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
-                        const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
-                        await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
-                        await this.update(mobile, { channels: channels.ids.length });
-                        if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
-                            successCount++;
-                            continue;
-                        }
-                        if (channels.canSendFalseCount < 10) {
-                            const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
-                            await (0, Helpers_1.sleep)(5000 + Math.random() * 3000);
-                            const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(mobile);
-                            const result = await this.fetchJoinCandidates(mobile, channels.ids.length, remaining, excludedIds);
-                            if (!this.joinChannelMap.has(mobile)) {
-                                if (this.safeSetJoinChannelMap(mobile, result)) {
-                                    joinSet.add(mobile);
-                                }
-                            }
-                        }
-                        else {
-                            if (!this.leaveChannelMap.has(mobile)) {
-                                if (this.queueLeaveChannelsIfAllowed(document, channels.canSendFalseChats)) {
-                                    leaveSet.add(mobile);
-                                }
-                            }
-                        }
-                        successCount++;
-                    }
-                    catch (error) {
-                        failCount++;
-                        const errorDetails = (0, parseError_1.parseError)(error);
-                        if ((0, isPermanentError_1.default)(errorDetails)) {
-                            await (0, Helpers_1.sleep)(1000);
-                            const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
-                            await this.deactivateClient(mobile, reason, { permanent: true });
-                        }
-                    }
-                    finally {
-                        await this.safeUnregisterClient(mobile);
-                        await (0, Helpers_1.sleep)(this.config.clientProcessingDelay + Math.random() * 5000);
-                    }
-                }
-                await (0, Helpers_1.sleep)(6000 + Math.random() * 3000);
-                if (joinSet.size > 0) {
-                    this.createTimeout(() => this.joinChannelQueue(), 2000);
-                }
-                if (leaveSet.size > 0) {
-                    this.createTimeout(() => this.leaveChannelQueue(), 5000);
-                }
-                return `Initiated Joining channels for ${joinSet.size} | Queued for leave: ${leaveSet.size}`;
-            }
-            catch (error) {
-                this.logger.error('Unexpected error during joinchannelForPromoteClients:', error);
-                this.joinChannelMap.clear();
-                this.leaveChannelMap.clear();
-                this.clearJoinChannelInterval();
-                this.clearLeaveChannelInterval();
-                throw new Error('Failed to initiate channel joining process');
-            }
-        }
-        finally {
-            this.isPrepareJoinChannelsProcessing = false;
-        }
+        return this.runJoinSweep(skipExisting);
     }
     async checkPromoteClients() {
         if (this.isWarmupCheckProcessing) {
@@ -38484,125 +37343,22 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
     }
     async _checkPromoteClientsInternal() {
-        const clients = await this.clientService.findAll();
-        const bufferClients = await this.bufferClientService.findAll();
-        const clientMap = new Map(clients.map((client) => [client.clientId, client]));
-        const now = Date.now();
-        const clientMainMobiles = clients.map((c) => c.mobile);
-        const bufferClientIds = bufferClients.map((c) => c.mobile);
-        const assignedPromoteClients = await this.promoteClientModel
-            .find({ clientId: { $exists: true, $ne: null }, status: 'active' })
-            .exec();
-        const allPromoteClientMobiles = (await this.promoteClientModel.find({}, { mobile: 1 }).lean().exec()).map((doc) => doc.mobile);
-        const goodIds = [...clientMainMobiles, ...bufferClientIds, ...allPromoteClientMobiles].filter((id) => typeof id === 'string' && id.length > 0);
-        const healthyPromoteClientsPerClient = new Map();
-        for (const doc of assignedPromoteClients) {
-            if (!doc.clientId)
-                continue;
-            if (!this.isHealthyPromoteClientForCap(doc, now))
-                continue;
-            healthyPromoteClientsPerClient.set(doc.clientId, (healthyPromoteClientsPerClient.get(doc.clientId) || 0) + 1);
-        }
-        let totalUpdates = 0;
-        const updatedEntries = [];
-        const promoteClientsToProcess = [];
-        for (const promoteClient of assignedPromoteClients) {
-            if (!promoteClient.clientId)
-                continue;
-            const client = clientMap.get(promoteClient.clientId);
-            if (!client)
-                continue;
-            if (promoteClient.inUse === true)
-                continue;
-            const lastUpdateAttempt = promoteClient.lastUpdateAttempt ? new Date(promoteClient.lastUpdateAttempt).getTime() : 0;
-            if (this.isOnCooldown(promoteClient.mobile, promoteClient.lastUpdateAttempt, now))
-                continue;
-            const warmupPhase = promoteClient.warmupPhase;
-            if (!warmupPhase) {
-                this.logger.warn(`Skipping promote client ${promoteClient.mobile}: incomplete lifecycle metadata`);
-                continue;
-            }
-            if (warmupPhase === base_client_service_1.WarmupPhase.READY || warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED)
-                continue;
-            const warmupAction = (0, base_client_service_1.getWarmupPhaseAction)(promoteClient, now, { operationalFloor: this.operationalFloor });
-            const priority = (0, base_client_service_1.calculateWarmupPriority)(promoteClient, warmupAction, now);
-            promoteClientsToProcess.push({ promoteClient: promoteClient, client, clientId: promoteClient.clientId, priority, warmupAction });
-        }
-        promoteClientsToProcess.sort((a, b) => b.priority - a.priority);
-        const effectiveCap = this.getEffectiveUpdatesCap(promoteClientsToProcess.length);
-        let sensitiveUpdates = 0;
-        let organicUpdates = 0;
-        this.logger.log(`Promote warmup run: ${promoteClientsToProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
-        for (const { promoteClient, client, warmupAction } of promoteClientsToProcess) {
-            if (totalUpdates >= effectiveCap)
-                break;
-            const warmupPhase = promoteClient.warmupPhase || base_client_service_1.WarmupPhase.ENROLLED;
-            if (warmupPhase === base_client_service_1.WarmupPhase.SESSION_ROTATED) {
-                const lastChecked = promoteClient.lastChecked ? new Date(promoteClient.lastChecked).getTime() : 0;
-                const healthCheck = await this.performHealthCheck(promoteClient.mobile, lastChecked, now);
-                if (!healthCheck.passed)
-                    continue;
-            }
-            const plannedAction = warmupAction.action;
-            if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
-                continue;
-            }
-            const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
-            if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
-                continue;
-            }
-            if (plannedSensitive)
-                sensitiveUpdates++;
-            if (plannedAction === 'organic_only')
-                organicUpdates++;
-            const processResult = await this.processClient(promoteClient, client, warmupAction);
-            if (processResult.updateCount > 0) {
-                totalUpdates += processResult.updateCount;
-                updatedEntries.push({ clientId: client.clientId, mobile: promoteClient.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
-            }
-        }
-        const clientNeedingPromoteClients = [];
-        for (const client of clients) {
-            const availabilityNeeds = await this.calculateAvailabilityBasedNeedsForCurrentState(client.clientId);
-            if (availabilityNeeds.totalNeeded <= 0)
-                continue;
-            const healthyCount = healthyPromoteClientsPerClient.get(client.clientId) || 0;
-            const remainingCapacity = Math.max(0, this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT - healthyCount);
-            if (remainingCapacity <= 0) {
-                this.logger.debug(`Skipping dynamic promote enrollment for ${client.clientId}: healthy pool already at cap`, {
-                    healthyCount,
-                    cap: this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT,
-                    requested: availabilityNeeds.totalNeeded,
-                });
-                continue;
-            }
-            const cappedNeeded = Math.min(availabilityNeeds.totalNeeded, remainingCapacity);
-            clientNeedingPromoteClients.push({
-                clientId: client.clientId,
-                ...availabilityNeeds,
-                totalNeeded: cappedNeeded,
-                calculationReason: cappedNeeded < availabilityNeeds.totalNeeded
-                    ? `${availabilityNeeds.calculationReason}; capped to remaining healthy capacity ${remainingCapacity}/${this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT}`
-                    : availabilityNeeds.calculationReason,
-            });
-        }
-        clientNeedingPromoteClients.sort((a, b) => a.priority - b.priority);
-        let totalSlotsNeeded = 0;
-        for (const clientNeed of clientNeedingPromoteClients) {
-            const allocated = Math.min(clientNeed.totalNeeded, this.config.maxNewClientsPerTrigger - totalSlotsNeeded);
-            if (allocated > 0)
-                totalSlotsNeeded += allocated;
-            if (totalSlotsNeeded >= this.config.maxNewClientsPerTrigger)
-                break;
-        }
+        await this.runWarmupMaintenance({
+            otherPoolMobiles: async () => (await this.bufferClientService.findAll()).map((c) => c.mobile),
+            enrolAfterWarmup: (ctx) => this.enrolAfterWarmup(ctx),
+        });
+    }
+    async enrolAfterWarmup({ clients, assigned, goodIds, now, totalUpdates, updatedEntries }) {
+        const assignedPromoteClients = assigned;
+        const plan = await this.buildPromoteEnrolmentPlan(clients.map((c) => c.clientId), assignedPromoteClients, now);
         let dynamicCreateResult = {
             createdCount: 0,
             attemptedCount: 0,
             createdEntries: [],
         };
-        if (clientNeedingPromoteClients.length > 0 && totalSlotsNeeded > 0) {
+        if (plan.needs.length > 0) {
             try {
-                dynamicCreateResult = await this.addNewUserstoPromoteClientsDynamic([], goodIds, clientNeedingPromoteClients, healthyPromoteClientsPerClient);
+                dynamicCreateResult = await this.addNewUserstoPromoteClientsDynamic([], goodIds, plan.needs, plan.healthyPerClient);
             }
             catch (error) {
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoPromoteClientsDynamic').message;
@@ -38630,161 +37386,118 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         return null;
     }
     async createPromoteClientFromUser(document, targetClientId, availableDate) {
-        const enrolledIn = await this.isMobileEnrolledAnywhere(document.mobile);
-        if (enrolledIn) {
-            this.logger.debug(`Skipping ${document.mobile}: already enrolled in ${enrolledIn}`);
-            return false;
-        }
-        const telegramClient = await connection_manager_1.connectionManager.getClient(document.mobile, { autoDisconnect: false });
-        try {
-            const hasPassword = await telegramClient.hasPassword();
-            if (hasPassword) {
-                await this.updateUser2FAStatus(document.tgId, document.mobile);
-                return false;
-            }
-            const channels = await (0, channelinfo_1.channelInfo)(telegramClient.client, true);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
-            const user = (await this.usersService.search({ mobile: document.mobile }))[0];
-            if (!user?.session?.trim()) {
-                this.logger.warn(`Skipping promote enrollment for ${document.mobile}: source user/session missing`);
-                return false;
-            }
-            const targetAvailableDate = availableDate || client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-            const promoteClient = {
-                tgId: document.tgId,
-                lastActive: new Date().toISOString(),
-                mobile: document.mobile,
-                session: user.session.trim(),
-                availableDate: targetAvailableDate,
-                channels: channels.ids.length,
-                clientId: targetClientId,
-                status: 'active',
-                message: 'Enrolled for warmup',
-                lastUsed: null,
-            };
-            const enrolled = await (0, enrollment_lock_1.withEnrollmentLock)(this.canonicalMobile(document.mobile), async () => {
-                const already = await this.isMobileEnrolledAnywhere(document.mobile);
-                if (already && already !== 'promoteClients') {
-                    this.logger.warn(`Skipping promote enrollment for ${document.mobile}: now enrolled in ${already}`);
-                    return false;
-                }
-                await this.promoteClientModel.findOneAndUpdate({ mobile: document.mobile }, {
-                    $set: {
-                        ...promoteClient,
-                        warmupPhase: base_client_service_1.WarmupPhase.ENROLLED,
-                        warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
-                        enrolledAt: new Date(),
-                    }
-                }, { returnDocument: 'after', upsert: true }).exec();
-                return true;
-            });
-            if (!enrolled)
-                return false;
-            this.logger.log(`Created PromoteClient for ${targetClientId} with availability ${targetAvailableDate}`);
-            await this.sendAccountNotice({
-                severity: 'success',
-                title: 'Promote enrolled',
-                fields: [
-                    { label: 'Client ID', value: targetClientId },
-                    { label: 'Mobile', value: document.mobile },
-                    { label: 'Available date', value: targetAvailableDate, code: false },
-                    { label: 'Channels', value: channels.ids.length, code: false },
-                    { label: 'Warmup phase', value: base_client_service_1.WarmupPhase.ENROLLED, code: false },
-                    { label: 'Source TG ID', value: document.tgId },
-                ],
-            });
-            return true;
-        }
-        catch (error) {
-            const errorDetails = this.handleError(error, 'Error processing client', document.mobile);
-            if ((0, isPermanentError_1.default)(errorDetails)) {
-                try {
-                    await this.usersService.expireAccount(document.mobile, errorDetails.message);
-                }
-                catch { }
-            }
-            return false;
-        }
-        finally {
-            await this.safeUnregisterClient(document.mobile);
-            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
-        }
+        return (0, enrolment_1.enrolPoolClientFromUser)(this.enrolmentPort(), document, targetClientId, availableDate);
     }
-    async addNewUserstoPromoteClients(badIds, goodIds, clientsNeedingPromoteClients = [], promoteClientsPerClient) {
-        const clientNeedingDynamic = [];
-        for (const clientId of clientsNeedingPromoteClients) {
-            const availabilityNeeds = await this.calculateAvailabilityBasedNeeds(clientId);
-            if (availabilityNeeds.totalNeeded > 0) {
-                clientNeedingDynamic.push({ clientId, ...availabilityNeeds });
-            }
+    enrolmentPort() {
+        return {
+            profile: pool_profile_1.PROMOTE_PROFILE,
+            model: this.model,
+            logger: this.logger,
+            usersService: this.usersService,
+            canonicalMobile: (mobile) => this.canonicalMobile(mobile),
+            isMobileEnrolledAnywhere: (mobile) => this.isMobileEnrolledAnywhere(mobile),
+            updateUser2FAStatus: (tgId, mobile) => this.updateUser2FAStatus(tgId, mobile),
+            sendAccountNotice: (input) => this.sendAccountNotice(input),
+            handleError: (error, context, mobile) => this.handleError(error, context, mobile),
+            safeUnregisterClient: (mobile) => this.safeUnregisterClient(mobile),
+            docExtras: () => ({ lastActive: new Date().toISOString() }),
+        };
+    }
+    async addNewUserstoPromoteClients(badIds, goodIds, clientsNeedingPromoteClients = [], _promoteClientsPerClient) {
+        const plan = await this.buildPromoteEnrolmentPlan(clientsNeedingPromoteClients);
+        if (plan.needs.length === 0)
+            return;
+        await this.addNewUserstoPromoteClientsDynamic(badIds, goodIds, plan.needs, plan.healthyPerClient);
+    }
+    promoteSupplyConfig() {
+        return {
+            ...(0, buffer_supply_1.defaultBufferSupplyConfig)((0, buffer_supply_1.engineWeeklyCeiling)(this.MAX_SENSITIVE_ACTIONS_PER_CYCLE, this.WARMUP_RUNS_PER_DAY)),
+            leadTimeDays: PROMOTE_ENROLMENT_LEAD_TIME_DAYS,
+            minTarget: pool_profile_1.PROMOTE_PROFILE.minTotalClients,
+            maxTarget: pool_profile_1.PROMOTE_PROFILE.legacyHealthyCap,
+            capHeadroom: pool_profile_1.PROMOTE_PROFILE.legacyHealthyCap - pool_profile_1.PROMOTE_PROFILE.minTotalClients,
+            hardCap: pool_profile_1.PROMOTE_PROFILE.legacyHealthyCap,
+        };
+    }
+    async buildPromoteEnrolmentPlan(clientIds, assigned, now = Date.now()) {
+        const config = this.promoteSupplyConfig();
+        const docs = assigned ?? await this.promoteClientModel
+            .find({ clientId: { $exists: true, $ne: null }, status: 'active' }, { clientId: 1, warmupPhase: 1, channels: 1, failedUpdateAttempts: 1 })
+            .lean().exec();
+        const healthyPerClient = new Map();
+        let fleetWarming = 0;
+        for (const doc of docs) {
+            if (!doc.clientId)
+                continue;
+            if (!this.isHealthyPromoteClientForCap(doc, now))
+                continue;
+            healthyPerClient.set(doc.clientId, (healthyPerClient.get(doc.clientId) || 0) + 1);
+            if (doc.warmupPhase !== base_client_service_1.WarmupPhase.READY && doc.warmupPhase !== base_client_service_1.WarmupPhase.SESSION_ROTATED)
+                fleetWarming += 1;
         }
-        clientNeedingDynamic.sort((a, b) => a.priority - b.priority);
-        await this.addNewUserstoPromoteClientsDynamic(badIds, goodIds, clientNeedingDynamic, promoteClientsPerClient);
+        const enrolledLast7d = await this.promoteClientModel.countDocuments({ enrolledAt: { $gte: new Date(now - 7 * this.ONE_DAY_MS) } });
+        const budget = (0, buffer_supply_1.computeFleetEnrollmentBudget)({
+            maxNewPerRun: this.config.maxNewClientsPerTrigger,
+            weeklyCeiling: config.fleetWeeklyCeiling,
+            enrolledLast7d,
+            fleetWarming,
+            leadTimeDays: config.leadTimeDays,
+        });
+        const entries = [];
+        for (const clientId of clientIds) {
+            const availability = await this.calculateAvailabilityBasedNeedsForCurrentState(clientId);
+            const counted = healthyPerClient.get(clientId) || 0;
+            const target = (0, buffer_supply_1.computeClientSupplyTarget)({ consumed: 0, counted }, config);
+            const remaining = Math.max(0, target.cap - counted);
+            const wanted = Math.max(target.need, availability.totalNeeded);
+            const need = Math.min(remaining, wanted);
+            if (remaining <= 0 && wanted > 0) {
+                this.logger.debug(`Skipping dynamic promote enrollment for ${clientId}: healthy pool already at cap`, {
+                    healthyCount: counted,
+                    cap: target.cap,
+                    requested: wanted,
+                });
+            }
+            entries.push({
+                clientId,
+                ...availability,
+                calculationReason: `supply ${counted}/${target.target} (cap ${target.cap}); window need ${availability.totalNeeded}`
+                    + (need < wanted ? `; capped to remaining healthy capacity ${remaining}/${target.cap}` : ''),
+                need, target: target.target, cap: target.cap, counted, allocated: 0,
+            });
+        }
+        const allocation = (0, buffer_supply_1.allocateByNeed)(entries.map((e) => ({ clientId: e.clientId, need: e.need, target: e.target })), budget.budget);
+        for (const entry of entries)
+            entry.allocated = allocation.get(entry.clientId) || 0;
+        const ordered = [...entries].sort((a, b) => (b.allocated / Math.max(1, b.target)) - (a.allocated / Math.max(1, a.target))
+            || b.need - a.need
+            || a.priority - b.priority
+            || a.clientId.localeCompare(b.clientId));
+        const needs = ordered
+            .filter((e) => e.allocated > 0)
+            .map(({ need: _need, target: _target, cap: _cap, counted: _counted, allocated, ...rest }) => ({ ...rest, totalNeeded: allocated }));
+        this.logger.info('Promote enrolment plan (fleet)', {
+            ...budget,
+            enrolledLast7d,
+            fleetWarming,
+            totalNeed: entries.reduce((sum, e) => sum + e.need, 0),
+            totalAllocated: needs.reduce((sum, n) => sum + n.totalNeeded, 0),
+        });
+        return { needs, healthyPerClient, budget, enrolledLast7d, fleetWarming };
     }
     async addNewUserstoPromoteClientsDynamic(badIds, goodIds, clientsNeedingPromoteClients, promoteClientsPerClient) {
-        const threeMonthsAgo = client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS);
-        let totalNeeded = 0;
-        for (const clientNeed of clientsNeedingPromoteClients) {
-            totalNeeded += clientNeed.totalNeeded;
-        }
-        totalNeeded = Math.min(totalNeeded, this.config.maxNewClientsPerTrigger);
-        if (totalNeeded === 0)
-            return { createdCount: 0, attemptedCount: 0, createdEntries: [] };
-        const documents = await this.usersService.executeQuery({
-            mobile: { $nin: goodIds },
-            expired: false,
-            twoFA: false,
-            lastActive: { $lt: threeMonthsAgo },
-            totalChats: { $gt: 150 },
-        }, { tgId: 1 }, totalNeeded + 5);
-        const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-        const assignmentQueue = [];
-        const projectedHealthyCounts = new Map(promoteClientsPerClient || []);
-        for (const clientNeed of clientsNeedingPromoteClients) {
-            const currentHealthyCount = projectedHealthyCounts.get(clientNeed.clientId) || 0;
-            const remainingCapacity = Math.max(0, this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT - currentHealthyCount);
-            const cappedNeed = Math.min(clientNeed.totalNeeded, remainingCapacity);
-            for (let i = 0; i < cappedNeed; i++) {
-                assignmentQueue.push({ clientId: clientNeed.clientId, priority: clientNeed.priority });
-            }
-            if (cappedNeed > 0) {
-                projectedHealthyCounts.set(clientNeed.clientId, currentHealthyCount + cappedNeed);
-            }
-        }
-        let attemptedCount = 0;
-        let createdCount = 0;
-        let assignmentIndex = 0;
-        const createdEntries = [];
-        const enrolledThisRun = new Set();
-        while (attemptedCount < totalNeeded && documents.length > 0 && assignmentIndex < assignmentQueue.length) {
-            const document = documents.shift();
-            if (!document || !document.mobile || !document.tgId)
-                continue;
-            if (enrolledThisRun.has(document.mobile)) {
-                this.logger.debug(`Skipping ${document.mobile}: already attempted in this enrollment run`);
-                continue;
-            }
-            enrolledThisRun.add(document.mobile);
-            const assignment = assignmentQueue[assignmentIndex];
-            if (!assignment)
-                break;
-            try {
-                const created = await this.createPromoteClientFromUser(document, assignment.clientId, today);
-                if (created) {
-                    assignmentIndex++;
-                    createdCount++;
-                    createdEntries.push({ clientId: assignment.clientId, mobile: document.mobile });
-                }
-                attemptedCount++;
-            }
-            catch (error) {
-                this.logger.error(`Error creating connection for ${document.mobile}`);
-                await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
-                attemptedCount++;
-            }
-        }
-        this.logger.log(`Dynamic batch completed: Created ${createdCount} new promote clients (${attemptedCount} attempted)`);
-        return { createdCount, attemptedCount, createdEntries };
+        return (0, candidate_source_1.runEnrolmentBatch)({
+            label: 'promote',
+            logger: this.logger,
+            usersService: this.usersService,
+            goodIds,
+            needs: clientsNeedingPromoteClients,
+            countedPerClient: promoteClientsPerClient,
+            capFor: (clientId) => this.MAX_HEALTHY_PROMOTE_CLIENTS_PER_CLIENT,
+            maxNewPerRun: this.config.maxNewClientsPerTrigger,
+            inactiveSince: client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+            enrolOne: (document, clientId, availableDate) => this.createPromoteClientFromUser(document, clientId, availableDate),
+        });
     }
     async getPromoteClientDistribution() {
         const clients = await this.clientService.findAll();
@@ -42001,8 +40714,12 @@ const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/
 const generateTGConfig_1 = __webpack_require__(/*! ../Telegram/utils/generateTGConfig */ "./src/components/Telegram/utils/generateTGConfig.ts");
 const notice_batch_1 = __webpack_require__(/*! ../../utils/notice-batch */ "./src/utils/notice-batch.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ./client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+const pool_profile_1 = __webpack_require__(/*! ./onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
+const candidate_source_1 = __webpack_require__(/*! ./onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const organic_activity_1 = __webpack_require__(/*! ./organic-activity */ "./src/components/shared/organic-activity.ts");
 Object.defineProperty(exports, "performOrganicActivity", { enumerable: true, get: function () { return organic_activity_1.performOrganicActivity; } });
+const persona_assignment_1 = __webpack_require__(/*! ../../utils/persona-assignment */ "./src/utils/persona-assignment.ts");
+const homoglyph_normalizer_1 = __webpack_require__(/*! ../../utils/homoglyph-normalizer */ "./src/utils/homoglyph-normalizer.ts");
 const warmup_phases_1 = __webpack_require__(/*! ./warmup-phases */ "./src/components/shared/warmup-phases.ts");
 Object.defineProperty(exports, "getWarmupPhaseAction", { enumerable: true, get: function () { return warmup_phases_1.getWarmupPhaseAction; } });
 Object.defineProperty(exports, "WarmupPhase", { enumerable: true, get: function () { return warmup_phases_1.WarmupPhase; } });
@@ -42199,10 +40916,623 @@ class BaseClientService {
         this.MAX_LEAVES_PER_DAY = 20;
         this.dailyLeaveCounts = new Map();
         this.dailyLeaveDate = '';
-        this.PERIODIC_HEALTH_CHECK_LIMIT = 25;
+        this.PERIODIC_HEALTH_CHECK_LIMIT = pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN;
         this.PERIODIC_HEALTH_CHECK_SPARE = 10;
         this.KNOWN_2FA_PASSWORD = 'Ajtdmwajt1@';
         this.logger = new logger_1.Logger(loggerName);
+    }
+    async updateNameAndBio(doc, client, failedAttempts) {
+        const nameBioModel = this.model;
+        const poolLastNames = this.clientType === 'buffer' ? client.bufferLastNames : client.promoteLastNames;
+        const telegramClient = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
+        try {
+            await (0, organic_activity_1.performOrganicActivity)(telegramClient, 'medium');
+            const me = await telegramClient.getMe();
+            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
+            let updateCount = 0;
+            const hasNameBioPool = (client.firstNames?.length > 0) || (poolLastNames?.length > 0) || (client.bios?.length > 0);
+            if ((client.firstNames?.length > 0) || (poolLastNames?.length > 0) || (client.bios?.length > 0) || (client.profilePics?.length > 0)) {
+                let assignment = null;
+                let unassignableReason = null;
+                const hasValidAssignment = (doc.assignedFirstName != null ||
+                    doc.assignedLastName != null ||
+                    doc.assignedBio != null);
+                if (hasValidAssignment) {
+                    assignment = {
+                        assignedFirstName: doc.assignedFirstName,
+                        assignedLastName: doc.assignedLastName,
+                        assignedBio: doc.assignedBio,
+                        assignedProfilePics: doc.assignedProfilePics,
+                    };
+                }
+                else {
+                    const pool = {
+                        firstNames: client.firstNames,
+                        lastNames: poolLastNames || [],
+                        bios: client.bios || [],
+                        profilePics: client.profilePics || [],
+                        dbcoll: client.dbcoll,
+                    };
+                    const existingAssignments = await nameBioModel.find({
+                        clientId: doc.clientId, status: 'active',
+                        mobile: { $ne: doc.mobile },
+                        $or: [
+                            { assignedFirstName: { $ne: null } },
+                            { assignedLastName: { $ne: null } },
+                            { assignedBio: { $ne: null } },
+                            { 'assignedProfilePics.0': { $exists: true } },
+                        ],
+                    }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
+                    try {
+                        const otherPoolAssignments = await this.otherPoolModel().find({
+                            clientId: doc.clientId, status: 'active',
+                            mobile: { $ne: doc.mobile },
+                            $or: [
+                                { assignedFirstName: { $ne: null } },
+                                { assignedLastName: { $ne: null } },
+                                { assignedBio: { $ne: null } },
+                                { 'assignedProfilePics.0': { $exists: true } },
+                            ],
+                        }, { mobile: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
+                        existingAssignments.push(...otherPoolAssignments);
+                    }
+                    catch { }
+                    const activeClientAssignment = await this.clientService.getActiveClientAssignment(client);
+                    if (activeClientAssignment && activeClientAssignment.mobile !== doc.mobile && !existingAssignments.some(a => a.mobile === activeClientAssignment.mobile)) {
+                        existingAssignments.push(activeClientAssignment);
+                    }
+                    const usedKeys = new Set(existingAssignments.map(a => (0, persona_assignment_1.personaKey)({
+                        firstName: a.assignedFirstName,
+                        lastName: a.assignedLastName || '',
+                        bio: a.assignedBio || '',
+                        profilePics: a.assignedProfilePics || [],
+                    })));
+                    const candidates = (0, persona_assignment_1.generateCandidateCombinations)(pool, doc.mobile);
+                    const chosen = candidates.find(c => !usedKeys.has((0, persona_assignment_1.personaKey)(c)));
+                    if (!chosen) {
+                        this.logger.warn(`No unique persona candidate available for ${doc.mobile}, falling back to first candidate`);
+                    }
+                    const pick = chosen || candidates[0];
+                    if (pick) {
+                        const result = await nameBioModel.findOneAndUpdate({
+                            mobile: doc.mobile,
+                            $or: [
+                                {
+                                    assignedFirstName: null,
+                                    assignedLastName: null,
+                                    assignedBio: null,
+                                    'assignedProfilePics.0': { $exists: false },
+                                },
+                            ],
+                        }, { $set: {
+                                assignedFirstName: pick.firstName,
+                                assignedLastName: pick.lastName || null,
+                                assignedBio: pick.bio || null,
+                                assignedProfilePics: pick.profilePics,
+                            } }, { returnDocument: 'after' });
+                        if (result) {
+                            assignment = {
+                                assignedFirstName: result.assignedFirstName,
+                                assignedLastName: result.assignedLastName,
+                                assignedBio: result.assignedBio,
+                                assignedProfilePics: result.assignedProfilePics,
+                            };
+                            this.logger.log(`Assigned persona "${pick.firstName}" to ${doc.mobile}`);
+                        }
+                        else {
+                            const fresh = await nameBioModel.findOne({ mobile: doc.mobile }, { assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1 }).lean();
+                            if (fresh && (fresh.assignedFirstName != null || fresh.assignedLastName != null || fresh.assignedBio != null)) {
+                                assignment = {
+                                    assignedFirstName: fresh.assignedFirstName,
+                                    assignedLastName: fresh.assignedLastName,
+                                    assignedBio: fresh.assignedBio,
+                                    assignedProfilePics: fresh.assignedProfilePics,
+                                };
+                                this.logger.log(`Using concurrently assigned persona for ${doc.mobile}`);
+                            }
+                            else {
+                                this.logger.warn(`Atomic persona assignment failed for ${doc.mobile} (guard condition not met)`);
+                                unassignableReason = 'atomic persona assignment guard not met';
+                            }
+                        }
+                    }
+                }
+                const hasAnyAssignment = assignment != null && (assignment.assignedFirstName != null ||
+                    assignment.assignedLastName != null ||
+                    assignment.assignedBio != null);
+                if (!hasNameBioPool) {
+                    this.logger.warn(`Persona pool for ${doc.mobile} has no firstNames/lastNames/bios — marking name/bio step done`);
+                    updateCount = 1;
+                }
+                else if (hasAnyAssignment) {
+                    const fullUser = await telegramClient.client.invoke(new telegram_1.Api.users.GetFullUser({ id: new telegram_1.Api.InputUserSelf() }));
+                    const currentLastName = this.readNestedString(fullUser, ['users', 0, 'lastName']);
+                    const currentBio = this.readNestedString(fullUser, ['fullUser', 'about']);
+                    const firstNameWrong = assignment?.assignedFirstName != null
+                        && !(0, homoglyph_normalizer_1.nameMatchesAssignment)(me.firstName || '', assignment.assignedFirstName);
+                    const lastNameWrong = assignment?.assignedLastName != null
+                        && !(0, homoglyph_normalizer_1.lastNameMatches)(currentLastName, assignment.assignedLastName);
+                    if (firstNameWrong || lastNameWrong) {
+                        const displayFirstName = assignment.assignedFirstName || me.firstName || '';
+                        const displayLastName = assignment.assignedLastName || '';
+                        this.logger.log(`Updating persona name/lastName for ${doc.mobile}`);
+                        await (0, organic_activity_1.performOrganicActivity)(telegramClient, 'medium');
+                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({
+                            firstName: displayFirstName,
+                            lastName: displayLastName,
+                        }));
+                        updateCount++;
+                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(5000, 1000, 3000, 7000));
+                    }
+                    if (assignment.assignedBio != null && currentBio !== assignment.assignedBio) {
+                        this.logger.log(`Updating persona bio for ${doc.mobile}`);
+                        await (0, organic_activity_1.performOrganicActivity)(telegramClient, 'light');
+                        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 3000, 8000, 18000));
+                        await telegramClient.client.invoke(new telegram_1.Api.account.UpdateProfile({ about: assignment.assignedBio }));
+                        updateCount++;
+                    }
+                    updateCount = Math.max(updateCount, 1);
+                }
+                else if (unassignableReason) {
+                    return await this.recordNameBioStepFailure(doc.mobile, failedAttempts, unassignableReason);
+                }
+                else {
+                    this.logger.warn(`No persona candidate for ${doc.mobile} — marking name/bio step done`);
+                    updateCount = 1;
+                }
+            }
+            else {
+                this.logger.warn(this.clientType === 'buffer'
+                    ? `No persona pool for ${doc.mobile} (clientId: ${doc.clientId}) — marking name/bio step done to unblock pipeline`
+                    : `No persona assignment for ${doc.mobile} — marking name/bio step done with current profile`);
+                updateCount = 1;
+            }
+            await this.update(doc.mobile, {
+                ...(updateCount > 0 ? { nameBioUpdatedAt: new Date() } : {}),
+                lastUpdateAttempt: new Date(),
+                failedUpdateAttempts: 0,
+                lastUpdateFailure: null,
+                organicActivityAt: new Date(),
+            });
+            this.logger.debug(`Updated name and bio for ${doc.mobile}`);
+            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(40000, 5000, 30000, 50000));
+            return updateCount;
+        }
+        catch (error) {
+            const errorDetails = this.handleError(error, 'Error updating profile', doc.mobile);
+            await this.update(doc.mobile, {
+                lastUpdateAttempt: new Date(),
+                failedUpdateAttempts: failedAttempts + 1,
+                lastUpdateFailure: new Date(),
+            });
+            if ((0, isPermanentError_1.default)(errorDetails)) {
+                const reason = await this.buildPermanentAccountReason(errorDetails.message, telegramClient);
+                await this.deactivateClient(doc.mobile, reason, { permanent: true });
+            }
+            return 0;
+        }
+        finally {
+            await this.safeUnregisterClient(doc.mobile);
+        }
+    }
+    async updateStatus(mobile, status, message) {
+        const pool = this.clientType;
+        const Pool = pool === 'buffer' ? 'Buffer' : 'Promote';
+        const updateData = { status };
+        if (message)
+            updateData.message = message;
+        if (status === 'inactive') {
+            updateData.inUse = false;
+        }
+        try {
+            const updated = await this.update(mobile, updateData);
+            this.logger.log(`${Pool} client ${mobile} status updated to ${status}`);
+            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                title: `${Pool} status`,
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'New status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                ],
+            }).catch((error) => this.logger.error(`Failed to send ${pool} status success notification for ${mobile}: ${error instanceof Error ? error.message : String(error)}`));
+            return updated;
+        }
+        catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to update ${pool} client ${mobile} status to ${status}: ${errorMessage}`);
+            this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity: 'error',
+                title: 'Status failed',
+                fields: [
+                    { label: 'Mobile', value: mobile },
+                    { label: 'Attempted status', value: status, code: false },
+                    { label: 'Reason', value: message || '-', code: false },
+                    { label: 'Error', value: errorMessage.substring(0, 120), code: false },
+                ],
+            }).catch((notifyError) => this.logger.error(`Failed to send ${pool} status failure notification for ${mobile}: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`));
+            throw error;
+        }
+    }
+    async markAsActive(mobile, message = 'Account is functioning properly') {
+        return this.updateStatus(mobile, 'active', message);
+    }
+    async markAsInactive(mobile, reason) {
+        try {
+            const existing = await this.findOne(mobile, false);
+            if (!existing || existing.status === 'inactive') {
+                return existing;
+            }
+            this.logger.log(`Marking ${this.clientType} client ${mobile} as inactive: ${reason}`);
+            return await this.updateStatus(mobile, 'inactive', reason);
+        }
+        catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            this.logger.error(`Failed to mark ${this.clientType} client ${mobile} as inactive: ${errorMessage}`);
+            return null;
+        }
+    }
+    async runWarmupMaintenance(hooks) {
+        const profile = this.poolProfile;
+        const pool = this.clientType;
+        const model = this.model;
+        const clients = await this.clientService.findAll();
+        const otherPoolMobiles = await hooks.otherPoolMobiles();
+        const clientMap = new Map(clients.map((client) => [client.clientId, client]));
+        const now = Date.now();
+        const clientMainMobiles = clients.map((c) => c.mobile);
+        const assigned = await model
+            .find({ clientId: { $exists: true, $ne: null }, status: 'active' })
+            .exec();
+        const allPoolMobiles = (await model.find({}, { mobile: 1 }).lean().exec()).map((doc) => doc.mobile);
+        const goodIds = (0, candidate_source_1.buildEnrolmentExclusions)(clientMainMobiles, otherPoolMobiles, allPoolMobiles);
+        let totalUpdates = 0;
+        const updatedEntries = [];
+        if (profile.warmupRun.logGoodIdsCount) {
+            this.logger.debug(`Checking ${pool} clients, good IDs count: ${goodIds.length}`);
+        }
+        const toProcess = [];
+        for (const doc of assigned) {
+            if (!doc.clientId)
+                continue;
+            const client = clientMap.get(doc.clientId);
+            if (!client)
+                continue;
+            if (profile.excludePrimaryMobiles && doc.mobile === client.mobile) {
+                this.logger.debug(`Skipping ${pool} maintenance for ${doc.mobile}: currently attached as primary client mobile`);
+                continue;
+            }
+            if (doc.inUse === true)
+                continue;
+            if (this.isOnCooldown(doc.mobile, doc.lastUpdateAttempt, now))
+                continue;
+            const warmupPhase = doc.warmupPhase;
+            if (!warmupPhase) {
+                this.logger.warn(`Skipping ${pool} client ${doc.mobile}: incomplete lifecycle metadata`);
+                continue;
+            }
+            if ((warmupPhase === warmup_phases_1.WarmupPhase.READY || warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED)
+                && !profile.terminalPhasesInWarmupRun.includes(warmupPhase))
+                continue;
+            const warmupAction = (0, warmup_phases_1.getWarmupPhaseAction)(doc, now, { operationalFloor: this.operationalFloor });
+            const priority = (0, warmup_phases_1.calculateWarmupPriority)(doc, warmupAction, now);
+            toProcess.push({ doc, client, clientId: doc.clientId, priority, warmupAction });
+        }
+        toProcess.sort((a, b) => b.priority - a.priority);
+        this.orderSessionRotatedOldestCheckedFirst(toProcess);
+        const healthCheckCap = Math.min(pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN, profile.warmupRun.healthCheckShare);
+        let healthCheckConnects = 0;
+        let healthChecksDeferred = 0;
+        const effectiveCap = this.getEffectiveUpdatesCap(toProcess.length);
+        let sensitiveUpdates = 0;
+        let organicUpdates = 0;
+        this.logger.log(`${profile.label} warmup run: ${toProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
+        for (const { doc, client, warmupAction } of toProcess) {
+            if (totalUpdates >= effectiveCap)
+                break;
+            const warmupPhase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
+            if (warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
+                if (healthCheckConnects >= healthCheckCap) {
+                    healthChecksDeferred++;
+                    continue;
+                }
+                const lastChecked = doc.lastChecked ? new Date(doc.lastChecked).getTime() : 0;
+                const healthCheck = await this.performHealthCheck(doc.mobile, lastChecked, now);
+                if (healthCheck.performed !== false)
+                    healthCheckConnects++;
+                if (!healthCheck.passed)
+                    continue;
+            }
+            const plannedAction = warmupAction.action;
+            if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
+                continue;
+            }
+            const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
+            if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                continue;
+            }
+            if (plannedSensitive)
+                sensitiveUpdates++;
+            if (plannedAction === 'organic_only')
+                organicUpdates++;
+            const processResult = await this.processClient(doc, client, warmupAction);
+            if (processResult.updateCount > 0) {
+                totalUpdates += processResult.updateCount;
+                updatedEntries.push({ clientId: client.clientId, mobile: doc.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
+            }
+        }
+        if (healthChecksDeferred > 0) {
+            this.logger.log(`${profile.label} warmup run: health-check cap ${healthCheckCap} reached, ${healthChecksDeferred} session_rotated account(s) deferred to the next run`);
+        }
+        await hooks.enrolAfterWarmup({ clients, assigned, goodIds, now, totalUpdates, updatedEntries });
+    }
+    orderSessionRotatedOldestCheckedFirst(list) {
+        const slots = [];
+        list.forEach((entry, i) => { if (entry.doc.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED)
+            slots.push(i); });
+        if (slots.length < 2)
+            return;
+        const ts = (v) => client_helper_utils_1.ClientHelperUtils.getTimestamp(v) || 0;
+        const ordered = slots
+            .map((i, rank) => ({ entry: list[i], rank }))
+            .sort((a, b) => (ts(a.entry.doc.lastChecked) - ts(b.entry.doc.lastChecked))
+            || (ts(a.entry.doc.lastHealthCheckAttemptAt) - ts(b.entry.doc.lastHealthCheckAttemptAt))
+            || (a.rank - b.rank));
+        slots.forEach((slot, k) => { list[slot] = ordered[k].entry; });
+    }
+    get poolProfile() {
+        return this.clientType === 'buffer' ? pool_profile_1.BUFFER_PROFILE : pool_profile_1.PROMOTE_PROFILE;
+    }
+    drawPacing(draw) {
+        if (draw.kind === 'fixed')
+            return draw.ms;
+        const base = draw.addProcessingDelay ? this.config.clientProcessingDelay : 0;
+        if (draw.kind === 'gaussian') {
+            return client_helper_utils_1.ClientHelperUtils.gaussianRandom(base + draw.mean, draw.sd, base + draw.min, base + draw.max);
+        }
+        return base + draw.base + Math.random() * draw.spread;
+    }
+    async pace(draw) {
+        await (0, Helpers_1.sleep)(this.drawPacing(draw));
+    }
+    async getPrimaryClientMobiles(clientId) {
+        const clients = await this.clientService.findAll();
+        const primaryClientMobiles = new Set(clients
+            .filter((client) => !!client.mobile && (!clientId || client.clientId === clientId))
+            .map((client) => client.mobile));
+        this.logger.debug('Resolved primary client mobiles for buffer guards', {
+            clientId: clientId || 'all',
+            count: primaryClientMobiles.size,
+        });
+        return primaryClientMobiles;
+    }
+    isPrimaryClientMobile(mobile, primaryClientMobiles) {
+        return !!mobile && primaryClientMobiles.has(mobile);
+    }
+    async findPrioritizedJoinCandidates(query) {
+        const model = this.model;
+        const limit = this.config.maxMapSize;
+        const operationalFloor = this.config.operationalChannelThreshold ?? this.poolProfile.operationalFloor;
+        const recoveryQuery = {
+            ...query,
+            warmupPhase: { $in: [warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
+            channels: { $lt: operationalFloor },
+        };
+        const recoveryQueryResult = model
+            .find(recoveryQuery)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
+        if (recoveryCandidates.length >= limit)
+            return recoveryCandidates;
+        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
+        const standardQueryResult = model
+            .find(query)
+            .sort({ channels: -1 })
+            .limit(limit);
+        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
+        return [
+            ...recoveryCandidates,
+            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
+        ].slice(0, limit);
+    }
+    async resolveJoinCandidateQuery(query) {
+        const executable = query;
+        return typeof executable.exec === 'function'
+            ? executable.exec()
+            : Promise.resolve(query);
+    }
+    async refillJoinQueue(clientId) {
+        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing)
+            return 0;
+        if (this.telegramService.hasActiveClientSetup())
+            return 0;
+        this.resetDailyJoinCountersIfNeeded();
+        const profile = this.poolProfile;
+        const primaryClientMobiles = profile.excludePrimaryMobiles
+            ? await this.getPrimaryClientMobiles(clientId)
+            : new Set();
+        const excludedMobiles = new Set([
+            ...this.joinChannelMap.keys(),
+            ...primaryClientMobiles,
+        ]);
+        const query = {
+            status: 'active',
+            channels: { $lt: this.config.channelTarget },
+            mobile: { $nin: Array.from(excludedMobiles) },
+            ...this.getJoinCapacityEligibilityFilter(),
+        };
+        if (clientId)
+            query.clientId = clientId;
+        if (profile.joinSweep.logPreparedSweep) {
+            this.logger.debug('Refill join queue query prepared', {
+                clientId: clientId || 'all',
+                excludedCount: excludedMobiles.size,
+            });
+        }
+        const eligible = await this.findPrioritizedJoinCandidates(query);
+        let added = 0;
+        let leaveAdded = 0;
+        for (const doc of eligible) {
+            if (this.isPrimaryClientMobile(doc.mobile, primaryClientMobiles)) {
+                this.logger.debug(`Skipping refill candidate ${doc.mobile}: it is the live client mobile`);
+                continue;
+            }
+            if (this.isMobileDailyCapped(doc.mobile))
+                continue;
+            let client = null;
+            try {
+                client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
+                const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
+                await this.update(doc.mobile, { channels: channels.ids.length });
+                if (this.isTerminalOperationalAfterRefresh(doc, channels.ids.length))
+                    continue;
+                if (channels.canSendFalseCount < 10) {
+                    const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(doc.mobile);
+                    const channelsToJoin = await this.fetchJoinCandidates(doc.mobile, channels.ids.length, remaining, this.getJoinedChannelIdsFromInfo(channels));
+                    if (channelsToJoin.length === 0)
+                        continue;
+                    if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
+                        added++;
+                    }
+                }
+                else if (!this.leaveChannelMap.has(doc.mobile)) {
+                    if (this.queueLeaveChannelsIfAllowed(doc, channels.canSendFalseChats)) {
+                        leaveAdded++;
+                    }
+                }
+            }
+            catch (error) {
+                const errorDetails = (0, parseError_1.parseError)(error, `RefillJoinQueueErr: ${doc.mobile}`);
+                if ((0, isPermanentError_1.default)(errorDetails)) {
+                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
+                    await this.deactivateClient(doc.mobile, reason, { permanent: true });
+                }
+            }
+            finally {
+                await this.safeUnregisterClient(doc.mobile);
+            }
+        }
+        if (added > 0) {
+            this.logger.log(`Refilled join queue with ${added} ${this.clientType} clients`);
+        }
+        if (leaveAdded > 0 && !this.leaveChannelIntervalId) {
+            this.createTimeout(() => this.leaveChannelQueue(), this.drawPacing(pool_profile_1.ONBOARDING_PACING.joinSweep.refillLeaveQueueStart));
+        }
+        return added;
+    }
+    async runJoinSweep(skipExisting, clientId) {
+        const cfg = this.poolProfile.joinSweep;
+        if (this.telegramService.hasActiveClientSetup()) {
+            return cfg.activeSetupMessage;
+        }
+        if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
+            this.logger.warn('Join/leave processing still in progress, skipping re-entry');
+            return 'Join/leave still processing, skipped';
+        }
+        if (this.isPrepareJoinChannelsProcessing) {
+            return 'Join-channel prepare already running, skipped';
+        }
+        this.isPrepareJoinChannelsProcessing = true;
+        this.logger.log(cfg.startLog);
+        try {
+            if (cfg.scopesByClientId)
+                this.joinScopeClientId = clientId || null;
+            const primaryClientMobiles = this.poolProfile.excludePrimaryMobiles
+                ? await this.getPrimaryClientMobiles(clientId)
+                : new Set();
+            const preservedMobiles = await this.prepareJoinChannelRefresh(skipExisting);
+            if (!cfg.wrapError)
+                return await this.joinSweepAccounts(clientId, preservedMobiles, primaryClientMobiles);
+            try {
+                return await this.joinSweepAccounts(clientId, preservedMobiles, primaryClientMobiles);
+            }
+            catch (error) {
+                this.logger.error(cfg.wrapError.log, error);
+                throw new Error(cfg.wrapError.message);
+            }
+        }
+        finally {
+            this.isPrepareJoinChannelsProcessing = false;
+        }
+    }
+    async joinSweepAccounts(clientId, preservedMobiles, primaryClientMobiles) {
+        const cfg = this.poolProfile.joinSweep;
+        const pacing = pool_profile_1.ONBOARDING_PACING.joinSweep;
+        const query = {
+            channels: { $lt: this.config.channelTarget },
+            mobile: { $nin: Array.from(new Set([...preservedMobiles, ...primaryClientMobiles])) },
+            status: 'active',
+            ...this.getJoinCapacityEligibilityFilter(),
+        };
+        if (clientId)
+            query.clientId = clientId;
+        if (cfg.logPreparedSweep) {
+            this.logger.info('Prepared buffer join-channel sweep', {
+                clientId: clientId || 'all',
+                preservedCount: preservedMobiles.size,
+                primaryClientCount: primaryClientMobiles.size,
+            });
+        }
+        const clients = await this.findPrioritizedJoinCandidates(query);
+        const joinSet = new Set();
+        const leaveSet = new Set();
+        for (let i = 0; i < clients.length; i++) {
+            const document = clients[i];
+            const mobile = document.mobile;
+            if (this.isMobileDailyCapped(mobile))
+                continue;
+            let client = null;
+            try {
+                client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
+                await this.pace(pacing.afterConnect);
+                const channels = await (0, channelinfo_1.channelInfo)(client.client, true);
+                await this.pace(pacing.afterChannelInfo);
+                await this.update(mobile, { channels: channels.ids.length });
+                if (this.isTerminalOperationalAfterRefresh(document, channels.ids.length)) {
+                    continue;
+                }
+                if (channels.canSendFalseCount < 10) {
+                    const excludedIds = this.getJoinedChannelIdsFromInfo(channels);
+                    await this.pace(pacing.beforeFetchCandidates);
+                    const remaining = this.config.maxChannelJoinsPerDay - this.getDailyJoinCount(mobile);
+                    const result = await this.fetchJoinCandidates(mobile, channels.ids.length, remaining, excludedIds);
+                    if (!this.joinChannelMap.has(mobile)) {
+                        if (this.safeSetJoinChannelMap(mobile, result)) {
+                            joinSet.add(mobile);
+                        }
+                    }
+                }
+                else {
+                    if (!this.leaveChannelMap.has(mobile)) {
+                        if (this.queueLeaveChannelsIfAllowed(document, channels.canSendFalseChats)) {
+                            leaveSet.add(mobile);
+                        }
+                    }
+                }
+            }
+            catch (error) {
+                const errorDetails = cfg.errorContext
+                    ? (0, parseError_1.parseError)(error, `${cfg.errorContext}: ${mobile}`)
+                    : (0, parseError_1.parseError)(error);
+                if ((0, isPermanentError_1.default)(errorDetails)) {
+                    await this.pace(pacing.beforePermanentHandling);
+                    const reason = await this.buildPermanentAccountReason(errorDetails.message, client);
+                    await this.deactivateClient(mobile, reason, { permanent: true });
+                }
+            }
+            finally {
+                await this.safeUnregisterClient(mobile);
+                await this.pace(pacing.betweenAccounts);
+            }
+        }
+        await this.pace(pacing.settle);
+        if (joinSet.size > 0) {
+            this.createTimeout(() => this.joinChannelQueue(), this.drawPacing(pacing.joinQueueStart));
+        }
+        if (leaveSet.size > 0) {
+            this.createTimeout(() => this.leaveChannelQueue(), this.drawPacing(pacing.leaveQueueStart));
+        }
+        return cfg.resultTemplate.replace('{join}', String(joinSet.size)).replace('{leave}', String(leaveSet.size));
     }
     async onModuleDestroy() {
         await this.cleanup();
@@ -42524,7 +41854,7 @@ class BaseClientService {
         const stale = neverChecked.length < fetchLimit
             ? await this.model
                 .find({ ...base, lastChecked: { $lt: new Date(now - 5 * this.ONE_DAY_MS) } })
-                .sort({ channels: 1 })
+                .sort({ lastChecked: 1, channels: 1 })
                 .limit(fetchLimit - neverChecked.length)
             : [];
         return [...neverChecked, ...stale];
@@ -42545,8 +41875,9 @@ class BaseClientService {
                 await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(16000, 2500, 12000, 20000));
             }
             const lastChecked = client.lastChecked ? new Date(client.lastChecked).getTime() : 0;
-            await this.performHealthCheck(client.mobile, lastChecked, now);
-            checked++;
+            const result = await this.performHealthCheck(client.mobile, lastChecked, now);
+            if (result?.performed !== false)
+                checked++;
         }
         return checked;
     }
@@ -44764,6 +44095,509 @@ function mobilesEqual(a, b) {
     catch {
         return false;
     }
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/onboarding/candidate-source.ts"
+/*!**************************************************************!*\
+  !*** ./src/components/shared/onboarding/candidate-source.ts ***!
+  \**************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ENROLMENT_MIN_TOTAL_CHATS = void 0;
+exports.buildEnrolmentExclusions = buildEnrolmentExclusions;
+exports.enrolmentEligibilityFilter = enrolmentEligibilityFilter;
+exports.enrolmentIneligibilityReasons = enrolmentIneligibilityReasons;
+exports.findEnrolmentCandidates = findEnrolmentCandidates;
+exports.runEnrolmentBatch = runEnrolmentBatch;
+const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+const client_helper_utils_1 = __webpack_require__(/*! ../client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+function buildEnrolmentExclusions(...groups) {
+    return groups.flat().filter((id) => typeof id === 'string' && id.length > 0);
+}
+exports.ENROLMENT_MIN_TOTAL_CHATS = 150;
+function enrolmentEligibilityFilter(inactiveSince) {
+    return {
+        expired: false,
+        twoFA: false,
+        lastActive: { $lt: inactiveSince },
+        totalChats: { $gt: exports.ENROLMENT_MIN_TOTAL_CHATS },
+    };
+}
+function enrolmentIneligibilityReasons(user, inactiveSince) {
+    const reasons = [];
+    if (user.expired !== false)
+        reasons.push('account is expired');
+    if (user.twoFA !== false)
+        reasons.push('2FA is already set (twoFA must be false)');
+    if (typeof user.lastActive !== 'string' || !(user.lastActive < inactiveSince)) {
+        reasons.push(`owner active recently (lastActive ${user.lastActive ?? 'missing'}, must be before ${inactiveSince})`);
+    }
+    if (typeof user.totalChats !== 'number' || !(user.totalChats > exports.ENROLMENT_MIN_TOTAL_CHATS)) {
+        reasons.push(`too few chats (totalChats ${user.totalChats ?? 'missing'}, must be > ${exports.ENROLMENT_MIN_TOTAL_CHATS})`);
+    }
+    return reasons;
+}
+function findEnrolmentCandidates(usersService, goodIds, limit, inactiveSince) {
+    return usersService.executeQuery({ mobile: { $nin: goodIds }, ...enrolmentEligibilityFilter(inactiveSince) }, { tgId: 1 }, limit);
+}
+async function runEnrolmentBatch(input) {
+    let totalNeeded = 0;
+    for (const clientNeed of input.needs)
+        totalNeeded += clientNeed.totalNeeded;
+    totalNeeded = Math.min(totalNeeded, input.maxNewPerRun);
+    if (totalNeeded === 0)
+        return { createdCount: 0, attemptedCount: 0, createdEntries: [] };
+    const documents = await findEnrolmentCandidates(input.usersService, input.goodIds, totalNeeded + 5, input.inactiveSince);
+    const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
+    const assignmentQueue = [];
+    const projectedHealthyCounts = new Map(input.countedPerClient || []);
+    for (const clientNeed of input.needs) {
+        const currentHealthyCount = projectedHealthyCounts.get(clientNeed.clientId) || 0;
+        const remainingCapacity = Math.max(0, input.capFor(clientNeed.clientId) - currentHealthyCount);
+        const cappedNeed = Math.min(clientNeed.totalNeeded, remainingCapacity);
+        for (let i = 0; i < cappedNeed; i++)
+            assignmentQueue.push({ clientId: clientNeed.clientId, priority: clientNeed.priority });
+        if (cappedNeed > 0)
+            projectedHealthyCounts.set(clientNeed.clientId, currentHealthyCount + cappedNeed);
+    }
+    let attemptedCount = 0;
+    let createdCount = 0;
+    let assignmentIndex = 0;
+    const createdEntries = [];
+    const enrolledThisRun = new Set();
+    while (attemptedCount < totalNeeded && documents.length > 0 && assignmentIndex < assignmentQueue.length) {
+        const document = documents.shift();
+        if (!document || !document.mobile || !document.tgId)
+            continue;
+        if (enrolledThisRun.has(document.mobile)) {
+            input.logger.debug(`Skipping ${document.mobile}: already attempted in this enrollment run`);
+            continue;
+        }
+        enrolledThisRun.add(document.mobile);
+        const assignment = assignmentQueue[assignmentIndex];
+        if (!assignment)
+            break;
+        try {
+            const created = await input.enrolOne({ mobile: document.mobile, tgId: document.tgId }, assignment.clientId, today);
+            if (created) {
+                assignmentIndex++;
+                createdCount++;
+                createdEntries.push({ clientId: assignment.clientId, mobile: document.mobile });
+            }
+            attemptedCount++;
+        }
+        catch {
+            input.logger.error(`Error creating connection for ${document.mobile}`);
+            await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
+            attemptedCount++;
+        }
+    }
+    input.logger.log(`Dynamic batch completed: Created ${createdCount} new ${input.label} clients (${attemptedCount} attempted)`);
+    return { createdCount, attemptedCount, createdEntries };
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/onboarding/enrolment.ts"
+/*!*******************************************************!*\
+  !*** ./src/components/shared/onboarding/enrolment.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.enrolPoolClientFromUser = enrolPoolClientFromUser;
+const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+const connection_manager_1 = __webpack_require__(/*! ../../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
+const channelinfo_1 = __webpack_require__(/*! ../../../utils/telegram-utils/channelinfo */ "./src/utils/telegram-utils/channelinfo.ts");
+const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
+const client_helper_utils_1 = __webpack_require__(/*! ../client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+const enrollment_lock_1 = __webpack_require__(/*! ../enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
+const pool_claim_1 = __webpack_require__(/*! ./pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
+const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
+async function enrolPoolClientFromUser(port, document, targetClientId, availableDate) {
+    const { profile, logger } = port;
+    const pool = profile.kind;
+    const enrolledIn = await port.isMobileEnrolledAnywhere(document.mobile);
+    if (enrolledIn) {
+        logger.debug(`Skipping ${document.mobile}: already enrolled in ${enrolledIn}`);
+        return false;
+    }
+    const telegramClient = await connection_manager_1.connectionManager.getClient(document.mobile, { autoDisconnect: false });
+    try {
+        const hasPassword = await telegramClient.hasPassword();
+        if (hasPassword) {
+            logger.debug(`Skipping ${pool} enrollment for ${document.mobile}: account already has a 2FA password`);
+            await port.updateUser2FAStatus(document.tgId, document.mobile);
+            return false;
+        }
+        const channels = await (0, channelinfo_1.channelInfo)(telegramClient.client, true);
+        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(7500, 1250, 5000, 10000));
+        const user = (await port.usersService.search({ mobile: document.mobile }))[0];
+        if (!user?.session?.trim()) {
+            logger.warn(`Skipping ${pool} enrollment for ${document.mobile}: source user/session missing`);
+            return false;
+        }
+        const targetAvailableDate = availableDate || client_helper_utils_1.ClientHelperUtils.getTodayDateString();
+        const extras = port.docExtras();
+        const poolDoc = {
+            tgId: document.tgId,
+            ...extras,
+            session: user.session.trim(),
+            mobile: document.mobile,
+            lastUsed: null,
+            availableDate: targetAvailableDate,
+            channels: channels.ids.length,
+            clientId: targetClientId,
+            status: 'active',
+            message: 'Enrolled for warmup',
+        };
+        const canonical = port.canonicalMobile(document.mobile);
+        const enrolled = await (0, enrollment_lock_1.withEnrollmentLock)(canonical, async () => {
+            const claim = await (0, pool_claim_1.withPoolClaim)(port.model, canonical, profile.collection, () => writeIfStillFree());
+            if ('heldBy' in claim) {
+                logger.warn(`Skipping ${pool} enrollment for ${document.mobile}: ${claim.heldBy} is enrolling it right now`);
+                return false;
+            }
+            return claim.value;
+        });
+        async function writeIfStillFree() {
+            const already = await port.isMobileEnrolledAnywhere(document.mobile);
+            if (already && already !== profile.collection) {
+                logger.warn(`Skipping ${pool} enrollment for ${document.mobile}: now enrolled in ${already}`);
+                return false;
+            }
+            await port.model.findOneAndUpdate({ mobile: document.mobile }, {
+                $set: {
+                    ...poolDoc,
+                    warmupPhase: warmup_phases_1.WarmupPhase.ENROLLED,
+                    warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
+                    enrolledAt: new Date(),
+                },
+            }, { returnDocument: 'after', upsert: true }).exec();
+            return true;
+        }
+        if (!enrolled)
+            return false;
+        logger.log(`Created ${profile.label}Client for ${targetClientId} with availability ${targetAvailableDate}`);
+        await port.sendAccountNotice({
+            severity: 'success',
+            title: `${profile.label} enrolled`,
+            fields: [
+                { label: 'Client ID', value: targetClientId },
+                { label: 'Mobile', value: document.mobile },
+                { label: 'Available date', value: targetAvailableDate, code: false },
+                { label: 'Channels', value: channels.ids.length, code: false },
+                { label: 'Warmup phase', value: warmup_phases_1.WarmupPhase.ENROLLED, code: false },
+                { label: 'Source TG ID', value: document.tgId },
+            ],
+        });
+        return true;
+    }
+    catch (error) {
+        const errorDetails = port.handleError(error, 'Error processing client', document.mobile);
+        logger.error(`Error processing ${pool} client ${document.mobile}: ${errorDetails.message}`);
+        if ((0, isPermanentError_1.default)(errorDetails)) {
+            try {
+                await port.usersService.expireAccount(document.mobile, errorDetails.message);
+            }
+            catch { }
+        }
+        return false;
+    }
+    finally {
+        await port.safeUnregisterClient(document.mobile);
+        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(12500, 1250, 10000, 15000));
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/onboarding/pool-claim.ts"
+/*!********************************************************!*\
+  !*** ./src/components/shared/onboarding/pool-claim.ts ***!
+  \********************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.POOL_CLAIM_LEASE_MS = exports.POOL_CLAIM_COLLECTION = void 0;
+exports.withPoolClaim = withPoolClaim;
+exports.POOL_CLAIM_COLLECTION = 'poolEnrolmentClaims';
+exports.POOL_CLAIM_LEASE_MS = 60_000;
+const indexReady = new WeakMap();
+function claimCollection(model) {
+    const db = model.db;
+    if (!db || typeof db.collection !== 'function')
+        return null;
+    const col = db.collection(exports.POOL_CLAIM_COLLECTION);
+    if (!indexReady.has(db)) {
+        indexReady.set(db, col.createIndex({ mobile: 1 }, { unique: true, name: 'mobile_unique' }));
+    }
+    return col;
+}
+function isDuplicateKey(error) {
+    return error?.code === 11000;
+}
+async function withPoolClaim(model, mobile, pool, fn, now = Date.now) {
+    const col = claimCollection(model);
+    if (!col)
+        return { claimed: true, value: await fn() };
+    await indexReady.get(model.db);
+    const at = new Date(now());
+    try {
+        await col.findOneAndUpdate({ mobile, $or: [{ pool }, { at: { $lt: new Date(at.getTime() - exports.POOL_CLAIM_LEASE_MS) } }] }, { $set: { mobile, pool, at } }, { upsert: true });
+    }
+    catch (error) {
+        if (!isDuplicateKey(error))
+            throw error;
+        const other = pool === 'bufferClients' ? 'promoteClients' : 'bufferClients';
+        return { claimed: false, heldBy: other };
+    }
+    try {
+        return { claimed: true, value: await fn() };
+    }
+    finally {
+        await col.updateOne({ mobile, pool, at }, { $set: { at: new Date(0) } }).catch(() => undefined);
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/onboarding/pool-profile.ts"
+/*!**********************************************************!*\
+  !*** ./src/components/shared/onboarding/pool-profile.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PROMOTE_PROFILE = exports.BUFFER_PROFILE = exports.HEALTH_CHECK_CONNECTIONS_PER_RUN = exports.ONBOARDING_PACING = void 0;
+exports.isHealthyForLegacyCap = isHealthyForLegacyCap;
+const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
+exports.ONBOARDING_PACING = Object.freeze({
+    clientProcessingDelayMs: 10000,
+    leaveChannelIntervalMs: 120 * 1000,
+    setAsPostChannelInfoSleep: Object.freeze({ mean: 7500, sd: 1250, min: 5000, max: 10000 }),
+    joinSweep: Object.freeze({
+        afterConnect: Object.freeze({ kind: 'uniform', base: 5000, spread: 3000 }),
+        afterChannelInfo: Object.freeze({ kind: 'uniform', base: 5000, spread: 3000 }),
+        beforeFetchCandidates: Object.freeze({ kind: 'uniform', base: 5000, spread: 3000 }),
+        beforePermanentHandling: Object.freeze({ kind: 'fixed', ms: 1000 }),
+        betweenAccounts: Object.freeze({ kind: 'gaussian', mean: 2500, sd: 1500, min: 0, max: 5000, addProcessingDelay: true }),
+        settle: Object.freeze({ kind: 'gaussian', mean: 7500, sd: 750, min: 6000, max: 9000 }),
+        joinQueueStart: Object.freeze({ kind: 'uniform', base: 4000, spread: 2000 }),
+        leaveQueueStart: Object.freeze({ kind: 'gaussian', mean: 12500, sd: 1250, min: 10000, max: 15000 }),
+        refillLeaveQueueStart: Object.freeze({ kind: 'gaussian', mean: 6500, sd: 1000, min: 5000, max: 8000 }),
+    }),
+});
+exports.HEALTH_CHECK_CONNECTIONS_PER_RUN = 20;
+exports.BUFFER_PROFILE = Object.freeze({
+    kind: 'buffer',
+    collection: 'bufferClients',
+    label: 'Buffer',
+    operationalFloor: 200,
+    legacyHealthyCap: 20,
+    minTotalClients: 10,
+    maxNewClientsPerTrigger: 10,
+    channelTarget: 350,
+    excludePrimaryMobiles: true,
+    setAsRequiresClientId: true,
+    terminalPhasesInWarmupRun: [warmup_phases_1.WarmupPhase.SESSION_ROTATED],
+    setAs: Object.freeze({
+        entityName: 'BufferClient',
+        userNotFoundMessage: 'user not found',
+        alreadyExistsMessage: 'BufferClient already exist',
+        successMessage: 'Client enrolled as buffer successfully',
+        stampLastActive: false,
+        errorContext: 'Failed to set as Buffer Client',
+        permanentErrorReason: 'Permanent error during buffer enrollment',
+    }),
+    joinSweep: Object.freeze({
+        activeSetupMessage: 'Active client setup exists, skipping',
+        startLog: 'Starting join channel process for buffer clients',
+        scopesByClientId: true,
+        logPreparedSweep: true,
+        errorContext: 'JoinChannelErr',
+        resultTemplate: 'Buffer Join queued for: {join}, Leave queued for: {leave}',
+        wrapError: null,
+    }),
+    warmupRun: Object.freeze({ logGoodIdsCount: true, healthCheckShare: exports.HEALTH_CHECK_CONNECTIONS_PER_RUN }),
+    consumerMinAgeDays: 15,
+});
+exports.PROMOTE_PROFILE = Object.freeze({
+    kind: 'promote',
+    collection: 'promoteClients',
+    label: 'Promote',
+    operationalFloor: 230,
+    legacyHealthyCap: 30,
+    minTotalClients: 12,
+    maxNewClientsPerTrigger: 10,
+    channelTarget: 350,
+    excludePrimaryMobiles: false,
+    setAsRequiresClientId: false,
+    terminalPhasesInWarmupRun: [warmup_phases_1.WarmupPhase.SESSION_ROTATED],
+    setAs: Object.freeze({
+        entityName: 'PromoteClient',
+        userNotFoundMessage: 'User not found',
+        alreadyExistsMessage: 'PromoteClient already exists',
+        successMessage: 'Client enrolled as promote successfully',
+        stampLastActive: true,
+        errorContext: null,
+        permanentErrorReason: 'Permanent error during promote enrollment',
+    }),
+    joinSweep: Object.freeze({
+        activeSetupMessage: 'Active client setup exists, skipping promotion',
+        startLog: 'Starting join channel process',
+        scopesByClientId: false,
+        logPreparedSweep: false,
+        errorContext: null,
+        resultTemplate: 'Initiated Joining channels for {join} | Queued for leave: {leave}',
+        wrapError: Object.freeze({ log: 'Unexpected error during joinchannelForPromoteClients:', message: 'Failed to initiate channel joining process' }),
+    }),
+    warmupRun: Object.freeze({ logGoodIdsCount: false, healthCheckShare: 4 }),
+    consumerMinAgeDays: 15,
+});
+function isHealthyForLegacyCap(doc, operationalFloor, maxFailedAttempts) {
+    const phase = doc.warmupPhase;
+    if (!phase)
+        return false;
+    if (phase === warmup_phases_1.WarmupPhase.READY || phase === warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
+        return (doc.channels || 0) >= operationalFloor;
+    }
+    return (doc.failedUpdateAttempts || 0) < maxFailedAttempts;
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/onboarding/set-as.ts"
+/*!****************************************************!*\
+  !*** ./src/components/shared/onboarding/set-as.ts ***!
+  \****************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.setAsPoolClient = setAsPoolClient;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+const connection_manager_1 = __webpack_require__(/*! ../../Telegram/utils/connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
+const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
+const parseError_1 = __webpack_require__(/*! ../../../utils/parseError */ "./src/utils/parseError.ts");
+const client_helper_utils_1 = __webpack_require__(/*! ../client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+const enrollment_lock_1 = __webpack_require__(/*! ../enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
+const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
+const candidate_source_1 = __webpack_require__(/*! ./candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
+const pool_profile_1 = __webpack_require__(/*! ./pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
+async function setAsPoolClient(port, mobile, clientId, availableDate) {
+    const { profile } = port;
+    const cfg = profile.setAs;
+    const otherCollection = profile.collection === 'bufferClients' ? 'promoteClients' : 'bufferClients';
+    const canonicalMobile = port.canonicalMobile(mobile);
+    const user = (await port.usersService.search({ mobile: canonicalMobile, expired: false }))[0];
+    if (!user)
+        throw new common_1.BadRequestException(cfg.userNotFoundMessage);
+    const sourceSession = user.session?.trim();
+    if (!sourceSession) {
+        throw new common_1.BadRequestException(`User session missing; cannot create ${cfg.entityName}`);
+    }
+    const isExist = await port.findOne(canonicalMobile, false);
+    if (isExist)
+        throw new common_1.ConflictException(cfg.alreadyExistsMessage);
+    const clients = await port.clientService.findAll();
+    const clientMobiles = clients.map((client) => client?.mobile);
+    if (clientMobiles.some((clientMobile) => port.mobilesMatch(clientMobile, canonicalMobile)))
+        throw new common_1.BadRequestException('Number is an Active Client');
+    if (await port.otherPoolExistsByMobile(canonicalMobile)) {
+        throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${otherCollection}; refusing to create a cross-pool ${cfg.entityName}`);
+    }
+    const inactiveSince = port.enrolmentInactiveSince();
+    const eligible = await port.usersService.executeQuery({ mobile: canonicalMobile, ...(0, candidate_source_1.enrolmentEligibilityFilter)(inactiveSince) }, { tgId: 1 }, 1);
+    if (eligible.length === 0) {
+        const reasons = (0, candidate_source_1.enrolmentIneligibilityReasons)(user, inactiveSince);
+        throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is not eligible for ${cfg.entityName}: ${reasons.length > 0 ? reasons.join('; ') : 'does not match the auto-enrol candidate filter'}`);
+    }
+    let targetClientId = clientId;
+    if (!profile.setAsRequiresClientId && !targetClientId && clients.length > 0) {
+        const counts = await port.model.aggregate([
+            { $match: { clientId: { $exists: true, $ne: null }, status: 'active' } },
+            { $group: { _id: '$clientId', count: { $sum: 1 } } },
+        ]);
+        const countMap = new Map(counts.map((count) => [count._id, count.count]));
+        let minCount = Infinity;
+        for (const c of clients) {
+            const count = countMap.get(c.clientId) || 0;
+            if (count < minCount) {
+                minCount = count;
+                targetClientId = c.clientId;
+            }
+        }
+    }
+    await connection_manager_1.connectionManager.getClient(canonicalMobile, { autoDisconnect: false });
+    try {
+        const channels = await port.telegramService.getChannelInfo(canonicalMobile, true);
+        const p = pool_profile_1.ONBOARDING_PACING.setAsPostChannelInfoSleep;
+        await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(p.mean, p.sd, p.min, p.max));
+        const poolDoc = {
+            tgId: user.tgId,
+            ...(cfg.stampLastActive ? { lastActive: new Date().toISOString() } : {}),
+            session: sourceSession,
+            mobile: canonicalMobile,
+            availableDate,
+            channels: channels.ids.length,
+            clientId: targetClientId,
+            status: 'active',
+            message: 'Enrolled for warmup',
+            lastUsed: null,
+        };
+        await (0, enrollment_lock_1.withEnrollmentLock)(canonicalMobile, () => port.withPoolClaimOrRefuse(canonicalMobile, async () => {
+            const already = await port.isMobileEnrolledAnywhere(canonicalMobile);
+            if (already && already !== profile.collection) {
+                throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${already}; refusing to create a cross-pool ${cfg.entityName}`);
+            }
+            await port.model
+                .findOneAndUpdate({ mobile: canonicalMobile }, {
+                $set: {
+                    ...poolDoc,
+                    warmupPhase: warmup_phases_1.WarmupPhase.ENROLLED,
+                    warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
+                    enrolledAt: new Date(),
+                },
+            }, { returnDocument: 'after', upsert: true })
+                .exec();
+        }));
+    }
+    catch (error) {
+        const errorDetails = cfg.errorContext
+            ? (0, parseError_1.parseError)(error, `${cfg.errorContext} ${canonicalMobile}`)
+            : (0, parseError_1.parseError)(error);
+        if ((0, isPermanentError_1.default)(errorDetails)) {
+            try {
+                await port.usersService.expireAccount(canonicalMobile, cfg.permanentErrorReason);
+            }
+            catch { }
+        }
+        throw new common_1.HttpException(errorDetails.message, errorDetails.status);
+    }
+    finally {
+        await port.safeUnregisterClient(canonicalMobile);
+    }
+    return cfg.successMessage;
 }
 
 
