@@ -23331,13 +23331,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             ...assignedBufferMobiles,
         ].filter((id) => typeof id === 'string' && id.length > 0);
         const threeMonthsAgo = client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS);
-        const eligibleUserCount = await this.usersService.executeQuery({
+        const eligibleUserCount = await this.usersService.countDocuments({
             mobile: { $nin: goodIds },
-            expired: false,
-            twoFA: false,
-            lastActive: { $lt: threeMonthsAgo },
-            totalChats: { $gt: 150 },
-        }, { _id: 1 }, totalSlotsNeeded + 5);
+            ...(0, candidate_source_1.enrolmentEligibilityFilter)(threeMonthsAgo),
+        });
         return {
             maxNewClientsPerTrigger: this.config.maxNewClientsPerTrigger,
             minTotalClients: this.config.minTotalClients,
@@ -23349,8 +23346,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             totalClientsNeedingEnrollment: clientsNeedingBufferClients.length,
             totalSlotsRequested: clientsNeedingBufferClients.reduce((s, c) => s + c.need, 0),
             totalSlotsAllocated: totalSlotsNeeded,
-            eligibleUsersAvailable: eligibleUserCount.length,
-            wouldCreate: Math.min(totalSlotsNeeded, eligibleUserCount.length),
+            eligibleUsersAvailable: eligibleUserCount,
+            wouldCreate: Math.min(totalSlotsNeeded, eligibleUserCount),
             allocations,
             perClientDecisions: perClientDecisions.sort((a, b) => b.totalNeeded - a.totalNeeded),
         };
@@ -30392,6 +30389,9 @@ exports.DailyAnalyticsService = exports.REVENUE_FROM_DAY = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const analytics_pg_reader_1 = __webpack_require__(/*! ./analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 exports.REVENUE_FROM_DAY = '2026-10-04';
+const ZERO_REV = { owner: 0, gross: 0 };
+const addRev = (a, b) => ({ owner: a.owner + b.owner, gross: a.gross + b.gross });
+const revFields = (r) => ({ revenue: r.owner, grossRevenue: r.gross, flaggedRevenue: r.gross - r.owner });
 const PG_COLUMNS = {
     promote: { sent: 'sent', success: 'delivered', failed: 'failed', banned: 'banned' },
     reaction: {
@@ -30454,9 +30454,9 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         if (!from)
             return out;
         const rows = await this.pg.query(`SELECT to_char((ts AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS d, client_id,
-              SUM(amount)::bigint AS amt
-         FROM payment_event
-        WHERE ts >= $1::timestamptz AND NOT is_cheat AND amount > 0
+              SUM(owner_amount)::bigint AS owner, SUM(amount)::bigint AS gross
+         FROM payment_event_owner
+        WHERE ts >= $1::timestamptz AND amount > 0
         GROUP BY 1, 2`, [`${from}T00:00:00+05:30`], this.onErr(ctx));
         if (!rows)
             return undefined;
@@ -30466,7 +30466,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
                 continue;
             if (!out.has(r.d))
                 out.set(r.d, new Map());
-            out.get(r.d).set(r.client_id, num(r.amt));
+            out.get(r.d).set(r.client_id, { owner: num(r.owner), gross: num(r.gross) });
         }
         return out;
     }
@@ -30494,7 +30494,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
                 out[f] = num(row[f]);
             if (metric === 'user') {
                 const perClient = revenue.get(date);
-                out.revenue = perClient ? [...perClient.values()].reduce((a, b) => a + b, 0) : 0;
+                Object.assign(out, revFields(perClient ? [...perClient.values()].reduce(addRev, ZERO_REV) : ZERO_REV));
                 out.revenueSource = (date >= exports.REVENUE_FROM_DAY ? 'payment_event' : 'unavailable');
             }
             return out;
@@ -30521,7 +30521,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
         const perClientRevenue = new Map();
         for (const m of revenue.values())
             for (const [c, a] of m)
-                perClientRevenue.set(c, (perClientRevenue.get(c) || 0) + a);
+                perClientRevenue.set(c, addRev(perClientRevenue.get(c) || ZERO_REV, a));
         const totals = new Map();
         const add = (id, row) => {
             const key = String(id);
@@ -30541,7 +30541,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             .map(([clientId, t]) => {
             const out = { clientId, ...t };
             if (metric === 'user') {
-                out.revenue = perClientRevenue.get(clientId) || 0;
+                Object.assign(out, revFields(perClientRevenue.get(clientId) || ZERO_REV));
                 out.revenueSource = source;
             }
             return out;
@@ -30565,7 +30565,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             for (const f of fields)
                 out[f] = num(r[f]);
             if (metric === 'user') {
-                out.revenue = 0;
+                Object.assign(out, revFields(ZERO_REV));
                 out.revenueSource = 'unavailable';
             }
             return out;
@@ -30598,7 +30598,7 @@ let DailyAnalyticsService = class DailyAnalyticsService {
             for (const f of fields)
                 out[f] = num(r[f]);
             if (metric === 'user') {
-                out.revenue = 0;
+                Object.assign(out, revFields(ZERO_REV));
                 out.revenueSource = 'unavailable';
             }
             return out;
@@ -37840,6 +37840,16 @@ __decorate([
     __metadata("design:type", Date)
 ], PromoteClient.prototype, "sessionRotatedAt", void 0);
 __decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'SpamBot snapshot written by promote-clients setDaysLeft: -1 healthy, 0 released today, >0 limited for N days (as of the write, not a live countdown).' }),
+    (0, mongoose_1.Prop)({ required: false, type: Number }),
+    __metadata("design:type", Number)
+], PromoteClient.prototype, "daysLeft", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Timestamp of the last inactive-mobile scrape by promote-clients.' }),
+    (0, mongoose_1.Prop)({ required: false, type: Date }),
+    __metadata("design:type", Date)
+], PromoteClient.prototype, "lastScraped", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Assigned first name from pool', required: false }),
     (0, mongoose_1.Prop)({ required: false, default: null }),
     __metadata("design:type", String)
@@ -44139,10 +44149,11 @@ function mobilesEqual(a, b) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ENROLMENT_MIN_TOTAL_CHATS = void 0;
+exports.ENROLMENT_CANDIDATE_PROJECTION = exports.ENROLMENT_MIN_TOTAL_CHATS = void 0;
 exports.buildEnrolmentExclusions = buildEnrolmentExclusions;
 exports.enrolmentEligibilityFilter = enrolmentEligibilityFilter;
 exports.enrolmentIneligibilityReasons = enrolmentIneligibilityReasons;
+exports.compareTgIdNumeric = compareTgIdNumeric;
 exports.findEnrolmentCandidates = findEnrolmentCandidates;
 exports.runEnrolmentBatch = runEnrolmentBatch;
 const Helpers_1 = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
@@ -44173,8 +44184,26 @@ function enrolmentIneligibilityReasons(user, inactiveSince) {
     }
     return reasons;
 }
-function findEnrolmentCandidates(usersService, goodIds, limit, inactiveSince) {
-    return usersService.executeQuery({ mobile: { $nin: goodIds }, ...enrolmentEligibilityFilter(inactiveSince) }, { tgId: 1 }, limit);
+exports.ENROLMENT_CANDIDATE_PROJECTION = { _id: 0, mobile: 1, tgId: 1 };
+function compareTgIdNumeric(a, b) {
+    const na = typeof a === 'string' && /^\d+$/.test(a) ? a.replace(/^0+(?=\d)/, '') : undefined;
+    const nb = typeof b === 'string' && /^\d+$/.test(b) ? b.replace(/^0+(?=\d)/, '') : undefined;
+    if (na !== undefined && nb !== undefined) {
+        if (na.length !== nb.length)
+            return na.length - nb.length;
+        return na < nb ? -1 : na > nb ? 1 : 0;
+    }
+    if (na !== undefined)
+        return -1;
+    if (nb !== undefined)
+        return 1;
+    const sa = a ?? '';
+    const sb = b ?? '';
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+async function findEnrolmentCandidates(usersService, goodIds, limit, inactiveSince) {
+    const rows = await usersService.executeQuery({ mobile: { $nin: goodIds }, ...enrolmentEligibilityFilter(inactiveSince) }, undefined, undefined, undefined, { ...exports.ENROLMENT_CANDIDATE_PROJECTION });
+    return [...rows].sort((x, y) => compareTgIdNumeric(x.tgId, y.tgId)).slice(0, Math.max(0, limit));
 }
 async function runEnrolmentBatch(input) {
     let totalNeeded = 0;
@@ -50598,6 +50627,12 @@ let UsersService = UsersService_1 = class UsersService {
         }
         return { $and: [...clauses, query] };
     }
+    async countDocuments(query) {
+        if (!query)
+            throw new common_1.BadRequestException('Query is invalid.');
+        const listQuery = await this.getDefaultUserListQuery(query);
+        return this.userModel.countDocuments(listQuery).exec();
+    }
     async findAllSorted(limit = 100, skip = 0, sort) {
         const filter = await this.getDefaultUserListQuery();
         const query = this.userModel.find(filter).lean();
@@ -51384,13 +51419,13 @@ let UsersService = UsersService_1 = class UsersService {
         ];
         return this.userModel.aggregate(pipeline).allowDiskUse(true).exec();
     }
-    async executeQuery(query, sort, limit, skip) {
+    async executeQuery(query, sort, limit, skip, projection) {
         if (!query) {
             throw new common_1.BadRequestException('Query is invalid.');
         }
         try {
             const listQuery = await this.getDefaultUserListQuery(query);
-            const queryExec = this.userModel.find(listQuery).lean();
+            const queryExec = this.userModel.find(listQuery, projection).lean();
             if (sort)
                 queryExec.sort(sort);
             if (limit)
