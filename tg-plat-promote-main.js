@@ -9424,7 +9424,10 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:ai-generate-msgs");
 const fallbackChain = (0,_tg_llm__WEBPACK_IMPORTED_MODULE_4__.createDefaultChain)();
-const GENERATE_TIMEOUT = 15000;
+// Each provider attempt (Gemma model 1, Gemma model 2, Groq) gets its own 10 s; the chain as a whole
+// gets 35 s, so a slow Gemma can no longer use up the budget before Groq is tried (owner 2026-10-27).
+const PROVIDER_ATTEMPT_TIMEOUT = 10000;
+const GENERATE_TIMEOUT = 35000;
 function cleanText(text) {
     return text
         .replace(/\\n/g, '\n')
@@ -9471,7 +9474,7 @@ async function generateGreeting(messages) {
         - Output ONLY the final greeting in plain text. No quotes, no intro.
         `;
     try {
-        const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_1__.withTimeout)(() => fallbackChain.generate(prompt, { maxTokens: 200, temperature: 1 }), { timeout: GENERATE_TIMEOUT, errorMessage: 'LLM FallbackChain Timeout' });
+        const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_1__.withTimeout)(() => fallbackChain.generate(prompt, { maxTokens: 200, temperature: 1, timeout: PROVIDER_ATTEMPT_TIMEOUT }), { timeout: GENERATE_TIMEOUT, errorMessage: 'LLM FallbackChain Timeout' });
         if (!result) {
             logger.warn('AI greeting: all providers failed');
             return null;
