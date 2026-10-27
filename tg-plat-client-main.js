@@ -33230,6 +33230,7 @@ function normalizePromoteStatsData(data) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* binding */ PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* binding */ PromoteRepository),
 /* harmony export */   emptyPromoteAvailability: () => (/* binding */ emptyPromoteAvailability),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* binding */ getPromoteRuntimeEligibilityFilter),
@@ -33243,6 +33244,8 @@ __webpack_require__.r(__webpack_exports__);
 
 const PROMOTE_RUNTIME_CHANNEL_FLOOR = 230;
 const PROMOTE_RUNTIME_PHASE = 'session_rotated';
+/** Minimum account age (days since createdAt) before promotion may use it: 15, same as buffer swaps (owner 2026-10-27, was 7). */
+const PROMOTE_RUNTIME_MIN_AGE_DAYS = 15;
 /**
  * Runtime selection is deliberately stricter than warmup progress: only accounts with the terminal
  * lifecycle phase and the promotion channel floor can start a Telegram client. There is no legacy
@@ -33448,7 +33451,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 ...filter,
                 clientId,
                 availableDate: { $lte: threeDaysLater },
-                createdAt: { $lt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+                createdAt: { $lt: new Date(Date.now() - PROMOTE_RUNTIME_MIN_AGE_DAYS * 24 * 60 * 60 * 1000) },
                 ...getPromoteRuntimeEligibilityFilter(),
             };
             this.info(`Getting available mobiles with filter: ${JSON.stringify(query, null, 2)} and currentDateStr: ${threeDaysLater}`);
@@ -34812,6 +34815,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
 /* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
