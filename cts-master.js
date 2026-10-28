@@ -30158,7 +30158,8 @@ let AnalyticsPgReader = AnalyticsPgReader_1 = class AnalyticsPgReader {
                 connectionTimeoutMillis: QUERY_TIMEOUT_MS,
                 query_timeout: QUERY_TIMEOUT_MS,
                 statement_timeout: QUERY_TIMEOUT_MS,
-                idleTimeoutMillis: 30_000,
+                idleTimeoutMillis: 10 * 60_000,
+                keepAlive: true,
             });
             pool.on('error', (err) => this.logOnce('pool error', err));
             const old = this.pool;
@@ -36025,11 +36026,12 @@ exports.JOIN_REQUEST_MODEL_NAME = 'joinRequestModule';
 /*!*************************************************!*\
   !*** ./src/components/monitor/monitor-cache.ts ***!
   \*************************************************/
-(__unused_webpack_module, exports) {
+(__unused_webpack_module, exports, __webpack_require__) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.TtlCache = void 0;
+exports.SnapshotCache = exports.ConcurrencyGate = exports.SwrCache = exports.TtlCache = void 0;
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 class TtlCache {
     constructor(ttlMs, maxKeys = 50, now = () => Date.now()) {
         this.ttlMs = ttlMs;
@@ -36072,6 +36074,501 @@ class TtlCache {
     }
 }
 exports.TtlCache = TtlCache;
+class SwrCache {
+    constructor(opts) {
+        this.opts = opts;
+        this.entries = new Map();
+        this.inflight = new Map();
+        this.now = opts.now ?? (() => Date.now());
+        this.maxKeys = opts.maxKeys ?? 100;
+    }
+    async get(key, load, expiresAt = Number.POSITIVE_INFINITY, opts) {
+        const now = this.now();
+        const e = this.entries.get(key);
+        const refresh = opts?.refresh === true;
+        if (e && (now >= e.expiresAt || now - e.at >= (this.opts.maxStaleMs ?? Number.POSITIVE_INFINITY))) {
+            this.entries.delete(key);
+        }
+        else if (e) {
+            if (now - e.at < this.opts.freshMs)
+                return { value: e.value, at: e.at, state: 'hit' };
+            if (refresh) {
+                try {
+                    const fresh = await (this.inflight.get(key) ?? this.start(key, load, expiresAt, true));
+                    return { value: fresh.value, at: fresh.at, state: 'hit' };
+                }
+                catch (err) {
+                    this.opts.onBackgroundError?.(key, err);
+                    return { value: e.value, at: e.at, state: 'stale' };
+                }
+            }
+            if (!this.inflight.has(key)) {
+                this.start(key, load, expiresAt, true).catch((err) => this.opts.onBackgroundError?.(key, err));
+            }
+            return { value: e.value, at: e.at, state: 'stale' };
+        }
+        const pending = this.inflight.get(key) ?? this.start(key, load, expiresAt, refresh);
+        const entry = await pending;
+        return { value: entry.value, at: entry.at, state: 'miss' };
+    }
+    get size() {
+        return this.entries.size;
+    }
+    start(key, load, expiresAt, background) {
+        const p = (async () => {
+            try {
+                const value = await load(background);
+                const entry = { value, at: this.now(), expiresAt };
+                this.set(key, entry);
+                return entry;
+            }
+            finally {
+                this.inflight.delete(key);
+            }
+        })();
+        this.inflight.set(key, p);
+        return p;
+    }
+    set(key, entry) {
+        this.entries.delete(key);
+        this.entries.set(key, entry);
+        const now = this.now();
+        for (const [k, v] of this.entries)
+            if (now >= v.expiresAt)
+                this.entries.delete(k);
+        while (this.entries.size > this.maxKeys) {
+            const oldest = this.entries.keys().next().value;
+            this.entries.delete(oldest);
+        }
+    }
+}
+exports.SwrCache = SwrCache;
+class ConcurrencyGate {
+    constructor(limit = 2, backgroundLimit = 1) {
+        this.limit = limit;
+        this.backgroundLimit = backgroundLimit;
+        this.active = 0;
+        this.activeBg = 0;
+        this.fg = [];
+        this.bg = [];
+    }
+    async run(background, fn) {
+        await this.acquire(background);
+        try {
+            return await fn();
+        }
+        finally {
+            this.release(background);
+        }
+    }
+    get pending() {
+        return this.fg.length + this.bg.length;
+    }
+    acquire(background) {
+        if (this.canStart(background)) {
+            this.take(background);
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => (background ? this.bg : this.fg).push(resolve));
+    }
+    canStart(background) {
+        if (this.active >= this.limit)
+            return false;
+        if (!background)
+            return true;
+        return this.fg.length === 0 && this.activeBg < this.backgroundLimit;
+    }
+    take(background) {
+        this.active += 1;
+        if (background)
+            this.activeBg += 1;
+    }
+    release(background) {
+        this.active -= 1;
+        if (background)
+            this.activeBg -= 1;
+        if (this.fg.length && this.active < this.limit) {
+            this.take(false);
+            this.fg.shift()();
+        }
+        else if (this.bg.length && this.canStart(true)) {
+            this.take(true);
+            this.bg.shift()();
+        }
+    }
+}
+exports.ConcurrencyGate = ConcurrencyGate;
+class SnapshotCache {
+    constructor(opts) {
+        this.opts = opts;
+        this.entries = new Map();
+        this.inflight = new Map();
+        this.storeReads = new Map();
+        this.storeTried = new Set();
+        this.now = opts.now ?? (() => Date.now());
+        this.prefix = opts.keyPrefix ?? 'monitor::snapshot::';
+    }
+    key(name) {
+        return `${this.prefix}${name}`;
+    }
+    async get(name, build) {
+        const now = this.now();
+        const day = this.opts.day(now);
+        let e = this.entries.get(name);
+        if (e && e.day !== day) {
+            this.entries.delete(name);
+            e = undefined;
+        }
+        if (!e)
+            e = await this.fromStore(name, day);
+        if (e) {
+            if (now - e.at < this.opts.freshMs)
+                return { value: e.value, at: e.at, state: 'hit', source: e.source };
+            this.refresh(name, build).catch((err) => this.opts.onError?.(`rebuild ${name}`, err));
+            return { value: e.value, at: e.at, state: 'stale', source: e.source };
+        }
+        const b = await (this.inflight.get(`${day}|${name}`) ?? this.start(name, build, false));
+        return { value: b.value, at: b.at, state: 'miss', source: 'build' };
+    }
+    refresh(name, build) {
+        return this.inflight.get(`${this.opts.day(this.now())}|${name}`) ?? this.start(name, build, true);
+    }
+    async preload(names) {
+        const day = this.opts.day(this.now());
+        const got = await Promise.all(names.filter((n) => !this.entries.has(n)).map((n) => this.fromStore(n, day)));
+        return got.filter(Boolean).length;
+    }
+    async storedDay(name) {
+        const raw = await this.readStore(name);
+        return raw?.day ?? null;
+    }
+    get size() {
+        return this.entries.size;
+    }
+    start(name, build, background) {
+        const at = this.now();
+        const day = this.opts.day(at);
+        const k = `${day}|${name}`;
+        const p = (async () => {
+            try {
+                const value = await build(background);
+                const complete = this.opts.complete ? this.opts.complete(value) : true;
+                const cur = this.entries.get(name);
+                if (complete && !(cur && cur.day > day)) {
+                    this.set(name, { value, at, day, source: 'memory' });
+                    this.persist(name, value, at, day);
+                }
+                return { value, at, complete };
+            }
+            finally {
+                this.inflight.delete(k);
+            }
+        })();
+        this.inflight.set(k, p);
+        return p;
+    }
+    async readStore(name) {
+        const store = this.opts.store;
+        if (!store)
+            return null;
+        try {
+            const raw = await (0, monitor_util_1.withTimeout)(Promise.resolve().then(() => store.get(this.key(name))), this.opts.storeDeadlineMs ?? 500, 'snapshot read');
+            if (!raw)
+                return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || parsed.v !== 1 || typeof parsed.day !== 'string' || !Number.isFinite(parsed.at) || parsed.value == null)
+                return null;
+            return { day: parsed.day, at: parsed.at, value: parsed.value };
+        }
+        catch (err) {
+            this.opts.onError?.(`read ${name}`, err);
+            return null;
+        }
+    }
+    fromStore(name, day) {
+        if (!this.opts.store)
+            return Promise.resolve(undefined);
+        const k = `${day}|${name}`;
+        const pending = this.storeReads.get(k);
+        if (pending)
+            return pending;
+        if (this.storeTried.has(k))
+            return Promise.resolve(undefined);
+        if (this.storeTried.size > 1000)
+            this.storeTried.clear();
+        this.storeTried.add(k);
+        const p = (async () => {
+            try {
+                const r = await this.readStore(name);
+                if (!r || r.day !== day)
+                    return undefined;
+                const cur = this.entries.get(name);
+                if (cur && cur.day === day && cur.at >= r.at)
+                    return cur;
+                const e = { value: r.value, at: r.at, day, source: 'store' };
+                this.set(name, e);
+                return e;
+            }
+            finally {
+                this.storeReads.delete(k);
+            }
+        })();
+        this.storeReads.set(k, p);
+        return p;
+    }
+    persist(name, value, at, day) {
+        const store = this.opts.store;
+        if (!store)
+            return;
+        let raw;
+        try {
+            raw = JSON.stringify({ v: 1, day, at, value });
+        }
+        catch (err) {
+            this.opts.onError?.(`serialize ${name}`, err);
+            return;
+        }
+        if (Buffer.byteLength(raw) > (this.opts.maxBytes ?? 256 * 1024)) {
+            this.opts.onError?.(`persist ${name}`, new Error(`snapshot of ${Buffer.byteLength(raw)} bytes not persisted`));
+            return;
+        }
+        Promise.resolve()
+            .then(() => store.set(this.key(name), raw, 'EX', this.opts.ttlSec ?? 36 * 3600))
+            .catch((err) => this.opts.onError?.(`persist ${name}`, err));
+    }
+    set(name, entry) {
+        this.entries.delete(name);
+        this.entries.set(name, entry);
+        while (this.entries.size > (this.opts.maxKeys ?? 100)) {
+            const oldest = this.entries.keys().next().value;
+            this.entries.delete(oldest);
+        }
+    }
+}
+exports.SnapshotCache = SnapshotCache;
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-merge.ts"
+/*!*************************************************!*\
+  !*** ./src/components/monitor/monitor-merge.ts ***!
+  \*************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.toCredit = toCredit;
+exports.revenueBy = revenueBy;
+exports.revenueByClientDay = revenueByClientDay;
+exports.sumDailyClient = sumDailyClient;
+exports.dailyClientByDate = dailyClientByDate;
+exports.sumDmsDays = sumDmsDays;
+exports.dmsByDate = dmsByDate;
+exports.distinctDms = distinctDms;
+exports.dmsByChannel = dmsByChannel;
+exports.rankChannels = rankChannels;
+exports.mergeMobiles = mergeMobiles;
+exports.addBuckets = addBuckets;
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+function toCredit(r) {
+    const amount = (0, monitor_util_1.num)(r.amount);
+    const under = amount < 1000;
+    return {
+        client: r.client_id ?? null,
+        ms: new Date(r.ts).getTime(),
+        chat: String(r.chat_id),
+        amount,
+        gross: amount,
+        revenue: under ? (0, monitor_util_1.num)(r.owner_amount) : 0,
+        clean: under && r.cheat_flagged !== true,
+    };
+}
+function revenueBy(credits, start, end) {
+    const acc = new Map();
+    const tot = { revenue: 0, gross: 0, chats: new Set() };
+    for (const c of credits) {
+        if (c.ms < start || c.ms >= end)
+            continue;
+        tot.revenue += c.revenue;
+        tot.gross += c.gross;
+        if (c.clean)
+            tot.chats.add(c.chat);
+        if (!c.client)
+            continue;
+        const e = acc.get(c.client) ?? { revenue: 0, gross: 0, chats: new Set() };
+        e.revenue += c.revenue;
+        e.gross += c.gross;
+        if (c.clean)
+            e.chats.add(c.chat);
+        acc.set(c.client, e);
+    }
+    const byClient = new Map();
+    for (const [k, v] of acc)
+        byClient.set(k, { revenue: v.revenue, gross: v.gross, payers: v.chats.size });
+    return { byClient, total: { revenue: tot.revenue, gross: tot.gross, payers: tot.chats.size } };
+}
+function revenueByClientDay(credits) {
+    const out = new Map();
+    for (const c of credits) {
+        if (!c.client || c.amount >= 1000)
+            continue;
+        const d = (0, monitor_time_1.istDate)(c.ms);
+        if (!out.has(c.client))
+            out.set(c.client, new Map());
+        const m = out.get(c.client);
+        m.set(d, (m.get(d) ?? 0) + c.revenue);
+    }
+    return out;
+}
+const zeroSend = () => ({ sent: 0, delivered: 0, banned: 0, newUsers: 0 });
+function addSend(a, r) {
+    a.sent += (0, monitor_util_1.num)(r.sent);
+    a.delivered += (0, monitor_util_1.num)(r.delivered);
+    a.banned += (0, monitor_util_1.num)(r.banned);
+    a.newUsers += (0, monitor_util_1.num)(r.new_users);
+}
+function sumDailyClient(rows, from, to) {
+    const byClient = new Map();
+    const total = zeroSend();
+    for (const r of rows) {
+        if (r.d < from || r.d > to)
+            continue;
+        addSend(total, r);
+        if (!r.client_id)
+            continue;
+        const e = byClient.get(r.client_id) ?? zeroSend();
+        addSend(e, r);
+        byClient.set(r.client_id, e);
+    }
+    return { byClient, total };
+}
+function dailyClientByDate(rows, scope) {
+    const out = new Map();
+    for (const r of rows) {
+        if (scope !== null && r.client_id !== scope)
+            continue;
+        const e = out.get(r.d) ?? zeroSend();
+        addSend(e, r);
+        out.set(r.d, e);
+    }
+    return out;
+}
+function sumDmsDays(rows, from, to) {
+    const byClient = new Map();
+    let total = 0;
+    for (const r of rows) {
+        if (r.d < from || r.d > to)
+            continue;
+        total += (0, monitor_util_1.num)(r.dms);
+        if (r.client_id)
+            byClient.set(r.client_id, (byClient.get(r.client_id) ?? 0) + (0, monitor_util_1.num)(r.dms));
+    }
+    return { byClient, total };
+}
+function dmsByDate(rows, scope) {
+    const out = new Map();
+    for (const r of rows) {
+        if (scope !== null && r.client_id !== scope)
+            continue;
+        out.set(r.d, (out.get(r.d) ?? 0) + (0, monitor_util_1.num)(r.dms));
+    }
+    return out;
+}
+function distinctDms(rows, before = Number.POSITIVE_INFINITY) {
+    const per = new Map();
+    const all = new Set();
+    for (const r of rows) {
+        if (new Date(r.ts).getTime() >= before)
+            continue;
+        all.add(r.conversion_id);
+        if (!r.client_id)
+            continue;
+        if (!per.has(r.client_id))
+            per.set(r.client_id, new Set());
+        per.get(r.client_id).add(r.conversion_id);
+    }
+    const byClient = new Map();
+    for (const [k, v] of per)
+        byClient.set(k, v.size);
+    return { byClient, total: all.size };
+}
+function dmsByChannel(rows, scope) {
+    const per = new Map();
+    for (const r of rows) {
+        if (!r.channel_id)
+            continue;
+        if (scope !== null && r.client_id !== scope)
+            continue;
+        if (!per.has(r.channel_id))
+            per.set(r.channel_id, new Set());
+        per.get(r.channel_id).add(r.conversion_id);
+    }
+    return new Map([...per].map(([k, v]) => [k, v.size]));
+}
+function rankChannels(hist, today, limit) {
+    const sum = new Map(hist);
+    for (const [k, v] of today)
+        sum.set(k, (sum.get(k) ?? 0) + v);
+    return [...sum]
+        .filter(([, v]) => v > 0)
+        .map(([channel_id, dms]) => ({ channel_id, dms }))
+        .sort((a, b) => b.dms - a.dms || (a.channel_id < b.channel_id ? -1 : a.channel_id > b.channel_id ? 1 : 0))
+        .slice(0, limit);
+}
+function mergeMobiles(rows, scope, limit = 20) {
+    const by = new Map();
+    for (const r of rows) {
+        if (scope !== null && r.client_id !== scope)
+            continue;
+        const e = by.get(r.mobile);
+        if (!e) {
+            by.set(r.mobile, {
+                mobile: r.mobile,
+                client_id: r.client_id,
+                new_users: (0, monitor_util_1.num)(r.new_users),
+                dms: (0, monitor_util_1.num)(r.dms),
+                sent: (0, monitor_util_1.num)(r.sent),
+                delivered: (0, monitor_util_1.num)(r.delivered),
+                banned: (0, monitor_util_1.num)(r.banned),
+                first_day: r.first_day,
+                last_day: r.last_day,
+                lastByClient: r.last_day,
+            });
+            continue;
+        }
+        e.new_users += (0, monitor_util_1.num)(r.new_users);
+        e.dms += (0, monitor_util_1.num)(r.dms);
+        e.sent += (0, monitor_util_1.num)(r.sent);
+        e.delivered += (0, monitor_util_1.num)(r.delivered);
+        e.banned += (0, monitor_util_1.num)(r.banned);
+        if (r.first_day < e.first_day)
+            e.first_day = r.first_day;
+        if (r.last_day > e.last_day)
+            e.last_day = r.last_day;
+        if (r.last_day > e.lastByClient || (r.last_day === e.lastByClient && String(r.client_id) > String(e.client_id))) {
+            e.lastByClient = r.last_day;
+            e.client_id = r.client_id;
+        }
+    }
+    const out = [...by.values()].map(({ lastByClient: _l, ...m }) => m);
+    if (scope !== null)
+        return out.sort((a, b) => b.sent - a.sent || (a.mobile < b.mobile ? -1 : 1));
+    return out
+        .sort((a, b) => b.new_users - a.new_users || b.sent - a.sent || (a.mobile < b.mobile ? -1 : a.mobile > b.mobile ? 1 : 0))
+        .slice(0, limit);
+}
+function addBuckets(a, b) {
+    const m = new Map();
+    for (const r of [...a, ...b]) {
+        const k = String(r._id);
+        const e = m.get(k) ?? { _id: r._id, n: 0 };
+        e.n += Number(r.n) || 0;
+        m.set(k, e);
+    }
+    return [...m.values()];
+}
 
 
 /***/ },
@@ -36091,6 +36588,8 @@ exports.flattenCohort = flattenCohort;
 exports.bufferPoolPipeline = bufferPoolPipeline;
 exports.promotePoolPipeline = promotePoolPipeline;
 exports.timeToFirstPayPipeline = timeToFirstPayPipeline;
+exports.firstPayRowsPipeline = firstPayRowsPipeline;
+exports.ttfpBuckets = ttfpBuckets;
 exports.mapTtfp = mapTtfp;
 const mongoose_1 = __webpack_require__(/*! mongoose */ "mongoose");
 exports.MONGO_MAX_TIME_MS = 8_000;
@@ -36200,6 +36699,33 @@ function timeToFirstPayPipeline(clientId, start, end) {
         },
     ];
 }
+function firstPayRowsPipeline(start, end, chats) {
+    return [
+        { $match: { ...(chats ? { chatId: { $in: chats } } : {}), firstPaidAt: { $gte: start, $lt: end } } },
+        { $project: { _id: 0, c: '$clientId', fp: '$firstPaidAt', mins: { $divide: [{ $subtract: ['$firstPaidAt', { $toLong: { $toDate: '$_id' } }] }, 60000] } } },
+    ];
+}
+const TTFP_BOUNDARIES = [-1e15, 0, 10, 30, 120, 1440, 4320, 1e15];
+function ttfpBuckets(rows, scope, start, end) {
+    const m = new Map();
+    for (const r of rows) {
+        if (scope !== null && r.c !== scope)
+            continue;
+        const fp = Number(r.fp);
+        if (!(fp >= start && fp < end))
+            continue;
+        const mins = Number(r.mins);
+        let id = 'other';
+        for (let i = 0; i < TTFP_BOUNDARIES.length - 1; i++) {
+            if (mins >= TTFP_BOUNDARIES[i] && mins < TTFP_BOUNDARIES[i + 1]) {
+                id = TTFP_BOUNDARIES[i];
+                break;
+            }
+        }
+        m.set(id, (m.get(id) ?? 0) + 1);
+    }
+    return [...m].map(([_id, n]) => ({ _id, n }));
+}
 const TTFP_BY_LOWER = {
     '0': '<10m',
     '10': '10-30m',
@@ -36232,216 +36758,134 @@ function mapTtfp(rows) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.fleetRevenueSql = fleetRevenueSql;
-exports.fleetSparkSql = fleetSparkSql;
-exports.fleetDailyClientSql = fleetDailyClientSql;
-exports.fleetSendsIntradaySql = fleetSendsIntradaySql;
-exports.fleetDmsSql = fleetDmsSql;
-exports.clientPaymentsSql = clientPaymentsSql;
-exports.clientDailyClientSql = clientDailyClientSql;
-exports.clientDmsDailySql = clientDmsDailySql;
-exports.clientSendsHourlySql = clientSendsHourlySql;
-exports.clientMobilesSql = clientMobilesSql;
-exports.clientTopDmChannelsSql = clientTopDmChannelsSql;
-exports.clientChannelSendsSql = clientChannelSendsSql;
+exports.paymentRowsSql = paymentRowsSql;
+exports.dailyClientSql = dailyClientSql;
+exports.dmsByDaySql = dmsByDaySql;
+exports.dmRowsSql = dmRowsSql;
+exports.sendsLiveSql = sendsLiveSql;
+exports.sendsHourlySql = sendsHourlySql;
+exports.mobilesSql = mobilesSql;
+exports.channelDmsHistSql = channelDmsHistSql;
+exports.channelSendsHistSql = channelSendsHistSql;
+exports.channelSendsTodaySql = channelSendsTodaySql;
 const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
 const iso = (ms) => new Date(ms).toISOString();
-const CLEAN_CREDIT = `amount < 1000 AND cheat_flagged IS NOT TRUE`;
-function fleetRevenueSql(cur, prev) {
-    const c = `ts >= $1::timestamptz AND ts < $2::timestamptz`;
-    const p = `ts >= $3::timestamptz AND ts < $4::timestamptz`;
-    return {
-        name: 'fleet.revenue',
-        sql: `SELECT client_id, GROUPING(client_id) AS is_total,
-  coalesce(sum(owner_amount) FILTER (WHERE ${c} AND amount < 1000), 0) AS revenue,
-  coalesce(sum(amount) FILTER (WHERE ${c}), 0) AS gross,
-  count(DISTINCT chat_id) FILTER (WHERE ${c} AND ${CLEAN_CREDIT}) AS payers,
-  coalesce(sum(owner_amount) FILTER (WHERE ${p} AND amount < 1000), 0) AS prev_revenue,
-  coalesce(sum(amount) FILTER (WHERE ${p}), 0) AS prev_gross,
-  count(DISTINCT chat_id) FILTER (WHERE ${p} AND ${CLEAN_CREDIT}) AS prev_payers
+function q(name, sql, params) {
+    return { name, sql: `/* monitor.${name} */ ${sql}`, params };
+}
+function paymentRowsSql(name, start, end) {
+    const params = [iso(start)];
+    let range = 'ts >= $1::timestamptz';
+    if (end !== undefined) {
+        params.push(iso(end));
+        range += ' AND ts < $2::timestamptz';
+    }
+    return q(name, `SELECT client_id, ts, chat_id, amount, owner_amount, cheat_flagged
 FROM payment_event_owner
-WHERE amount > 0 AND ((${c}) OR (${p}))
-GROUP BY GROUPING SETS ((client_id), ())`,
-        params: [iso(cur.start), iso(cur.end), iso(prev.start), iso(prev.end)],
-    };
+WHERE ${range} AND amount > 0`, params);
 }
-function fleetSparkSql(fromDayStart) {
-    return {
-        name: 'fleet.spark',
-        sql: `SELECT client_id, ${IST}::date::text AS d, coalesce(sum(owner_amount), 0) AS revenue
-FROM payment_event_owner
-WHERE amount > 0 AND amount < 1000 AND ts >= $1::timestamptz
-GROUP BY 1, 2`,
-        params: [iso(fromDayStart)],
-    };
-}
-function fleetDailyClientSql(from, to, prevFrom, prevTo) {
-    const c = `day BETWEEN $1::date AND $2::date`;
-    const p = `day BETWEEN $3::date AND $4::date`;
-    return {
-        name: 'fleet.daily_client',
-        sql: `SELECT client_id,
-  coalesce(sum(sent) FILTER (WHERE ${c}), 0) AS sent,
-  coalesce(sum(delivered) FILTER (WHERE ${c}), 0) AS delivered,
-  coalesce(sum(banned) FILTER (WHERE ${c}), 0) AS banned,
-  coalesce(sum(new_users) FILTER (WHERE ${c} AND namespace = 'tg-aut'), 0) AS new_users,
-  coalesce(sum(sent) FILTER (WHERE ${p}), 0) AS prev_sent,
-  coalesce(sum(delivered) FILTER (WHERE ${p}), 0) AS prev_delivered,
-  coalesce(sum(banned) FILTER (WHERE ${p}), 0) AS prev_banned,
-  coalesce(sum(new_users) FILTER (WHERE ${p} AND namespace = 'tg-aut'), 0) AS prev_new_users
-FROM daily_client
-WHERE day BETWEEN $3::date AND $2::date
-GROUP BY client_id`,
-        params: [from, to, prevFrom, prevTo],
-    };
-}
-function fleetSendsIntradaySql(cur, prev) {
-    const c = `ts >= $1::timestamptz`;
-    const p = `ts < $2::timestamptz`;
-    return {
-        name: 'fleet.promotion_send_intraday',
-        sql: `SELECT client_id,
-  count(*) FILTER (WHERE ${c} AND outcome <> 'deleted') AS sent,
-  count(*) FILTER (WHERE ${c} AND outcome = 'delivered') AS delivered,
-  count(*) FILTER (WHERE ${c} AND outcome = 'banned') AS banned,
-  count(*) FILTER (WHERE ${p} AND outcome <> 'deleted') AS prev_sent,
-  count(*) FILTER (WHERE ${p} AND outcome = 'delivered') AS prev_delivered,
-  count(*) FILTER (WHERE ${p} AND outcome = 'banned') AS prev_banned
-FROM promotion_send
-WHERE ts >= $3::timestamptz AND ts < $4::timestamptz AND (${c} OR ${p})
-GROUP BY client_id`,
-        params: [iso(cur.start), iso(prev.end), iso(prev.start), iso(cur.end)],
-    };
-}
-function fleetDmsSql(cur, prev) {
-    const c = `ts >= $1::timestamptz AND ts < $2::timestamptz`;
-    const p = `ts >= $3::timestamptz AND ts < $4::timestamptz`;
-    return {
-        name: 'fleet.dms',
-        sql: `SELECT client_id, GROUPING(client_id) AS is_total,
-  count(DISTINCT conversion_id) FILTER (WHERE ${c}) AS dms,
-  count(DISTINCT conversion_id) FILTER (WHERE ${p}) AS prev_dms
-FROM conversion_event
-WHERE kind = 'dm' AND ((${c}) OR (${p}))
-GROUP BY GROUPING SETS ((client_id), ())`,
-        params: [iso(cur.start), iso(cur.end), iso(prev.start), iso(prev.end)],
-    };
-}
-function scoped(clientId, base) {
-    const params = [];
-    const add = (v) => {
-        params.push(v);
-        return `$${params.length}`;
-    };
-    const where = clientId === null ? '' : `client_id = ${add(clientId)} AND `;
-    return { params, add, where, name: `${clientId === null ? 'fleet' : 'client'}.${base}` };
-}
-function clientPaymentsSql(clientId, start) {
-    const q = scoped(clientId, 'payments');
-    return {
-        name: q.name,
-        sql: `SELECT ts, chat_id, amount, owner_amount, cheat_flagged
-FROM payment_event_owner
-WHERE ${q.where}ts >= ${q.add(iso(start))}::timestamptz AND amount > 0`,
-        params: q.params,
-    };
-}
-function clientDailyClientSql(clientId, from) {
-    const q = scoped(clientId, 'daily_client');
-    return {
-        name: q.name,
-        sql: `SELECT day::text AS d,
+function dailyClientSql(name, from, to) {
+    return q(name, `SELECT day::text AS d, client_id,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users
 FROM daily_client
-WHERE ${q.where}day >= ${q.add(from)}::date
-GROUP BY day`,
-        params: q.params,
-    };
+WHERE day BETWEEN $1::date AND $2::date
+GROUP BY day, client_id`, [from, to]);
 }
-function clientDmsDailySql(clientId, start) {
-    const q = scoped(clientId, 'dms_daily');
-    return {
-        name: q.name,
-        sql: `SELECT ${IST}::date::text AS d, count(DISTINCT conversion_id) AS dms
+function dmsByDaySql(start, end) {
+    return q('dms_hist', `SELECT ${IST}::date::text AS d, client_id, count(DISTINCT conversion_id) AS dms
 FROM conversion_event
-WHERE kind = 'dm' AND ${q.where}ts >= ${q.add(iso(start))}::timestamptz
-GROUP BY 1`,
-        params: q.params,
-    };
+WHERE kind = 'dm' AND ts >= $1::timestamptz AND ts < $2::timestamptz
+GROUP BY 1, 2`, [iso(start), iso(end)]);
 }
-function clientSendsHourlySql(clientId, start) {
-    const q = scoped(clientId, 'promotion_send_hourly');
-    return {
-        name: q.name,
-        sql: `SELECT ${IST}::date::text AS d, extract(hour FROM ${IST})::int AS h,
-  count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+function dmRowsSql(name, start, end) {
+    const params = [iso(start)];
+    let range = 'ts >= $1::timestamptz';
+    if (end !== undefined) {
+        params.push(iso(end));
+        range += ' AND ts < $2::timestamptz';
+    }
+    return q(name, `SELECT client_id, channel_id, conversion_id, ts
+FROM conversion_event
+WHERE kind = 'dm' AND ${range}`, params);
+}
+function sendsLiveSql(today, cut) {
+    return q('sends_live', `SELECT client_id, ts >= $1::timestamptz AS today, extract(hour FROM ${IST})::int AS h,
+  count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
+  count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
+  count(*) FILTER (WHERE outcome = 'banned') AS banned
 FROM promotion_send
-WHERE ${q.where}ts >= ${q.add(iso(start))}::timestamptz
-GROUP BY 1, 2`,
-        params: q.params,
-    };
+WHERE ts >= $2::timestamptz AND ts < $3::timestamptz AND (ts >= $1::timestamptz OR ts < $4::timestamptz)
+GROUP BY 1, 2, 3`, [iso(today.start), iso(today.start - 86_400_000), iso(today.end), iso(cut)]);
 }
-function clientMobilesSql(clientId, from) {
-    const q = scoped(clientId, 'daily_mobile');
-    const fleet = clientId === null;
-    return {
-        name: q.name,
-        sql: `SELECT mobile,${fleet ? `\n  (array_agg(client_id ORDER BY day DESC))[1] AS client_id,` : ''}
+function sendsHourlySql(day) {
+    return q('sends_yday_hourly', `SELECT client_id, extract(hour FROM ${IST})::int AS h, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+FROM promotion_send
+WHERE ts >= $1::timestamptz AND ts < $2::timestamptz
+GROUP BY 1, 2`, [iso(day.start), iso(day.end)]);
+}
+function mobilesSql(name, from, to) {
+    return q(name, `SELECT mobile, client_id,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'promote-clients'), 0) AS dms,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   min(day)::text AS first_day, max(day)::text AS last_day
 FROM daily_mobile
-WHERE ${q.where}day >= ${q.add(from)}::date
-GROUP BY mobile
-${fleet ? 'ORDER BY new_users DESC, sent DESC, mobile\nLIMIT 20' : 'ORDER BY sent DESC'}`,
-        params: q.params,
-    };
+WHERE day BETWEEN $1::date AND $2::date
+GROUP BY mobile, client_id`, [from, to]);
 }
-function clientTopDmChannelsSql(clientId, start) {
-    const q = scoped(clientId, 'channels_top_dms');
-    return {
-        name: q.name,
-        sql: `SELECT channel_id, count(DISTINCT conversion_id) AS dms
-FROM conversion_event
-WHERE kind = 'dm' AND ${q.where}ts >= ${q.add(iso(start))}::timestamptz AND channel_id IS NOT NULL
-GROUP BY 1
-ORDER BY 2 DESC, 1
-LIMIT 20`,
-        params: q.params,
-    };
-}
-function clientChannelSendsSql(clientId, start, channelIds, fleetDays) {
-    const q = scoped(clientId, 'channels_sends');
+const ROLLED = `rolled AS (SELECT coalesce(max(day), DATE '1970-01-01') AS d FROM daily_channel WHERE day < $2::date)`;
+const RAW_FROM = `greatest($3::timestamptz, (((SELECT d FROM rolled) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'))`;
+const RAW_GATE = `(SELECT d FROM rolled) < $2::date - 1`;
+function channelDmsHistSql(clientId, from, today, start, today0) {
     if (clientId === null) {
-        if (!fleetDays)
-            throw new Error('fleet channel sends need the IST day range');
-        const ids = q.add(channelIds);
-        return {
-            name: q.name,
-            sql: `SELECT channel_id, sum(sent)::bigint AS sent, (SELECT max(day) FROM daily_channel)::text AS rolled_to
+        return q('channels_dms_hist', `WITH ${ROLLED}
+SELECT channel_id, sum(dms) AS dms, (SELECT d FROM rolled)::text AS rolled_to
 FROM (
-  SELECT channel_id, sent FROM daily_channel
-  WHERE channel_id = ANY(${ids}::text[]) AND day >= ${q.add(fleetDays.from)}::date AND day < ${q.add(fleetDays.today)}::date
+  SELECT channel_id, dms FROM daily_channel
+  WHERE day >= $1::date AND day <= (SELECT d FROM rolled) AND dms > 0
   UNION ALL
-  SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') FROM promotion_send
-  WHERE channel_id = ANY(${ids}::text[]) AND ts >= ${q.add(iso(fleetDays.todayStart))}::timestamptz
+  SELECT channel_id, count(DISTINCT conversion_id) FROM conversion_event
+  WHERE ${RAW_GATE} AND kind = 'dm' AND ts >= ${RAW_FROM} AND ts < $4::timestamptz AND channel_id IS NOT NULL
   GROUP BY 1
 ) x
-GROUP BY 1`,
-            params: q.params,
-        };
+GROUP BY 1`, [from, today, iso(start), iso(today0)]);
     }
-    const ts = q.add(iso(start));
-    return {
-        name: q.name,
-        sql: `SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+    return q('client_channels_dms_hist', `SELECT channel_id, count(DISTINCT conversion_id) AS dms
+FROM conversion_event
+WHERE kind = 'dm' AND client_id = $1 AND ts >= $2::timestamptz AND ts < $3::timestamptz AND channel_id IS NOT NULL
+GROUP BY 1`, [clientId, iso(start), iso(today0)]);
+}
+function channelSendsHistSql(clientId, ids, from, today, start, today0) {
+    if (clientId === null) {
+        return q('channels_sends_hist', `WITH ${ROLLED}
+SELECT channel_id, sum(sent)::bigint AS sent, (SELECT d FROM rolled)::text AS rolled_to
+FROM (
+  SELECT channel_id, sent FROM daily_channel
+  WHERE channel_id = ANY($5::text[]) AND day >= $1::date AND day <= (SELECT d FROM rolled)
+  UNION ALL
+  SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') FROM promotion_send
+  WHERE ${RAW_GATE} AND channel_id = ANY($5::text[]) AND ts >= ${RAW_FROM} AND ts < $4::timestamptz
+  GROUP BY 1
+) x
+GROUP BY 1`, [from, today, iso(start), iso(today0), ids]);
+    }
+    return q('client_channels_sends_hist', `SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
 FROM promotion_send
-WHERE channel_id = ANY(${q.add(channelIds)}::text[]) AND ${q.where}ts >= ${ts}::timestamptz
-GROUP BY 1`,
-        params: q.params,
-    };
+WHERE channel_id = ANY($2::text[]) AND client_id = $1 AND ts >= $3::timestamptz AND ts < $4::timestamptz
+GROUP BY 1`, [clientId, ids, iso(start), iso(today0)]);
+}
+function channelSendsTodaySql(clientId, ids, today0) {
+    const params = [ids, iso(today0)];
+    let client = '';
+    if (clientId !== null) {
+        params.push(clientId);
+        client = ' AND client_id = $3';
+    }
+    return q(clientId === null ? 'channels_sends_today' : 'client_channels_sends_today', `SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+FROM promotion_send
+WHERE channel_id = ANY($1::text[]) AND ts >= $2::timestamptz${client}
+GROUP BY 1`, params);
 }
 
 
@@ -36769,6 +37213,8 @@ exports.MonitorModule = MonitorModule = __decorate([
                 useFactory: () => ({
                     smembers: (key) => redisClient_1.RedisClient.getClient().smembers(key),
                     mget: (keys) => redisClient_1.RedisClient.getClient().mget(keys),
+                    get: (key) => redisClient_1.RedisClient.getClient().get(key),
+                    set: (key, value, mode, ttlSec) => redisClient_1.RedisClient.getClient().set(key, value, mode, ttlSec),
                 }),
             },
         ],
@@ -36799,14 +37245,16 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.FLEET_DETAIL_ID = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.LIVE_TTL_MS = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.FLEET_DETAIL_ID = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.fleetSummaryRow = fleetSummaryRow;
+exports.withSnapshotCache = withSnapshotCache;
 exports.classifyHeartbeat = classifyHeartbeat;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const monitor_cache_1 = __webpack_require__(/*! ./monitor-cache */ "./src/components/monitor/monitor-cache.ts");
+const monitor_merge_1 = __webpack_require__(/*! ./monitor-merge */ "./src/components/monitor/monitor-merge.ts");
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
@@ -36815,13 +37263,24 @@ exports.MONITOR_REDIS = 'MONITOR_REDIS';
 exports.PG_TIMEOUT_MS = 10_500;
 exports.MONGO_TIMEOUT_MS = 10_000;
 exports.LIVE_REDIS_DEADLINE_MS = 2_000;
-exports.FLEET_TTL_MS = 60_000;
-exports.CLIENT_TTL_MS = 60_000;
+exports.TODAY_FRESH_MS = 60_000;
+exports.TODAY_MAX_STALE_MS = 15 * 60_000;
+exports.HISTORY_FRESH_MS = 10 * 60_000;
+exports.POOL_FRESH_MS = 10 * 60_000;
+exports.HISTORY_DAYS = 60;
+exports.CHANNEL_CANDIDATES = 40;
 exports.LIVE_TTL_MS = 5_000;
+exports.SNAPSHOT_FRESH_MS = exports.TODAY_FRESH_MS;
+exports.SNAPSHOT_KEY_PREFIX = 'monitor::snapshot::';
+exports.SNAPSHOT_TTL_SEC = 36 * 3600;
+exports.PREWARM_DELAY_MS = 5_000;
+exports.MIDNIGHT_PREWARM_AFTER_MS = 2 * 60_000;
+exports.PREWARM_PAGES = ['fleet:today', 'fleet:7d', 'fleet:30d', 'detail:all:7', 'detail:all:30'];
+exports.FLEET_TTL_MS = exports.TODAY_FRESH_MS;
+exports.CLIENT_TTL_MS = exports.TODAY_FRESH_MS;
 exports.HEARTBEAT_INDEX_KEY = 'heartbeat::index';
 exports.LIVE_SVCS = ['tg-aut', 'promote'];
 exports.FLEET_DETAIL_ID = 'all';
-const FLEET_DETAIL_KEY = '*fleet*';
 function fleetSummaryRow(f) {
     const pools = f.clients.map((c) => c.pool);
     const sparks = f.clients.map((c) => c.spark);
@@ -36855,6 +37314,54 @@ function fleetSummaryRow(f) {
         previous: { revenue: f.previous.revenue, payers: f.previous.payers, newUsers: f.previous.newUsers, conversion: f.previous.conversion },
     };
 }
+class Ctx {
+    constructor(background = false) {
+        this.background = background;
+        this.notes = [];
+        this.timings = {};
+        this.history = null;
+        this.today = null;
+    }
+    track(kind, state, at) {
+        const cur = this[kind];
+        const rank = { hit: 0, stale: 1, miss: 2 };
+        if (!cur)
+            this[kind] = { state, at };
+        else
+            this[kind] = { state: rank[state] > rank[cur.state] ? state : cur.state, at: Math.min(at, cur.at) };
+    }
+    merge(info, now) {
+        if (info.history)
+            this.track('history', info.history, now - (info.historyAgeSec ?? 0) * 1000);
+        if (info.today)
+            this.track('today', info.today, now - (info.ageSec ?? 0) * 1000);
+    }
+    cache(now) {
+        const age = (t) => (t ? Math.max(0, Math.round((now - t.at) / 1000)) : null);
+        return { history: this.history?.state ?? null, today: this.today?.state ?? null, ageSec: age(this.today), historyAgeSec: age(this.history) };
+    }
+}
+function withSnapshotCache(r, now) {
+    const ageSec = Math.max(0, Math.round((now - r.at) / 1000));
+    const c = r.value?.cache ?? { history: null, today: null, ageSec: null, historyAgeSec: null };
+    const snapshot = { snapshot: r.state, snapshotSource: r.source, snapshotAgeSec: ageSec };
+    if (r.state === 'miss')
+        return { ...r.value, cache: { ...c, ...snapshot } };
+    const age = (a) => (a === null ? null : a + ageSec);
+    const state = (s, a, freshMs) => s === null ? null : a !== null && a * 1000 < freshMs ? 'hit' : 'stale';
+    const todayAge = age(c.ageSec);
+    const histAge = age(c.historyAgeSec);
+    return {
+        ...r.value,
+        cache: {
+            history: state(c.history, histAge, exports.HISTORY_FRESH_MS),
+            today: state(c.today, todayAge, exports.TODAY_FRESH_MS),
+            ageSec: todayAge,
+            historyAgeSec: histAge,
+            ...snapshot,
+        },
+    };
+}
 function classifyHeartbeat(payload, now) {
     if (!payload)
         return { state: 'no-heartbeat', ageSec: null, clockSkew: false };
@@ -36877,43 +37384,140 @@ const AMOUNT_BUCKETS = [
     { bucket: '300-499', lo: 300, hi: 500 },
     { bucket: '500-999', lo: 500, hi: 1000 },
 ];
-function credit(r) {
-    const amount = (0, monitor_util_1.num)(r.amount);
-    const under = amount < 1000;
-    return {
-        ms: new Date(r.ts).getTime(),
-        chat: String(r.chat_id),
-        amount,
-        gross: amount,
-        revenue: under ? (0, monitor_util_1.num)(r.owner_amount) : 0,
-        clean: under && r.cheat_flagged !== true,
-    };
-}
 let MonitorService = MonitorService_1 = class MonitorService {
     constructor(pg, connection, redis) {
         this.pg = pg;
         this.connection = connection;
         this.redis = redis;
         this.logger = new common_1.Logger(MonitorService_1.name);
-        this.fleetCache = new monitor_cache_1.TtlCache(exports.FLEET_TTL_MS, 10);
-        this.clientCache = new monitor_cache_1.TtlCache(exports.CLIENT_TTL_MS, 100);
+        this.historyCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.HISTORY_FRESH_MS,
+            maxKeys: 300,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor history refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
+        this.todayCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.TODAY_FRESH_MS,
+            maxStaleMs: exports.TODAY_MAX_STALE_MS,
+            maxKeys: 300,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor today refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
+        this.dailyCache = new monitor_cache_1.SwrCache({ freshMs: Number.POSITIVE_INFINITY, maxKeys: 20 });
+        this.poolCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.POOL_FRESH_MS,
+            maxStaleMs: exports.TODAY_MAX_STALE_MS * 2,
+            maxKeys: 5,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor pool refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
+        this.metaCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.TODAY_FRESH_MS,
+            maxKeys: 3,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor clients refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
         this.liveCache = new monitor_cache_1.TtlCache(exports.LIVE_TTL_MS, 2);
-        this.metaCache = new monitor_cache_1.TtlCache(exports.FLEET_TTL_MS, 1);
+        this.prewarmDelayMs = exports.PREWARM_DELAY_MS;
+        this.prewarmTimer = null;
+        this.prewarming = null;
+        this.pgGate = new monitor_cache_1.ConcurrencyGate(2, 1);
+        const store = typeof redis?.get === 'function' && typeof redis?.set === 'function'
+            ? { get: (k) => redis.get(k), set: (k, v, mode, ttl) => redis.set(k, v, mode, ttl) }
+            : null;
+        this.snapshots = new monitor_cache_1.SnapshotCache({
+            freshMs: exports.SNAPSHOT_FRESH_MS,
+            day: (t) => (0, monitor_time_1.istDate)(t),
+            store,
+            keyPrefix: exports.SNAPSHOT_KEY_PREFIX,
+            ttlSec: exports.SNAPSHOT_TTL_SEC,
+            maxKeys: 100,
+            complete: (v) => !(v?.notes ?? []).some((n) => typeof n === 'string' && / unavailable: /.test(n)),
+            onError: (what, err) => this.logger.warn(`monitor snapshot ${what} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
     }
-    async pgRows(q, ctx) {
-        const t = Date.now();
-        let err;
-        try {
-            const rows = await (0, monitor_util_1.withTimeout)(this.pg.query(q.sql, q.params, (e) => (err = e)), exports.PG_TIMEOUT_MS, q.name);
-            if (!rows)
-                throw new Error(`${err?.kind ?? 'query'}: ${err?.message ?? 'no rows'}`);
-            return rows;
-        }
-        finally {
-            ctx.timings[q.name] = Date.now() - t;
-        }
+    onModuleInit() {
+        if (this.prewarmDelayMs < 0)
+            return;
+        void this.snapshots.preload(exports.PREWARM_PAGES).catch(() => undefined);
+        this.schedulePrewarm(this.prewarmDelayMs, 'boot');
     }
-    async mongoAgg(collection, pipeline, name, ctx) {
+    onModuleDestroy() {
+        if (this.prewarmTimer)
+            clearTimeout(this.prewarmTimer);
+        this.prewarmTimer = null;
+    }
+    schedulePrewarm(delayMs, reason) {
+        if (this.prewarmTimer)
+            clearTimeout(this.prewarmTimer);
+        this.prewarmTimer = setTimeout(() => {
+            this.prewarmTimer = null;
+            void this.prewarm(reason).finally(() => {
+                const now = Date.now();
+                this.schedulePrewarm((0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)((0, monitor_time_1.istDate)(now), 1)) - now + exports.MIDNIGHT_PREWARM_AFTER_MS, 'midnight');
+            });
+        }, Math.max(0, delayMs));
+        this.prewarmTimer.unref?.();
+    }
+    async prewarm(reason = 'manual') {
+        if (this.prewarming) {
+            await this.prewarming;
+            return [];
+        }
+        const built = [];
+        this.prewarming = (async () => {
+            try {
+                if (!(await this.snapshots.storedDay('fleet:today'))) {
+                    this.logger.log(`monitor prewarm (${reason}) skipped: no recent snapshot (monitor unused in the last 36 h)`);
+                    return;
+                }
+                const t = Date.now();
+                for (const page of exports.PREWARM_PAGES) {
+                    try {
+                        await this.snapshots.refresh(page, (bg) => this.buildPage(page, bg));
+                        built.push(page);
+                    }
+                    catch (err) {
+                        this.logger.warn(`monitor prewarm ${page} failed: ${String(err?.message ?? err).slice(0, 200)}`);
+                    }
+                }
+                this.logger.log(`monitor prewarm (${reason}): ${built.length}/${exports.PREWARM_PAGES.length} pages in ${Date.now() - t} ms`);
+            }
+            finally {
+                this.prewarming = null;
+            }
+        })();
+        await this.prewarming;
+        return built;
+    }
+    buildPage(page, background) {
+        const now = Date.now();
+        const [kind, a, b] = page.split(':');
+        if (kind === 'fleet')
+            return this.buildFleet(a, now, background);
+        if (kind === 'detail')
+            return this.buildDetail(null, Number(b), now, background);
+        return this.buildDetail(a, Number(b), now, background);
+    }
+    async snap(page) {
+        const r = await this.snapshots.get(page, (bg) => this.buildPage(page, bg));
+        return withSnapshotCache(r, Date.now());
+    }
+    async pgRows(q, timings, background) {
+        const queued = Date.now();
+        return this.pgGate.run(background, async () => {
+            const t = Date.now();
+            if (t - queued >= 50)
+                timings[`pg.${q.name}.queue`] = t - queued;
+            let err;
+            try {
+                const rows = await (0, monitor_util_1.withTimeout)(this.pg.query(q.sql, q.params, (e) => (err = e)), exports.PG_TIMEOUT_MS, q.name);
+                if (!rows)
+                    throw new Error(`${err?.kind ?? 'query'}: ${err?.message ?? 'no rows'}`);
+                return rows;
+            }
+            finally {
+                timings[`pg.${q.name}`] = Date.now() - t;
+            }
+        });
+    }
+    async mongoAgg(collection, pipeline, name, timings) {
         const t = Date.now();
         try {
             const cursor = this.connection
@@ -36922,10 +37526,10 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return (await (0, monitor_util_1.withTimeout)(cursor.toArray(), exports.MONGO_TIMEOUT_MS, name));
         }
         finally {
-            ctx.timings[name] = Date.now() - t;
+            timings[name] = Date.now() - t;
         }
     }
-    async mongoFind(collection, filter, projection, name, ctx) {
+    async mongoFind(collection, filter, projection, name, timings) {
         const t = Date.now();
         try {
             const cursor = this.connection
@@ -36934,7 +37538,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return (await (0, monitor_util_1.withTimeout)(cursor.toArray(), exports.MONGO_TIMEOUT_MS, name));
         }
         finally {
-            ctx.timings[name] = Date.now() - t;
+            timings[name] = Date.now() - t;
         }
     }
     async section(name, ctx, fn) {
@@ -36948,170 +37552,118 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return null;
         }
     }
-    async clientMeta(ctx) {
-        const hit = await this.metaCache.get('clients', async () => {
-            const rows = await this.mongoFind('clients', {}, { _id: 0, clientId: 1, name: 1, promoteRepl: 1 }, 'mongo.clients', ctx);
+    async part(ctx, kind, key, load, cacheOverride) {
+        const now = Date.now();
+        const today = (0, monitor_time_1.istDate)(now);
+        const cache = cacheOverride ?? (kind === 'history' ? this.historyCache : this.todayCache);
+        const r = await cache.get(`${today}|${key}`, async (background) => {
+            const asOf = Date.now();
+            const timings = {};
+            const value = await load(asOf, timings, background || ctx.background);
+            return { value, asOf, timings };
+        }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)), { refresh: ctx.background });
+        ctx.track(kind, r.state, r.at);
+        Object.assign(ctx.timings, r.value.timings);
+        return r.value;
+    }
+    historyStart(today) {
+        return (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, -exports.HISTORY_DAYS));
+    }
+    payHist(ctx) {
+        return this.part(ctx, 'history', 'pay_hist', async (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            const rows = await this.pgRows((0, monitor_sql_1.paymentRowsSql)('pay_hist', this.historyStart(today), (0, monitor_time_1.istDayStart)(today)), t, bg);
+            return rows.map(monitor_merge_1.toCredit);
+        }).then((l) => l.value);
+    }
+    payToday(ctx) {
+        return this.part(ctx, 'today', 'pay_today', async (now, t, bg) => {
+            const rows = await this.pgRows((0, monitor_sql_1.paymentRowsSql)('pay_today', (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now))), t, bg);
+            return rows.map(monitor_merge_1.toCredit);
+        }).then((l) => ({ asOf: l.asOf, rows: l.value }));
+    }
+    dcHist(ctx) {
+        return this.part(ctx, 'history', 'dc_hist', (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return this.pgRows((0, monitor_sql_1.dailyClientSql)('dc_hist', (0, monitor_time_1.addDays)(today, -exports.HISTORY_DAYS), (0, monitor_time_1.addDays)(today, -1)), t, bg);
+        }).then((l) => l.value);
+    }
+    dcToday(ctx) {
+        return this.part(ctx, 'today', 'dc_today', (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return this.pgRows((0, monitor_sql_1.dailyClientSql)('dc_today', today, today), t, bg);
+        }).then((l) => l.value);
+    }
+    dmsHist(ctx) {
+        return this.part(ctx, 'history', 'dms_hist', (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return this.pgRows((0, monitor_sql_1.dmsByDaySql)(this.historyStart(today), (0, monitor_time_1.istDayStart)(today)), t, bg);
+        }).then((l) => l.value);
+    }
+    dmRowsYday(ctx) {
+        return this.part(ctx, 'history', 'dm_rows_yday', (now, t, bg) => {
+            const today0 = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now));
+            return this.pgRows((0, monitor_sql_1.dmRowsSql)('dm_rows_yday', today0 - monitor_time_1.DAY_MS, today0), t, bg);
+        }).then((l) => l.value);
+    }
+    dmRowsToday(ctx) {
+        return this.part(ctx, 'today', 'dm_rows_today', (now, t, bg) => this.pgRows((0, monitor_sql_1.dmRowsSql)('dm_rows_today', (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now))), t, bg)).then((l) => ({ asOf: l.asOf, rows: l.value }));
+    }
+    sendsLive(ctx) {
+        return this.part(ctx, 'today', 'sends_live', (now, t, bg) => this.pgRows((0, monitor_sql_1.sendsLiveSql)({ start: (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now)), end: now }, now - monitor_time_1.DAY_MS), t, bg)).then((l) => ({ asOf: l.asOf, rows: l.value }));
+    }
+    sendsYdayHourly(ctx) {
+        return this.part(ctx, 'history', 'sends_yday_hourly', (now, t, bg) => {
+            const today0 = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now));
+            return this.pgRows((0, monitor_sql_1.sendsHourlySql)({ start: today0 - monitor_time_1.DAY_MS, end: today0 }), t, bg);
+        }).then((l) => l.value);
+    }
+    mobilesHist(ctx, from) {
+        return this.part(ctx, 'history', `mobiles_hist:${from}`, (now, t, bg) => this.pgRows((0, monitor_sql_1.mobilesSql)('mobiles_hist', from, (0, monitor_time_1.addDays)((0, monitor_time_1.istDate)(now), -1)), t, bg)).then((l) => l.value);
+    }
+    mobilesToday(ctx) {
+        return this.part(ctx, 'today', 'mobiles_today', (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return this.pgRows((0, monitor_sql_1.mobilesSql)('mobiles_today', today, today), t, bg);
+        }).then((l) => l.value);
+    }
+    clientMeta(ctx) {
+        return this.part(ctx, 'today', 'clients', async (_now, t) => {
+            const rows = await this.mongoFind('clients', {}, { _id: 0, clientId: 1, name: 1, promoteRepl: 1 }, 'mongo.clients', t);
             return rows
                 .filter((r) => r.clientId)
                 .map((r) => ({ clientId: String(r.clientId), name: r.name ?? null, promote: !!r.promoteRepl }));
-        });
-        return hit.value;
+        }, this.metaCache).then((l) => l.value);
     }
-    async fleet(period) {
-        return (await this.fleetCache.get(period, () => this.buildFleet(period, Date.now()))).value;
+    cohortsHist(ctx) {
+        return this.part(ctx, 'history', 'cohorts_hist', async (now, t) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: this.historyStart(today), end: (0, monitor_time_1.istDayStart)(today) }), 'mongo.userData_cohorts_hist', t));
+        }).then((l) => l.value);
     }
-    async buildFleet(period, now) {
-        const ctx = { notes: [], timings: {} };
-        const w = (0, monitor_time_1.resolvePeriod)(period, now);
-        const sparkFrom = (0, monitor_time_1.addDays)(w.today, -6);
-        const [meta, rev, spark, sendRows, dmsRows, cohorts, pool] = await Promise.all([
-            this.section('clients', ctx, () => this.clientMeta(ctx)),
-            this.section('revenue', ctx, () => this.pgRows((0, monitor_sql_1.fleetRevenueSql)(w.cur, w.prev), ctx)),
-            this.section('spark', ctx, () => this.pgRows((0, monitor_sql_1.fleetSparkSql)((0, monitor_time_1.istDayStart)(sparkFrom)), ctx)),
-            this.section('sends', ctx, () => this.pgRows(w.wholeDays
-                ? (0, monitor_sql_1.fleetDailyClientSql)(w.range.from, w.range.to, w.prevRange.from, w.prevRange.to)
-                : (0, monitor_sql_1.fleetSendsIntradaySql)(w.cur, w.prev), ctx)),
-            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.fleetDmsSql)(w.cur, w.prev), ctx)),
-            this.section('conversion', ctx, () => this.fleetCohorts(w, ctx)),
-            this.section('pool', ctx, () => this.poolByClient(now, w.today, undefined, ctx)),
-        ]);
-        const revBy = new Map();
-        let revTotal = null;
-        for (const r of rev ?? []) {
-            if ((0, monitor_util_1.num)(r.is_total) === 1)
-                revTotal = r;
-            else if (r.client_id)
-                revBy.set(r.client_id, r);
-        }
-        const dmsBy = new Map();
-        let dmsTotal = null;
-        for (const r of dmsRows ?? []) {
-            if ((0, monitor_util_1.num)(r.is_total) === 1)
-                dmsTotal = r;
-            else if (r.client_id)
-                dmsBy.set(r.client_id, r);
-        }
-        const sendsBy = new Map((sendRows ?? []).filter((r) => r.client_id).map((r) => [r.client_id, r]));
-        const sparkBy = new Map();
-        for (const r of spark ?? []) {
-            if (!r.client_id)
-                continue;
-            if (!sparkBy.has(r.client_id))
-                sparkBy.set(r.client_id, new Map());
-            sparkBy.get(r.client_id).set(r.d, (0, monitor_util_1.num)(r.revenue));
-        }
-        const sparkDates = (0, monitor_time_1.datesBetween)(sparkFrom, w.today);
-        const nuCur = (id) => {
-            if (w.wholeDays)
-                return sendRows ? (0, monitor_util_1.num)(sendsBy.get(id)?.new_users) : null;
-            return cohorts ? cohorts.cur.filter((c) => c.c === id).reduce((s, c) => s + c.n, 0) : null;
-        };
-        const nuPrev = (id) => {
-            if (w.wholeDays)
-                return sendRows ? (0, monitor_util_1.num)(sendsBy.get(id)?.prev_new_users) : null;
-            return cohorts ? cohorts.prev.filter((c) => c.c === id).reduce((s, c) => s + c.n, 0) : null;
-        };
-        const conv = (rows, id) => {
-            if (!rows)
-                return null;
-            const sel = id === undefined ? rows : rows.filter((c) => c.c === id);
-            return (0, monitor_util_1.ratio)(sel.reduce((s, c) => s + c.same, 0), sel.reduce((s, c) => s + c.n, 0));
-        };
-        const prevSwept = w.prevRange.from < (0, monitor_time_1.addDays)(w.today, -29);
-        const prevCohorts = prevSwept ? undefined : cohorts?.prev;
-        const metaBy = new Map((meta ?? []).map((m) => [m.clientId, m]));
-        const ids = new Set([...metaBy.keys(), ...revBy.keys(), ...sendsBy.keys(), ...dmsBy.keys()]);
-        for (const c of cohorts?.cur ?? [])
-            if (c.c)
-                ids.add(c.c);
-        const clients = [...ids].map((id) => {
-            const r = revBy.get(id);
-            const s = sendsBy.get(id);
-            const d = dmsBy.get(id);
-            const revenue = rev ? (0, monitor_util_1.num)(r?.revenue) : null;
-            const payers = rev ? (0, monitor_util_1.num)(r?.payers) : null;
-            const p = pool?.get(id);
-            return {
-                clientId: id,
-                name: metaBy.get(id)?.name ?? null,
-                revenue,
-                payers,
-                newUsers: nuCur(id),
-                conversion: conv(cohorts?.cur, id),
-                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
-                sends: sendRows ? (0, monitor_util_1.num)(s?.sent) : null,
-                sendSuccess: sendRows ? (0, monitor_util_1.num)(s?.delivered) : null,
-                banned: sendRows ? (0, monitor_util_1.num)(s?.banned) : null,
-                dms: dmsRows ? (0, monitor_util_1.num)(d?.dms) : null,
-                pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
-                spark: spark ? sparkDates.map((dt) => sparkBy.get(id)?.get(dt) ?? 0) : null,
-                previous: {
-                    revenue: rev ? (0, monitor_util_1.num)(r?.prev_revenue) : null,
-                    payers: rev ? (0, monitor_util_1.num)(r?.prev_payers) : null,
-                    newUsers: nuPrev(id),
-                    conversion: conv(prevCohorts, id),
-                },
-            };
-        });
-        clients.sort((a, b) => (b.revenue ?? -1) - (a.revenue ?? -1) || a.clientId.localeCompare(b.clientId));
-        const sumSends = (k) => (sendRows ? sendRows.reduce((s, r) => s + (0, monitor_util_1.num)(r[k]), 0) : null);
-        const allCohort = (rows) => (rows ? rows.reduce((s, c) => s + c.n, 0) : null);
-        const totals = (prefix) => {
-            const revenue = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}revenue`]) : null;
-            const gross = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}gross`]) : null;
-            const payers = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}payers`]) : null;
-            const cur = prefix === '';
-            return {
-                revenue,
-                grossRevenue: gross,
-                flaggedRevenue: revenue === null ? null : gross - revenue,
-                payers,
-                newUsers: w.wholeDays ? sumSends(`${prefix}new_users`) : allCohort(cur ? cohorts?.cur : cohorts?.prev),
-                conversion: conv(cur ? cohorts?.cur : prevCohorts),
-                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
-                sends: sumSends(`${prefix}sent`),
-                sendSuccess: sumSends(`${prefix}delivered`),
-                banned: sumSends(`${prefix}banned`),
-                dms: dmsRows ? (0, monitor_util_1.num)(dmsTotal?.[`${prefix}dms`]) : null,
-            };
-        };
-        const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
-        if (!w.wholeDays) {
-            notes.push(`previous = yesterday 00:00 to ${new Date(w.prev.end + 19_800_000).toISOString().slice(11, 16)} IST; today's sends come from promotion_send and new users/conversion from Mongo userData.`);
-        }
-        if (prevSwept) {
-            notes.push('previous.conversion is null: the previous window is older than ~30 days and userData docs are swept after 30 days idle. Current-window days older than ~30 days may also undercount.');
-        }
-        return {
-            generatedAt: new Date(now).toISOString(),
-            period,
-            range: w.range,
-            previousRange: w.prevRange,
-            fleet: totals(''),
-            previous: totals('prev_'),
-            clients,
-            notes,
-            timingsMs: ctx.timings,
-        };
+    cohortsToday(ctx) {
+        return this.part(ctx, 'today', 'cohorts_today', async (now, t) => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now)), end: now, byHour: true }), 'mongo.userData_cohorts_today', t))).then((l) => l.value);
     }
-    async fleetCohorts(w, ctx) {
-        if (w.wholeDays) {
-            const rows = (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.prev.start, end: w.cur.end }), 'mongo.userData_cohorts', ctx));
-            return {
-                cur: rows.filter((r) => r.d >= w.range.from && r.d <= w.range.to),
-                prev: rows.filter((r) => r.d >= w.prevRange.from && r.d <= w.prevRange.to),
-            };
-        }
-        const [cur, prev] = await Promise.all([
-            this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.cur.start, end: w.cur.end }), 'mongo.userData_cohorts_today', ctx),
-            this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.prev.start, end: w.prev.end, paidBefore: w.prev.end }), 'mongo.userData_cohorts_yday_same_time', ctx),
-        ]);
-        return { cur: (0, monitor_mongo_1.flattenCohort)(cur), prev: (0, monitor_mongo_1.flattenCohort)(prev) };
+    cohortsYdayHourly(ctx) {
+        return this.part(ctx, 'history', 'cohorts_yday_hourly', async (now, t) => {
+            const today0 = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now));
+            return (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: today0 - monitor_time_1.DAY_MS, end: today0, byHour: true }), 'mongo.userData_hourly_yday', t));
+        }).then((l) => l.value);
     }
-    async poolByClient(now, today, clientId, ctx) {
+    cohortsYdayCut(ctx) {
+        return this.part(ctx, 'today', 'cohorts_yday_cut', async (now, t) => {
+            const cut = now - monitor_time_1.DAY_MS;
+            const start = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now)) - monitor_time_1.DAY_MS;
+            return (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start, end: cut, paidBefore: cut }), 'mongo.userData_cohorts_yday_same_time', t));
+        }).then((l) => l.value);
+    }
+    pool(ctx) {
+        return this.part(ctx, 'history', 'pool', (now, t) => this.poolByClient(now, (0, monitor_time_1.istDate)(now), t), this.poolCache).then((l) => l.value);
+    }
+    async poolByClient(now, today, t) {
         const [buf, prom] = await Promise.all([
-            this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolPipeline)(now, today, clientId), 'mongo.bufferClients_pool', ctx),
-            this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolPipeline)(clientId), 'mongo.promoteClients_pool', ctx),
+            this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolPipeline)(now, today), 'mongo.bufferClients_pool', t),
+            this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolPipeline)(), 'mongo.promoteClients_pool', t),
         ]);
         const out = new Map();
         const get = (id) => {
@@ -37127,11 +37679,181 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 get(p._id).promoteActive = (0, monitor_util_1.num)(p.active);
         return out;
     }
+    async fleet(period) {
+        return this.snap(`fleet:${period}`);
+    }
+    async buildFleet(period, now, background = false) {
+        const ctx = new Ctx(background);
+        const w = (0, monitor_time_1.resolvePeriod)(period, now);
+        const sparkFrom = (0, monitor_time_1.addDays)(w.today, -6);
+        const intraday = !w.wholeDays;
+        const [meta, payH, payT, dcH, dmsH, dmY, dmT, live, cohH, cohT, cohY, pool] = await Promise.all([
+            this.section('clients', ctx, () => this.clientMeta(ctx)),
+            this.section('revenue', ctx, () => this.payHist(ctx)),
+            this.section('revenue_today', ctx, () => this.payToday(ctx)),
+            w.wholeDays ? this.section('sends', ctx, () => this.dcHist(ctx)) : null,
+            w.wholeDays ? this.section('dms', ctx, () => this.dmsHist(ctx)) : null,
+            intraday ? this.section('dms', ctx, () => this.dmRowsYday(ctx)) : null,
+            intraday ? this.section('dms_today', ctx, () => this.dmRowsToday(ctx)) : null,
+            intraday ? this.section('sends', ctx, () => this.sendsLive(ctx)) : null,
+            w.wholeDays ? this.section('conversion', ctx, () => this.cohortsHist(ctx)) : null,
+            intraday ? this.section('conversion', ctx, () => this.cohortsToday(ctx)) : null,
+            intraday ? this.section('conversion', ctx, () => this.cohortsYdayCut(ctx)) : null,
+            this.section('pool', ctx, () => this.pool(ctx)),
+        ]);
+        let rev = null;
+        let revPrev = null;
+        if (intraday) {
+            if (payT)
+                rev = (0, monitor_merge_1.revenueBy)(payT.rows, w.cur.start, payT.asOf);
+            if (payH)
+                revPrev = (0, monitor_merge_1.revenueBy)(payH, w.prev.start, (payT?.asOf ?? now) - monitor_time_1.DAY_MS);
+        }
+        else if (payH) {
+            rev = (0, monitor_merge_1.revenueBy)(payH, w.cur.start, w.cur.end);
+            revPrev = (0, monitor_merge_1.revenueBy)(payH, w.prev.start, w.prev.end);
+        }
+        let sends = null;
+        let sendsPrev = null;
+        if (dcH) {
+            sends = (0, monitor_merge_1.sumDailyClient)(dcH, w.range.from, w.range.to);
+            sendsPrev = (0, monitor_merge_1.sumDailyClient)(dcH, w.prevRange.from, w.prevRange.to);
+        }
+        else if (live) {
+            const cur = new Map();
+            const prev = new Map();
+            for (const r of live.rows) {
+                const id = r.client_id ?? '';
+                const into = r.today === true || r.today === 't' ? cur : prev;
+                const e = into.get(id) ?? { sent: 0, delivered: 0, banned: 0, new_users: 0 };
+                e.sent += (0, monitor_util_1.num)(r.sent);
+                e.delivered += (0, monitor_util_1.num)(r.delivered);
+                e.banned += (0, monitor_util_1.num)(r.banned);
+                into.set(id, e);
+            }
+            const asRows = (m) => [...m].map(([client_id, v]) => ({ d: w.today, client_id: client_id || null, ...v }));
+            sends = (0, monitor_merge_1.sumDailyClient)(asRows(cur), w.today, w.today);
+            sendsPrev = (0, monitor_merge_1.sumDailyClient)(asRows(prev), w.today, w.today);
+        }
+        let dms = null;
+        let dmsPrev = null;
+        if (dmsH) {
+            dms = (0, monitor_merge_1.sumDmsDays)(dmsH, w.range.from, w.range.to);
+            dmsPrev = (0, monitor_merge_1.sumDmsDays)(dmsH, w.prevRange.from, w.prevRange.to);
+        }
+        else {
+            if (dmT)
+                dms = (0, monitor_merge_1.distinctDms)(dmT.rows);
+            if (dmY)
+                dmsPrev = (0, monitor_merge_1.distinctDms)(dmY, (dmT?.asOf ?? now) - monitor_time_1.DAY_MS);
+        }
+        let cohortCur = null;
+        let cohortPrev = null;
+        if (cohH) {
+            cohortCur = cohH.filter((r) => r.d >= w.range.from && r.d <= w.range.to);
+            cohortPrev = cohH.filter((r) => r.d >= w.prevRange.from && r.d <= w.prevRange.to);
+        }
+        else {
+            cohortCur = cohT;
+            cohortPrev = cohY;
+        }
+        const sparkDates = (0, monitor_time_1.datesBetween)(sparkFrom, w.today);
+        const sparkOk = !!payH && !!payT;
+        const sparkBy = sparkOk ? (0, monitor_merge_1.revenueByClientDay)([...payH, ...payT.rows]) : new Map();
+        const conv = (rows, id) => {
+            if (!rows)
+                return null;
+            const sel = id === undefined ? rows : rows.filter((c) => c.c === id);
+            return (0, monitor_util_1.ratio)(sel.reduce((s, c) => s + c.same, 0), sel.reduce((s, c) => s + c.n, 0));
+        };
+        const cohortN = (rows, id) => rows ? rows.filter((c) => id === undefined || c.c === id).reduce((s, c) => s + c.n, 0) : null;
+        const nuCur = (id) => w.wholeDays ? (sends ? (id === undefined ? sends.total : sends.byClient.get(id))?.newUsers ?? 0 : null) : cohortN(cohortCur, id);
+        const nuPrev = (id) => w.wholeDays ? (sendsPrev ? (id === undefined ? sendsPrev.total : sendsPrev.byClient.get(id))?.newUsers ?? 0 : null) : cohortN(cohortPrev, id);
+        const prevSwept = w.prevRange.from < (0, monitor_time_1.addDays)(w.today, -29);
+        const prevCohorts = prevSwept ? null : cohortPrev;
+        const metaBy = new Map((meta ?? []).map((m) => [m.clientId, m]));
+        const ids = new Set([...metaBy.keys()]);
+        for (const m of [rev?.byClient, sends?.byClient, dms?.byClient])
+            for (const k of m?.keys() ?? [])
+                if (k)
+                    ids.add(k);
+        for (const c of cohortCur ?? [])
+            if (c.c)
+                ids.add(c.c);
+        const clients = [...ids].map((id) => {
+            const r = rev?.byClient.get(id);
+            const s = sends?.byClient.get(id);
+            const revenue = rev ? (r?.revenue ?? 0) : null;
+            const payers = rev ? (r?.payers ?? 0) : null;
+            const p = pool?.get(id);
+            const rp = revPrev?.byClient.get(id);
+            return {
+                clientId: id,
+                name: metaBy.get(id)?.name ?? null,
+                revenue,
+                payers,
+                newUsers: nuCur(id),
+                conversion: conv(cohortCur, id),
+                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
+                sends: sends ? (s?.sent ?? 0) : null,
+                sendSuccess: sends ? (s?.delivered ?? 0) : null,
+                banned: sends ? (s?.banned ?? 0) : null,
+                dms: dms ? (dms.byClient.get(id) ?? 0) : null,
+                pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
+                spark: sparkOk ? sparkDates.map((dt) => sparkBy.get(id)?.get(dt) ?? 0) : null,
+                previous: {
+                    revenue: revPrev ? (rp?.revenue ?? 0) : null,
+                    payers: revPrev ? (rp?.payers ?? 0) : null,
+                    newUsers: nuPrev(id),
+                    conversion: conv(prevCohorts, id),
+                },
+            };
+        });
+        clients.sort((a, b) => (b.revenue ?? -1) - (a.revenue ?? -1) || a.clientId.localeCompare(b.clientId));
+        const totals = (r, s, d, cohorts, nu) => {
+            const revenue = r ? r.total.revenue : null;
+            const gross = r ? r.total.gross : null;
+            const payers = r ? r.total.payers : null;
+            return {
+                revenue,
+                grossRevenue: gross,
+                flaggedRevenue: revenue === null || gross === null ? null : gross - revenue,
+                payers,
+                newUsers: nu,
+                conversion: conv(cohorts),
+                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
+                sends: s ? s.total.sent : null,
+                sendSuccess: s ? s.total.delivered : null,
+                banned: s ? s.total.banned : null,
+                dms: d ? d.total : null,
+            };
+        };
+        const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
+        if (intraday) {
+            const cutAt = (live?.asOf ?? payT?.asOf ?? now) - monitor_time_1.DAY_MS;
+            notes.push(`previous = yesterday 00:00 to ${new Date(cutAt + 19_800_000).toISOString().slice(11, 16)} IST; today's sends come from promotion_send and new users/conversion from Mongo userData.`);
+        }
+        if (prevSwept) {
+            notes.push('previous.conversion is null: the previous window is older than ~30 days and userData docs are swept after 30 days idle. Current-window days older than ~30 days may also undercount.');
+        }
+        return {
+            generatedAt: new Date(now).toISOString(),
+            period,
+            range: w.range,
+            previousRange: w.prevRange,
+            fleet: totals(rev, sends, dms, cohortCur, nuCur()),
+            previous: totals(revPrev, sendsPrev, dmsPrev, prevCohorts, nuPrev()),
+            clients,
+            notes,
+            timingsMs: ctx.timings,
+            cache: ctx.cache(Date.now()),
+        };
+    }
     async client(clientId, days) {
-        return (await this.clientCache.get(`${clientId}:${days}`, () => this.buildClient(clientId, days, Date.now()))).value;
+        return this.snap(`client:${clientId}:${days}`);
     }
     async fleetDetail(days) {
-        return (await this.clientCache.get(`${FLEET_DETAIL_KEY}:${days}`, () => this.buildFleetDetail(days, Date.now()))).value;
+        return this.snap(`detail:all:${days}`);
     }
     async buildClient(clientId, days, now) {
         return this.buildDetail(clientId, days, now);
@@ -37139,89 +37861,120 @@ let MonitorService = MonitorService_1 = class MonitorService {
     async buildFleetDetail(days, now) {
         return this.buildDetail(null, days, now);
     }
-    async buildDetail(scope, days, now) {
-        const ctx = { notes: [], timings: {} };
+    async buildDetail(scope, days, now, background = false) {
+        const ctx = new Ctx(background);
         const fleetScope = scope === null;
         const clientId = scope ?? exports.FLEET_DETAIL_ID;
-        const mongoClient = scope ?? undefined;
         const r = (0, monitor_time_1.clientDaysRange)(days, now);
         const today = r.to;
         const yday = (0, monitor_time_1.addDays)(today, -1);
-        const yday0 = (0, monitor_time_1.istDayStart)(yday);
-        const payStart = Math.min(r.start, yday0);
-        const tag = fleetScope ? 'fleet' : 'client';
-        const [meta, fleet, payRows, dcRows, dmsRows, psHourly, mobileRows, channelRows, cohortDaily, cohortHourly, ttfpRows, pool] = await Promise.all([
+        const today0 = (0, monitor_time_1.istDayStart)(today);
+        const yday0 = today0 - monitor_time_1.DAY_MS;
+        const inScope = (c) => fleetScope || c === scope;
+        const [meta, fleet, payH, payT, dcH, dcT, dmsH, dmT, ydayHourly, live, mobH, mobT, channelRows, cohH, cohT, cohYH, ttfp, pool] = await Promise.all([
             this.section('clients', ctx, () => this.clientMeta(ctx)),
-            this.section('summary', ctx, () => this.fleet(days === 7 ? '7d' : '30d')),
-            this.section('payments', ctx, () => this.pgRows((0, monitor_sql_1.clientPaymentsSql)(scope, payStart), ctx)),
-            this.section('daily_client', ctx, () => this.pgRows((0, monitor_sql_1.clientDailyClientSql)(scope, r.from), ctx)),
-            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.clientDmsDailySql)(scope, r.start), ctx)),
-            this.section('hourly_sends', ctx, () => this.pgRows((0, monitor_sql_1.clientSendsHourlySql)(scope, yday0), ctx)),
-            this.section('mobiles', ctx, () => this.pgRows((0, monitor_sql_1.clientMobilesSql)(scope, r.from), ctx)),
-            this.section('channels', ctx, () => this.topChannels(scope, r.start, { from: r.from, today, todayStart: (0, monitor_time_1.istDayStart)(today) }, ctx)),
-            this.section('conversion', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: r.start, end: now, clientId: mongoClient }), `mongo.userData_cohorts_${tag}`, ctx))),
-            this.section('hourly_new_users', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: yday0, end: now, clientId: mongoClient, byHour: true }), `mongo.userData_hourly_${tag}`, ctx))),
-            this.section('time_to_first_pay', ctx, () => this.mongoAgg('userData', (0, monitor_mongo_1.timeToFirstPayPipeline)(mongoClient, r.start, now), `mongo.userData_ttfp_${tag}`, ctx)),
-            this.section('pool', ctx, () => this.poolByClient(now, today, mongoClient, ctx)),
+            this.section('summary', ctx, () => this.buildFleet(days === 7 ? '7d' : '30d', now, background)),
+            this.section('payments', ctx, () => this.payHist(ctx)),
+            this.section('payments_today', ctx, () => this.payToday(ctx)),
+            this.section('daily_client', ctx, () => this.dcHist(ctx)),
+            this.section('daily_client_today', ctx, () => this.dcToday(ctx)),
+            this.section('dms', ctx, () => this.dmsHist(ctx)),
+            this.section('dms_today', ctx, () => this.dmRowsToday(ctx)),
+            this.section('hourly_sends', ctx, () => this.sendsYdayHourly(ctx)),
+            this.section('hourly_sends_today', ctx, () => this.sendsLive(ctx)),
+            this.section('mobiles', ctx, () => this.mobilesHist(ctx, r.from)),
+            this.section('mobiles_today', ctx, () => this.mobilesToday(ctx)),
+            this.section('channels', ctx, () => this.topChannels(scope, r.from, r.start, today, ctx)),
+            this.section('conversion', ctx, () => this.cohortsHist(ctx)),
+            this.section('conversion_today', ctx, () => this.cohortsToday(ctx)),
+            this.section('hourly_new_users', ctx, () => this.cohortsYdayHourly(ctx)),
+            this.section('time_to_first_pay', ctx, () => this.timeToFirstPay(scope, r.start, ctx)),
+            this.section('pool', ctx, () => this.pool(ctx)),
         ]);
-        const credits = (payRows ?? []).map(credit);
-        const inRange = credits.filter((c) => c.ms >= r.start && c.ms < now);
-        const dcBy = new Map((dcRows ?? []).map((x) => [x.d, x]));
-        const dmsBy = new Map((dmsRows ?? []).map((x) => [x.d, (0, monitor_util_1.num)(x.dms)]));
+        if (fleet)
+            ctx.merge(fleet.cache, Date.now());
+        const scoped = (cs) => cs.filter((c) => inScope(c.client));
+        const histCredits = payH ? scoped(payH).filter((c) => c.ms >= Math.min(r.start, yday0)) : null;
+        const todayCredits = payT ? scoped(payT.rows) : null;
+        const credits = histCredits && todayCredits ? [...histCredits, ...todayCredits] : null;
+        const inRange = credits?.filter((c) => c.ms >= r.start && c.ms < now) ?? null;
+        const creditsOf = (date) => (date === today ? todayCredits : histCredits);
+        const dcBy = new Map([...(dcH ? (0, monitor_merge_1.dailyClientByDate)(dcH, scope) : []), ...(dcT ? (0, monitor_merge_1.dailyClientByDate)(dcT, scope) : [])]);
+        const dmsBy = dmsH ? (0, monitor_merge_1.dmsByDate)(dmsH, scope) : new Map();
+        const dmsToday = dmT ? (0, monitor_merge_1.distinctDms)(dmT.rows.filter((x) => inScope(x.client_id))).total : null;
         const cohortBy = new Map();
-        for (const x of cohortDaily ?? []) {
+        for (const x of [...(cohH ?? []), ...(cohT ?? [])]) {
+            if (!inScope(x.c))
+                continue;
             const e = cohortBy.get(x.d) ?? { n: 0, same: 0 };
             e.n += x.n;
             e.same += x.same;
             cohortBy.set(x.d, e);
         }
         const daily = (0, monitor_time_1.datesBetween)(r.from, r.to).map((date) => {
-            const dayCredits = inRange.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date);
-            const revenue = payRows ? dayCredits.reduce((s, c) => s + c.revenue, 0) : null;
+            const isToday = date === today;
+            const dayCredits = creditsOf(date)?.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date) ?? null;
+            const dcOk = isToday ? !!dcT : !!dcH;
             const dc = dcBy.get(date);
             const co = cohortBy.get(date);
+            const coOk = isToday ? !!cohT : !!cohH;
             return {
                 date,
-                revenue,
-                grossRevenue: payRows ? dayCredits.reduce((s, c) => s + c.gross, 0) : null,
-                payers: payRows ? new Set(dayCredits.filter((c) => c.clean).map((c) => c.chat)).size : null,
-                newUsers: dcRows ? (0, monitor_util_1.num)(dc?.new_users) : null,
-                conversion: cohortDaily ? (0, monitor_util_1.ratio)(co?.same ?? 0, co?.n ?? 0) : null,
-                sends: dcRows ? (0, monitor_util_1.num)(dc?.sent) : null,
-                sendSuccess: dcRows ? (0, monitor_util_1.num)(dc?.delivered) : null,
-                banned: dcRows ? (0, monitor_util_1.num)(dc?.banned) : null,
-                dms: dmsRows ? (dmsBy.get(date) ?? 0) : null,
+                revenue: dayCredits ? dayCredits.reduce((s, c) => s + c.revenue, 0) : null,
+                grossRevenue: dayCredits ? dayCredits.reduce((s, c) => s + c.gross, 0) : null,
+                payers: dayCredits ? new Set(dayCredits.filter((c) => c.clean).map((c) => c.chat)).size : null,
+                newUsers: dcOk ? (dc?.newUsers ?? 0) : null,
+                conversion: coOk ? (0, monitor_util_1.ratio)(co?.same ?? 0, co?.n ?? 0) : null,
+                sends: dcOk ? (dc?.sent ?? 0) : null,
+                sendSuccess: dcOk ? (dc?.delivered ?? 0) : null,
+                banned: dcOk ? (dc?.banned ?? 0) : null,
+                dms: isToday ? dmsToday : dmsH ? (dmsBy.get(date) ?? 0) : null,
             };
         });
-        const sendsHourBy = new Map((psHourly ?? []).map((x) => [`${x.d}:${(0, monitor_util_1.num)(x.h)}`, (0, monitor_util_1.num)(x.sent)]));
+        const sendsHourBy = new Map();
+        for (const x of ydayHourly ?? [])
+            if (inScope(x.client_id))
+                sendsHourBy.set(`${yday}:${(0, monitor_util_1.num)(x.h)}`, (sendsHourBy.get(`${yday}:${(0, monitor_util_1.num)(x.h)}`) ?? 0) + (0, monitor_util_1.num)(x.sent));
+        for (const x of live?.rows ?? []) {
+            if (!(x.today === true || x.today === 't') || !inScope(x.client_id))
+                continue;
+            sendsHourBy.set(`${today}:${(0, monitor_util_1.num)(x.h)}`, (sendsHourBy.get(`${today}:${(0, monitor_util_1.num)(x.h)}`) ?? 0) + (0, monitor_util_1.num)(x.sent));
+        }
         const nuHourBy = new Map();
-        for (const c of cohortHourly ?? [])
-            nuHourBy.set(`${c.d}:${c.h}`, (nuHourBy.get(`${c.d}:${c.h}`) ?? 0) + c.n);
-        const hourly = (date) => Array.from({ length: 24 }, (_, hour) => {
-            const hc = credits.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date && (0, monitor_time_1.istHour)(c.ms) === hour);
-            return {
-                hour,
-                revenue: payRows ? hc.reduce((s, c) => s + c.revenue, 0) : null,
-                payers: payRows ? new Set(hc.filter((c) => c.clean).map((c) => c.chat)).size : null,
-                newUsers: cohortHourly ? (nuHourBy.get(`${date}:${hour}`) ?? 0) : null,
-                sends: psHourly ? (sendsHourBy.get(`${date}:${hour}`) ?? 0) : null,
-            };
-        });
-        const clean = inRange.filter((c) => c.clean);
-        const amount = payRows
+        for (const c of [...(cohYH ?? []), ...(cohT ?? [])])
+            if (inScope(c.c))
+                nuHourBy.set(`${c.d}:${c.h}`, (nuHourBy.get(`${c.d}:${c.h}`) ?? 0) + c.n);
+        const hourly = (date) => {
+            const isToday = date === today;
+            const dayCredits = creditsOf(date)?.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date) ?? null;
+            const sendsOk = isToday ? !!live : !!ydayHourly;
+            const nuOk = isToday ? !!cohT : !!cohYH;
+            return Array.from({ length: 24 }, (_, hour) => {
+                const hc = dayCredits?.filter((c) => (0, monitor_time_1.istHour)(c.ms) === hour) ?? null;
+                return {
+                    hour,
+                    revenue: hc ? hc.reduce((s, c) => s + c.revenue, 0) : null,
+                    payers: hc ? new Set(hc.filter((c) => c.clean).map((c) => c.chat)).size : null,
+                    newUsers: nuOk ? (nuHourBy.get(`${date}:${hour}`) ?? 0) : null,
+                    sends: sendsOk ? (sendsHourBy.get(`${date}:${hour}`) ?? 0) : null,
+                };
+            });
+        };
+        const clean = inRange?.filter((c) => c.clean) ?? [];
+        const amount = inRange
             ? AMOUNT_BUCKETS.map((b) => {
                 const inB = clean.filter((c) => c.amount >= b.lo && c.amount < b.hi);
                 return { bucket: b.bucket, count: inB.length, revenue: inB.reduce((s, c) => s + c.revenue, 0) };
             })
             : null;
-        const hourOfDay = payRows
+        const hourOfDay = inRange
             ? Array.from({ length: 24 }, (_, hour) => {
                 const hc = clean.filter((c) => (0, monitor_time_1.istHour)(c.ms) === hour);
                 return { hour, revenue: hc.reduce((s, c) => s + c.revenue, 0), payers: new Set(hc.map((c) => c.chat)).size };
             })
             : null;
         let repeat = null;
-        if (payRows) {
+        if (inRange) {
             const byChat = new Map();
             for (const c of clean) {
                 const e = byChat.get(c.chat) ?? { days: new Set(), revenue: 0 };
@@ -37245,37 +37998,37 @@ let MonitorService = MonitorService_1 = class MonitorService {
             repeat = { oneTime: one, repeat: rep, repeatRevenueShare: (0, monitor_util_1.ratio)(repRev, totRev) };
         }
         let timeToFirstPay = null;
-        if (ttfpRows) {
-            const m = (0, monitor_mongo_1.mapTtfp)(ttfpRows);
+        if (ttfp) {
+            const m = (0, monitor_mongo_1.mapTtfp)(ttfp);
             timeToFirstPay = m.buckets;
             if (m.negative)
                 ctx.notes.push(`timeToFirstPay: ${m.negative} first payment(s) predate their userData doc (doc recreated) and are excluded.`);
         }
+        const mobileRows = mobH && mobT ? (0, monitor_merge_1.mergeMobiles)([...mobH, ...mobT], scope) : null;
+        if (mobH && !mobT)
+            ctx.notes.push('mobiles unavailable: today part failed');
         const mobiles = mobileRows
             ? mobileRows.map((m) => ({
                 mobile: (0, monitor_util_1.maskMobile)(m.mobile),
                 ...(fleetScope ? { clientId: m.client_id ?? null } : {}),
-                newUsers: (0, monitor_util_1.num)(m.new_users),
-                sends: (0, monitor_util_1.num)(m.sent),
-                sendSuccess: (0, monitor_util_1.num)(m.delivered),
-                banned: (0, monitor_util_1.num)(m.banned),
-                dms: (0, monitor_util_1.num)(m.dms),
+                newUsers: m.new_users,
+                sends: m.sent,
+                sendSuccess: m.delivered,
+                banned: m.banned,
+                dms: m.dms,
                 firstDay: m.first_day,
                 lastDay: m.last_day,
             }))
             : null;
         let channels = null;
         if (channelRows) {
-            const titles = (await this.section('channel_titles', ctx, () => this.channelTitles(channelRows.map((c) => String(c.channel_id)), ctx))) ?? new Map();
-            channels = channelRows.map((c) => {
-                const id = String(c.channel_id);
-                return {
-                    title: titles.get(id) ?? `channel …${id.slice(-4)}`,
-                    sends: (0, monitor_util_1.num)(c.sent),
-                    dms: (0, monitor_util_1.num)(c.dms),
-                    dmPerSend: (0, monitor_util_1.ratio)((0, monitor_util_1.num)(c.dms), (0, monitor_util_1.num)(c.sent)),
-                };
-            });
+            const titles = (await this.section('channel_titles', ctx, () => this.channelTitles(channelRows.map((c) => c.channel_id), ctx))) ?? new Map();
+            channels = channelRows.map((c) => ({
+                title: titles.get(c.channel_id) ?? `channel …${c.channel_id.slice(-4)}`,
+                sends: c.sent,
+                dms: c.dms,
+                dmPerSend: (0, monitor_util_1.ratio)(c.dms, c.sent),
+            }));
         }
         const poolAll = { eligible: 0, total: 0, harsh: 0, promoteActive: 0 };
         for (const v of pool?.values() ?? []) {
@@ -37318,42 +38071,79 @@ let MonitorService = MonitorService_1 = class MonitorService {
             pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, harsh: p?.harsh ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
             notes,
             timingsMs: ctx.timings,
+            cache: ctx.cache(Date.now()),
         };
     }
-    async topChannels(clientId, start, days, ctx) {
-        const top = await this.pgRows((0, monitor_sql_1.clientTopDmChannelsSql)(clientId, start), ctx);
+    async timeToFirstPay(scope, start, ctx) {
+        const [hist, today] = await Promise.all([
+            this.part(ctx, 'history', 'ttfp_hist', (now, t) => {
+                const today0 = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now));
+                return this.mongoAgg('userData', (0, monitor_mongo_1.firstPayRowsPipeline)(this.historyStart((0, monitor_time_1.istDate)(now)), today0), 'mongo.userData_ttfp_hist', t);
+            }, this.dailyCache),
+            this.part(ctx, 'today', 'ttfp_today', async (now, t, bg) => {
+                const pay = await this.payToday(new Ctx(bg));
+                const chats = [...new Set(pay.rows.map((c) => c.chat))];
+                if (!chats.length)
+                    return [];
+                return this.mongoAgg('userData', (0, monitor_mongo_1.firstPayRowsPipeline)((0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now)), now, chats), 'mongo.userData_ttfp_today', t);
+            }),
+        ]);
+        const today0 = (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(Date.now()));
+        return (0, monitor_merge_1.addBuckets)((0, monitor_mongo_1.ttfpBuckets)(hist.value, scope, start, today0), (0, monitor_mongo_1.ttfpBuckets)(today.value, scope, today0, Number.POSITIVE_INFINITY));
+    }
+    async topChannels(scope, from, start, today, ctx) {
+        const today0 = (0, monitor_time_1.istDayStart)(today);
+        const key = scope ?? '*';
+        const [hist, dmT] = await Promise.all([
+            this.part(ctx, 'history', `channels_dms_hist:${key}:${from}`, (_now, t, bg) => this.pgRows((0, monitor_sql_1.channelDmsHistSql)(scope, from, today, start, today0), t, bg)),
+            this.dmRowsToday(ctx),
+        ]);
+        const histDms = new Map(hist.value.map((x) => [String(x.channel_id), (0, monitor_util_1.num)(x.dms)]));
+        const top = (0, monitor_merge_1.rankChannels)(histDms, (0, monitor_merge_1.dmsByChannel)(dmT.rows, scope), 20);
         if (!top.length)
             return [];
-        const ids = top.map((t) => String(t.channel_id));
-        const sends = await this.pgRows((0, monitor_sql_1.clientChannelSendsSql)(clientId, start, ids, clientId === null ? days : undefined), ctx);
-        const rolledTo = sends.find((x) => x.rolled_to)?.rolled_to;
-        const yday = (0, monitor_time_1.addDays)(days.today, -1);
-        if (clientId === null && rolledTo && rolledTo < yday) {
-            ctx.notes.push(`channels[].sends: daily_channel is rolled up only to ${rolledTo}; sends for ${(0, monitor_time_1.addDays)(rolledTo, 1)}..${yday} are missing.`);
+        const candidates = (0, monitor_merge_1.rankChannels)(histDms, new Map(), exports.CHANNEL_CANDIDATES).map((c) => c.channel_id).sort();
+        const cand = new Set(candidates);
+        const extra = top.map((c) => c.channel_id).filter((id) => !cand.has(id)).sort();
+        const sendsHist = (ids) => this.part(ctx, 'history', `channels_sends_hist:${key}:${from}:${ids.join(',')}`, (_now, t, bg) => this.pgRows((0, monitor_sql_1.channelSendsHistSql)(scope, ids, from, today, start, today0), t, bg));
+        const sendsToday = (ids) => this.part(ctx, 'today', `channels_sends_today:${key}:${ids.join(',')}`, (now, t, bg) => this.pgRows((0, monitor_sql_1.channelSendsTodaySql)(scope, ids, (0, monitor_time_1.istDayStart)((0, monitor_time_1.istDate)(now))), t, bg));
+        const [h1, h2, t1, t2] = await Promise.all([
+            candidates.length ? sendsHist(candidates) : null,
+            extra.length ? sendsHist(extra) : null,
+            candidates.length ? sendsToday(candidates) : null,
+            extra.length ? sendsToday(extra) : null,
+        ]);
+        const sentBy = new Map();
+        for (const part of [h1, h2, t1, t2]) {
+            for (const x of part?.value ?? [])
+                sentBy.set(String(x.channel_id), (sentBy.get(String(x.channel_id)) ?? 0) + (0, monitor_util_1.num)(x.sent));
         }
-        const sentBy = new Map(sends.map((x) => [String(x.channel_id), (0, monitor_util_1.num)(x.sent)]));
-        return top.map((t) => ({ channel_id: String(t.channel_id), dms: (0, monitor_util_1.num)(t.dms), sent: sentBy.get(String(t.channel_id)) ?? 0 }));
+        return top.map((t) => ({ channel_id: t.channel_id, dms: t.dms, sent: sentBy.get(t.channel_id) ?? 0 }));
     }
     async channelTitles(ids, ctx) {
-        const variants = (id) => {
-            const bare = id.replace(/^-100/, '');
-            return [...new Set([id, bare, `-100${bare}`])];
-        };
-        const all = [...new Set(ids.flatMap(variants))];
-        const out = new Map();
-        for (const coll of ['activeChannels', 'channels']) {
-            const missing = ids.filter((id) => !out.has(id));
-            if (!missing.length)
-                break;
-            const rows = await this.mongoFind(coll, { channelId: { $in: all } }, { _id: 0, channelId: 1, title: 1 }, `mongo.${coll}_titles`, ctx);
-            const byId = new Map(rows.filter((x) => x.title).map((x) => [String(x.channelId), String(x.title)]));
-            for (const id of missing) {
-                const t = variants(id).map((v) => byId.get(v)).find(Boolean);
-                if (t)
-                    out.set(id, t);
+        const key = [...ids].sort().join(',');
+        const loaded = await this.part(ctx, 'history', `titles:${key}`, async (_now, t) => {
+            const variants = (id) => {
+                const bare = id.replace(/^-100/, '');
+                return [...new Set([id, bare, `-100${bare}`])];
+            };
+            const all = [...new Set(ids.flatMap(variants))];
+            const out = new Map();
+            for (const coll of ['activeChannels', 'channels']) {
+                const missing = ids.filter((id) => !out.has(id));
+                if (!missing.length)
+                    break;
+                const rows = await this.mongoFind(coll, { channelId: { $in: all } }, { _id: 0, channelId: 1, title: 1 }, `mongo.${coll}_titles`, t);
+                const byId = new Map(rows.filter((x) => x.title).map((x) => [String(x.channelId), String(x.title)]));
+                for (const id of missing) {
+                    const title = variants(id).map((v) => byId.get(v)).find(Boolean);
+                    if (title)
+                        out.set(id, title);
+                }
             }
-        }
-        return out;
+            return [...out];
+        });
+        return new Map(loaded.value);
     }
     async live(svc) {
         let redis = 'ok';
@@ -37392,7 +38182,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         };
     }
     async loadLive() {
-        const ctx = { notes: [], timings: {} };
+        const ctx = new Ctx();
         const meta = await this.section('clients', ctx, () => this.clientMeta(ctx));
         const redisPart = async () => {
             const members = await this.redis.smembers(exports.HEARTBEAT_INDEX_KEY);
