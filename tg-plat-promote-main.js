@@ -35726,7 +35726,9 @@ class HealthMonitor {
         const updatedDetails = {
             ...clientDetails,
             repl: clientData?.repl ?? clientDetails.repl,
-            username: clientData?.username ?? clientDetails.username,
+            // Route handle = the main tg-aut account (clients.username). Prefer the fresh clients doc, then the
+            // manager's value (kept fresh by its own clients-doc refresh), never anything read from getMe().
+            username: clientData?.username || telegramManager?.clientDetails?.username || clientDetails.username,
             lastMessage: Date.now(),
             lastInboundMessageAt: clientDetails.lastInboundMessageAt || 0,
             name: clientDetails.name || clientData?.name
@@ -35757,6 +35759,7 @@ class HealthMonitor {
                 return; // Skip further checks for this cycle, let the recreated client stabilize.
             }
             const me = await (0,_telegram_check_me__WEBPACK_IMPORTED_MODULE_13__.checkMe)(telegramManager.client, telegramManager.clientDetails);
+            telegramManager.noteOwnUsername?.(me?.username);
             const inboundSnapshot = this.mobileManager.getInboundActivitySnapshot(mobile);
             logger.info(`[${mobile}] Inbound activity confidence`, {
                 confidence: inboundSnapshot.confidence,
@@ -37799,6 +37802,7 @@ __webpack_require__.r(__webpack_exports__);
  *
  *   promote::route::{mobile}         HASH  chatId -> {"stage","lastSentAt","callAttempts","firstStageUseUrl"}  TTL 24 h
  *   promote::routebacklog::{mobile}  ZSET  chatId -> routedAt ms (confirmed route sends awaiting conversion)  TTL 24 h
+ *   promote::mainreply::{mobile}     ZSET  chatId -> sentAt ms (main-account reply to a user who already has userData)  TTL 24 h
  *
  * Without it a restart re-sent stage 1 (and re-rang) users already mid-escalation, and dropped the 24 h
  * conversion backlog. Writes are fire-and-forget (replayed per chat after a Redis outage); load() runs once at boot.
@@ -37823,12 +37827,24 @@ function parseRoute(raw) {
         return null;
     }
 }
+function parseScored(flat) {
+    const entries = [];
+    const list = flat ?? [];
+    for (let i = 0; i + 1 < list.length; i += 2) {
+        const at = Number(list[i + 1]);
+        if (Number.isFinite(at))
+            entries.push([String(list[i]), at]);
+    }
+    return entries;
+}
 class PromoteRouteStore {
     constructor(mobile) {
         this.routeKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::route", mobile);
         this.backlogKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::routebacklog", mobile);
         this.routes = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisHash(() => this.routeKey, PROMOTE_ROUTE_STATE_TTL_MS, "promote.route");
         this.backlog = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.backlogKey, "promote.routebacklog");
+        this.mainReplyKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::mainreply", mobile);
+        this.mainReplies = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.mainReplyKey, "promote.mainreply");
     }
     saveRoute(chatId, state) {
         const value = JSON.stringify({
@@ -37858,6 +37874,17 @@ class PromoteRouteStore {
             return Promise.resolve(false);
         return this.backlog.send((m, key) => { m.zrem(key, ...clean); }, clean.map((chatId) => [chatId, (m, key) => { m.zrem(key, chatId); }]));
     }
+    /** Records that this chat got the once-per-24 h main-account reply (stale entries are trimmed). */
+    addMainReply(chatId, sentAt) {
+        if (!chatId)
+            return Promise.resolve(false);
+        const build = (m, key) => {
+            m.zadd(key, sentAt, chatId);
+            m.zremrangebyscore(key, "-inf", sentAt - PROMOTE_ROUTE_STATE_TTL_MS);
+            m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
+        };
+        return this.mainReplies.send(build, [[chatId, build]]);
+    }
     /**
      * Routes last touched within `maxRouteAgeMs` and backlog entries younger than 24 h; null when Redis is
      * unavailable (the caller then starts empty, as before).
@@ -37865,13 +37892,15 @@ class PromoteRouteStore {
     async load(now, maxRouteAgeMs) {
         const routeKey = this.routeKey;
         const backlogKey = this.backlogKey;
-        if (!routeKey || !backlogKey)
+        const mainReplyKey = this.mainReplyKey;
+        if (!routeKey || !backlogKey || !mainReplyKey)
             return null;
-        const [hash, backlog] = await Promise.all([
+        const [hash, backlog, mainReplies] = await Promise.all([
             (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.route", (r) => r.hgetall(routeKey)),
             (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.routebacklog", (r) => r.zrangebyscore(backlogKey, now - PROMOTE_ROUTE_STATE_TTL_MS, "+inf", "WITHSCORES")),
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.mainreply", (r) => r.zrangebyscore(mainReplyKey, now - PROMOTE_ROUTE_STATE_TTL_MS, "+inf", "WITHSCORES")),
         ]);
-        if (hash === null && backlog === null)
+        if (hash === null && backlog === null && mainReplies === null)
             return null;
         const routes = [];
         for (const [chatId, raw] of Object.entries(hash ?? {})) {
@@ -37879,14 +37908,7 @@ class PromoteRouteStore {
             if (state && now - state.lastSentAt <= maxRouteAgeMs)
                 routes.push([chatId, state]);
         }
-        const entries = [];
-        const flat = backlog ?? [];
-        for (let i = 0; i + 1 < flat.length; i += 2) {
-            const at = Number(flat[i + 1]);
-            if (Number.isFinite(at))
-                entries.push([String(flat[i]), at]);
-        }
-        return { routes, backlog: entries };
+        return { routes, backlog: parseScored(backlog), mainReplies: parseScored(mainReplies) };
     }
 }
 
@@ -38311,8 +38333,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ec44fbad5a446f853d5048b9d20f374c6af54dd4" : 0;
-    const builtAt =  true ? "2026-10-28T17:12:37.734Z" : 0;
+    const sha =  true ? "56f5c2cbae5d8204fb87a975453144671f198b61" : 0;
+    const builtAt =  true ? "2026-10-28T17:52:04.169Z" : 0;
     return { sha, builtAt };
 }
 
@@ -45010,6 +45032,7 @@ function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ROUTE_TME_PROBABILITY: () => (/* binding */ ROUTE_TME_PROBABILITY),
 /* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -45235,6 +45258,81 @@ const CONNECTION_CHECK_INTERVAL = 5 * 60 * 1000; // Check connection every 5 min
 const MAX_RECONNECTION_ATTEMPTS = 3;
 const RECONNECTION_DELAY = 5000; // 5 seconds
 const SESSION_ENTITIES_MAX_SIZE = 500; // Cap GramJS internal entity/session caches
+/**
+ * One process serves several promote mobiles for the same clientId, each with its own
+ * clientDetails object and its own 5-min health tick. Share one clients-doc read across them
+ * for this long so N mobiles do not make N identical reads per tick. Failures are not cached.
+ */
+const ROUTE_USERNAME_CACHE_MS = 60 * 1000;
+let routeUsernameCache = null;
+/**
+ * Usernames (lower-case) of every promote account this process has run, keyed by mobile. A route handle
+ * that matches any of them would send users back to a promote account instead of the main account.
+ */
+const ownPromoteUsernames = new Map();
+/** Last clients.username read that was not one of our promote accounts. */
+let lastGoodMainUsername = '';
+function normalizeHandle(value) {
+    return typeof value === 'string' ? value.trim().replace(/^@+/, '') : '';
+}
+function isOwnPromoteUsername(handle) {
+    const wanted = normalizeHandle(handle).toLowerCase();
+    if (!wanted)
+        return false;
+    for (const own of ownPromoteUsernames.values()) {
+        if (own === wanted)
+            return true;
+    }
+    return false;
+}
+/**
+ * Chance that a stage-1 route message renders the main handle as a t.me link (owner 2026-10-28: 0.8, was 0.7).
+ * The t.me link previews the main profile, so it is sent alone; the @username rendering has no preview, so it
+ * carries the website URL (process.env.link) instead.
+ */
+const ROUTE_TME_PROBABILITY = 0.8;
+/**
+ * The website URL for route messages (process.env.link), or '' when unset or when it (misconfigured) links one
+ * of this process's promote accounts: the never-self-link invariant covers the website line too.
+ */
+function routeWebsite() {
+    const website = process.env.link?.trim() ?? '';
+    const tme = /(?:t\.me|telegram\.me)\/@?([A-Za-z0-9_]+)/gi;
+    for (const match of website.matchAll(tme)) {
+        if (isOwnPromoteUsername(match[1]))
+            return '';
+    }
+    return website;
+}
+/** Appends the website URL on its own line (when there is one). */
+function withWebsite(message, website) {
+    return website ? `${message}\n\n${website}` : message;
+}
+/** Picks one option from each {a|b|c} group. */
+function parseSpintax(text) {
+    return text.replace(/\{([^{}]+)\}/g, (_match, options) => {
+        const choices = options.split('|');
+        return choices[Math.floor(Math.random() * choices.length)];
+    });
+}
+/** Main tg-aut account username from the clients doc; '' when missing or unreadable. */
+function readMainRouteUsername(clientId) {
+    const now = Date.now();
+    if (routeUsernameCache && routeUsernameCache.clientId === clientId && now - routeUsernameCache.at < ROUTE_USERNAME_CACHE_MS) {
+        return routeUsernameCache.value;
+    }
+    const value = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance().getClient(clientId)
+        .then((client) => (typeof client?.username === 'string' ? client.username.trim() : ''));
+    const entry = { clientId, at: now, value };
+    routeUsernameCache = entry;
+    const forget = () => {
+        if (routeUsernameCache === entry)
+            routeUsernameCache = null;
+    };
+    value.then((username) => { if (!username)
+        forget(); }, forget);
+    return value;
+}
 class TelegramManager {
     static getInstance(mobile) {
         return _a.activeInstances.get(mobile);
@@ -45279,6 +45377,39 @@ class TelegramManager {
         instance.init();
         return instance;
     }
+    /** Test hook: forget process-wide route-handle state (own promote usernames, last good main username). */
+    static resetRouteHandleStateForTests() {
+        ownPromoteUsernames.clear();
+        lastGoodMainUsername = '';
+        routeUsernameCache = null;
+    }
+    /** Remembers this promote account's own Telegram username so it can never become a route handle. */
+    noteOwnUsername(username) {
+        const mobile = this.clientDetails?.mobile;
+        if (!mobile)
+            return;
+        const handle = normalizeHandle(username).toLowerCase();
+        if (!handle)
+            return;
+        ownPromoteUsernames.set(mobile, handle);
+        if (lastGoodMainUsername.toLowerCase() === handle)
+            lastGoodMainUsername = '';
+    }
+    /**
+     * Every writer of clientDetails goes through here: a username equal to one of our promote accounts
+     * (or empty) never replaces the current main-account handle.
+     */
+    withSafeRouteUsername(incoming) {
+        const handle = normalizeHandle(incoming?.username);
+        if (handle && !isOwnPromoteUsername(handle))
+            return incoming;
+        const current = normalizeHandle(this.clientDetails?.username);
+        const keep = current && !isOwnPromoteUsername(current) ? current : lastGoodMainUsername;
+        if (handle) {
+            logger.warn(`[PromoteRoute] ${incoming.mobile}: refusing promote account @${handle} as route handle; keeping ${keep ? `@${keep}` : '(none)'}`);
+        }
+        return { ...incoming, username: keep };
+    }
     constructor(clientDetails) {
         this.checkingAuths = false;
         this.lastResetTime = 0;
@@ -45312,6 +45443,10 @@ class TelegramManager {
         this.ROUTE_ATTRIBUTION_PACE_JITTER_MS = 750;
         /** Redis mirror of routeStateMap + pendingRouteChats (memory stays authoritative). */
         this.routeStoreInstance = null;
+        /** chatId -> when an existing user (has userData) last got the main-account reply; once per 24 h. */
+        this.mainAccountReplies = new Map();
+        this.MAIN_ACCOUNT_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
+        this.MAIN_ACCOUNT_REPLY_MAX_SIZE = 5000;
         // Array limits
         this.MAX_EVENT_HANDLERS = 10;
         // Reusable filter instance - same reference used for add and remove
@@ -45321,7 +45456,7 @@ class TelegramManager {
         this.apiId = null;
         this.apiHash = null;
         this.stringSession = null;
-        this.clientDetails = clientDetails;
+        this.clientDetails = this.withSafeRouteUsername(clientDetails);
         // Register this instance
         _a.activeInstances.set(clientDetails.mobile, this);
         logger.info(`TelegramManager created for ${clientDetails.mobile}. Total instances: ${_a.activeInstances.size}`);
@@ -45395,8 +45530,8 @@ class TelegramManager {
     init() {
         this.connectionCheckInterval = setInterval(this.checkConnection.bind(this), CONNECTION_CHECK_INTERVAL);
         this.startLiveMapCleanup();
-        // Prime the route username from the live account once at startup so we don't route to the
-        // startup-config value until the first 5-min health check runs.
+        // Prime the route username from the clients doc once at startup so a tg-aut swap that
+        // happened after this process loaded its config is picked up before the first health check.
         void this.refreshRouteUsername();
         this.startRouteConversionReconciler();
         void this.restoreRouteState();
@@ -45449,6 +45584,11 @@ class TelegramManager {
                     continue;
                 this.pendingRouteChats.set(chatId, routedAt);
                 backlog += 1;
+            }
+            for (const [chatId, sentAt] of snapshot.mainReplies) {
+                const known = this.mainAccountReplies.get(chatId);
+                if (known === undefined || known < sentAt)
+                    this.mainAccountReplies.set(chatId, sentAt);
             }
             if (routes || backlog) {
                 logger.info(`[PromoteRoute] ${this.clientDetails?.mobile} restored ${routes} route state(s) and ${backlog} pending route(s) from Redis`);
@@ -45574,6 +45714,7 @@ class TelegramManager {
             // this.promoterInstance.PromoteToGrp()
             const me = await this.client.getMe();
             this.tgId = me.id.toString();
+            this.noteOwnUsername(me.username);
             void (async () => {
                 try {
                     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance();
@@ -45662,9 +45803,9 @@ class TelegramManager {
                 logger.info(`${this.clientDetails.mobile}: Connection health check passed`);
                 // Reset reconnection attempts on successful connection
                 this.reconnectionAttempts = 0;
-                // Keep the route-message username in sync with the live account. The username can
-                // change when the account rotates/updates it, but clientDetails.username is only set
-                // at startup — so without this refresh we route users to a stale @username.
+                // Keep the route-message username in sync with the client's main tg-aut account. A buffer
+                // swap changes clients.username, but clientDetails.username is only set at startup, so
+                // without this refresh we would route users to the retired main account.
                 await this.refreshRouteUsername();
             }
         }
@@ -45940,6 +46081,7 @@ class TelegramManager {
             if (removed > 0) {
                 logger.info(`${this.clientDetails?.mobile}: Cleaned up ${removed} expired liveMap entries. Current size: ${this.liveMap.size}`);
             }
+            this.pruneMainAccountReplies(now);
             // Also clean GramJS internal caches on the same interval
             this.cleanupSessionEntityCache();
         }, this.LIVE_MAP_CLEANUP_INTERVAL);
@@ -45998,7 +46140,7 @@ class TelegramManager {
             this.sessionString = incomingSession;
             this.stringSession = null;
         }
-        this.clientDetails = clientDetails;
+        this.clientDetails = this.withSafeRouteUsername(clientDetails);
     }
     async destroy() {
         try {
@@ -46057,6 +46199,7 @@ class TelegramManager {
                         const res = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.UpdateUsername({ username }));
                         logger.info(`Username '${username}' updated successfully.`);
                         newUserName = username;
+                        this.noteOwnUsername(username);
                         break;
                     }
                     else {
@@ -46070,6 +46213,7 @@ class TelegramManager {
                     logger.info(error.errorMessage);
                     if (error.errorMessage == 'USERNAME_NOT_MODIFIED') {
                         newUserName = username;
+                        this.noteOwnUsername(username);
                         break;
                     }
                     username = baseUsername + increment;
@@ -46080,20 +46224,88 @@ class TelegramManager {
         }
         return newUserName;
     }
+    /**
+     * The main tg-aut account handle for route messages. Never one of this process's promote accounts:
+     * a self-handle falls back to the last good clients.username, and with none known the caller sends
+     * the message without a handle.
+     */
+    resolveRouteHandle() {
+        const current = normalizeHandle(this.clientDetails?.username);
+        if (current && !isOwnPromoteUsername(current))
+            return current;
+        const fallback = lastGoodMainUsername && !isOwnPromoteUsername(lastGoodMainUsername) ? lastGoodMainUsername : '';
+        if (current || !fallback) {
+            logger.warn(`[PromoteRoute] ${this.clientDetails?.mobile}: route handle ${current ? `@${current} is a promote account in this process` : 'missing'}; using ${fallback ? `@${fallback}` : 'no handle'}`);
+        }
+        return fallback;
+    }
+    /**
+     * Restored existing-user reply (promote-clients before 16a9bcd, 2026-04-05): point them at the main account.
+     * With a handle: the t.me link alone (its preview is the main profile). Without one: "my main account" plus
+     * the website URL, so the user still has somewhere to go.
+     */
+    getMainAccountReplyMessage() {
+        const handle = this.resolveRouteHandle();
+        const target = handle ? `https://t.me/${handle}` : 'my main account';
+        const website = handle ? '' : routeWebsite();
+        const templates = [
+            `{Text|Message|DM} me here **{handsome|daddy|cutie}!! ${this.generateEmojis()}👇:**\n\n\n${target} ${this.getRandomEmoji()}`,
+            `{Contact|Message|Hit} me here **{sexy|babyyy|babe}!! ${this.generateEmojis()}👇:**\n\n\n${target} ${this.getRandomEmoji()}`,
+            `{DM|Msg|Text} me here **{beautiful man|bujji|daddy}!! ${this.generateEmojis()}👇:**\n\n\n${target} ${this.getRandomEmoji()}`,
+        ];
+        const template = templates[Math.floor(Math.random() * templates.length)];
+        return { message: withWebsite(parseSpintax(template), website), linkPreview: Boolean(handle || website) };
+    }
+    pruneMainAccountReplies(now) {
+        for (const [chatId, sentAt] of this.mainAccountReplies) {
+            if (now - sentAt >= this.MAIN_ACCOUNT_REPLY_WINDOW_MS)
+                this.mainAccountReplies.delete(chatId);
+        }
+        if (this.mainAccountReplies.size > this.MAIN_ACCOUNT_REPLY_MAX_SIZE) {
+            const oldest = Array.from(this.mainAccountReplies.entries()).sort((a, b) => a[1] - b[1]);
+            for (let i = 0; i < oldest.length - this.MAIN_ACCOUNT_REPLY_MAX_SIZE; i++)
+                this.mainAccountReplies.delete(oldest[i][0]);
+        }
+    }
+    /** At most once per chat per promote account per 24 h (memory, mirrored to Redis for restarts). */
+    async sendMainAccountReply(chatId) {
+        const now = Date.now();
+        const lastSentAt = this.mainAccountReplies.get(chatId);
+        if (lastSentAt !== undefined && now - lastSentAt < this.MAIN_ACCOUNT_REPLY_WINDOW_MS) {
+            logger.debug(`[PromoteRoute] ${this.clientDetails.mobile}:${chatId} main-account reply already sent within 24 h`);
+            return;
+        }
+        if (!this.messageQueue)
+            return;
+        this.mainAccountReplies.set(chatId, now);
+        void this.routeStore?.addMainReply(chatId, now);
+        const payload = this.getMainAccountReplyMessage();
+        try {
+            await this.messageQueue.enqueue(chatId, { message: payload.message, linkPreview: payload.linkPreview });
+            await this.setVideoRecording(chatId);
+            logger.info(`[PromoteRoute] ${this.clientDetails.mobile}:${chatId} existing user sent main-account reply`);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: main-account reply to ${chatId} failed`, false);
+        }
+    }
     getPromoteRouteMessage(stage, useUrlOverride) {
-        // Mix two renderings of the SAME live account handle:
-        //  - t.me link  -> Telegram shows a rich profile card (expressive, better pull), preview ON
-        //  - @username  -> plain mention, preview OFF
-        // Stage 1 keeps the existing 70% URL choice. Route state then forces
+        // Mix two renderings of the SAME main account handle (owner 2026-10-28):
+        //  - t.me link  -> Telegram previews the main profile; sent alone (no website URL), preview ON
+        //  - @username  -> plain mention, no preview of its own; the website URL is appended and previewed
+        //  - no handle  -> "my main account" plus the website URL, so the user still has somewhere to go
+        // Stage 1 picks t.me with ROUTE_TME_PROBABILITY. Route state then forces
         // stage 2 to use the opposite rendering and stage 3 to switch back,
         // preventing random streaks for the same user.
-        const handle = this.clientDetails.username?.trim();
-        const website = process.env.link?.trim();
+        const handle = this.resolveRouteHandle();
         const useUrl = Boolean(handle)
-            && (typeof useUrlOverride === 'boolean' ? useUrlOverride : Math.random() < 0.7);
+            && (typeof useUrlOverride === 'boolean' ? useUrlOverride : Math.random() < ROUTE_TME_PROBABILITY);
         const target = handle
             ? (useUrl ? `https://t.me/${handle}` : `@${handle}`)
             : "my main account";
+        const website = useUrl ? '' : routeWebsite();
+        // Preview ON whenever the message carries a URL: the t.me link, or the website (the only URL otherwise).
+        const linkPreview = useUrl || Boolean(website);
         /* Previous route copy retained for quick rollback/reference.
         const stageOne = [
             `Heyy Dear...!!\n\nYahan slow hoon... **Msg me** on Main acc!\n${target} 💕`,
@@ -46118,41 +46330,26 @@ class TelegramManager {
         */
         const stageOne = [
             `Heyy Dear...!! 😊\n\n**Msg me here** na\n${target}`,
-            `Hii Baby...!! 🙈\n\nI'm **active here**\n${target}`,
+            `Hii Baby...!! 🙈\n\nI'm **Active here**\n${target}`,
             `Hey Dear... 😊\n\n**Come here** na...!!\n${target}`,
-            `Baby...!!\n\nText me on my **main acc**\n${target}`,
+            `Baby...!!\n\nText me on my **Main Acc**\n${target}`,
         ];
         const stageTwo = [
             `Still here Dear...? 😅\n\n**Msg me there** na...!!\n${target}`,
             `Come na Baby...!! 🙈\n\nI'll **reply there**\n${target}`,
-            `Hii Dear...!! 😊\n\nDid u **msg me here**?\n${target}`,
+            `Hii Dear...!! 😊\n\nDid u **Msg me here**?\n${target}`,
             `Baby... 🙈\n\nI'm **online here**\n${target}`,
         ];
         const stageThree = [
             `Hey Baby...!! 😊\n\n**Msg me there** when free\n${target}`,
             `Dear...!! 🙈\n\nCome there na...\nI'll **reply**\n${target}`,
-            `Hii Baby...!!\n\nText me on my **main acc**\n${target}`,
-            `Hey Dear... 😊\n\nI'm **active there**\n${target}`,
+            `Hii Baby...!!\n\nText me on my **Main Acc**\n${target}`,
+            `Hey Dear... 😊\n\nI'm **Active there**\n${target}`,
         ];
-        if (stage === 1) {
-            return {
-                message: stageOne[Math.floor(Math.random() * stageOne.length)],
-                linkPreview: useUrl,
-                useUrl,
-            };
-        }
-        if (stage === 2) {
-            const message = stageTwo[Math.floor(Math.random() * stageTwo.length)];
-            return {
-                message: website ? `${message}\n\n${website}` : message,
-                // Preview on if either the t.me handle OR the website link is present.
-                linkPreview: useUrl || Boolean(website),
-                useUrl,
-            };
-        }
+        const catalog = stage === 1 ? stageOne : stage === 2 ? stageTwo : stageThree;
         return {
-            message: stageThree[Math.floor(Math.random() * stageThree.length)],
-            linkPreview: useUrl,
+            message: withWebsite(catalog[Math.floor(Math.random() * catalog.length)], website),
+            linkPreview,
             useUrl,
         };
     }
@@ -46391,6 +46588,8 @@ class TelegramManager {
                 totalCount: userData.totalCount ?? 0,
                 username: userData.username ?? null,
             });
+            // Existing users get one short pointer to the main account per 24 h instead of silence.
+            await this.sendMainAccountReply(chatId);
             return;
         }
         const now = Date.now();
@@ -46741,24 +46940,33 @@ class TelegramManager {
         return me;
     }
     /**
-     * Refreshes clientDetails.username from the live Telegram account (getMe). The route messages
-     * direct users to this promote account's own DM, so the username must track the live account —
-     * clientDetails.username is only populated at startup and goes stale after a username rotation.
-     * Best-effort: a failure here just leaves the last-known username in place.
+     * Refreshes clientDetails.username from the clients doc (clients.username for
+     * process.env.clientId). Route messages send users to the client's MAIN tg-aut account, never
+     * to this promote account's own DM, so the value must follow tg-aut buffer swaps without a
+     * restart. Best-effort: a failed or empty read keeps the last-known username; it never falls
+     * back to this promote account's own username.
      */
     async refreshRouteUsername() {
-        if (!this.client || this.isDestroyed)
+        if (this.isDestroyed)
+            return;
+        const clientId = process.env.clientId || this.clientDetails.clientId;
+        if (!clientId)
             return;
         try {
-            const me = await this.client.getMe();
-            const live = typeof me?.username === 'string' ? me.username.trim() : '';
-            if (live && live !== this.clientDetails.username) {
-                logger.info(`[${this.clientDetails.mobile}] Route username updated: ${this.clientDetails.username || '(none)'} -> ${live}`);
-                this.clientDetails.username = live;
+            const main = normalizeHandle(await readMainRouteUsername(clientId));
+            if (main && isOwnPromoteUsername(main)) {
+                logger.warn(`[PromoteRoute] ${this.clientDetails.mobile}: clients doc username @${main} is a promote account in this process; keeping ${this.clientDetails.username || '(none)'}`);
+                return;
+            }
+            if (main)
+                lastGoodMainUsername = main;
+            if (main && main !== this.clientDetails.username) {
+                logger.info(`[${this.clientDetails.mobile}] Route username updated from clients doc: ${this.clientDetails.username || '(none)'} -> ${main}`);
+                this.clientDetails.username = main;
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: Failed to refresh route username`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: Failed to refresh route username from clients doc`, false);
         }
     }
     async updateProfile(firstName, about) {
