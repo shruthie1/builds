@@ -17568,20 +17568,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)
 /* harmony export */ });
 /* harmony import */ var _notice_digest__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notice-digest */ "../../packages/tg-core/src/utils/notice-digest.ts");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! axios */ "axios");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! form-data */ "form-data");
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
 
 
 
@@ -17590,7 +17592,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-core:telegram-bots-config');
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-core:telegram-bots-config');
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -17617,6 +17620,10 @@ const ChannelCategory = Object.freeze({
     /** The unwanted-updates group (private): bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
     UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
+function isBotLocalFile(media) {
+    return typeof media === 'object' && media !== null && !Buffer.isBuffer(media)
+        && typeof media.localPath === 'string';
+}
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
 // (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
@@ -17732,7 +17739,7 @@ class BotConfig {
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to initialize BotConfig', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to initialize BotConfig', false);
         }
         finally {
             this.initialized = true;
@@ -17761,7 +17768,7 @@ class BotConfig {
             this.carryBotState(this.categoryMap, next);
             this.categoryMap = next;
         })()
-            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
+            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
     /**
@@ -17902,7 +17909,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
             return null;
         }
     }
@@ -17965,7 +17972,7 @@ class BotConfig {
                 logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
                 return '';
             }
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error fetching bot username:', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
     }
@@ -18084,7 +18091,7 @@ class BotConfig {
         entry.lastUsed = new Date();
         this.pendingUsage.set(key, entry);
         if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_5__.scheduleUnrefTimeout)(() => {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_6__.scheduleUnrefTimeout)(() => {
                 this.usageFlushTimer = null;
                 void this.flushBotUsage();
             }, this.USAGE_FLUSH_MS);
@@ -18127,7 +18134,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
         }
     }
     /**
@@ -18168,7 +18175,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = process.env.clientId ?? 'unknown';
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml)(clientId) : clientId;
     }
     /** Client id alone on the first line (owner, 2026-10-19), as in rich cards. */
     prefixMessage(message, parseMode, gap = false) {
@@ -18188,9 +18195,9 @@ class BotConfig {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
     /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
     richMessageHtml(message, options, category) {
@@ -18198,7 +18205,7 @@ class BotConfig {
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatRichMessageHtml)(input, { prefix: source || undefined });
     }
     /** The notice's buttons, then any caller reply_markup rows, as one classic inline keyboard under the bubble. */
     richKeyboard(message, replyMarkup) {
@@ -18211,7 +18218,7 @@ class BotConfig {
                 markup = undefined;
             }
         }
-        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
+        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
         return rows.length ? { inline_keyboard: rows } : undefined;
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
@@ -18396,7 +18403,7 @@ class BotConfig {
      * line on top. Bot failover is sendMedia's. `onSent` gets the photo's message id.
      */
     async sendPhotoCard(category, photo, card, options = {}) {
-        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
+        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
         return this.sendMedia(category, 'sendPhoto', photo, {
             caption,
             parseMode: 'HTML',
@@ -18404,7 +18411,7 @@ class BotConfig {
             disableNotification: options.disableNotification,
             replyToMessageId: options.replyToMessageId,
             allowSendingWithoutReply: options.replyToMessageId ? true : undefined,
-            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(card),
+            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(card),
             onSent: options.onSent,
         });
     }
@@ -18605,11 +18612,12 @@ class BotConfig {
         const channelId = String(options.targetChannelId || data.channelId);
         const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
+        let localStream;
         // Determine media field name based on method
         const mediaField = method === 'sendVideoNote'
             ? 'video_note'
             : method.replace('send', '').toLowerCase();
-        if (Buffer.isBuffer(media)) {
+        if (Buffer.isBuffer(media) || isBotLocalFile(media)) {
             // Determine appropriate filename and extension based on media type
             let filename = `${mediaField}.dat`;
             if (method === 'sendAudio') {
@@ -18641,7 +18649,21 @@ class BotConfig {
                 const extension = options.extension || 'mp4';
                 filename = `video_note.${extension}`;
             }
-            formData.append(mediaField, media, filename);
+            if (isBotLocalFile(media)) {
+                // Streamed from disk: the file is never read into memory whole (a fresh stream per attempt).
+                localStream = (0,fs__WEBPACK_IMPORTED_MODULE_3__.createReadStream)(media.localPath);
+                // The stream opens asynchronously: once abandoned (attempt over, file deleted by the caller) a late
+                // open/read error must not become an uncaughtException. A failure during the upload itself still
+                // fails the request (form-data forwards it) and is handled below.
+                localStream.on('error', (error) => logger.debug(`local media stream ${media.localPath}: ${error.message}`));
+                formData.append(mediaField, localStream, {
+                    filename,
+                    ...(typeof media.size === 'number' ? { knownLength: media.size } : {}),
+                });
+            }
+            else {
+                formData.append(mediaField, media, filename);
+            }
         }
         else {
             formData.append(mediaField, media);
@@ -18756,7 +18778,7 @@ class BotConfig {
         const url = `https://api.telegram.org/bot${token}/${method}`;
         try {
             const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
-                timeout: 30000, // 30 second timeout for media uploads
+                timeout: typeof options.timeoutMs === 'number' && options.timeoutMs > 0 ? options.timeoutMs : 30000, // 30 s default for media uploads
                 headers: {
                     ...formData.getHeaders(),
                 },
@@ -18775,13 +18797,17 @@ class BotConfig {
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
+            localStream?.destroy(); // a failed upload never leaves the file open (the retry opens its own)
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
             if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
                 return this.sendMedia(category, method, media, options);
             }
             return false;
+        }
+        finally {
+            localStream?.destroy();
         }
     }
     /**
@@ -38285,8 +38311,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "e49ba15a218875c65e8034df0045e98b823efede" : 0;
-    const builtAt =  true ? "2026-10-28T14:03:33.884Z" : 0;
+    const sha =  true ? "f4e03380e870db5563e32f974977805e359ce428" : 0;
+    const builtAt =  true ? "2026-10-28T16:47:40.746Z" : 0;
     return { sha, builtAt };
 }
 
