@@ -14157,6 +14157,352 @@ function extractRealOrigin(request) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/monitoring/heartbeat.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/monitoring/heartbeat.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HEARTBEAT_INDEX_EVERY_MS: () => (/* binding */ HEARTBEAT_INDEX_EVERY_MS),
+/* harmony export */   HEARTBEAT_INDEX_KEY: () => (/* binding */ HEARTBEAT_INDEX_KEY),
+/* harmony export */   HEARTBEAT_INDEX_TTL_MS: () => (/* binding */ HEARTBEAT_INDEX_TTL_MS),
+/* harmony export */   HEARTBEAT_INTERVAL_MS: () => (/* binding */ HEARTBEAT_INTERVAL_MS),
+/* harmony export */   HEARTBEAT_JITTER_MS: () => (/* binding */ HEARTBEAT_JITTER_MS),
+/* harmony export */   HEARTBEAT_MAX_BYTES: () => (/* binding */ HEARTBEAT_MAX_BYTES),
+/* harmony export */   HEARTBEAT_STOP_BOUND_MS: () => (/* binding */ HEARTBEAT_STOP_BOUND_MS),
+/* harmony export */   HEARTBEAT_TTL_SEC: () => (/* binding */ HEARTBEAT_TTL_SEC),
+/* harmony export */   HeartbeatPublisher: () => (/* binding */ HeartbeatPublisher),
+/* harmony export */   heartbeatKey: () => (/* binding */ heartbeatKey),
+/* harmony export */   maskMobile: () => (/* binding */ maskMobile),
+/* harmony export */   startHeartbeat: () => (/* binding */ startHeartbeat),
+/* harmony export */   stopHeartbeat: () => (/* binding */ stopHeartbeat)
+/* harmony export */ });
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:os */ "node:os");
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _last_error__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./last-error */ "../../packages/tg-core/src/monitoring/last-error.ts");
+// Process heartbeat: every tg-aut / promote-clients process publishes a small JSON snapshot of its in-memory state to
+// Redis so CMS can show live per-process state without probing processes.
+//
+//  - Key `heartbeat::<svc>::<clientId>` (STRING, `SET … EX 600`), written every 30 s + 0-3 s jitter. The 10 min TTL
+//    keeps a dead process's last payload visible ("stale, last seen …") instead of vanishing.
+//  - `heartbeat::index` (SET of `<svc>::<clientId>`): SADD at the first good beat and every 30 min after, 7 d expiry,
+//    so readers find publishers without SCAN/KEYS.
+//  - Writes go through state-redis `writeOnce`: never throws, 3 s deadline, no offline queue, backs off while Redis is
+//    down. A lost beat is not replayed (correct for a heartbeat).
+//  - The timer is unref'd and chained; a tick is skipped while the previous write is pending (no stacking).
+//  - Collector sections run in their own try/catch with a deadline: a failing section becomes null, never stops the
+//    beat. Collectors must be pure memory reads (no Telegram, no Mongo).
+//  - Payload ≤ 4 KB: over the cap, sections in `dropOrder` are nulled first, then all sections are removed.
+//  - Mobiles are published masked (`maskMobile`) so raw numbers never reach Redis.
+
+
+
+const HEARTBEAT_INDEX_KEY = "heartbeat::index";
+const HEARTBEAT_INTERVAL_MS = 30000;
+const HEARTBEAT_JITTER_MS = 3000;
+const HEARTBEAT_TTL_SEC = 600;
+const HEARTBEAT_INDEX_EVERY_MS = 30 * 60000;
+const HEARTBEAT_INDEX_TTL_MS = 7 * 24 * 60 * 60000;
+const HEARTBEAT_MAX_BYTES = 4096;
+const HEARTBEAT_STOP_BOUND_MS = 1000;
+const SECTION_TIMEOUT_MS = 1000;
+const MB = 1024 * 1024;
+/** `heartbeat::<svc>::<clientId>`, or null when the clientId is missing. */
+function heartbeatKey(svc, clientId) {
+    return (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.stateKey)("heartbeat", svc, clientId);
+}
+/** Last 4 digits only: `••••1234`. Null for a missing mobile. */
+function maskMobile(mobile) {
+    if (mobile === null || mobile === undefined)
+        return null;
+    const digits = String(mobile).trim();
+    if (!digits)
+        return null;
+    return digits.length > 4 ? `••••${digits.slice(-4)}` : "••••";
+}
+function envNumber(name) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "")
+        return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+}
+const defaultTimers = {
+    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+    clearTimeout: (timer) => { if (timer)
+        globalThis.clearTimeout(timer); },
+};
+class HeartbeatPublisher {
+    constructor(opts) {
+        this.inFlight = false;
+        this.stopped = false;
+        this.started = false;
+        this.seq = 0;
+        this.lastIndexAt = 0;
+        this.opts = opts;
+        this.timers = opts.timers ?? defaultTimers;
+        this.random = opts.random ?? Math.random;
+        this.processStartedAt = Math.round(Date.now() - process.uptime() * 1000);
+    }
+    /** First beat now, then every interval + jitter. Idempotent. */
+    start() {
+        if (this.started || this.stopped)
+            return;
+        this.started = true;
+        void this.runTick();
+    }
+    runTick() {
+        this.schedule();
+        return this.tick();
+    }
+    schedule() {
+        if (this.stopped)
+            return;
+        const interval = this.opts.intervalMs ?? HEARTBEAT_INTERVAL_MS;
+        const jitter = this.opts.jitterMs ?? HEARTBEAT_JITTER_MS;
+        const delay = interval + Math.floor(Math.min(1, Math.max(0, this.random())) * jitter);
+        this.timer = this.timers.setTimeout(() => { void this.runTick(); }, delay);
+        this.timer?.unref?.();
+    }
+    /** One beat. Never throws. 'skipped' while the previous write is pending or after stop. */
+    async tick() {
+        if (this.stopped || this.inFlight)
+            return "skipped";
+        this.inFlight = true;
+        try {
+            return (await this.publish()) ? "sent" : "failed";
+        }
+        catch {
+            return "failed";
+        }
+        finally {
+            this.inFlight = false;
+        }
+    }
+    /** Clears the timer and writes one 'stopping' beat, bounded by `boundMs`. Resolves whether it was written. */
+    async stop(boundMs = HEARTBEAT_STOP_BOUND_MS) {
+        if (this.stopped)
+            return false;
+        this.stopped = true;
+        this.timers.clearTimeout(this.timer);
+        this.timer = undefined;
+        try {
+            return await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(this.publish("stopping"), boundMs, "heartbeat stop");
+        }
+        catch {
+            return false;
+        }
+    }
+    /** Tests: stop the timer without a final beat. */
+    dispose() {
+        this.stopped = true;
+        this.timers.clearTimeout(this.timer);
+        this.timer = undefined;
+    }
+    resolveStatus(sectionErrors) {
+        let status;
+        try {
+            status = this.opts.collector.status();
+        }
+        catch {
+            return "degraded";
+        }
+        if (status === "ready" && sectionErrors.length)
+            return "degraded";
+        return status;
+    }
+    async collectSections() {
+        const values = {};
+        const errors = [];
+        const timeoutMs = this.opts.sectionTimeoutMs ?? SECTION_TIMEOUT_MS;
+        if (this.opts.collector.prepare) {
+            try {
+                const prepared = this.opts.collector.prepare();
+                if (prepared && typeof prepared.then === "function") {
+                    await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(prepared, timeoutMs, "heartbeat prepare");
+                }
+            }
+            catch {
+                errors.push("prepare");
+            }
+        }
+        for (const [name, section] of Object.entries(this.opts.collector.sections)) {
+            try {
+                let value = section();
+                if (value && typeof value.then === "function") {
+                    value = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(value, timeoutMs, `heartbeat section ${name}`);
+                }
+                values[name] = value === undefined ? null : value;
+            }
+            catch {
+                values[name] = null;
+                errors.push(name);
+            }
+        }
+        return { values, errors };
+    }
+    /** Builds the payload JSON (size-guarded). Exposed for tests and size measurement. */
+    async buildJson(clientId, statusOverride) {
+        const { values, errors } = await this.collectSections();
+        const status = statusOverride ?? this.resolveStatus(errors);
+        let build = null;
+        try {
+            build = this.opts.build?.() ?? null;
+        }
+        catch {
+            build = null;
+        }
+        const mem = process.memoryUsage();
+        const envelope = {
+            v: 1,
+            svc: this.opts.svc,
+            clientId,
+            host: node_os__WEBPACK_IMPORTED_MODULE_0__.hostname(),
+            pmId: envNumber("pm_id"),
+            pid: process.pid,
+            restarts: envNumber("restart_time"),
+            startedAt: envNumber("pm_uptime") ?? this.processStartedAt,
+            ts: Date.now(),
+            seq: ++this.seq,
+            status,
+            build,
+            memMb: { rss: Math.round(mem.rss / MB), heapUsed: Math.round(mem.heapUsed / MB) },
+            lastError: (0,_last_error__WEBPACK_IMPORTED_MODULE_2__.getLastError)(),
+        };
+        const payload = { ...envelope, ...values };
+        if (errors.length)
+            payload.sectionErrors = errors;
+        const max = this.opts.maxBytes ?? HEARTBEAT_MAX_BYTES;
+        let json = JSON.stringify(payload);
+        if (Buffer.byteLength(json) <= max)
+            return json;
+        const dropped = [];
+        for (const name of this.opts.collector.dropOrder ?? []) {
+            if (payload[name] === null || payload[name] === undefined)
+                continue;
+            payload[name] = null;
+            dropped.push(name);
+            payload.truncated = dropped;
+            json = JSON.stringify(payload);
+            if (Buffer.byteLength(json) <= max)
+                return json;
+        }
+        // Still too big: envelope only.
+        json = JSON.stringify({ ...envelope, truncated: "all" });
+        if (Buffer.byteLength(json) <= max)
+            return json;
+        return JSON.stringify({ ...envelope, lastError: null, truncated: "all" });
+    }
+    async publish(statusOverride) {
+        const clientId = (this.opts.clientId ?? process.env.clientId ?? "").trim();
+        const key = heartbeatKey(this.opts.svc, clientId);
+        if (!key)
+            return false;
+        const json = await this.buildJson(clientId, statusOverride);
+        const ttlSec = this.opts.ttlSec ?? HEARTBEAT_TTL_SEC;
+        const now = Date.now();
+        const indexDue = statusOverride !== "stopping"
+            && now - this.lastIndexAt >= (this.opts.indexEveryMs ?? HEARTBEAT_INDEX_EVERY_MS);
+        const ok = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.writeOnce)("heartbeat", (multi) => {
+            multi.set(key, json, "EX", ttlSec);
+            if (indexDue) {
+                multi.sadd(HEARTBEAT_INDEX_KEY, `${this.opts.svc}::${clientId}`);
+                multi.pexpire(HEARTBEAT_INDEX_KEY, HEARTBEAT_INDEX_TTL_MS);
+            }
+        });
+        if (ok && indexDue)
+            this.lastIndexAt = now;
+        return ok;
+    }
+}
+let current = null;
+/** Starts this process's heartbeat (one per process; a second call returns the running one). */
+function startHeartbeat(opts) {
+    if (current)
+        return current;
+    current = new HeartbeatPublisher(opts);
+    current.start();
+    return current;
+}
+/** Final 'stopping' beat (bounded, default 1 s) and timer cleared. Never throws. */
+async function stopHeartbeat(boundMs = HEARTBEAT_STOP_BOUND_MS) {
+    const publisher = current;
+    current = null;
+    if (!publisher)
+        return false;
+    return publisher.stop(boundMs);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/monitoring/last-error.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-core/src/monitoring/last-error.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getLastError: () => (/* binding */ getLastError),
+/* harmony export */   recordLastError: () => (/* binding */ recordLastError),
+/* harmony export */   resetLastErrorForTests: () => (/* binding */ resetLastErrorForTests)
+/* harmony export */ });
+// Last-error slot for the process heartbeat (monitoring/heartbeat.ts).
+//
+// parseError() is the common error choke point in both apps; it overwrites this one slot per real (non-expected)
+// error. Recording is three assignments, no allocation and no I/O, so an error storm costs nothing. Clipping and
+// secret scrubbing happen on the read side, once per heartbeat.
+const CTX_MAX = 40;
+const MSG_MAX = 160;
+let lastAt = 0;
+let lastCtx;
+let lastMsg;
+/** Overwrites the slot. Never throws. */
+function recordLastError(context, message) {
+    lastAt = Date.now();
+    lastCtx = context;
+    lastMsg = message;
+}
+const SECRET_PATTERNS = [
+    // Telegram bot tokens: <digits>:<35 base64url chars>
+    [/\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, "***"],
+    // key=value / key: value secrets (x-api-key, apiKey, token, password, session, secret, authorization)
+    [/\b(x-api-key|api[-_]?key|apikey|token|access_token|password|passwd|session|secret|authorization)\b(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s&,;]+)/gi, "$1$2***"],
+];
+function scrub(text) {
+    let out = text;
+    for (const [pattern, replacement] of SECRET_PATTERNS)
+        out = out.replace(pattern, replacement);
+    return out;
+}
+function clip(value, max, fallback) {
+    const text = typeof value === "string" && value ? value : fallback;
+    // Bound the scrub work (messages can be KBs), then clip to the published length.
+    return scrub(text.slice(0, 2000)).slice(0, max);
+}
+/** The last recorded error, clipped (ctx ≤ 40, msg ≤ 160) and scrubbed, or null when none. */
+function getLastError() {
+    if (!lastAt)
+        return null;
+    return {
+        at: lastAt,
+        ctx: clip(lastCtx, CTX_MAX, "error"),
+        msg: clip(lastMsg, MSG_MAX, ""),
+    };
+}
+function resetLastErrorForTests() {
+    lastAt = 0;
+    lastCtx = undefined;
+    lastMsg = undefined;
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/state/durable-queue.ts"
 /*!*********************************************************!*\
   !*** ../../packages/tg-core/src/state/durable-queue.ts ***!
@@ -21914,6 +22260,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 /* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
 /* harmony import */ var _telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
+/* harmony import */ var _monitoring_last_error__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../monitoring/last-error */ "../../packages/tg-core/src/monitoring/last-error.ts");
+
 
 
 
@@ -22212,8 +22560,11 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         const expected = isExpectedTelegramOutcome(`${telegramErrorMsg} ${fullMessage}`);
         if (expected)
             logger.warn(fullMessage);
-        else
+        else {
             logger.error(fullMessage);
+            // Heartbeat last-error slot: one overwrite, no I/O (monitoring/last-error.ts clips + scrubs on read).
+            (0,_monitoring_last_error__WEBPACK_IMPORTED_MODULE_5__.recordLastError)(prefix, telegramErrorMsg || extractedMessage);
+        }
         // Prepare response object
         const response = {
             status,
@@ -37645,7 +37996,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_connection_service__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../telegram/connection-service */ "./src/telegram/connection-service.ts");
 /* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -37657,7 +38009,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("express");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("express");
 // mobile-manager / Telegram.service reach the TelegramManager statics through telegram/client-access.
 (0,_telegram_client_access__WEBPACK_IMPORTED_MODULE_9__.registerTelegramManager)(_telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_8__["default"]);
 logger.info("ProcessID: ", _process_info__WEBPACK_IMPORTED_MODULE_0__.prcessID);
@@ -37671,6 +38024,8 @@ const healthCheckInterval = (0,_jobs_scheduler__WEBPACK_IMPORTED_MODULE_6__.setu
 (0,_http_routes_heapdump_routes__WEBPACK_IMPORTED_MODULE_5__.configureHeapdumpRoutes)(app);
 app.listen(port, () => {
     (0,_telegram_connection_state__WEBPACK_IMPORTED_MODULE_1__.startConnectionMonitor)(() => _telegram_connection_service__WEBPACK_IMPORTED_MODULE_7__.ConnectionService.getInstance().isInitialized(), () => _telegram_connection_service__WEBPACK_IMPORTED_MODULE_7__.ConnectionService.getInstance().isInitializationInProgress());
+    // Redis heartbeat (heartbeat::promote::<clientId>): 'starting' until connections are initialized.
+    (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_10__.startPromoteHeartbeat)();
     logger.info(`🚀 Server is running on port ${port}`);
     logger.info(`📊 Health checks scheduled every 5 minutes`);
     logger.info(`📈 Daily stats scheduled at 00:25 IST`);
@@ -37716,6 +38071,25 @@ const getPublicIP = async () => {
         logger.error('Error fetching the public IP address:', error.message);
     }
 };
+
+
+/***/ },
+
+/***/ "./src/build-info.ts"
+/*!***************************!*\
+  !*** ./src/build-info.ts ***!
+  \***************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   buildInfo: () => (/* binding */ buildInfo)
+/* harmony export */ });
+function buildInfo() {
+    const sha =  true ? "a95a4ede97dc60954c967163e7d90d85f4435b91" : 0;
+    const builtAt =  true ? "2026-10-28T10:25:54.092Z" : 0;
+    return { sha, builtAt };
+}
 
 
 /***/ },
@@ -40428,6 +40802,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+
 
 
 
@@ -40558,6 +40934,8 @@ function setupExitHandlers() {
             process.exit(1);
         }, SHUTDOWN_TIMEOUT);
         try {
+            // Final 'stopping' heartbeat (bounded 1 s, never throws); runs alongside the cleanup, awaited below.
+            const heartbeatStopped = (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_18__.stopPromoteHeartbeat)();
             (0,_telegram_connection_state__WEBPACK_IMPORTED_MODULE_7__.stopConnection)();
             try {
                 const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
@@ -40588,6 +40966,7 @@ function setupExitHandlers() {
                     logger.error("Error closing DialogManager connection:", err);
                 }
             }
+            await heartbeatStopped;
             // Drain whatever analytics rows are still buffered. Best-effort; a dead sink must not hold
             // up shutdown (the hard SHUTDOWN_TIMEOUT above still applies regardless).
             try {
@@ -40769,6 +41148,165 @@ async function sendPromoteStatsNotification(notification, failureContext) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, failureContext, false);
         return false;
     }
+}
+
+
+/***/ },
+
+/***/ "./src/monitoring/heartbeat-collect.ts"
+/*!*********************************************!*\
+  !*** ./src/monitoring/heartbeat-collect.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTE_HEARTBEAT_MAX_MOBILES: () => (/* binding */ PROMOTE_HEARTBEAT_MAX_MOBILES),
+/* harmony export */   buildPromoteMobiles: () => (/* binding */ buildPromoteMobiles),
+/* harmony export */   createPromoteHeartbeatCollector: () => (/* binding */ createPromoteHeartbeatCollector),
+/* harmony export */   promoteHeartbeatStatus: () => (/* binding */ promoteHeartbeatStatus)
+/* harmony export */ });
+/* harmony import */ var _tg_core_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/monitoring/heartbeat */ "../../packages/tg-core/src/monitoring/heartbeat.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+// promote-clients heartbeat collector: per-mobile summary from in-memory promotion stats + the health snapshot
+// (buildPromoteHealthSnapshot is in-memory: manager maps, engine stats, connection flags). No Telegram or Mongo calls.
+// Mobiles are masked to the last 4 digits and capped at 20 entries.
+
+
+const PROMOTE_HEARTBEAT_MAX_MOBILES = 20;
+const STATUS_RANK = { healthy: 0, recovering: 1, degraded: 2, unknown: 3, unhealthy: 4 };
+function worst(...checks) {
+    let result = "unknown";
+    let rank = -1;
+    for (const check of checks) {
+        if (!check)
+            continue;
+        const r = STATUS_RANK[check.status] ?? 3;
+        if (r > rank) {
+            rank = r;
+            result = check.status;
+        }
+    }
+    return result;
+}
+function buildPromoteMobiles(stats, snapshot) {
+    const checks = (snapshot?.checks ?? []);
+    const byComponent = new Map();
+    const mobiles = [];
+    const seen = new Set();
+    const add = (mobile) => { if (!seen.has(mobile)) {
+        seen.add(mobile);
+        mobiles.push(mobile);
+    } };
+    for (const mobile in stats ?? {})
+        add(mobile);
+    for (const check of checks) {
+        byComponent.set(check.component, check);
+        if (check.component.startsWith("telegram.connection."))
+            add(check.component.slice("telegram.connection.".length));
+    }
+    const out = [];
+    for (const mobile of mobiles) {
+        if (out.length >= PROMOTE_HEARTBEAT_MAX_MOBILES)
+            break;
+        const s = stats?.[mobile];
+        const connection = byComponent.get(`telegram.connection.${mobile}`);
+        const engine = byComponent.get(`promotion.engine.${mobile}`);
+        const metaConnected = connection?.metadata?.connected;
+        const connected = connection
+            ? (typeof metaConnected === "boolean" ? metaConnected : connection.status === "healthy")
+            : null;
+        let health = "unknown";
+        if (snapshot) {
+            health = (0,_health_service_health__WEBPACK_IMPORTED_MODULE_1__.promoteMobileReadinessHttpStatus)(checks, mobile) === 200 ? "ready" : worst(connection, engine);
+        }
+        out.push({
+            mobile: (0,_tg_core_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(mobile),
+            connected,
+            success: typeof s?.successCount === "number" ? s.successCount : null,
+            failed: typeof s?.failedCount === "number" ? s.failedCount : null,
+            health,
+        });
+    }
+    return out;
+}
+function promoteHeartbeatStatus(initialized, snapshot) {
+    if (!initialized)
+        return "starting";
+    if (!snapshot)
+        return "degraded";
+    return (0,_health_service_health__WEBPACK_IMPORTED_MODULE_1__.promoteReadinessHttpStatus)(snapshot) === 200 ? "ready" : "degraded";
+}
+function createPromoteHeartbeatCollector(src) {
+    let snapshot = null;
+    let stats = null;
+    return {
+        prepare: async () => {
+            snapshot = null;
+            stats = null;
+            try {
+                stats = src.mobileStats();
+            }
+            catch {
+                stats = null;
+            }
+            snapshot = await src.healthSnapshot();
+        },
+        status: () => promoteHeartbeatStatus(src.isInitialized(), snapshot),
+        dropOrder: ["mobiles"],
+        sections: {
+            initialized: () => src.isInitialized(),
+            activeMobiles: () => src.activeMobileCount(),
+            mobiles: () => buildPromoteMobiles(stats, snapshot),
+        },
+    };
+}
+
+
+/***/ },
+
+/***/ "./src/monitoring/heartbeat.ts"
+/*!*************************************!*\
+  !*** ./src/monitoring/heartbeat.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   startPromoteHeartbeat: () => (/* binding */ startPromoteHeartbeat),
+/* harmony export */   stopPromoteHeartbeat: () => (/* binding */ stopPromoteHeartbeat)
+/* harmony export */ });
+/* harmony import */ var _tg_core_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/monitoring/heartbeat */ "../../packages/tg-core/src/monitoring/heartbeat.ts");
+/* harmony import */ var _telegram_connection_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../telegram/connection-service */ "./src/telegram/connection-service.ts");
+/* harmony import */ var _telegram_telegram_service__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/telegram-service */ "./src/telegram/telegram-service.ts");
+/* harmony import */ var _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../accounts/mobile-manager */ "./src/accounts/mobile-manager.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _build_info__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../build-info */ "./src/build-info.ts");
+/* harmony import */ var _heartbeat_collect__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./heartbeat-collect */ "./src/monitoring/heartbeat-collect.ts");
+// promote-clients heartbeat wiring: binds the collector to the live in-memory sources and starts/stops the tg-core
+// publisher. Started after the HTTP listen in bootstrap/express.ts, stopped first in the exit handler
+// (jobs/scheduler.ts) with a final 'stopping' beat (≤ 1 s).
+
+
+
+
+
+
+
+function startPromoteHeartbeat() {
+    (0,_tg_core_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_0__.startHeartbeat)({
+        svc: "promote",
+        build: _build_info__WEBPACK_IMPORTED_MODULE_5__.buildInfo,
+        collector: (0,_heartbeat_collect__WEBPACK_IMPORTED_MODULE_6__.createPromoteHeartbeatCollector)({
+            isInitialized: () => _telegram_connection_service__WEBPACK_IMPORTED_MODULE_1__.ConnectionService.getInstance().isInitialized(),
+            activeMobileCount: () => _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_3__.MobileManager.getInstance().getActiveCount(),
+            mobileStats: () => _telegram_telegram_service__WEBPACK_IMPORTED_MODULE_2__.TelegramService.getInstance().getMobileStats(),
+            healthSnapshot: () => (0,_health_service_health__WEBPACK_IMPORTED_MODULE_4__.buildPromoteHealthSnapshot)(),
+        }),
+    });
+}
+function stopPromoteHeartbeat() {
+    return (0,_tg_core_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_0__.stopHeartbeat)();
 }
 
 
