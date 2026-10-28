@@ -23030,6 +23030,86 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/request-heartbeat.ts"
+/*!*************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/request-heartbeat.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_HEARTBEAT_INTERVAL_MS: () => (/* binding */ DEFAULT_HEARTBEAT_INTERVAL_MS),
+/* harmony export */   createRequestHeartbeat: () => (/* binding */ createRequestHeartbeat),
+/* harmony export */   isViewerReadRequest: () => (/* binding */ isViewerReadRequest)
+/* harmony export */ });
+/**
+ * Request heartbeat: the "last request seen" stamp each tg-aut / promote process writes to the
+ * Mongo `timestamps` doc. CMS `GET /timestamps/stalled` lists processes whose stamp is older than
+ * a threshold (default 3 min) and the payment page pings those processes' URLs. Nothing needs
+ * per-request precision, so the write is:
+ *   - never awaited in the request path (a slow or failing Mongo write cannot delay a response),
+ *   - bounded: at most one write in flight,
+ *   - coalesced: at most one write started per `minIntervalMs` (default 10 s), so the stamp lags
+ *     the last request by at most that much.
+ */
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 10000;
+function createRequestHeartbeat(options) {
+    const minIntervalMs = options.minIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    const now = options.now ?? (() => Date.now());
+    const onError = options.onError ?? (() => undefined);
+    let inFlight = false;
+    let lastStartedAt = Number.NEGATIVE_INFINITY;
+    return {
+        touch() {
+            const t = now();
+            if (inFlight || t - lastStartedAt < minIntervalMs)
+                return false;
+            inFlight = true;
+            lastStartedAt = t;
+            let pending;
+            try {
+                pending = Promise.resolve(options.write());
+            }
+            catch (error) {
+                pending = Promise.reject(error);
+            }
+            pending
+                .catch((error) => {
+                try {
+                    onError(error);
+                }
+                catch { /* error reporting must not escape */ }
+            })
+                .finally(() => { inFlight = false; });
+            return true;
+        },
+        isInFlight() {
+            return inFlight;
+        },
+    };
+}
+/**
+ * Read-only chat-viewer and diagnostics routes (tg-chats viewer, ops dashboard). They do not
+ * refresh the heartbeat. Only GET/HEAD; POSTs under /diagnostics (gc, heapdump) still count.
+ */
+const VIEWER_READ_PATHS = [
+    /^\/dialogs\/?$/i,
+    /^\/dialog\/[^/]+\/info\/?$/i,
+    /^\/chat\//i,
+    /^\/media\//i,
+    /^\/diagnostics(?:\/|$)/i,
+];
+function isViewerReadRequest(method, path) {
+    const verb = (method ?? '').toUpperCase();
+    if (verb !== 'GET' && verb !== 'HEAD')
+        return false;
+    const p = path ?? '';
+    return VIEWER_READ_PATHS.some((re) => re.test(p));
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/rich-message.ts"
 /*!********************************************************!*\
   !*** ../../packages/tg-core/src/utils/rich-message.ts ***!
@@ -27458,18 +27538,23 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      * Two queries rather than one $or because Mongo gives NO ordering guarantee inside $or, and a
      * user with both an owned and a legacy row must deterministically resolve to the owned one.
      */
-    async findForClient(chatId, identity) {
+    /** `options.projection` (optional) limits the returned fields; without it both reads are exactly as before. */
+    async findForClient(chatId, identity, options = {}) {
         // Deliberately NOT `guard` (which degrades a failure to the fallback): null here means
         // "no such user", and tg-aut's PrivateMessageHandler routes that to the NEW-user flow. A
         // transient read error must surface as an error, exactly as the raw findOne did before.
         try {
+            const { projection } = options;
+            const read = (filter) => (projection
+                ? this.collection.findOne(filter, { projection })
+                : this.collection.findOne(filter));
             const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownFilter)(chatId, identity);
             if (own) {
-                const owned = await this.collection.findOne(own);
+                const owned = await read(own);
                 if (owned)
                     return owned;
             }
-            return await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+            return await read((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
         }
         catch (error) {
             this.logger.error(`[${this.collectionName}] findForClient(${chatId}) failed: ${(0,_connection__WEBPACK_IMPORTED_MODULE_3__.describeError)(error)}`);
@@ -30770,6 +30855,35 @@ function peerCacheKey(peer) {
         return `-100${peer.channelId.toJSNumber()}`;
     return undefined;
 }
+/** Full user entities this client resolved itself, per dialog id. Bounded (LRU) and TTL'd; dies with the client. */
+const CLIENT_ENTITY_TTL_MS = 30 * 60 * 1000;
+const CLIENT_ENTITY_MAX = 1000;
+const clientEntities = new WeakMap();
+function readClientEntity(client, dialogId) {
+    const entries = clientEntities.get(client);
+    const entry = entries?.get(dialogId);
+    if (!entries || !entry)
+        return undefined;
+    if (Date.now() - entry.at > CLIENT_ENTITY_TTL_MS) {
+        entries.delete(dialogId);
+        return undefined;
+    }
+    entries.delete(dialogId);
+    entries.set(dialogId, entry);
+    return entry.entity;
+}
+function rememberClientEntity(client, dialogId, entity) {
+    let entries = clientEntities.get(client);
+    if (!entries) {
+        entries = new Map();
+        clientEntities.set(client, entries);
+    }
+    entries.delete(dialogId);
+    entries.set(dialogId, { entity, at: Date.now() });
+    while (entries.size > CLIENT_ENTITY_MAX) {
+        entries.delete(entries.keys().next().value);
+    }
+}
 function isExpectedMissingEntityError(error) {
     const message = error instanceof Error ? error.message : String(error);
     // A dead/inaccessible channel is expected during dialog resolution — treat it as a
@@ -30791,6 +30905,18 @@ async function getEntity(host, dialogId) {
     const dialog = host.dialogs.get(dialogId);
     if (!dialog) {
         return undefined;
+    }
+    // Cache first for user/bot dialogs (cost audit 2026-10-28): client.getEntity on a peer is a users.GetUsers
+    // round trip EVERY call (GramJS keeps only input peers, not full entities) and the viewer routes call this
+    // per request. The cache is PER CLIENT, not the process-wide EntityCacheManager: promote-clients runs several
+    // accounts in one process and an entity's accessHash is only valid for the account that fetched it.
+    // Channels/groups still go to Telegram every time, so promotion sendability (defaultBannedRights) stays fresh.
+    const isUserDialog = dialog.peer?.className === 'PeerUser';
+    if (isUserDialog) {
+        const cached = readClientEntity(host.client, dialogId);
+        if (cached) {
+            return cached;
+        }
     }
     try {
         let entity;
@@ -30817,9 +30943,12 @@ async function getEntity(host, dialogId) {
             // For users/bots, use peer object directly
             entity = await host.client.getEntity(dialog.peer);
         }
-        // Write-through: cache resolved entity into EntityCacheManager
+        // Write-through: cache resolved entity into EntityCacheManager (unchanged), and user entities per client.
         if (entity) {
             _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance().put(dialogId, entity);
+            if (isUserDialog && entity.className === 'User') {
+                rememberClientEntity(host.client, dialogId, entity);
+            }
         }
         return entity;
     }
@@ -38156,8 +38285,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a428c7151bf21f7104ceb126ffbd3496a681a954" : 0;
-    const builtAt =  true ? "2026-10-28T11:31:49.155Z" : 0;
+    const sha =  true ? "e49ba15a218875c65e8034df0045e98b823efede" : 0;
+    const builtAt =  true ? "2026-10-28T14:03:33.884Z" : 0;
     return { sha, builtAt };
 }
 
@@ -38501,6 +38630,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../http/middlewares/auth.middleware */ "./src/http/middlewares/auth.middleware.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_request_heartbeat__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/request-heartbeat */ "../../packages/tg-core/src/utils/request-heartbeat.ts");
+
 
 
 
@@ -38533,21 +38664,24 @@ function earlyFlushMiddleware(req, res, next) {
     }
     next();
 }
-const trackLastRequestMiddleware = async (req, res, next) => {
-    try {
+// Last-request heartbeat (Mongo `timestamps`, key `<clientId>_prom`, read by CMS
+// /timestamps/stalled with a 3 min threshold). Never awaited: at most one write in flight,
+// at most one per 10 s.
+const requestHeartbeat = (0,_tg_core_utils_request_heartbeat__WEBPACK_IMPORTED_MODULE_5__.createRequestHeartbeat)({
+    write: async () => {
         if (_data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.isInstanceExist()) {
-            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance();
-            await db.updateTimestamps();
+            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_2__.UserDataDtoCrud.getInstance().updateTimestamps();
         }
         else {
             logger.debug("Database instance does not exist.");
         }
-    }
-    catch (error) {
-        logger.error("Error updating timestamp in database:", error);
-    }
+    },
+    onError: (error) => logger.error("Error updating timestamp in database:", error),
+});
+function trackLastRequestMiddleware(_req, _res, next) {
+    requestHeartbeat.touch();
     next();
-};
+}
 
 
 /***/ },
